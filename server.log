@@ -1,0 +1,93 @@
+/workspace/.venv/lib/python3.12/site-packages/django/db/backends/utils.py:98: RuntimeWarning: Accessing the database during app initialization is discouraged. To fix this warning, avoid executing queries in AppConfig.ready() or when your app modules are imported.
+  warnings.warn(self.APPS_NOT_READY_WARNING_MSG, category=RuntimeWarning)
+/workspace/.venv/lib/python3.12/site-packages/django/db/backends/utils.py:98: RuntimeWarning: Accessing the database during app initialization is discouraged. To fix this warning, avoid executing queries in AppConfig.ready() or when your app modules are imported.
+  warnings.warn(self.APPS_NOT_READY_WARNING_MSG, category=RuntimeWarning)
+Watching for file changes with StatReloader
+[25/Aug/2026 18:48:48] "GET / HTTP/1.1" 302 0
+[25/Aug/2026 18:50:49] "GET / HTTP/1.1" 302 0
+[25/Aug/2026 18:50:49] "GET /login/?next=/ HTTP/1.1" 200 7686
+[25/Aug/2026 18:50:49] "GET /static/js/tnr-common.js HTTP/1.1" 200 15093
+[25/Aug/2026 18:50:49] "GET /static/css/tnr-traditional.css HTTP/1.1" 200 34393
+Not Found: /favicon.ico
+[25/Aug/2026 18:50:49] "GET /favicon.ico HTTP/1.1" 404 4058
+[25/Aug/2026 18:56:08] "POST /login/ HTTP/1.1" 200 8449
+[25/Aug/2026 18:56:08] "GET /static/js/tnr-common.js HTTP/1.1" 304 0
+[25/Aug/2026 18:56:08] "GET /static/css/tnr-traditional.css HTTP/1.1" 304 0
+Not Found: /favicon.ico
+[25/Aug/2026 18:56:08] "GET /favicon.ico HTTP/1.1" 404 4058
+[25/Aug/2026 19:05:19] "POST /login/ HTTP/1.1" 302 0
+[25/Aug/2026 19:05:19] "GET /gov/ HTTP/1.1" 200 106307
+[25/Aug/2026 19:05:19] "GET /static/css/tnr-traditional.css HTTP/1.1" 304 0
+[25/Aug/2026 19:05:19] "GET /static/js/tnr-api.js HTTP/1.1" 200 11554
+[25/Aug/2026 19:05:19] "GET /static/js/tnr-common.js HTTP/1.1" 304 0
+[25/Aug/2026 19:05:19] "GET /api/supervision/dashboard/ HTTP/1.1" 200 578
+[25/Aug/2026 19:05:19] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:19] "GET /api/supervision/institutions/ HTTP/1.1" 200 3473
+[25/Aug/2026 19:05:19] "GET /api/business/captures/ HTTP/1.1" 200 2627
+[25/Aug/2026 19:05:20] "GET /api/business/treatments/ HTTP/1.1" 200 8312
+Not Found: /favicon.ico
+[25/Aug/2026 19:05:20] "GET /favicon.ico HTTP/1.1" 404 4058
+[25/Aug/2026 19:05:20] "GET /api/business/releases/ HTTP/1.1" 200 972
+[25/Aug/2026 19:05:20] "GET /api/business/adoptions/ HTTP/1.1" 200 1464
+[25/Aug/2026 19:05:20] "GET /api/business/euthanasia/ HTTP/1.1" 200 1296
+[25/Aug/2026 19:05:20] "GET /api/supervision/materials/ HTTP/1.1" 200 10271
+[25/Aug/2026 19:05:20] "GET /api/business/transfers/ HTTP/1.1" 200 3444
+[25/Aug/2026 19:05:21] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:21] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:22] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:22] "GET /api/supervision/users/ HTTP/1.1" 200 3958
+[25/Aug/2026 19:05:23] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:23] "GET /api/supervision/business/?business_type=capture HTTP/1.1" 200 2732
+[25/Aug/2026 19:05:23] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:24] "GET /api/supervision/materials/ HTTP/1.1" 200 10271
+[25/Aug/2026 19:05:24] "GET /api/supervision/institutions/?type=hospital HTTP/1.1" 200 1396
+[25/Aug/2026 19:05:24] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:24] "GET /api/supervision/institutions/ HTTP/1.1" 200 3473
+[25/Aug/2026 19:05:24] "GET /api/supervision/ledger/?business_type=capture HTTP/1.1" 200 3031
+[25/Aug/2026 19:05:26] "GET /api/supervision/materials/ HTTP/1.1" 200 10271
+[25/Aug/2026 19:05:26] "GET /api/supervision/institutions/?type=hospital HTTP/1.1" 200 1396
+[25/Aug/2026 19:05:26] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:26] "GET /api/supervision/business/?business_type=capture HTTP/1.1" 200 2732
+[25/Aug/2026 19:05:26] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:30] "GET /api/supervision/config/ HTTP/1.1" 200 367
+[25/Aug/2026 19:05:32] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:32] "GET /api/supervision/institutions/ HTTP/1.1" 200 3473
+[25/Aug/2026 19:05:33] "GET /api/supervision/ledger/?business_type=capture HTTP/1.1" 200 3031
+[25/Aug/2026 19:05:34] "GET /portal/ HTTP/1.1" 200 25315
+[25/Aug/2026 19:05:36] "GET / HTTP/1.1" 302 0
+[25/Aug/2026 19:05:36] "GET /gov/ HTTP/1.1" 200 106307
+[25/Aug/2026 19:05:36] "GET /api/supervision/dashboard/ HTTP/1.1" 200 578
+[25/Aug/2026 19:05:36] "GET /api/supervision/districts/ HTTP/1.1" 200 909
+[25/Aug/2026 19:05:36] "GET /api/supervision/institutions/ HTTP/1.1" 200 3473
+[25/Aug/2026 19:05:36] "GET /api/business/captures/ HTTP/1.1" 200 2627
+[25/Aug/2026 19:05:36] "GET /api/business/treatments/ HTTP/1.1" 200 8312
+[25/Aug/2026 19:05:36] "GET /api/business/releases/ HTTP/1.1" 200 972
+[25/Aug/2026 19:05:36] "GET /api/business/adoptions/ HTTP/1.1" 200 1464
+[25/Aug/2026 19:05:37] "GET /api/business/euthanasia/ HTTP/1.1" 200 1296
+[25/Aug/2026 19:05:37] "GET /api/supervision/materials/ HTTP/1.1" 200 10271
+[25/Aug/2026 19:05:37] "GET /api/business/transfers/ HTTP/1.1" 200 3444
+[25/Aug/2026 19:05:39] "GET /logout/ HTTP/1.1" 302 0
+[25/Aug/2026 19:05:39] "GET /login/ HTTP/1.1" 200 7686
+[25/Aug/2026 19:05:41] "GET /portal/ HTTP/1.1" 200 25083
+[25/Aug/2026 19:05:42] "GET /login/ HTTP/1.1" 200 7686
+[25/Aug/2026 19:05:44] "GET /portal/ HTTP/1.1" 200 25083
+[25/Aug/2026 19:05:48] "GET /login/ HTTP/1.1" 200 7686
+[25/Aug/2026 19:05:52] "GET /portal/ HTTP/1.1" 200 25083
+[25/Aug/2026 19:06:09] "GET /adopter/ HTTP/1.1" 302 0
+[25/Aug/2026 19:06:09] "GET /login/?next=/adopter/ HTTP/1.1" 200 7686
+[25/Aug/2026 19:06:20] "POST /login/ HTTP/1.1" 302 0
+[25/Aug/2026 19:06:20] "GET /adopter/ HTTP/1.1" 200 70041
+[25/Aug/2026 19:06:20] "GET /api/business/adoptions/hall/ HTTP/1.1" 200 68
+[25/Aug/2026 19:06:20] "GET /api/business/portal/messages/ HTTP/1.1" 200 1153
+Not Found: /favicon.ico
+[25/Aug/2026 19:06:20] "GET /favicon.ico HTTP/1.1" 404 4058
+[25/Aug/2026 19:06:23] "GET /api/business/portal/messages/ HTTP/1.1" 200 1153
+[25/Aug/2026 19:06:23] "GET /api/business/adoptions/my-applications/ HTTP/1.1" 200 68
+[25/Aug/2026 19:06:23] "GET /api/business/portal/adoptions/ HTTP/1.1" 200 2318
+[25/Aug/2026 19:06:25] "GET /api/business/checkins/ HTTP/1.1" 200 1074
+[25/Aug/2026 19:06:25] "GET /api/business/portal/adoptions/ HTTP/1.1" 200 2318
+[25/Aug/2026 19:06:25] "GET /api/business/portal/messages/ HTTP/1.1" 200 1153
+[25/Aug/2026 19:06:26] "GET /api/business/portal/messages/ HTTP/1.1" 200 1153
+[25/Aug/2026 19:06:26] "GET /api/business/portal/messages/ HTTP/1.1" 200 1153
+[25/Aug/2026 19:06:26] "GET /api/business/portal/messages/ HTTP/1.1" 200 1153
+[25/Aug/2026 19:06:27] "GET /api/business/portal/messages/ HTTP/1.1" 200 1153
