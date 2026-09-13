@@ -1586,6 +1586,53 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
 /* 分页条布局 */
 .dt-pagination { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; padding: var(--sp-3); justify-content: flex-end; }
 
+/* === 侧栏底部收起/展开按钮 === */
+.sidebar-collapse-btn {
+  width: 100%; height: 42px; border: none; cursor: pointer;
+  background: transparent; color: rgba(255, 255, 255, 0.78);
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 16px; transition: background .15s ease;
+}
+.sidebar-collapse-btn:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+body.tnr-side-collapsed .sidebar-collapse-btn { padding: 0; }
+
+/* === 头部锁定：标签页 / 筛选条件 / 表格标题 不随列表滚动 === */
+/* 头部三级锁定：标签(top:0) → 筛选条(top:46px) → 表格标题(top:100px)，
+   高度固定为 46px/54px，纯 CSS 偏移，稳定不抖动 */
+body .page-view .tabs {
+  position: sticky; top: 0; z-index: 40;
+  height: 46px; align-items: center;
+  background: var(--rice-paper); margin-top: 0;
+}
+body .page-view .filter-bar {
+  position: sticky;
+  top: 46px;
+  z-index: 30;
+  min-height: 54px; align-items: center;
+  background: var(--white);
+  border: 1px solid var(--border-light);
+  border-radius: var(--r-md, 8px);
+  padding: var(--sp-3);
+  box-shadow: 0 2px 8px rgba(28, 28, 28, 0.06);
+  margin-bottom: 10px;
+}
+body .dt-card .card-header {
+  position: sticky;
+  top: 100px;
+  z-index: 20;
+  background: var(--white);
+  border-bottom: 1px solid var(--border-light);
+  border-radius: var(--r-md, 8px) var(--r-md, 8px) 0 0;
+}
+
+/* 内容区自身滚动：顶栏（含页面标题）固定，sticky 头部相对内容区生效。
+   中间包裹层（admin-content 等）必须取消滚动，否则 sticky 相对内层失灵 */
+body .portal-main { height: 100vh; }
+body .portal-content { overflow-y: auto; overflow-x: hidden; padding-top: 0; }
+body .page-view { padding-top: var(--sp-6); }
+body .admin-content { overflow: visible; }
+body .chinese-pattern-bg { overflow: visible; }
+
 /* 筛选条操作分组：搜索/重置一组，新增等自定义操作独立分组（左侧分隔+主按钮样式区分） */
 .filter-actions { display: flex; align-items: center; gap: var(--sp-2); }
 .filter-actions-extra { display: flex; align-items: center; gap: var(--sp-2); margin-left: var(--sp-4); padding-left: var(--sp-4); border-left: 1px solid var(--border-light, #e5e0d5); }
@@ -1641,4 +1688,10 @@ body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(
   .btn { min-height: 38px; }
   .form-input, .form-select { min-height: 38px; font-size: 16px; }  /* 16px 防 iOS 聚焦缩放 */
   .pagination { justify-content: center; }
+}
+
+/* 移动端：筛选条/表格标题不锁定（堆叠换行会占满屏幕），仅顶栏与标签锁定 */
+@media (max-width: 768px) {
+  body .page-view .filter-bar,
+  body .dt-card .card-header { position: static; }
 }

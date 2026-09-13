@@ -178,6 +178,8 @@ const TNR_UI = {
         ? document.querySelector(target) : document.getElementById(target);
     }
     if (!el) return;
+    // 外层容器若带 table-wrapper（overflow-x:auto）会剪裁 sticky 表头，剥离之
+    if (el.classList && el.classList.contains('table-wrapper')) el.classList.remove('table-wrapper');
     const id = opts.id || el.id || 'table';
     const st = this._tableState[id] = this._tableState[id] || { page: 1 };
     const prefs = this._pref('tbl.' + id) || {};
@@ -217,7 +219,7 @@ const TNR_UI = {
 
     let html = '';
     if (opts.wrap !== 'plain') {
-      html += '<div class="card"><div class="card-body" style="padding:0;">';
+      html += '<div class="card dt-card"><div class="card-body" style="padding:0;">';
       if (opts.title) {
         html += `<div class="card-header"><div class="card-title"><span class="card-title-bar"></span>${esc(opts.title)}${total ? `（${total}）` : ''}</div>${opts.actions ? `<div class="std-card-actions">${opts.actions}</div>` : ''}</div>`;
       }
@@ -675,9 +677,28 @@ const TNR_UI = {
         a.title = document.body.classList.contains('tnr-side-collapsed') && !isMobile()
           ? (label ? label.textContent.trim() : '') : '';
       });
+      const icon = sidebar.querySelector('.sidebar-collapse-btn .collapse-icon');
+      if (icon) icon.textContent = (document.body.classList.contains('tnr-side-collapsed') && !isMobile()) ? '»' : '«';
     };
     applyTips();
     new MutationObserver(applyTips).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+
+    // === 侧栏底部收起/展开按钮（桌面折叠窄栏 / 移动端收起抽屉） ===
+    const userFooter = sidebar.querySelector('.portal-sidebar-user, .sidebar-user');
+    const collapseBtn = document.createElement('button');
+    collapseBtn.type = 'button';
+    collapseBtn.className = 'sidebar-collapse-btn';
+    collapseBtn.title = '收起/展开导航栏';
+    collapseBtn.innerHTML = '<span class="collapse-icon">«</span>';
+    if (userFooter) userFooter.parentNode.insertBefore(collapseBtn, userFooter);
+    else sidebar.appendChild(collapseBtn);
+    collapseBtn.addEventListener('click', () => {
+      if (isMobile()) { setMobile(false); return; }
+      const collapsed = document.body.classList.toggle('tnr-side-collapsed');
+      this._pref('sideCollapsed', collapsed);
+    });
+
+    // 头部锁定偏移由固定高度的 CSS 规则实现（tabs 46px / filter 54px），无需动态测量
 
     // 跨断点切换时复位
     mq.addEventListener('change', () => {

@@ -389,6 +389,7 @@ class SupervisionDataTest(SupervisionBase):
         Treatment.objects.create(
             pet=pet, pet_code=pet.code, hospital=self.hospital_a,
             items_sterilization=True, items_vaccine=True, items_deworming=True,
+            sterilization_surgeon='测试医师', sterilization_surgery_date=__import__('datetime').date.today(),
             vaccine_type='狂犬疫苗', deworming_type='体内外驱虫',
             status='completed', district=self.district_a)
         adopter = UserModel.objects.create_user(username='arc_adopter', password='x',
@@ -413,6 +414,13 @@ class SupervisionDataTest(SupervisionBase):
         self.assertIn('档案领养人', rec['delivery_unit'])
         self.assertTrue(any(v['drug'] == '狂犬疫苗' for v in rec['vaccine_records']))
         self.assertTrue(any(v['drug'] == '体内外驱虫' for v in rec['deworm_records']))
+        # 诊疗记录须包含医院与医师
+        self.assertEqual(len(rec['treatment_records']), 1)
+        trt = rec['treatment_records'][0]
+        self.assertEqual(trt['hospital'], self.hospital_a.name)
+        self.assertEqual(trt['doctor'], '测试医师')
+        self.assertIn('绝育', trt['items'])
+        self.assertEqual(trt['status'], '已完成')
 
     def test_ledger_date_filter_includes_end_date(self):
         """回归：结束日期应包含当天全部记录（此前 __lte 当天零点排除当天记录）"""
