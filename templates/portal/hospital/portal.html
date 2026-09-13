@@ -98,6 +98,7 @@ const Hospital = {
   /* ========== 初始化 ========== */
   init() {
     this.bindSidebarNav();
+    TNR_UI.initPortalShell();
     this.navigate('dashboard');
   },
 
@@ -338,15 +339,28 @@ const Hospital = {
         actions = '<button class="btn btn-secondary btn-sm" data-view-reject="' + t.id + '">查看驳回理由</button>';
       }
 
-      return '<tr><td><div style="font-weight:500;">' + this.escape(t.ledger_no || '') + '</div><div style="font-size:var(--fs-xs);color:var(--ink-light);">' + this.formatDateTime(t.created_at) + '</div></td>' +
-        '<td>' + (petInfo || '<span class="text-muted">—</span>') + '</td>' +
-        '<td>' + this.escape(t.from_shelter_name || '') + '</td>' +
-        '<td>' + (t.pet_count || 0) + '</td>' +
-        '<td>' + this.transferStatusBadge(t.status) + '</td>' +
-        '<td><div class="flex gap-2">' + actions + '</div></td></tr>';
-    }).join('');
+      return {
+        _ledger: '<div style="font-weight:500;">' + this.escape(t.ledger_no || '') + '</div><div style="font-size:var(--fs-xs);color:var(--ink-light);">' + this.formatDateTime(t.created_at) + '</div>',
+        ledger_no: t.ledger_no || '',
+        created_at: t.created_at,
+        petInfo: petInfo || '<span class="text-muted">—</span>',
+        from_shelter_name: t.from_shelter_name || '',
+        pet_count: t.pet_count || 0,
+        pet_count_num: t.pet_count || 0,
+        status: this.transferStatusBadge(t.status),
+        status_raw: t.status,
+        _actions: '<div class="flex gap-2">' + actions + '</div>',
+      };
+    });
 
-    c.innerHTML = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>交接单号</th><th>宠物信息</th><th>来源捕捉点</th><th>数量</th><th>状态</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    TNR_UI.mountTable(c, { id: 'hospital.receive', title: '动物交接', columns: [
+        { title: '交接单号', key: '_ledger', sortable: false },
+        { title: '宠物信息', key: 'petInfo', sortable: false },
+        { title: '来源捕捉点', key: 'from_shelter_name' },
+        { title: '数量', key: 'pet_count_num', align: 'center' },
+        { title: '状态', key: 'status', sortable: false },
+        { title: '操作', key: '_actions', sortable: false },
+      ], data: rows, emptyText: '暂无待交接动物' });
 
     c.querySelectorAll('[data-receive]').forEach(btn => {
       btn.addEventListener('click', () => this.confirmReceive(btn.dataset.receive));
@@ -737,16 +751,26 @@ const Hospital = {
         if (t.items_vaccine) items.push('<span class="badge badge-info">疫苗</span>');
         if (t.items_deworming) items.push('<span class="badge badge-success">驱虫</span>');
         if (t.items_chip) items.push('<span class="badge badge-warning">芯片</span>');
-        return '<tr><td><div style="font-weight:500;">' + this.escape(t.pet_code || '') + '</div></td>' +
-          '<td>' + (items.join(' ') || '—') + '</td>' +
-          '<td>' + this.escape(t.hospital_name || '') + '</td>' +
-          '<td>' + this.escape(t.sterilization_surgeon || t.operator_name || '—') + '</td>' +
-          '<td>' + this.formatDateTime(t.created_at) + '</td>' +
-          '<td>' + this.treatmentStatusBadge(t.status) + '</td>' +
-          '<td><button class="btn-link" data-view-treatment="' + t.id + '">详情</button></td></tr>';
-      }).join('');
+        return {
+          pet_code: t.pet_code || '',
+          _items: items.join(' ') || '—',
+          hospital_name: t.hospital_name || '',
+          _doctor: this.escape(t.sterilization_surgeon || t.operator_name || '—'),
+          created_at: t.created_at,
+          _status: this.treatmentStatusBadge(t.status),
+          _actions: '<button class="btn-link" data-view-treatment="' + t.id + '">详情</button>',
+        };
+      });
 
-      c.innerHTML = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>宠物编号</th><th>诊疗项目</th><th>医院</th><th>医生</th><th>日期</th><th>状态</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      TNR_UI.mountTable(c, { id: 'hospital.treatments', title: '诊疗记录', columns: [
+          { title: '宠物编号', key: 'pet_code' },
+          { title: '诊疗项目', key: '_items', sortable: false },
+          { title: '医院', key: 'hospital_name' },
+          { title: '医生', key: '_doctor', sortable: false },
+          { title: '日期', key: 'created_at' },
+          { title: '状态', key: '_status', sortable: false },
+          { title: '操作', key: '_actions', sortable: false },
+        ], data: rows, emptyText: '暂无诊疗记录' });
 
       c.querySelectorAll('[data-view-treatment]').forEach(btn => {
         btn.addEventListener('click', () => this.viewTreatmentDetail(btn.dataset.viewTreatment));
@@ -868,14 +892,23 @@ const Hospital = {
       return;
     }
     const rows = dispatches.map(t => {
-      return '<tr><td><div style="font-weight:500;">' + this.escape(t.material_name || '') + '</div><div style="font-size:var(--fs-xs);color:var(--ink-light);">' + this.escape(t.ledger_no || '') + '</div></td>' +
-        '<td>' + (t.quantity || 0) + ' ' + this.escape(t.unit || '') + '</td>' +
-        '<td>' + this.escape(t.batch_no || '—') + '</td>' +
-        '<td>' + this.escape(t.operator_name || '') + '</td>' +
-        '<td>' + this.formatDate(t.date) + '</td>' +
-        '<td><button class="btn btn-success btn-sm" data-mreceive="' + t.id + '">确认入库</button></td></tr>';
-    }).join('');
-    c.innerHTML = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>物料名称</th><th>数量</th><th>批号</th><th>下发方</th><th>下发日期</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      return {
+        _mat: '<div style="font-weight:500;">' + this.escape(t.material_name || '') + '</div><div style="font-size:var(--fs-xs);color:var(--ink-light);">' + this.escape(t.ledger_no || '') + '</div>',
+        _qty: (t.quantity || 0) + ' ' + this.escape(t.unit || ''),
+        batch_no: t.batch_no || '—',
+        operator_name: t.operator_name || '',
+        date: t.date,
+        _actions: '<button class="btn btn-success btn-sm" data-mreceive="' + t.id + '">确认入库</button>',
+      };
+    });
+    TNR_UI.mountTable(c, { id: 'hospital.material.pending', title: '待接收物料', columns: [
+        { title: '物料名称', key: '_mat', sortable: false },
+        { title: '数量', key: '_qty', sortable: false },
+        { title: '批号', key: 'batch_no' },
+        { title: '下发方', key: 'operator_name' },
+        { title: '下发日期', key: 'date' },
+        { title: '操作', key: '_actions', sortable: false },
+      ], data: rows, emptyText: '暂无待接收物料' });
     c.querySelectorAll('[data-mreceive]').forEach(btn => {
       btn.addEventListener('click', () => this.confirmMaterialReceive(btn.dataset.mreceive));
     });
@@ -918,12 +951,14 @@ const Hospital = {
 
     const adj = txns.filter(t => t.type === 'adjustment');
     let adjHtml = '<div class="empty-state" style="padding:var(--sp-6);"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无异动记录</div></div>';
-    if (adj.length > 0) {
-      const rows = adj.map(t => {
-        return '<tr><td>' + this.escape(t.material_name || '') + '</td><td>' + this.escape(t.note || '—') + '</td><td>' + (t.quantity || 0) + ' ' + this.escape(t.unit || '') + '</td><td>' + this.formatDate(t.date) + '</td><td>' + this.escape(t.operator_name || '') + '</td></tr>';
-      }).join('');
-      adjHtml = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>物料</th><th>原因</th><th>数量</th><th>日期</th><th>操作人</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
-    }
+    const adjRows = adj.map(t => ({
+      material_name: t.material_name || '',
+      note: t.note || '—',
+      _qty: (t.quantity || 0) + ' ' + this.escape(t.unit || ''),
+      date: t.date,
+      operator_name: t.operator_name || '',
+    }));
+    if (adj.length > 0) adjHtml = '<div id="hospitalAdjTable"></div>';
 
     c.innerHTML = '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>库存异动报备</div></div><div class="card-body">' +
       '<div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">📝</div><div class="form-section-title">新增异动报备</div></div><div class="form-section-body">' +
@@ -934,6 +969,15 @@ const Hospital = {
       '<div style="display:flex;justify-content:flex-end;"><button class="btn btn-primary" id="adjSubmitBtn">提交报备</button></div></div></div></div></div>' +
       '<div class="card mt-5"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>异动记录</div></div><div class="card-body-flush">' + adjHtml + '</div></div>';
 
+    if (adj.length > 0) {
+      TNR_UI.mountTable('hospitalAdjTable', { id: 'hospital.material.adjustment', title: '异动记录', columns: [
+          { title: '物料', key: 'material_name' },
+          { title: '原因', key: 'note' },
+          { title: '数量', key: '_qty', sortable: false },
+          { title: '日期', key: 'date' },
+          { title: '操作人', key: 'operator_name' },
+        ], data: adjRows, emptyText: '暂无异动记录' });
+    }
     c.querySelector('#adjSubmitBtn')?.addEventListener('click', () => this.saveStockAdjustment(materials));
   },
 
@@ -968,16 +1012,28 @@ const Hospital = {
     const typeBadge = {'purchase': 'badge-success', 'dispatch': 'badge-info', 'consume': 'badge-warning', 'adjustment': 'badge-danger'};
     const rows = data.map(t => {
       const sign = (t.type === 'consume' || t.type === 'adjustment') ? '-' : '+';
-      return '<tr><td><div style="font-weight:500;">' + this.escape(t.ledger_no || '') + '</div></td>' +
-        '<td><span class="badge ' + (typeBadge[t.type] || 'badge-default') + '">' + (typeMap[t.type] || t.type) + '</span></td>' +
-        '<td>' + this.escape(t.material_name || '') + '</td>' +
-        '<td>' + sign + (t.quantity || 0) + ' ' + this.escape(t.unit || '') + '</td>' +
-        '<td>' + this.escape(t.batch_no || '—') + '</td>' +
-        '<td>' + this.escape(t.from_to || '') + '</td>' +
-        '<td>' + this.escape(t.operator_name || '') + '</td>' +
-        '<td>' + this.formatDate(t.date) + '</td></tr>';
-    }).join('');
-    c.innerHTML = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>单据编号</th><th>类型</th><th>物料</th><th>数量</th><th>批号</th><th>来源/去向</th><th>操作人</th><th>日期</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      return {
+        ledger_no: t.ledger_no || '',
+        _type: '<span class="badge ' + (typeBadge[t.type] || 'badge-default') + '">' + (typeMap[t.type] || t.type) + '</span>',
+        _typeRaw: t.type,
+        material_name: t.material_name || '',
+        _qty: sign + (t.quantity || 0) + ' ' + this.escape(t.unit || ''),
+        batch_no: t.batch_no || '—',
+        from_to: t.from_to || '',
+        operator_name: t.operator_name || '',
+        date: t.date,
+      };
+    });
+    TNR_UI.mountTable(c, { id: 'hospital.material.ledger', title: '物料台账', columns: [
+        { title: '单据编号', key: 'ledger_no' },
+        { title: '类型', key: '_type', sortable: false },
+        { title: '物料', key: 'material_name' },
+        { title: '数量', key: '_qty', sortable: false },
+        { title: '批号', key: 'batch_no' },
+        { title: '来源/去向', key: 'from_to' },
+        { title: '操作人', key: 'operator_name' },
+        { title: '日期', key: 'date' },
+      ], data: rows, emptyText: '暂无台账记录' });
   },
 
   async confirmMaterialReceive(txnId) {
@@ -1015,26 +1071,42 @@ const Hospital = {
       const pendingAppls = applications.filter(a => a.status === 'pending');
       let applHtml = '';
       if (pendingAppls.length > 0) {
-        applHtml = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>待审核领养申请</div><span class="badge badge-cinnabar">' + pendingAppls.length + ' 条待处理</span></div><div class="card-body" style="padding:0;"><div class="table-wrapper"><table class="table"><thead><tr><th>宠物编号</th><th>申请人</th><th>电话</th><th>资质说明</th><th>申请时间</th><th>操作</th></tr></thead><tbody>';
-        pendingAppls.forEach(a => {
-          applHtml += '<tr><td><span class="pet-code-chip">' + this.escape(a.pet_code || '') + '</span></td><td>' + this.escape(a.applicant_name || '') + '</td><td>' + this.escape(a.applicant_phone || '') + '</td><td style="max-width:220px;">' + this.escape((a.qualification || '').substring(0, 40)) + '</td><td>' + this.escape((a.applied_at || '').substring(0, 16)) + '</td><td><button class="btn btn-success btn-sm" data-review-apply="' + a.id + '" data-action="approve">通过</button> <button class="btn btn-danger btn-sm" data-review-apply="' + a.id + '" data-action="reject">拒绝</button></td></tr>';
-        });
-        applHtml += '</tbody></table></div></div></div>';
+        applHtml = '<div id="hospitalApplTable"></div>';
       }
+      const applRows = pendingAppls.map(a => ({
+        _pet: '<span class="pet-code-chip">' + this.escape(a.pet_code || '') + '</span>',
+        applicant_name: a.applicant_name || '',
+        applicant_phone: a.applicant_phone || '',
+        _qual: this.escape((a.qualification || '').substring(0, 40)),
+        applied_at: a.applied_at,
+        _actions: '<button class="btn btn-success btn-sm" data-review-apply="' + a.id + '" data-action="approve">通过</button> <button class="btn btn-danger btn-sm" data-review-apply="' + a.id + '" data-action="reject">拒绝</button>',
+      }));
 
       // 待领出确认列表（捕捉点已登记领养，等待医院确认领出）
       const pendingClaims = adoptions.filter(a => a.status === 'pending_claim');
       let claimsHtml = '';
       if (pendingClaims.length > 0) {
-        claimsHtml = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>待领出确认</div><span class="badge badge-cinnabar">' + pendingClaims.length + ' 条待处理</span></div><div class="card-body" style="padding:0;"><div class="table-wrapper"><table class="table"><thead><tr><th>领养单号</th><th>宠物编号</th><th>领养人</th><th>电话</th><th>登记时间</th><th>操作</th></tr></thead><tbody>';
-        pendingClaims.forEach(a => {
-          claimsHtml += '<tr><td><span class="font-mono fs-sm">' + this.escape(a.ledger_no || a.id) + '</span></td><td><span class="pet-code-chip">' + this.escape(a.pet_code || '') + '</span></td><td>' + this.escape(a.adopter_name || '') + '</td><td>' + this.escape(a.adopter_phone || '') + '</td><td>' + this.escape((a.created_at || '').substring(0, 16)) + '</td><td><button class="btn btn-primary btn-sm" data-confirm-claim="' + a.id + '">确认领出</button></td></tr>';
-        });
-        claimsHtml += '</tbody></table></div></div></div>';
+        claimsHtml = '<div id="hospitalClaimsTable"></div>';
       }
+      const claimRows = pendingClaims.map(a => ({
+        ledger_no: a.ledger_no || a.id,
+        _pet: '<span class="pet-code-chip">' + this.escape(a.pet_code || '') + '</span>',
+        adopter_name: a.adopter_name || '',
+        adopter_phone: a.adopter_phone || '',
+        created_at: a.created_at,
+        _actions: '<button class="btn btn-primary btn-sm" data-confirm-claim="' + a.id + '">确认领出</button>',
+      }));
 
       if (pets.length === 0 && pendingClaims.length === 0) {
         page.innerHTML = applHtml + '<div class="empty-state"><div class="empty-state-icon">🐾</div><div class="empty-state-text">暂无待领养动物</div><div class="empty-state-desc">诊疗完成5天后，动物状态将自动变更为「待领养」</div></div>';
+        if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', title: '待审核领养申请', actions: '<span class="badge badge-cinnabar">' + pendingAppls.length + ' 条待处理</span>', columns: [
+            { title: '宠物编号', key: '_pet', sortable: false },
+            { title: '申请人', key: 'applicant_name' },
+            { title: '电话', key: 'applicant_phone' },
+            { title: '资质说明', key: '_qual', sortable: false },
+            { title: '申请时间', key: 'applied_at' },
+            { title: '操作', key: '_actions', sortable: false },
+          ], data: applRows, emptyText: '暂无申请' });
         page.querySelectorAll('[data-review-apply]').forEach(btn => {
           btn.addEventListener('click', () => this.reviewApplication(btn.dataset.reviewApply, btn.dataset.action));
         });
@@ -1043,6 +1115,22 @@ const Hospital = {
 
       if (pets.length === 0) {
         page.innerHTML = claimsHtml + applHtml + '<div class="empty-state"><div class="empty-state-icon">🐾</div><div class="empty-state-text">暂无待领养动物</div><div class="empty-state-desc">诊疗完成5天后，动物状态将自动变更为「待领养」</div></div>';
+        if (pendingClaims.length > 0) TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', title: '待领出确认', actions: '<span class="badge badge-cinnabar">' + pendingClaims.length + ' 条待处理</span>', columns: [
+            { title: '领养单号', key: 'ledger_no' },
+            { title: '宠物编号', key: '_pet', sortable: false },
+            { title: '领养人', key: 'adopter_name' },
+            { title: '电话', key: 'adopter_phone' },
+            { title: '登记时间', key: 'created_at' },
+            { title: '操作', key: '_actions', sortable: false },
+          ], data: claimRows, emptyText: '暂无记录' });
+        if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', title: '待审核领养申请', actions: '<span class="badge badge-cinnabar">' + pendingAppls.length + ' 条待处理</span>', columns: [
+            { title: '宠物编号', key: '_pet', sortable: false },
+            { title: '申请人', key: 'applicant_name' },
+            { title: '电话', key: 'applicant_phone' },
+            { title: '资质说明', key: '_qual', sortable: false },
+            { title: '申请时间', key: 'applied_at' },
+            { title: '操作', key: '_actions', sortable: false },
+          ], data: applRows, emptyText: '暂无申请' });
         // 绑定确认领出按钮
         page.querySelectorAll('[data-confirm-claim]').forEach(btn => {
           btn.addEventListener('click', () => this.confirmClaim(btn.dataset.confirmClaim));
@@ -1088,6 +1176,22 @@ const Hospital = {
       }).join('');
 
       page.innerHTML = claimsHtml + applHtml + html;
+      if (pendingClaims.length > 0) TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', title: '待领出确认', actions: '<span class="badge badge-cinnabar">' + pendingClaims.length + ' 条待处理</span>', columns: [
+          { title: '领养单号', key: 'ledger_no' },
+          { title: '宠物编号', key: '_pet', sortable: false },
+          { title: '领养人', key: 'adopter_name' },
+          { title: '电话', key: 'adopter_phone' },
+          { title: '登记时间', key: 'created_at' },
+          { title: '操作', key: '_actions', sortable: false },
+        ], data: claimRows, emptyText: '暂无记录' });
+      if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', title: '待审核领养申请', actions: '<span class="badge badge-cinnabar">' + pendingAppls.length + ' 条待处理</span>', columns: [
+          { title: '宠物编号', key: '_pet', sortable: false },
+          { title: '申请人', key: 'applicant_name' },
+          { title: '电话', key: 'applicant_phone' },
+          { title: '资质说明', key: '_qual', sortable: false },
+          { title: '申请时间', key: 'applied_at' },
+          { title: '操作', key: '_actions', sortable: false },
+        ], data: applRows, emptyText: '暂无申请' });
 
       page.querySelectorAll('[data-confirm-claim]').forEach(btn => {
         btn.addEventListener('click', () => this.confirmClaim(btn.dataset.confirmClaim));
@@ -1256,22 +1360,28 @@ const Hospital = {
 
       /* 记录列表 */
       html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>安乐死处置记录</div></div><div class="card-body-flush">';
-      if (records.length === 0) {
-        html += '<div class="empty-state" style="padding:var(--sp-6);"><div class="empty-state-icon">⚰️</div><div class="empty-state-text">暂无处置记录</div></div>';
-      } else {
-        const rows = records.map(e => {
-          return '<tr><td><div style="font-weight:500;">' + this.escape(e.pet_code || '') + '</div></td>' +
-            '<td>' + this.escape(e.reason || '') + '</td>' +
-            '<td>' + this.formatDate(e.euthanized_at) + '</td>' +
-            '<td>' + (e.body_received ? '<span class="badge badge-success">已移交</span>' : '<span class="badge badge-warning">未移交</span>') + '</td>' +
-            '<td>' + this.escape(e.operator_name || '') + '</td>' +
-            '<td><button class="btn-link" data-view-euth="' + e.id + '">详情</button></td></tr>';
-        }).join('');
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>宠物编号</th><th>原因</th><th>处置日期</th><th>遗体移交</th><th>操作人</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
-      }
-      html += '</div></div>';
+      html += '<div id="hospitalEuthTable"></div></div></div>';
 
       page.innerHTML = html;
+
+      if (records.length > 0) {
+        const rows = records.map(e => ({
+          _pet: '<div style="font-weight:500;">' + this.escape(e.pet_code || '') + '</div>',
+          reason: e.reason || '',
+          euthanized_at: e.euthanized_at,
+          _body: e.body_received ? '<span class="badge badge-success">已移交</span>' : '<span class="badge badge-warning">未移交</span>',
+          operator_name: e.operator_name || '',
+          _actions: '<button class="btn-link" data-view-euth="' + e.id + '">详情</button>',
+        }));
+        TNR_UI.mountTable('hospitalEuthTable', { id: 'hospital.euthanasia', title: '安乐死处置记录', columns: [
+            { title: '宠物编号', key: '_pet', sortable: false },
+            { title: '原因', key: 'reason' },
+            { title: '处置日期', key: 'euthanized_at' },
+            { title: '遗体移交', key: '_body', sortable: false },
+            { title: '操作人', key: 'operator_name' },
+            { title: '操作', key: '_actions', sortable: false },
+          ], data: rows, emptyText: '暂无处置记录' });
+      }
 
       page.querySelector('#euthSubmitBtn')?.addEventListener('click', () => this.saveEuthanasia());
       page.querySelectorAll('[data-view-euth]').forEach(btn => {
@@ -1370,9 +1480,25 @@ const Hospital = {
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无交接台账</div></div>'; return; }
       const rows = data.map(t => {
         const codes = this.parsePetCodes(t.pet_codes);
-        return '<tr><td>' + this.escape(t.ledger_no || '') + '</td><td>' + this.formatDateTime(t.created_at) + '</td><td>' + this.escape(t.from_shelter_name || '') + '</td><td>' + (t.pet_count || 0) + '</td><td>' + this.escape(codes.join(', ')) + '</td><td>' + this.transferStatusBadge(t.status) + '</td><td>' + this.formatDate(t.received_at) + '</td></tr>';
-      }).join('');
-      c.innerHTML = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>单据编号</th><th>创建时间</th><th>来源捕捉点</th><th>动物数量</th><th>宠物编号</th><th>状态</th><th>接收时间</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+        return {
+          ledger_no: t.ledger_no || '',
+          created_at: t.created_at,
+          from_shelter_name: t.from_shelter_name || '',
+          _count: t.pet_count || 0,
+          _codes: this.escape(codes.join(', ')),
+          _status: this.transferStatusBadge(t.status),
+          received_at: t.received_at,
+        };
+      });
+      TNR_UI.mountTable(c, { id: 'hospital.ledger.transfer', title: '交接台账', columns: [
+          { title: '单据编号', key: 'ledger_no' },
+          { title: '创建时间', key: 'created_at' },
+          { title: '来源捕捉点', key: 'from_shelter_name' },
+          { title: '动物数量', key: '_count', align: 'center' },
+          { title: '宠物编号', key: '_codes', sortable: false },
+          { title: '状态', key: '_status', sortable: false },
+          { title: '接收时间', key: 'received_at' },
+        ], data: rows, emptyText: '暂无交接台账' });
     } else if (tab === 'treatment') {
       const data = treatments.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无诊疗台账</div></div>'; return; }
@@ -1382,9 +1508,23 @@ const Hospital = {
         if (t.items_vaccine) items.push('疫苗');
         if (t.items_deworming) items.push('驱虫');
         if (t.items_chip) items.push('芯片');
-        return '<tr><td>' + this.escape(t.pet_code || '') + '</td><td>' + (items.join('、') || '—') + '</td><td>' + this.escape(t.hospital_name || '') + '</td><td>' + this.escape(t.sterilization_surgeon || t.operator_name || '—') + '</td><td>' + this.formatDateTime(t.created_at) + '</td><td>' + this.treatmentStatusBadge(t.status) + '</td></tr>';
-      }).join('');
-      c.innerHTML = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>宠物编号</th><th>诊疗项目</th><th>医院</th><th>医生</th><th>日期</th><th>状态</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+        return {
+          pet_code: t.pet_code || '',
+          _items: items.join('、') || '—',
+          hospital_name: t.hospital_name || '',
+          _doctor: this.escape(t.sterilization_surgeon || t.operator_name || '—'),
+          created_at: t.created_at,
+          _status: this.treatmentStatusBadge(t.status),
+        };
+      });
+      TNR_UI.mountTable(c, { id: 'hospital.ledger.treatment', title: '诊疗台账', columns: [
+          { title: '宠物编号', key: 'pet_code' },
+          { title: '诊疗项目', key: '_items', sortable: false },
+          { title: '医院', key: 'hospital_name' },
+          { title: '医生', key: '_doctor', sortable: false },
+          { title: '日期', key: 'created_at' },
+          { title: '状态', key: '_status', sortable: false },
+        ], data: rows, emptyText: '暂无诊疗台账' });
     } else if (tab === 'material') {
       const data = txns.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无物料台账</div></div>'; return; }
@@ -1392,16 +1532,42 @@ const Hospital = {
       const typeBadge = {'purchase': 'badge-success', 'dispatch': 'badge-info', 'consume': 'badge-warning', 'adjustment': 'badge-danger'};
       const rows = data.map(t => {
         const sign = (t.type === 'consume' || t.type === 'adjustment') ? '-' : '+';
-        return '<tr><td>' + this.escape(t.ledger_no || '') + '</td><td><span class="badge ' + (typeBadge[t.type] || 'badge-default') + '">' + (typeMap[t.type] || t.type) + '</span></td><td>' + this.escape(t.material_name || '') + '</td><td>' + sign + (t.quantity || 0) + ' ' + this.escape(t.unit || '') + '</td><td>' + this.formatDate(t.date) + '</td><td>' + this.escape(t.operator_name || '') + '</td></tr>';
-      }).join('');
-      c.innerHTML = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>单据编号</th><th>类型</th><th>物料</th><th>数量</th><th>日期</th><th>操作人</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+        return {
+          ledger_no: t.ledger_no || '',
+          _type: '<span class="badge ' + (typeBadge[t.type] || 'badge-default') + '">' + (typeMap[t.type] || t.type) + '</span>',
+          material_name: t.material_name || '',
+          _qty: sign + (t.quantity || 0) + ' ' + this.escape(t.unit || ''),
+          date: t.date,
+          operator_name: t.operator_name || '',
+        };
+      });
+      TNR_UI.mountTable(c, { id: 'hospital.ledger.material', title: '物料台账', columns: [
+          { title: '单据编号', key: 'ledger_no' },
+          { title: '类型', key: '_type', sortable: false },
+          { title: '物料', key: 'material_name' },
+          { title: '数量', key: '_qty', sortable: false },
+          { title: '日期', key: 'date' },
+          { title: '操作人', key: 'operator_name' },
+        ], data: rows, emptyText: '暂无物料台账' });
     } else if (tab === 'euthanasia') {
       const data = euthanasia.slice().sort((a, b) => (b.euthanized_at || '').localeCompare(a.euthanized_at || ''));
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无安乐死台账</div></div>'; return; }
-      const rows = data.map(e => {
-        return '<tr><td>' + this.escape(e.ledger_no || '') + '</td><td>' + this.escape(e.pet_code || '') + '</td><td>' + this.escape(e.reason || '') + '</td><td>' + this.formatDate(e.euthanized_at) + '</td><td>' + (e.body_received ? '<span class="badge badge-success">已移交</span>' : '<span class="badge badge-warning">未移交</span>') + '</td><td>' + this.escape(e.operator_name || '') + '</td></tr>';
-      }).join('');
-      c.innerHTML = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>单据编号</th><th>宠物编号</th><th>原因</th><th>处置日期</th><th>遗体移交</th><th>操作人</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      const rows = data.map(e => ({
+        ledger_no: e.ledger_no || '',
+        pet_code: e.pet_code || '',
+        reason: e.reason || '',
+        euthanized_at: e.euthanized_at,
+        _body: e.body_received ? '<span class="badge badge-success">已移交</span>' : '<span class="badge badge-warning">未移交</span>',
+        operator_name: e.operator_name || '',
+      }));
+      TNR_UI.mountTable(c, { id: 'hospital.ledger.euthanasia', title: '安乐死台账', columns: [
+          { title: '单据编号', key: 'ledger_no' },
+          { title: '宠物编号', key: 'pet_code' },
+          { title: '原因', key: 'reason' },
+          { title: '处置日期', key: 'euthanized_at' },
+          { title: '遗体移交', key: '_body', sortable: false },
+          { title: '操作人', key: 'operator_name' },
+        ], data: rows, emptyText: '暂无安乐死台账' });
     }
   },
 

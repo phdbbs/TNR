@@ -217,6 +217,7 @@ const Shelter = {
   /* ========== 初始化 ========== */
   init() {
     this.bindSidebarNav();
+    TNR_UI.initPortalShell();
     this.navigate('dashboard');
   },
 
@@ -407,9 +408,8 @@ const Shelter = {
         html += '<button class="btn-link danger" data-act="del" data-id="' + r.id + '">删除</button>';
         return html;
       };
-      const tableHTML = TNR_UI.renderTable({ columns, data: list, emptyText: '暂无捕捉记录', rowActions });
+      TNR_UI.mountTable('captureTableWrap', { id: 'shelter.captures', title: '捕捉记录', columns, data: list, emptyText: '暂无捕捉记录', rowActions });
       const wrap = document.getElementById('captureTableWrap');
-      wrap.innerHTML = '<div class="card"><div class="card-body" style="padding:0;"><div class="table-wrapper">' + tableHTML + '</div></div></div>';
 
       wrap.querySelectorAll('[data-act]').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -667,8 +667,7 @@ const Shelter = {
         { title: '时间', key: 'createdAt' }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
-      const tableHTML = TNR_UI.renderTable({ columns, data: filtered, emptyText: '暂无主人领回记录', rowActions });
-      document.getElementById('returnTableWrap').innerHTML = '<div class="card"><div class="card-body" style="padding:0;"><div class="table-wrapper">' + tableHTML + '</div></div></div>';
+      TNR_UI.mountTable('returnTableWrap', { id: 'shelter.ownerReturns', title: '主人领回记录', columns, data: filtered, emptyText: '暂无主人领回记录', rowActions });
       document.getElementById('returnTableWrap').querySelectorAll('[data-act]').forEach(btn => {
         btn.addEventListener('click', () => {
           const rec = list.find(r => String(r.id) === String(btn.dataset.id));
@@ -818,7 +817,7 @@ const Shelter = {
       html += '</div></div>';
 
       const pendingOrders = all.filter(t => t.status === 'pending');
-      html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>待医院签收转运单（' + pendingOrders.length + '）</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
+      html += '<div data-mt="shelter.transfers.pending"></div>';
       const columns = [
         { title: '转运单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
         { title: '接收医院', key: 'toHospitalName' },
@@ -828,10 +827,9 @@ const Shelter = {
         { title: '创建时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
-      html += TNR_UI.renderTable({ columns, data: pendingOrders, emptyText: '暂无待签收转运单', rowActions });
-      html += '</div></div></div>';
 
       wrap.innerHTML = html;
+      TNR_UI.mountTable('[data-mt="shelter.transfers.pending"]', { id: 'shelter.transfers.pending', title: '待医院签收转运单', columns, data: pendingOrders, emptyText: '暂无待签收转运单', rowActions });
 
       if (inTransitPets.length > 0) {
         document.getElementById('btnCreateTransfer').addEventListener('click', async () => {
@@ -894,7 +892,7 @@ const Shelter = {
         return html;
       };
       const tabLabel = { dispatched: '已下发', received: '已签收', rejected: '已驳回' }[tab];
-      wrap.innerHTML = '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>' + tabLabel + '转运单（' + list.length + '）</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">' + TNR_UI.renderTable({ columns, data: list, emptyText: '暂无' + tabLabel + '转运单', rowActions }) + '</div></div></div>';
+      TNR_UI.mountTable(wrap, { id: 'shelter.transfers.' + tab, title: tabLabel + '转运单', columns, data: list, emptyText: '暂无' + tabLabel + '转运单', rowActions });
 
       wrap.querySelectorAll('[data-act]').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -959,7 +957,7 @@ const Shelter = {
     const materials = this._materials || [];
 
     if (tab === 'stock') {
-      let html = '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>捕捉点库存台账</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
+      let html = '<div data-mt="shelter.material.stock"></div>';
       const columns = [
         { title: '物料名称', key: 'name' },
         { title: '分类', render: r => '<span class="badge badge-default">' + TNR_API.getMaterialCategoryText(r.category) + '</span>' },
@@ -983,9 +981,8 @@ const Shelter = {
         }},
         { title: '有效期', key: 'expiryDate', render: r => r.expiryDate || '—' }
       ];
-      html += TNR_UI.renderTable({ columns, data: materials, emptyText: '暂无库存数据' });
-      html += '</div></div></div>';
       wrap.innerHTML = html;
+      TNR_UI.mountTable('[data-mt="shelter.material.stock"]', { id: 'shelter.material.stock', title: '捕捉点库存台账', columns, data: materials, emptyText: '暂无库存数据' });
 
     } else if (tab === 'purchase') {
       let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>采购入库登记</div></div><div class="card-body">';
@@ -1006,9 +1003,9 @@ const Shelter = {
       html += '</div></div>';
 
       const txns = (this._matTxns || []).filter(t => t.type === 'purchase');
-      html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>采购入库记录</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
-      html += TNR_UI.renderTable({
-        columns: [
+      html += '<div data-mt="shelter.material.purchase"></div>';
+      wrap.innerHTML = html;
+      TNR_UI.mountTable('[data-mt="shelter.material.purchase"]', { id: 'shelter.material.purchase', title: '采购入库记录', columns: [
           { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || '') + '</span>' },
           { title: '物料', key: 'materialName' },
           { title: '数量', render: r => r.quantity + ' ' + (r.unit || '') },
@@ -1016,11 +1013,7 @@ const Shelter = {
           { title: '批号', key: 'batchNo' },
           { title: '日期', key: 'date' },
           { title: '操作员', key: 'operatorName' }
-        ],
-        data: txns, emptyText: '暂无采购记录'
-      });
-      html += '</div></div></div>';
-      wrap.innerHTML = html;
+        ], data: txns, emptyText: '暂无采购记录' });
 
       document.getElementById('pu_category').addEventListener('change', (e) => {
         document.getElementById('pu_chipRangeGroup').style.display = e.target.value === 'chip' ? '' : 'none';
@@ -1069,9 +1062,9 @@ const Shelter = {
       html += '</div></div>';
 
       const txns = (this._matTxns || []).filter(t => t.type === 'dispatch');
-      html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>下发出库记录</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
-      html += TNR_UI.renderTable({
-        columns: [
+      html += '<div data-mt="shelter.material.outbound"></div>';
+      wrap.innerHTML = html;
+      TNR_UI.mountTable('[data-mt="shelter.material.outbound"]', { id: 'shelter.material.outbound', title: '下发出库记录', columns: [
           { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || '') + '</span>' },
           { title: '物料', key: 'materialName' },
           { title: '数量', render: r => r.quantity + ' ' + (r.unit || '') },
@@ -1079,11 +1072,7 @@ const Shelter = {
           { title: '批号', key: 'batchNo' },
           { title: '日期', key: 'date' },
           { title: '操作员', key: 'operatorName' }
-        ],
-        data: txns, emptyText: '暂无出库记录'
-      });
-      html += '</div></div></div>';
-      wrap.innerHTML = html;
+        ], data: txns, emptyText: '暂无出库记录' });
 
       document.getElementById('ob_material').addEventListener('change', (e) => {
         const mat = materials.find(m => String(m.id) === String(e.target.value));
@@ -1149,7 +1138,7 @@ const Shelter = {
           { title: '操作员', key: 'operatorName' },
           { title: '备注', key: 'note' }
         ];
-        document.getElementById('flowTableWrap').innerHTML = '<div class="card"><div class="card-body" style="padding:0;"><div class="table-wrapper">' + TNR_UI.renderTable({ columns, data: list, emptyText: '暂无流向记录' }) + '</div></div></div>';
+        TNR_UI.mountTable('flowTableWrap', { id: 'shelter.material.flow', title: '物资流向记录', columns, data: list, emptyText: '暂无流向记录' });
       };
       renderFlow();
       TNR_UI.bindFilter(renderFlow);
@@ -1188,7 +1177,7 @@ const Shelter = {
       // 待回收：列出可被回收（已绝育/已完成诊疗）的动物，点击"回收"直接创建放养记录
       const recoverable = pets.filter(p => p.status === 'in_treatment' || p.status === 'pending_adopt');
       const treatments = await TNR_API.getTreatments();
-      let html = '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>可回收动物列表</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
+      let html = '<div data-mt="shelter.release.recovery"></div>';
       const columns = [
         { title: '宠物编号', key: 'code', render: r => '<span class="pet-code-chip">' + r.code + '</span>' },
         { title: '名称', key: 'name', render: r => r.name || '—' },
@@ -1200,8 +1189,8 @@ const Shelter = {
         { title: '状态', render: r => TNR_UI.statusBadge(TNR_API.getPetStatusText(r.status), TNR_API.getPetStatusBadge(r.status).replace('badge-','')) },
         { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-recover="' + r.id + '">回收并登记放养</button>' }
       ];
-      html += TNR_UI.renderTable({ columns, data: recoverable, emptyText: '暂无可回收动物（需先经医院诊疗）' });
-      html += '</div></div></div>';
+      html += '';
+      TNR_UI.mountTable('[data-mt="shelter.release.recovery"]', { id: 'shelter.release.recovery', title: '可回收动物列表', columns, data: recoverable, emptyText: '暂无可回收动物（需先经医院诊疗）', rowActions });
       wrap.innerHTML = html;
 
       wrap.querySelectorAll('[data-recover]').forEach(btn => {
@@ -1215,7 +1204,7 @@ const Shelter = {
     } else if (tab === 'pending') {
       // 待放养：列出 status=pending 的放养记录，等待物业签字确认
       const pendingReleases = releases.filter(r => r.status === 'pending');
-      let html = '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>待放养确认（' + pendingReleases.length + '）</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
+      let html = '<div data-mt="shelter.release.pending"></div>';
       const columns = [
         { title: '放养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
         { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + TNR_UI.escape(r.petCode || r.pet_code) + '</span>' },
@@ -1225,9 +1214,8 @@ const Shelter = {
         { title: '登记时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt || r.created_at) },
         { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-confirm-release="' + r.id + '">确认放养</button><button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>' }
       ];
-      html += TNR_UI.renderTable({ columns, data: pendingReleases, emptyText: '暂无待放养记录' });
-      html += '</div></div></div>';
       wrap.innerHTML = html;
+      TNR_UI.mountTable('[data-mt="shelter.release.pending"]', { id: 'shelter.release.pending', title: '待放养确认', columns, data: pendingReleases, emptyText: '暂无待放养记录' });
 
       wrap.querySelectorAll('[data-confirm-release]').forEach(btn => {
         btn.addEventListener('click', () => this.showReleaseConfirmModal(btn.dataset.confirmRelease, releases));
@@ -1260,7 +1248,7 @@ const Shelter = {
         { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.escape(r.releasedAt || r.released_at || '—') }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
-      wrap.innerHTML = '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>放养记录</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">' + TNR_UI.renderTable({ columns, data: released, emptyText: '暂无放养记录', rowActions }) + '</div></div></div>';
+      TNR_UI.mountTable(wrap, { id: 'shelter.release.released', title: '放养记录', columns, data: released, emptyText: '暂无放养记录', rowActions });
       wrap.querySelectorAll('[data-act]').forEach(btn => {
         btn.addEventListener('click', () => {
           const rec = releases.find(r => String(r.id) === String(btn.dataset.id));
@@ -1464,7 +1452,7 @@ const Shelter = {
         { title: '领养时间', key: 'adoptedAt' }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
-      document.getElementById('adoptionTableWrap').innerHTML = TNR_UI.renderTable({ columns, data: list, emptyText: '暂无领养记录', rowActions });
+      TNR_UI.mountTable('adoptionTableWrap', { id: 'shelter.adoption', title: '领养记录', columns, data: list, emptyText: '暂无领养记录', rowActions });
       document.getElementById('adoptionTableWrap').querySelectorAll('[data-act]').forEach(btn => {
         btn.addEventListener('click', () => {
           const rec = list.find(r => String(r.id) === String(btn.dataset.id));
@@ -1562,7 +1550,7 @@ const Shelter = {
         if (r.status === 'pending') return '<button class="btn-link success" data-act="approve" data-id="' + r.id + '">通过</button><button class="btn-link danger" data-act="reject" data-id="' + r.id + '">驳回</button>';
         return '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
       };
-      document.getElementById('checkinTableWrap').innerHTML = TNR_UI.renderTable({ columns, data: list, emptyText: '暂无打卡记录', rowActions });
+      TNR_UI.mountTable('checkinTableWrap', { id: 'shelter.checkin', title: '回访打卡记录', columns, data: list, emptyText: '暂无打卡记录', rowActions });
       document.getElementById('checkinTableWrap').querySelectorAll('[data-act]').forEach(btn => {
         btn.addEventListener('click', async () => {
           const rec = list.find(r => String(r.id) === String(btn.dataset.id));
@@ -1642,7 +1630,7 @@ const Shelter = {
         { title: '登记时间', key: 'createdAt' }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="edit" data-id="' + r.id + '">编辑</button><button class="btn-link danger" data-act="del" data-id="' + r.id + '">删除</button>';
-      document.getElementById('blackTableWrap').innerHTML = '<div class="card"><div class="card-body" style="padding:0;"><div class="table-wrapper">' + TNR_UI.renderTable({ columns, data: list, emptyText: '暂无黑名单记录', rowActions }) + '</div></div></div>';
+      TNR_UI.mountTable('blackTableWrap', { id: 'shelter.blacklist', title: '黑名单', columns, data: list, emptyText: '暂无黑名单记录', rowActions });
       document.getElementById('blackTableWrap').querySelectorAll('[data-act]').forEach(btn => {
         btn.addEventListener('click', () => {
           const rec = list.find(r => String(r.id) === String(btn.dataset.id));
@@ -1775,7 +1763,7 @@ const Shelter = {
     if (tab === 'body') {
       const pending = records.filter(r => !r.bodyReceived);
       const received = records.filter(r => r.bodyReceived);
-      let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>待接收尸体（' + pending.length + '）</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
+      let html = '<div data-mt="shelter.euth.bodyPending"></div>';
       const columns = [
         { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
         { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + r.petCode + '</span>' },
@@ -1785,10 +1773,8 @@ const Shelter = {
         { title: '处置时间', key: 'euthanizedAt' },
         { title: '操作', render: r => '<button class="btn btn-primary btn-sm" data-receive="' + r.id + '">接收备案</button>' }
       ];
-      html += TNR_UI.renderTable({ columns, data: pending, emptyText: '暂无待接收尸体' });
-      html += '</div></div></div>';
+      html += '<div data-mt="shelter.euth.bodyReceived"></div>';
 
-      html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>已接收备案（' + received.length + '）</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
       const cols2 = [
         { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
         { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + r.petCode + '</span>' },
@@ -1798,9 +1784,9 @@ const Shelter = {
         { title: '接收时间', key: 'bodyReceivedAt' },
         { title: '接收人', key: 'bodyReceivedByName' }
       ];
-      html += TNR_UI.renderTable({ columns: cols2, data: received, emptyText: '暂无已接收记录' });
-      html += '</div></div></div>';
       wrap.innerHTML = html;
+      TNR_UI.mountTable('[data-mt="shelter.euth.bodyPending"]', { id: 'shelter.euth.bodyPending', title: '待接收尸体', columns, data: pending, emptyText: '暂无待接收尸体' });
+      TNR_UI.mountTable('[data-mt="shelter.euth.bodyReceived"]', { id: 'shelter.euth.bodyReceived', title: '已接收备案', columns: cols2, data: received, emptyText: '暂无已接收记录' });
 
       wrap.querySelectorAll('[data-receive]').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -1842,7 +1828,7 @@ const Shelter = {
           { title: '尸体状态', render: r => r.bodyReceived ? TNR_UI.statusBadge('已接收', 'success') : TNR_UI.statusBadge('待接收', 'warning') },
           { title: '操作', render: r => '<button class="btn-link" data-view="' + r.id + '">详情</button>' }
         ];
-        document.getElementById('eutTableWrap').innerHTML = '<div class="card"><div class="card-body" style="padding:0;"><div class="table-wrapper">' + TNR_UI.renderTable({ columns, data: list, emptyText: '暂无处置记录' }) + '</div></div></div>';
+        TNR_UI.mountTable('eutTableWrap', { id: 'shelter.euth.records', title: '处置记录', columns, data: list, emptyText: '暂无处置记录' });
         document.getElementById('eutTableWrap').querySelectorAll('[data-view]').forEach(btn => {
           btn.addEventListener('click', () => {
             const rec = records.find(r => String(r.id) === String(btn.dataset.view));
@@ -1980,17 +1966,18 @@ const Shelter = {
     wrap.innerHTML = `
       <div class="card">
         <div class="card-header">
-          <div class="card-title"><span class="card-title-bar"></span>${title}（共 ${data.length} 条）</div>
+          <div class="card-title"><span class="card-title-bar"></span>${title}</div>
           <div class="flex gap-2">
             <button class="btn btn-secondary btn-sm" id="btnExportLedger">导出</button>
             <button class="btn btn-secondary btn-sm" id="btnPrintLedger">打印</button>
           </div>
         </div>
         <div class="card-body" style="padding:0;">
-          <div class="table-wrapper">${TNR_UI.renderTable({ columns, data, emptyText: '暂无台账数据' })}</div>
+          <div id="ledgerTableHolder"></div>
         </div>
       </div>
     `;
+    TNR_UI.mountTable('ledgerTableHolder', { id: 'shelter.ledger', title: title, columns, data, emptyText: '暂无台账数据' });
     document.getElementById('btnExportLedger').addEventListener('click', () => {
       const csv = [];
       csv.push(columns.map(c => c.title).join(','));

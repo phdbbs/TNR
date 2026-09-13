@@ -110,7 +110,7 @@ const TNR_UI = {
     return { drawerEl, close: closeFn };
   },
 
-  // === 渲染表格 ===
+  // === 渲染表格（旧接口，保持兼容；标准列表请用 mountTable） ===
   renderTable({ columns, data, emptyText = '暂无数据', rowActions = null }) {
     if (!data || data.length === 0) {
       return `<div class="table-empty"><div class="table-empty-icon">📋</div><div class="table-empty-text">${emptyText}</div></div>`;
@@ -134,6 +134,233 @@ const TNR_UI = {
     });
     html += '</tbody></table>';
     return html;
+  },
+
+  // ============================================
+  // 标准数据表格（前端分页 / 点击排序 / 列宽拖拽记忆）
+  // ============================================
+  _tableState: {},   // 运行态：page / sortKey / sortDir（filter 重渲染时保留排序）
+  _dtDrag: null,     // 列宽拖拽中的临时状态
+
+  _pref(key, value) {
+    // localStorage 读写（JSON），失败静默降级为无记忆
+    try {
+      const fullKey = 'tnr.ui.' + key;
+      if (value === undefined) {
+        const raw = localStorage.getItem(fullKey);
+        return raw === null ? null : JSON.parse(raw);
+      }
+      localStorage.setItem(fullKey, JSON.stringify(value));
+    } catch (e) { /* 隐私模式等场景降级 */ }
+    return value === undefined ? null : value;
+  },
+
+  _sortValue(row, key) {
+    const v = row[key];
+    if (v === null || v === undefined || v === '') return null;
+    if (typeof v === 'number') return v;
+    const s = String(v).trim();
+    if (s !== '' && !isNaN(Number(s)) && /^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return Date.parse(s) || s;
+    return s;
+  },
+
+  /**
+   * 标准表格挂载：客户端分页（默认 10 条/页）+ 点击列头排序 + 列宽拖拽（localStorage 记忆）。
+   * @param {string|Element} target 容器元素或 id
+   * @param {object} opts { id, columns:[{key,title,render,width,sortable,align}], data, rowActions,
+   *                        emptyText, title, pageSize, pageSizes, wrap:'card'|'plain', actions }
+   */
+  mountTable(target, opts) {
+    let el = target;
+    if (typeof target === 'string') {
+      el = (/^[\\#[\.\[]/.test(target) || target.includes(' '))
+        ? document.querySelector(target) : document.getElementById(target);
+    }
+    if (!el) return;
+    const id = opts.id || el.id || 'table';
+    const st = this._tableState[id] = this._tableState[id] || { page: 1 };
+    const prefs = this._pref('tbl.' + id) || {};
+    const pageSizes = opts.pageSizes || [10, 20, 50];
+    const pageSize = st.pageSize || prefs.pageSize || opts.pageSize || 10;
+    const data = Array.isArray(opts.data) ? opts.data.slice() : [];
+
+    // ---- 排序（外部重渲染保留排序条件；filter 变化时由调用方决定是否重置） ----
+    let rows = data;
+    if (st.sortKey) {
+      const dir = st.sortDir === 'desc' ? -1 : 1;
+      rows = rows.slice().sort((a, b) => {
+        const va = this._sortValue(a, st.sortKey), vb = this._sortValue(b, st.sortKey);
+        if (va === null && vb === null) return 0;
+        if (va === null) return 1;
+        if (vb === null) return -1;
+        if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir;
+        return String(va).localeCompare(String(vb), 'zh-Hans-CN') * dir;
+      });
+    }
+
+    // ---- 分页 ----
+    const total = rows.length;
+    // 数据总量变化（筛选/刷新）时回到第 1 页；排序/翻页等内部操作不受影响
+    if (st.lastTotal !== undefined && st.lastTotal !== total) st.page = 1;
+    st.lastTotal = total;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (st.page > totalPages) st.page = totalPages;
+    const pageRows = rows.slice((st.page - 1) * pageSize, st.page * pageSize);
+
+    // ---- 列宽记忆 ----
+    const widths = prefs.widths || null;
+
+    const esc = this.escape.bind(this);
+    const emptyText = opts.emptyText || '暂无数据';
+    const actionsCol = !!opts.rowActions;
+
+    let html = '';
+    if (opts.wrap !== 'plain') {
+      html += '<div class="card"><div class="card-body" style="padding:0;">';
+      if (opts.title) {
+        html += `<div class="card-header"><div class="card-title"><span class="card-title-bar"></span>${esc(opts.title)}${total ? `（${total}）` : ''}</div>${opts.actions ? `<div class="std-card-actions">${opts.actions}</div>` : ''}</div>`;
+      }
+      html += '<div class="table-wrapper">';
+    }
+
+    if (total === 0) {
+      html += `<div class="table-empty"><div class="table-empty-icon">📋</div><div class="table-empty-text">${esc(emptyText)}</div></div>`;
+    } else {
+      const fixed = widths ? ' table-layout:fixed;' : '';
+      html += `<table class="data-table dt-table" style="${fixed}">`;
+      html += '<colgroup>';
+      opts.columns.forEach((col, i) => {
+        const w = widths ? widths[i] : (col.width || null);
+        html += `<col style="${w ? 'width:' + (typeof w === 'number' ? w + 'px' : w) + ';' : ''}">`;
+      });
+      if (actionsCol) html += `<col style="${widths && widths[opts.columns.length] ? 'width:' + widths[opts.columns.length] + 'px' : 'width:1px;'}">`;
+      html += '</colgroup><thead><tr>';
+      opts.columns.forEach((col, i) => {
+        const sortable = col.sortable !== false && col.key;
+        const sorted = st.sortKey === col.key;
+        const arrow = sortable ? `<span class="dt-sort ${sorted ? 'on ' + (st.sortDir === 'desc' ? 'desc' : 'asc') : ''}">${sorted ? (st.sortDir === 'desc' ? '▼' : '▲') : '⇅'}</span>` : '';
+        const align = col.align ? `text-align:${col.align};` : '';
+        html += `<th class="${sortable ? 'dt-sortable' : ''}" data-dt-sort="${sortable ? esc(col.key) : ''}" style="${align}">${col.title}${arrow}`;
+        if (col.resizable !== false) html += `<span class="dt-colresizer" data-dt-col="${i}"></span>`;
+        html += '</th>';
+      });
+      if (actionsCol) html += `<th class="dt-actions-th">操作<span class="dt-colresizer" data-dt-col="${opts.columns.length}"></span></th>`;
+      html += '</tr></thead><tbody>';
+      pageRows.forEach((row, idx) => {
+        html += '<tr>';
+        opts.columns.forEach(col => {
+          const val = typeof col.render === 'function' ? col.render(row, idx) : (row[col.key] ?? '');
+          html += `<td>${val ?? ''}</td>`;
+        });
+        if (actionsCol) html += `<td class="dt-actions-td"><div class="flex gap-2">${opts.rowActions(row, idx)}</div></td>`;
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    if (opts.wrap !== 'plain') html += '</div>';
+
+    // ---- 分页条 ----
+    if (total > 0) {
+      html += '<div class="pagination dt-pagination">';
+      html += `<span class="pagination-info">共 ${total} 条</span>`;
+      html += `<select class="form-select dt-pagesize" data-dt-size="${esc(id)}" style="width:auto;padding:2px 6px;font-size:12px;">`;
+      pageSizes.forEach(s => {
+        html += `<option value="${s}" ${s === pageSize ? 'selected' : ''}>${s} 条/页</option>`;
+      });
+      html += '</select>';
+      if (totalPages > 1) {
+        html += `<button class="pagination-btn" ${st.page <= 1 ? 'disabled' : ''} data-dt-page="${st.page - 1}" data-dt-id="${esc(id)}">‹</button>`;
+        for (let i = 1; i <= totalPages; i++) {
+          if (i === 1 || i === totalPages || (i >= st.page - 1 && i <= st.page + 1)) {
+            html += `<button class="pagination-btn ${i === st.page ? 'active' : ''}" data-dt-page="${i}" data-dt-id="${esc(id)}">${i}</button>`;
+          } else if (i === st.page - 2 || i === st.page + 2) {
+            html += '<button class="pagination-btn" disabled>…</button>';
+          }
+        }
+        html += `<button class="pagination-btn" ${st.page >= totalPages ? 'disabled' : ''} data-dt-page="${st.page + 1}" data-dt-id="${esc(id)}">›</button>`;
+      }
+      html += '</div>';
+    }
+    if (opts.wrap !== 'plain') html += '</div>';
+
+    el.innerHTML = html;
+
+    // ---- 事件绑定 ----
+    // 排序
+    el.querySelectorAll('.dt-sortable').forEach(th => {
+      th.addEventListener('click', (e) => {
+        if (e.target.classList.contains('dt-colresizer')) return;
+        const key = th.dataset.dtSort;
+        if (!key) return;
+        if (st.sortKey === key) st.sortDir = st.sortDir === 'asc' ? 'desc' : 'asc';
+        else { st.sortKey = key; st.sortDir = 'asc'; }
+        st.page = 1;
+        this.mountTable(el, opts);   // 重渲染（保留其他状态）
+      });
+    });
+    // 翻页 / 每页条数
+    el.querySelectorAll('[data-dt-page]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tid = btn.dataset.dtId;
+        const s = this._tableState[tid];
+        if (s) { s.page = parseInt(btn.dataset.dtPage, 10) || 1; this.mountTable(el, opts); }
+      });
+    });
+    const sizeSel = el.querySelector('.dt-pagesize');
+    if (sizeSel) {
+      sizeSel.addEventListener('change', () => {
+        st.pageSize = parseInt(sizeSel.value, 10);
+        st.page = 1;
+        this._pref('tbl.' + id, Object.assign({}, prefs, { pageSize: st.pageSize, widths: prefs.widths }));
+        this.mountTable(el, opts);
+      });
+    }
+    // 列宽拖拽
+    el.querySelectorAll('.dt-colresizer').forEach(handle => {
+      handle.addEventListener('mousedown', (e) => this._startColResize(e, handle, el, opts, id, prefs));
+      handle.addEventListener('touchstart', (e) => this._startColResize(e, handle, el, opts, id, prefs), { passive: true });
+    });
+  },
+
+  _startColResize(e, handle, el, opts, id, prefs) {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = handle.closest('th');
+    const table = handle.closest('table');
+    const colIndex = parseInt(handle.dataset.dtCol, 10);
+    const startX = (e.touches ? e.touches[0].clientX : e.clientX);
+    const startW = th.offsetWidth;
+    const move = (ev) => {
+      const x = (ev.touches ? ev.touches[0].clientX : ev.clientX);
+      const w = Math.max(48, startW + (x - startX));
+      if (table.style.tableLayout !== 'fixed') {
+        // 首次拖拽：把当前自然宽度固化为列宽
+        table.style.tableLayout = 'fixed';
+        const widths = Array.from(table.querySelectorAll('thead th')).map(t => t.offsetWidth);
+        table.querySelectorAll('colgroup col').forEach((c, i) => {
+          if (widths[i]) c.style.width = widths[i] + 'px';
+        });
+      }
+      table.querySelectorAll('colgroup col')[colIndex].style.width = w + 'px';
+      th.style.width = w + 'px';
+    };
+    const up = () => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      document.removeEventListener('touchmove', move);
+      document.removeEventListener('touchend', up);
+      const widths = Array.from(table.querySelectorAll('colgroup col')).map(c => parseInt(c.style.width, 10) || null);
+      const saved = this._pref('tbl.' + id) || {};
+      saved.widths = widths;
+      this._pref('tbl.' + id, saved);
+      this.toast('列宽已保存', 'info', 1200);
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+    document.addEventListener('touchmove', move, { passive: false });
+    document.addEventListener('touchend', up);
   },
 
   // === 渲染分页 ===
@@ -341,11 +568,27 @@ const TNR_UI = {
     return html;
   },
 
-  // === 实时搜索过滤 ===
+  // === 实时搜索过滤（输入防抖 200ms；回车立即提交） ===
   bindFilter(tableRender) {
     document.querySelectorAll('[data-filter]').forEach(input => {
-      input.addEventListener('input', () => tableRender());
-      input.addEventListener('change', () => tableRender());
+      let timer = null;
+      const isText = (input.type || '') === 'text' || input.tagName === 'INPUT' && input.type !== 'checkbox';
+      input.addEventListener('input', () => {
+        if (!isText) { tableRender(); return; }
+        clearTimeout(timer);
+        timer = setTimeout(tableRender, 200);
+      });
+      input.addEventListener('change', () => {
+        clearTimeout(timer);
+        tableRender();
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          clearTimeout(timer);
+          tableRender();
+        }
+      });
     });
   },
 
@@ -355,6 +598,80 @@ const TNR_UI = {
       vals[input.dataset.filter] = input.value.trim().toLowerCase();
     });
     return vals;
+  },
+
+  // ============================================
+  // 门户壳层框架：侧栏折叠（桌面）/ 抽屉自动隐藏（移动）
+  // ============================================
+  /**
+   * 对 portal_*_base 布局启用标准框架行为。
+   * - 桌面（>900px）：顶栏 ☰ 切换「图标窄栏」模式，状态记忆 localStorage；
+ *   窄栏下悬停自动展开预览，导航项以 title 提示。
+   * - 移动（≤900px）：侧栏默认隐藏（抽屉），☰ 呼出，点遮罩/导航后自动收起；
+   *   窗口尺寸切换时自动复位。
+   */
+  initPortalShell() {
+    const sidebar = document.getElementById('portalSidebar');
+    const overlay = document.getElementById('portalSidebarOverlay');
+    const toggle = document.getElementById('portalSidebarToggle');
+    if (!sidebar) return;
+
+    const isMobile = () => window.matchMedia('(max-width: 768px)').matches;
+    const mq = window.matchMedia('(max-width: 768px)');
+
+    // 恢复桌面折叠状态
+    if (!isMobile() && this._pref('sideCollapsed') === true) {
+      document.body.classList.add('tnr-side-collapsed');
+    }
+
+    const setMobile = (open) => {
+      sidebar.classList.toggle('show', open);
+      if (overlay) overlay.classList.toggle('show', open);
+    };
+
+    if (toggle) {
+      // 替换 base 内联脚本可能已绑定的行为：先克隆去监听
+      const fresh = toggle.cloneNode(true);
+      toggle.parentNode.replaceChild(fresh, toggle);
+      fresh.addEventListener('click', () => {
+        if (isMobile()) {
+          setMobile(!sidebar.classList.contains('show'));
+        } else {
+          const collapsed = document.body.classList.toggle('tnr-side-collapsed');
+          this._pref('sideCollapsed', collapsed);
+        }
+      });
+    }
+    if (overlay) overlay.addEventListener('click', () => setMobile(false));
+
+    // 导航点击后收起移动端抽屉
+    sidebar.querySelectorAll('.nav-item').forEach(a => {
+      a.addEventListener('click', () => { if (isMobile()) setMobile(false); });
+    });
+
+    // 折叠窄栏时给导航项补 title 提示
+    const applyTips = () => {
+      sidebar.querySelectorAll('.nav-item').forEach(a => {
+        const label = a.querySelector('.nav-item-label');
+        a.title = document.body.classList.contains('tnr-side-collapsed') && !isMobile()
+          ? (label ? label.textContent.trim() : '') : '';
+      });
+    };
+    applyTips();
+    new MutationObserver(applyTips).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+
+    // 跨断点切换时复位
+    mq.addEventListener('change', () => {
+      setMobile(false);
+      document.body.classList.remove('tnr-side-collapsed');
+      if (!mq.matches) document.body.classList.remove('tnr-side-collapsed');
+      applyTips();
+    });
+  },
+
+  // === 标准页头 ===
+  pageHeader({ title, desc = '', actions = '' }) {
+    return `<div class="std-page-head"><div><div class="std-page-title">${title}</div>${desc ? `<div class="std-page-desc">${desc}</div>` : ''}</div>${actions ? `<div class="std-page-actions">${actions}</div>` : ''}</div>`;
   },
 
   // === 创建空HTML骨架 ===

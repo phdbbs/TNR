@@ -94,6 +94,7 @@ const GovPortal = {
   /* ========== 初始化 ========== */
   init() {
     this.bindSidebarNav();
+    TNR_UI.initPortalShell();
     this.startClock();
     this.navigate('dashboard');
   },
@@ -411,7 +412,7 @@ const GovPortal = {
       <button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle-dist="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>
       <button class="btn-link danger" data-del-dist="${r.id}">删除</button>
     `) : (() => '');
-    document.getElementById('distTableWrapper').innerHTML = TNR_UI.renderTable({ columns, data, rowActions, emptyText: '暂无区县数据' });
+    TNR_UI.mountTable('distTableWrapper', { id: 'gov.districts', title: '区县列表', columns, data, rowActions, emptyText: '暂无区县数据' });
     document.querySelectorAll('[data-edit-dist]').forEach(b => b.addEventListener('click', () => this.showDistrictModal(b.dataset.editDist)));
     document.querySelectorAll('[data-toggle-dist]').forEach(b => b.addEventListener('click', () => this.toggleDistrictStatus(b.dataset.toggleDist)));
     document.querySelectorAll('[data-del-dist]').forEach(b => b.addEventListener('click', () => this.deleteDistrict(b.dataset.delDist)));
@@ -526,7 +527,7 @@ const GovPortal = {
       <button class="btn-link" data-edit="${r.id}">编辑</button>
       <button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>
     `;
-    document.getElementById('instTableWrapper').innerHTML = TNR_UI.renderTable({ columns, data, rowActions, emptyText: '暂无机构数据' });
+    TNR_UI.mountTable('instTableWrapper', { id: 'gov.institutions', title: '机构列表', columns, data, rowActions, emptyText: '暂无机构数据' });
     document.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => this.showInstitutionModal(b.dataset.edit)));
     document.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => this.toggleInstitutionStatus(b.dataset.toggle)));
   },
@@ -668,7 +669,7 @@ const GovPortal = {
     const rowActions = r => r.id === selfId
       ? '<span style="font-size:var(--fs-xs);color:var(--ink-light);">当前账号</span>'
       : `<button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>`;
-    document.getElementById('acctTableWrapper').innerHTML = TNR_UI.renderTable({ columns, data, rowActions, emptyText: '暂无账号' });
+    TNR_UI.mountTable('acctTableWrapper', { id: 'gov.accounts', title: '账号列表', columns, data, rowActions, emptyText: '暂无账号' });
     document.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => this.toggleAccountStatus(b.dataset.toggle)));
   },
 
@@ -999,7 +1000,7 @@ const GovPortal = {
     }
 
     const rowActions = r => `<button class="btn-link" data-detail="${r.id}">详情</button>`;
-    document.getElementById('supTableWrapper').innerHTML = TNR_UI.renderTable({ columns, data, rowActions, emptyText: '暂无监管数据' });
+    TNR_UI.mountTable('supTableWrapper', { id: 'gov.supervision.' + this.state.supTab, title: '业务监管', columns, data, rowActions, emptyText: '暂无监管数据' });
     document.querySelectorAll('[data-detail]').forEach(b => b.addEventListener('click', () => this.showSupervisionDetail(type, b.dataset.detail)));
   },
 
@@ -1455,9 +1456,7 @@ const GovPortal = {
     // 通用：添加详情操作列
     columns.push({ key: '_action', title: '操作', width: '90px', render: r => `<button class="btn btn-secondary btn-sm" data-ledger-detail="${r.id}">详情</button>` });
 
-    document.getElementById('ledgerTableWrapper').innerHTML =
-      '<div style="margin-bottom:var(--sp-3);font-size:var(--fs-sm);color:var(--ink-muted);">共 ' + records.length + ' 条记录</div>' +
-      TNR_UI.renderTable({ columns, data: records, emptyText: '暂无台账数据' });
+    TNR_UI.mountTable('ledgerTableWrapper', { id: 'gov.ledger.' + (this.state.ledgerTab || 'all'), title: '台账中心', columns, data: records, emptyText: '暂无台账数据' });
 
     document.querySelectorAll('[data-ledger-detail]').forEach(b => {
       b.addEventListener('click', () => this.showLedgerDetail(records, b.dataset.ledgerDetail));

@@ -1550,3 +1550,92 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
 
 /* 隐藏 */
 .hidden { display: none !important; }
+
+/* ============================================
+   标准后台框架层（2026 框架升级）
+   —— 排版规范 / 可折叠侧栏 / 标准表格 / 响应式
+   ============================================ */
+
+/* --- 标准页头 --- */
+.std-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+  flex-wrap: wrap;
+}
+.std-page-title { font-family: var(--font-display, serif); font-size: 20px; font-weight: 700; color: var(--ink-text); }
+.std-page-desc { font-size: var(--fs-xs, 12px); color: var(--ink-light); margin-top: 4px; }
+.std-page-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.std-card-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+
+/* --- 标准表格：可排序列头 / 列宽拖拽 --- */
+.data-table th.dt-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.data-table th.dt-sortable:hover { color: var(--cinnabar); }
+.data-table .dt-sort { font-size: 10px; margin-left: 4px; opacity: .45; }
+.data-table .dt-sort.on { opacity: 1; color: var(--cinnabar); }
+.data-table .dt-colresizer {
+  position: absolute; top: 0; right: -3px; width: 7px; height: 100%;
+  cursor: col-resize; z-index: 2;
+}
+.data-table thead th { position: relative; }
+.data-table.dt-table { min-width: 100%; }
+.dt-actions-th, .dt-actions-td { white-space: nowrap; }
+.dt-actions-td .btn-link { padding: 4px 8px; }
+.dt-pagesize { appearance: auto; }
+
+/* 分页条布局 */
+.dt-pagination { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; padding: var(--sp-3); justify-content: flex-end; }
+
+/* --- 可折叠侧栏（桌面端图标窄栏） --- */
+.portal-sidebar { transition: width .2s ease; }
+.portal-topbar-toggle { display: inline-flex; align-items: center; justify-content: center; }
+body.tnr-side-collapsed .portal-sidebar { width: 64px; }
+body.tnr-side-collapsed .portal-main { margin-left: 64px; }
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-brand { padding-left: 0; padding-right: 0; justify-content: center; }
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-brand-text,
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-brand-sub,
+body.tnr-side-collapsed .portal-sidebar .nav-item-label,
+body.tnr-side-collapsed .portal-sidebar .nav-group-title,
+body.tnr-side-collapsed .portal-sidebar .sidebar-user-info { display: none; }
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-nav { padding: var(--sp-2); }
+body.tnr-side-collapsed .portal-sidebar .nav-item { justify-content: center; padding-left: 0; padding-right: 0; }
+body.tnr-side-collapsed .portal-sidebar .nav-item-badge { position: absolute; top: 6px; right: 8px; }
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-user,
+body.tnr-side-collapsed .portal-sidebar .sidebar-user { justify-content: center; }
+
+/* --- 统计卡栅格（自适应换行，移动端 2 列） --- */
+body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--sp-4); }
+
+/* --- 筛选栏规范 --- */
+.filter-bar { display: flex; align-items: flex-end; gap: var(--sp-3); flex-wrap: wrap; }
+.filter-item { min-width: 0; }
+.filter-item .form-input, .filter-item .form-select { min-width: 140px; }
+
+/* --- 移动端适配（捕捉点端 / 医院端高频手机操作） --- */
+@media (max-width: 768px) {
+  .std-page-head { flex-direction: column; align-items: stretch; }
+  .std-page-actions, .std-card-actions { width: 100%; }
+  .std-page-actions .btn, .std-card-actions .btn { flex: 1; }
+  .filter-bar { flex-direction: column; align-items: stretch; }
+  .filter-item, .filter-item .form-input, .filter-item .form-select { width: 100%; min-width: 0; }
+  .filter-actions { display: flex; width: 100%; }
+  .filter-actions .btn { flex: 1; }
+  body .stat-grid { grid-template-columns: repeat(2, 1fr); gap: var(--sp-2); }
+  body .filter-bar { flex-direction: column; align-items: stretch; }
+  body .filter-item, body .filter-item .form-input, body .filter-item .form-select { width: 100%; min-width: 0; }
+  body .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  body .portal-content { padding: var(--sp-3); }
+  .stat-card { padding: var(--sp-3); }
+  .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .data-table { font-size: 13px; }
+  .data-table th, .data-table td { padding: 8px 10px; }
+  .dt-actions-td .btn-link { padding: 8px 10px; }   /* 触控热区 */
+  .modal { width: 92vw !important; max-width: 92vw !important; }
+  .modal-lg, .modal-xl { width: 96vw !important; }
+  .drawer { width: 92vw !important; }
+  .btn { min-height: 38px; }
+  .form-input, .form-select { min-height: 38px; font-size: 16px; }  /* 16px 防 iOS 聚焦缩放 */
+  .pagination { justify-content: center; }
+}
