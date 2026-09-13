@@ -9,10 +9,10 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **306 个用例，全部通过**（约 22 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **311 个用例，全部通过**（约 22 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通，详见第四节 |
-| 发现并修复的真实缺陷 | 12 项（详见第二节） |
+| 发现并修复的真实缺陷 | 17 项（第二节 12 项 + 第 2.5 节 5 项） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
 
@@ -72,6 +72,28 @@ supervision/tests.py           # 政府端权限边界/大屏/机构/区县/用�
 
 ---
 
+## 二点五、用户实测反馈修复（2026-09-13 晚）
+
+用户以 admin 实测时触发自锁：在账号管理中停用了自己的账号（日志
+`POST /api/supervision/users/1/toggle/`），此后无法登录，且登录页仅提示
+「用户名或密码错误」，误导排查方向。修复（提交 `2c4d488`）：
+
+| # | 问题 | 修复 | 测试 |
+|---|---|---|---|
+| 13 | 管理员可在账号管理中**停用自己**，停用即被锁死 | 后端禁止停用当前登录账号自己 | test_toggle_self_rejected |
+| 14 | 最后一个启用中的市级管理员可被停用，系统失去账号管理入口 | 停用前校验，至少保留一个启用中的市级管理员 | test_district_admin_cannot_deactivate_last_city_admin |
+| 15 | 超级管理员可被停用 | 超级管理员不可停用 | test_toggle_superuser_rejected |
+| 16 | 停用账号登录时提示「用户名或密码错误」，误导排查 | 明确提示「该账号已被停用，请联系管理员恢复」 | test_login_inactive_account_clear_message |
+| 17 | 政府端账号列表对自己的行也显示「停用」按钮，易误点 | 当前登录账号行显示「当前账号」标记，不再提供按钮 | 前端改动 + 后端兜底 |
+
+同时验证了用户关心的**区县改名联动**：系统中区县引用全部走外键实时读取
+（无名称快照），改名后账号列表、机构列表、业务数据、大屏统计等处自动展示
+新名称，已用测试 `test_district_rename_propagates` 与线上 API 实测双重验证。
+种子数据默认使用北京区县（朝阳/海淀/西城/东城 + 全市市级）；用户手工改名的
+数据会保留，需要恢复北京演示数据可执行 `python manage.py seed_data --flush`。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -110,7 +132,7 @@ cd /Users/wl/M4/TNR
 source .venv/bin/activate
 python manage.py migrate
 python manage.py seed_data          # 幂等，可重复执行
-python manage.py test --parallel 1  # 306 个用例
+python manage.py test --parallel 1  # 311 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / aixin_hosp / adopter1
 ```
