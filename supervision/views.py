@@ -3,7 +3,7 @@ Task 13: 政府监管后端
 - 数据大屏统计 / 机构管理 / 区县管理 / 用户管理
 - 业务监管 / 物资监管 / 台账中心 / 操作日志 / 系统配置
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.decorators import login_required
@@ -799,7 +799,8 @@ def ledger_center(request):
         if end_date:
             try:
                 ed = datetime.strptime(end_date[:10], '%Y-%m-%d').date()
-                qs = qs.filter(**{f'{date_field}__lte': ed})
+                # 结束日期含当天：用次日零点开区间，避免当天非零点记录被排除
+                qs = qs.filter(**{f'{date_field}__lt': ed + timedelta(days=1)})
             except (ValueError, TypeError):
                 pass
         return qs

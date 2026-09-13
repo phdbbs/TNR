@@ -1703,7 +1703,7 @@ const GovPortal = {
     }
 
     TNR_UI.drawer({
-      title: '台账详情 · ' + (typeLabelMap[tab] || tab),
+      title: '台账详情 · ' + ({ capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放养', adoption: '领养', material: '物料', euthanasia: '安乐死' }[tab] || tab),
       body: bodyEl => { bodyEl.innerHTML = TNR_UI.renderDescList(items) + extraHtml; }
     });
   },

@@ -1586,6 +1586,11 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
 /* 分页条布局 */
 .dt-pagination { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; padding: var(--sp-3); justify-content: flex-end; }
 
+/* 筛选条操作分组：搜索/重置一组，新增等自定义操作独立分组（左侧分隔+主按钮样式区分） */
+.filter-actions { display: flex; align-items: center; gap: var(--sp-2); }
+.filter-actions-extra { display: flex; align-items: center; gap: var(--sp-2); margin-left: var(--sp-4); padding-left: var(--sp-4); border-left: 1px solid var(--border-light, #e5e0d5); }
+.filter-actions .btn-secondary[data-fb] { color: var(--ink-text); }
+
 /* --- 可折叠侧栏（桌面端图标窄栏） --- */
 .portal-sidebar { transition: width .2s ease; }
 .portal-topbar-toggle { display: inline-flex; align-items: center; justify-content: center; }

@@ -561,11 +561,12 @@ const TNR_UI = {
       }
       html += '</div>';
     });
+    // 搜索/重置紧跟筛选条件且样式一致；自定义操作（新增/导出等）单独分组、样式区分
     const stdButtons = opts.noButtons ? '' :
-      `<button type="button" class="btn btn-primary btn-sm" data-fb="search">🔍 搜索</button>` +
+      `<button type="button" class="btn btn-secondary btn-sm" data-fb="search">搜索</button>` +
       `<button type="button" class="btn btn-secondary btn-sm" data-fb="reset">重置</button>`;
     if (actions || stdButtons) {
-      html += `<div class="filter-actions">${actions}${stdButtons}</div>`;
+      html += `<div class="filter-actions">${stdButtons}${actions ? `<span class="filter-actions-extra">${actions}</span>` : ''}</div>`;
     }
     html += '</div>';
     return html;

@@ -379,6 +379,21 @@ class SupervisionDataTest(SupervisionBase):
         records = body['data']['records']
         self.assertEqual(records[0]['ledger_no'], 'CAP-SV-1')
 
+    def test_ledger_date_filter_includes_end_date(self):
+        """回归：结束日期应包含当天全部记录（此前 __lte 当天零点排除当天记录）"""
+        from datetime import date
+        pet = make_pet(district=self.district_a)
+        Capture.objects.create(district=self.district_a, shelter=self.shelter_a,
+                               pet_codes=pet.code, pet_count=1,
+                               ledger_no='CAP-DATEFIX-001')
+        today = date.today().isoformat()
+        self.client.force_login(self.gov_city)
+        data = self.ok(self.client.get(
+            f'{API}/ledger/?start_date={today}&end_date={today}'))['data']
+        self.assertGreaterEqual(data['total'], 1, '结束日期当天的记录不应被排除')
+        self.assertTrue(any(r['ledger_no'] == 'CAP-DATEFIX-001' for r in data['records']),
+                        '结束日期当天的捕捉记录应在结果中')
+
     def test_ledger_center_business_type_filter(self):
         pet = make_pet(district=self.district_a)
         Capture.objects.create(district=self.district_a, shelter=self.shelter_a,
