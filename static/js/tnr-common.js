@@ -541,8 +541,8 @@ const TNR_UI = {
     }
   },
 
-  // === 渲染搜索筛选栏 ===
-  renderFilterBar(filters, actions = '') {
+  // === 渲染搜索筛选栏（自动附带标准「搜索/重置」按钮，配合 bindFilter 生效） ===
+  renderFilterBar(filters, actions = '', opts = {}) {
     let html = '<div class="filter-bar">';
     filters.forEach(f => {
       html += '<div class="filter-item">';
@@ -561,8 +561,11 @@ const TNR_UI = {
       }
       html += '</div>';
     });
-    if (actions) {
-      html += `<div class="filter-actions">${actions}</div>`;
+    const stdButtons = opts.noButtons ? '' :
+      `<button type="button" class="btn btn-primary btn-sm" data-fb="search">🔍 搜索</button>` +
+      `<button type="button" class="btn btn-secondary btn-sm" data-fb="reset">重置</button>`;
+    if (actions || stdButtons) {
+      html += `<div class="filter-actions">${actions}${stdButtons}</div>`;
     }
     html += '</div>';
     return html;
@@ -570,6 +573,21 @@ const TNR_UI = {
 
   // === 实时搜索过滤（输入防抖 200ms；回车立即提交） ===
   bindFilter(tableRender) {
+    // 标准「搜索 / 重置」按钮
+    document.querySelectorAll('[data-fb="search"]').forEach(btn => {
+      const fresh = btn.cloneNode(true);
+      btn.parentNode.replaceChild(fresh, btn);
+      fresh.addEventListener('click', (e) => { e.preventDefault(); tableRender(); });
+    });
+    document.querySelectorAll('[data-fb="reset"]').forEach(btn => {
+      const fresh = btn.cloneNode(true);
+      btn.parentNode.replaceChild(fresh, btn);
+      fresh.addEventListener('click', (e) => {
+        e.preventDefault();
+        document.querySelectorAll('[data-filter]').forEach(i => { i.value = ''; });
+        tableRender();
+      });
+    });
     document.querySelectorAll('[data-filter]').forEach(input => {
       let timer = null;
       const isText = (input.type || '') === 'text' || input.tagName === 'INPUT' && input.type !== 'checkbox';

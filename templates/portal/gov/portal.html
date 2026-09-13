@@ -180,164 +180,272 @@ const GovPortal = {
     return fallbackId || '—';
   },
 
-  /* ========== 1. 数据总览大屏 ========== */
+  /* ========== 1. 数据总览大屏（时间维度 + 前端明细加总） ========== */
   async render_dashboard() {
     const el = document.getElementById('page-dashboard');
     el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⏳</div><div class="table-empty-text">加载中...</div></div>';
     try {
-      const stats = await TNR_API.getDashboardStats();
-      const districts = await TNR_API.getDistricts();
-      const institutions = await TNR_API.getInstitutions();
-      const captures = await TNR_API.getCaptures();
-      const treatments = await TNR_API.getTreatments();
-      const releases = await TNR_API.getReleases();
-      const adoptions = await TNR_API.getAdoptions();
-      const euthanasia = await TNR_API.getEuthanasia();
-      const materialSup = await TNR_API.getMaterialSupervision();
+      // 一次性拉取全部明细数据，汇总一律由前端按时间范围过滤后加总
+      const [districts, institutions, captures, treatments, releases, adoptions,
+             euthanasia, transfers, pets, materialSup] = await Promise.all([
+        TNR_API.getDistricts(),
+        TNR_API.getInstitutions(),
+        TNR_API.getCaptures(),
+        TNR_API.getTreatments(),
+        TNR_API.getReleases(),
+        TNR_API.getAdoptions(),
+        TNR_API.getEuthanasia(),
+        TNR_API.getTransfers(),
+        TNR_API.getPets(),
+        TNR_API.getMaterialSupervision(),
+      ]);
+      this._dash = {
+        districts: districts || [], institutions: institutions || [],
+        captures: captures || [], treatments: treatments || [],
+        releases: releases || [], adoptions: adoptions || [],
+        euthanasia: euthanasia || [], transfers: transfers || [],
+        pets: pets || [],
+        materials: (materialSup && materialSup.materials) || [],
+        txns: (materialSup && materialSup.transactions) || [],
+      };
+      // 默认时间范围：全部
+      if (!this._dashRange) this._dashRange = { start: '', end: '' };
+      this._renderDashBody();
+    } catch (e) {
+      el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⚠️</div><div class="table-empty-text">加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
+    }
+  },
 
-      const totalCaptures = (captures || []).reduce((s, c) => s + (c.pet_count || 0), 0);
-      const totalTreatments = (treatments || []).length;
-      const totalReleases = (releases || []).length;
-      const totalAdoptions = (adoptions || []).length;
-      const totalEuthanasia = (euthanasia || []).length;
-      const inTransit = (stats && stats.pet_status_distribution) ? (stats.pet_status_distribution.in_transit || 0) : 0;
+  _dashInRange(dateStr) {
+    const { start, end } = this._dashRange || {};
+    if (!dateStr) return !start && !end ? true : false;
+    const d = String(dateStr).substring(0, 10);
+    if (start && d < start) return false;
+    if (end && d > end) return false;
+    return true;
+  },
 
-      const instCounts = (stats && stats.institution_counts) || {};
-      const matStats = (stats && stats.material_stats) || {};
+  _dashSum(list, dateKey, countFn) {
+    return (list || []).filter(x => this._dashInRange(x[dateKey] || x.created_at))
+      .reduce((s, x) => s + (countFn ? countFn(x) : 1), 0);
+  },
 
-      // 区县统计
-      const districtStats = (districts || []).map(d => {
-        const dc = (captures || []).filter(c => c.district_id === d.id);
-        const dt = (treatments || []).filter(t => t.district_id === d.id);
-        const dr = (releases || []).filter(r => r.district_id === d.id);
-        const da = (adoptions || []).filter(a => a.district_id === d.id);
-        const de = (euthanasia || []).filter(e => e.district_id === d.id);
-        return {
-          d,
-          captures: dc.reduce((s, c) => s + (c.pet_count || 0), 0),
-          treatments: dt.length, releases: dr.length,
-          adoptions: da.length, euthanasia: de.length
-        };
-      });
+  _renderDashBody() {
+    const el = document.getElementById('page-dashboard');
+    const D = this._dash;
+    const { start, end } = this._dashRange || {};
+    const rangeText = (start || end)
+      ? `${start || '开始'} ~ ${end || '今天'}`
+      : '全部时间';
 
-      // 物料消耗柱状图
-      const materials = (materialSup && materialSup.materials) || [];
-      const txns = (materialSup && materialSup.transactions) || [];
-      const matChart = materials.map(m => {
-        const consumed = txns.filter(t => t.material_id === m.id && t.type === 'consume').reduce((s, t) => s + t.quantity, 0);
-        return { label: m.name, value: consumed };
-      });
-      const matMax = Math.max(...matChart.map(m => m.value), 1);
+    // ---- 汇总：全部由明细数据按时间范围加总 ----
+    const sumCapturePets = this._dashSum(D.captures, 'created_at', c => c.pet_count || 0);
+    const sumCaptureOrders = (D.captures || []).filter(c => this._dashInRange(c.created_at)).length;
+    const sumTreatments = this._dashSum(D.treatments, 'created_at');
+    const sumReleases = this._dashSum(D.releases, 'created_at');
+    const sumAdoptions = this._dashSum(D.adoptions, 'created_at');
+    const sumEuthanasia = this._dashSum(D.euthanasia, 'euthanized_at') ||
+                          this._dashSum(D.euthanasia, 'created_at');
+    const inRangeTxns = (D.txns || []).filter(t => this._dashInRange(t.date || t.created_at));
+    const sumPurchase = inRangeTxns.filter(t => t.type === 'purchase').reduce((s, t) => s + (t.quantity || 0), 0);
+    const sumDispatch = inRangeTxns.filter(t => t.type === 'dispatch').reduce((s, t) => s + (t.quantity || 0), 0);
+    const sumConsume = inRangeTxns.filter(t => t.type === 'consume').reduce((s, t) => s + (t.quantity || 0), 0);
+    // 当前值（不受时间过滤，卡片上标注「当前」）
+    const curInstitutions = (D.institutions || []).filter(i => i.status !== 'inactive').length;
+    const curInTransit = (D.pets || []).filter(p => p.status === 'in_transit').length;
+    const curPets = (D.pets || []).length;
 
-      // 最近活动
-      const activities = [];
-      (captures || []).forEach(c => activities.push({ time: c.created_at, title: '捕捉登记', desc: (c.community_name || '') + ' · ' + (c.pet_count || 0) + '只', type: 'capture' }));
-      const transfers = await TNR_API.getTransfers();
-      (transfers || []).forEach(t => activities.push({ time: t.created_at, title: '转运交接', desc: (t.from_shelter_name || '') + ' → ' + (t.to_hospital_name || ''), type: 'transfer' }));
-      (treatments || []).forEach(t => activities.push({ time: t.created_at, title: '诊疗记录', desc: (t.pet_code || '') + ' · ' + (t.hospital_name || ''), type: 'treatment' }));
-      (releases || []).forEach(r => activities.push({ time: r.created_at, title: '放养登记', desc: (r.pet_code || '') + ' → ' + (r.community_name || ''), type: 'release' }));
-      (adoptions || []).forEach(a => activities.push({ time: a.created_at, title: '领养登记', desc: (a.pet_code || '') + ' · ' + (a.adopter_name || ''), type: 'adoption' }));
-      (euthanasia || []).forEach(e => activities.push({ time: e.created_at, title: '安乐死处置', desc: (e.pet_code || '') + ' · ' + (e.hospital_name || ''), type: 'euthanasia' }));
-      activities.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
-      const recentActivities = activities.slice(0, 8);
-      const activityIcons = { capture: '🐾', transfer: '🚐', treatment: '🏥', release: '🌱', adoption: '🏠', euthanasia: '⚖️' };
+    // ---- 区县统计（按时间范围加总） ----
+    const districtStats = (D.districts || []).map(d => {
+      const dc = (D.captures || []).filter(c => c.district_id === d.id && this._dashInRange(c.created_at));
+      const dt = (D.treatments || []).filter(t => t.district_id === d.id && this._dashInRange(t.created_at));
+      const dr = (D.releases || []).filter(r => r.district_id === d.id && this._dashInRange(r.created_at));
+      const da = (D.adoptions || []).filter(a => a.district_id === d.id && this._dashInRange(a.created_at));
+      const de = (D.euthanasia || []).filter(e => e.district_id === d.id && (this._dashInRange(e.euthanized_at) || this._dashInRange(e.created_at)));
+      return {
+        d,
+        captures: dc.reduce((s, c) => s + (c.pet_count || 0), 0),
+        treatments: dt.length, releases: dr.length,
+        adoptions: da.length, euthanasia: de.length
+      };
+    }).filter(ds => ds.d.is_city ? true : true);
 
-      el.innerHTML = `
-        <div class="stat-grid">
-          <div class="stat-card">
-            <div class="stat-card-icon">🐾</div>
-            <div><div class="stat-card-value">${totalCaptures}</div><div class="stat-card-label">累计捕捉（只）</div></div>
-          </div>
-          <div class="stat-card blue">
-            <div class="stat-card-icon">🏥</div>
-            <div><div class="stat-card-value">${totalTreatments}</div><div class="stat-card-label">诊疗总量</div></div>
-          </div>
-          <div class="stat-card green">
-            <div class="stat-card-icon">🌱</div>
-            <div><div class="stat-card-value">${totalReleases}</div><div class="stat-card-label">放养总量</div></div>
-          </div>
-          <div class="stat-card gold">
-            <div class="stat-card-icon">🏠</div>
-            <div><div class="stat-card-value">${totalAdoptions}</div><div class="stat-card-label">领养总量</div></div>
-          </div>
-          <div class="stat-card rouge">
-            <div class="stat-card-icon">⚖️</div>
-            <div><div class="stat-card-value">${totalEuthanasia}</div><div class="stat-card-label">安乐死数量</div></div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-card-icon">🏢</div>
-            <div><div class="stat-card-value">${instCounts.total || (institutions || []).length}</div><div class="stat-card-label">机构总数</div></div>
+    // ---- 物料消耗柱状图（按时间范围加总） ----
+    const matChart = (D.materials || []).map(m => {
+      const consumed = inRangeTxns.filter(t => t.material_id === m.id && t.type === 'consume')
+        .reduce((s, t) => s + (t.quantity || 0), 0);
+      return { label: m.name, value: consumed };
+    });
+    const matMax = Math.max(...matChart.map(m => m.value), 1);
+
+    // ---- 最近动态（按时间范围过滤） ----
+    const activities = [];
+    (D.captures || []).forEach(c => { if (this._dashInRange(c.created_at)) activities.push({ time: c.created_at, title: '捕捉登记', desc: (c.community_name || '') + ' · ' + (c.pet_count || 0) + '只', type: 'capture' }); });
+    (D.transfers || []).forEach(t => { if (this._dashInRange(t.created_at)) activities.push({ time: t.created_at, title: '转运交接', desc: (t.from_shelter_name || '') + ' → ' + (t.to_hospital_name || ''), type: 'transfer' }); });
+    (D.treatments || []).forEach(t => { if (this._dashInRange(t.created_at)) activities.push({ time: t.created_at, title: '诊疗记录', desc: (t.pet_code || '') + ' · ' + (t.hospital_name || ''), type: 'treatment' }); });
+    (D.releases || []).forEach(r => { if (this._dashInRange(r.created_at)) activities.push({ time: r.created_at, title: '放养登记', desc: (r.pet_code || '') + ' → ' + (r.community_name || ''), type: 'release' }); });
+    (D.adoptions || []).forEach(a => { if (this._dashInRange(a.created_at)) activities.push({ time: a.created_at, title: '领养登记', desc: (a.pet_code || '') + ' · ' + (a.adopter_name || ''), type: 'adoption' }); });
+    (D.euthanasia || []).forEach(e => { if (this._dashInRange(e.euthanized_at) || this._dashInRange(e.created_at)) activities.push({ time: e.euthanized_at || e.created_at, title: '安乐死处置', desc: (e.pet_code || '') + ' · ' + (e.hospital_name || ''), type: 'euthanasia' }); });
+    activities.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+    const recentActivities = activities.slice(0, 8);
+    const activityIcons = { capture: '🐾', transfer: '🚐', treatment: '🏥', release: '🌱', adoption: '🏠', euthanasia: '⚖️' };
+    const inRangeActive = (start || end) ? recentActivities.length > 0 : recentActivities.length > 0;
+
+    el.innerHTML = `
+      <div class="std-page-head">
+        <div>
+          <div class="std-page-title">数据总览大屏</div>
+          <div class="std-page-desc">统计口径：${rangeText} · 全部汇总数据由业务明细实时加总</div>
+        </div>
+        <div class="filter-bar" style="align-items:center;">
+          <div class="filter-item"><div class="filter-item-label">开始日期</div>
+            <input type="date" class="form-input" id="dashStart" value="${start || ''}"></div>
+          <div class="filter-item"><div class="filter-item-label">结束日期</div>
+            <input type="date" class="form-input" id="dashEnd" value="${end || ''}"></div>
+          <div class="filter-actions">
+            <button type="button" class="btn btn-primary btn-sm" id="dashBtnSearch">🔍 统计</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="dashBtnWeek">最近一周</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="dashBtnMonth">最近一月</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="dashBtnAll">全部</button>
           </div>
         </div>
+      </div>
 
-        <div class="dashboard-grid">
-          <div class="card">
-            <div class="card-header">
-              <div class="card-title"><span class="card-title-bar"></span>区县业务统计</div>
-            </div>
-            <div class="card-body card-body-flush">
-              <div class="table-wrapper" style="border:none;">
-                <table class="data-table district-compare-table">
-                  <thead><tr>
-                    <th style="text-align:left;">区县</th>
-                    <th>捕捉</th><th>诊疗</th><th>放养</th><th>领养</th><th>安乐死</th>
-                  </tr></thead>
-                  <tbody>
-                    ${districtStats.length ? districtStats.map(ds => `
-                      <tr>
-                        <td style="text-align:left;font-weight:600;">${TNR_UI.escape(ds.d.name)}</td>
-                        <td>${ds.captures}</td><td>${ds.treatments}</td><td>${ds.releases}</td>
-                        <td>${ds.adoptions}</td><td>${ds.euthanasia}</td>
-                      </tr>
-                    `).join('') : '<tr><td colspan="6" class="table-empty">暂无数据</td></tr>'}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-card-icon">🐾</div>
+          <div><div class="stat-card-value">${sumCapturePets}</div><div class="stat-card-label">捕捉动物（只 / ${sumCaptureOrders} 单）</div></div>
+        </div>
+        <div class="stat-card blue">
+          <div class="stat-card-icon">🏥</div>
+          <div><div class="stat-card-value">${sumTreatments}</div><div class="stat-card-label">诊疗（单）</div></div>
+        </div>
+        <div class="stat-card green">
+          <div class="stat-card-icon">🌱</div>
+          <div><div class="stat-card-value">${sumReleases}</div><div class="stat-card-label">放养（单）</div></div>
+        </div>
+        <div class="stat-card gold">
+          <div class="stat-card-icon">🏠</div>
+          <div><div class="stat-card-value">${sumAdoptions}</div><div class="stat-card-label">领养（单）</div></div>
+        </div>
+        <div class="stat-card rouge">
+          <div class="stat-card-icon">⚖️</div>
+          <div><div class="stat-card-value">${sumEuthanasia}</div><div class="stat-card-label">安乐死（单）</div></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-icon">📮</div>
+          <div><div class="stat-card-value">${curInTransit}</div><div class="stat-card-label">在途动物（当前）</div></div>
+        </div>
+        <div class="stat-card blue">
+          <div class="stat-card-icon">🐕</div>
+          <div><div class="stat-card-value">${curPets}</div><div class="stat-card-label">宠物档案（当前）</div></div>
+        </div>
+        <div class="stat-card gold">
+          <div class="stat-card-icon">🏢</div>
+          <div><div class="stat-card-value">${curInstitutions}</div><div class="stat-card-label">在营机构（当前）</div></div>
+        </div>
+      </div>
+
+      <div class="dashboard-grid">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title"><span class="card-title-bar"></span>区县业务统计（${rangeText}）</div>
           </div>
-
-          <div class="card">
-            <div class="card-header">
-              <div class="card-title"><span class="card-title-bar"></span>物料消耗统计</div>
-            </div>
-            <div class="card-body">
-              <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:var(--sp-5);">
-                <div><div class="fs-2xl font-bold font-display" style="color:var(--ink);">${matStats.total_purchased || 0}</div><div class="fs-sm text-muted">采购总量</div></div>
-                <div><div class="fs-2xl font-bold font-display" style="color:var(--azurite);">${matStats.total_dispatched || 0}</div><div class="fs-sm text-muted">下发总量</div></div>
-                <div><div class="fs-2xl font-bold font-display" style="color:var(--cinnabar);">${matStats.total_consumed || 0}</div><div class="fs-sm text-muted">消耗总量</div></div>
-              </div>
-              ${matChart.length ? matChart.map(m => `
-                <div class="chart-bar-container">
-                  <div class="chart-bar-label">${TNR_UI.escape(m.label)}</div>
-                  <div class="chart-bar-track">
-                    <div class="chart-bar-fill" style="width:${(m.value / matMax * 100).toFixed(1)}%">${m.value}</div>
-                  </div>
-                </div>
-              `).join('') : '<div class="table-empty">暂无物料数据</div>'}
+          <div class="card-body card-body-flush">
+            <div class="table-wrapper" style="border:none;">
+              <table class="data-table district-compare-table">
+                <thead><tr>
+                  <th style="text-align:left;">区县</th>
+                  <th>捕捉(只)</th><th>诊疗</th><th>放养</th><th>领养</th><th>安乐死</th>
+                </tr></thead>
+                <tbody>
+                  ${districtStats.length ? districtStats.map(ds => `
+                    <tr>
+                      <td style="text-align:left;font-weight:600;">${TNR_UI.escape(ds.d.name)}${ds.d.is_city ? '<span class=\"badge badge-default\" style=\"margin-left:6px;\">市级</span>' : ''}</td>
+                      <td>${ds.captures}</td><td>${ds.treatments}</td><td>${ds.releases}</td>
+                      <td>${ds.adoptions}</td><td>${ds.euthanasia}</td>
+                    </tr>
+                  `).join('') : '<tr><td colspan="6" class="table-empty">暂无数据</td></tr>'}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
 
         <div class="card">
           <div class="card-header">
-            <div class="card-title"><span class="card-title-bar"></span>最近业务动态</div>
+            <div class="card-title"><span class="card-title-bar"></span>物料流转统计（${rangeText}）</div>
           </div>
           <div class="card-body">
-            <div class="timeline">
-              ${recentActivities.length ? recentActivities.map(a => `
-                <div class="timeline-item">
-                  <div class="timeline-time">${TNR_UI.formatDateTime(a.time)}</div>
-                  <div class="timeline-title">${activityIcons[a.type] || '📋'} ${TNR_UI.escape(a.title)}</div>
-                  <div class="timeline-desc">${TNR_UI.escape(a.desc)}</div>
-                </div>
-              `).join('') : '<div class="table-empty">暂无动态</div>'}
+            <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:var(--sp-5);">
+              <div><div class="fs-2xl font-bold font-display" style="color:var(--ink);">${sumPurchase}</div><div class="fs-sm text-muted">采购入库（份）</div></div>
+              <div><div class="fs-2xl font-bold font-display" style="color:var(--azurite);">${sumDispatch}</div><div class="fs-sm text-muted">下发医院（份）</div></div>
+              <div><div class="fs-2xl font-bold font-display" style="color:var(--cinnabar);">${sumConsume}</div><div class="fs-sm text-muted">诊疗消耗（份）</div></div>
             </div>
+            ${matChart.length ? matChart.map(m => `
+              <div class="chart-bar-container">
+                <div class="chart-bar-label">${TNR_UI.escape(m.label)}</div>
+                <div class="chart-bar-track">
+                  <div class="chart-bar-fill" style="width:${(m.value / matMax * 100).toFixed(1)}%">${m.value}</div>
+                </div>
+              </div>
+            `).join('') : '<div class="table-empty">暂无物料数据</div>'}
           </div>
         </div>
-      `;
-    } catch (e) {
-      el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⚠️</div><div class="table-empty-text">加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
-    }
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><span class="card-title-bar"></span>业务动态（${rangeText}${recentActivities.length ? ' · 最近 ' + recentActivities.length + ' 条' : ''}）</div>
+        </div>
+        <div class="card-body">
+          <div class="timeline">
+            ${recentActivities.length ? recentActivities.map(a => `
+              <div class="timeline-item">
+                <div class="timeline-time">${TNR_UI.formatDateTime(a.time)}</div>
+                <div class="timeline-title">${activityIcons[a.type] || '📋'} ${TNR_UI.escape(a.title)}</div>
+                <div class="timeline-desc">${TNR_UI.escape(a.desc)}</div>
+              </div>
+            `).join('') : '<div class="table-empty">该时间范围内暂无业务动态</div>'}
+          </div>
+        </div>
+      </div>
+    `;
+
+    // ---- 时间筛选交互 ----
+    const applyRange = (s, e) => {
+      this._dashRange = { start: s, end: e };
+      document.getElementById('dashStart').value = s;
+      document.getElementById('dashEnd').value = e;
+      this._renderDashBody();
+    };
+    const doSearch = () => {
+      this._dashRange = {
+        start: document.getElementById('dashStart').value || '',
+        end: document.getElementById('dashEnd').value || '',
+      };
+      this._renderDashBody();
+    };
+    document.getElementById('dashBtnSearch').addEventListener('click', doSearch);
+    ['dashStart', 'dashEnd'].forEach(id => {
+      document.getElementById(id).addEventListener('change', doSearch);
+      document.getElementById(id).addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doSearch();
+      });
+    });
+    document.getElementById('dashBtnWeek').addEventListener('click', () => {
+      const fmt = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      const end = new Date();
+      const startD = new Date(end.getTime() - 6 * 86400000);
+      applyRange(fmt(startD), fmt(end));
+    });
+    document.getElementById('dashBtnMonth').addEventListener('click', () => {
+      const fmt = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      const end = new Date();
+      const startD = new Date(end.getTime() - 29 * 86400000);
+      applyRange(fmt(startD), fmt(end));
+    });
+    document.getElementById('dashBtnAll').addEventListener('click', () => applyRange('', ''));
   },
 
   /* ========== 2. 机构基础管理 ========== */
