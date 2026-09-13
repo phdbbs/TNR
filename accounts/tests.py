@@ -51,6 +51,21 @@ class LoginViewTest(ApiMixin, TestCase):
         resp = self.client.post('/login/', {'username': 'ghost', 'password': 'x'})
         self.assertEqual(resp.status_code, 200)
 
+    def test_login_inactive_account_clear_message(self):
+        """停用账号登录给出明确提示，而非误导性的密码错误"""
+        self.gov_city.is_active = False
+        self.gov_city.status = 'inactive'
+        self.gov_city.save()
+        resp = self.client.post('/login/', {
+            'username': self.gov_city.username, 'password': '123456',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('该账号已被停用', resp.content.decode())
+        # 恢复
+        self.gov_city.is_active = True
+        self.gov_city.status = 'active'
+        self.gov_city.save()
+
     def test_login_missing_fields_stays(self):
         resp = self.client.post('/login/', {})
         self.assertEqual(resp.status_code, 200)

@@ -282,6 +282,53 @@ class UserApiTest(SupervisionBase):
                                         self._create_payload(institution_id=self.hospital_a.id)),
                          message='所选机构不是捕捉点类型')
 
+    def test_toggle_self_rejected(self):
+        """管理员不能停用自己（防止自锁）"""
+        self.client.force_login(self.gov_a)
+        self.expect_fail(self.post_json(f'{API}/users/{self.gov_a.id}/toggle/'),
+                         message='不能停用当前登录账号自己')
+        self.gov_a.refresh_from_db()
+        self.assertTrue(self.gov_a.is_active)
+
+    def test_toggle_superuser_rejected(self):
+        target = make_user(role='shelter', district=self.district_a, is_superuser=True)
+        self.client.force_login(self.gov_a)
+        self.expect_fail(self.post_json(f'{API}/users/{target.id}/toggle/'),
+                         message='超级管理员账号不可停用')
+
+    def test_district_admin_cannot_deactivate_last_city_admin(self):
+        """至少保留一个启用中的市级管理员（防止锁死系统）"""
+        city_admin2 = make_user(role='gov_city', district=self.city)
+        self.client.force_login(self.gov_a)
+        # 两个市级管理员时可停用其一
+        self.ok(self.post_json(f'{API}/users/{self.gov_city.id}/toggle/'))
+        self.gov_city.refresh_from_db()
+        self.assertFalse(self.gov_city.is_active)
+        # 再停用最后一个市级管理员应被拒绝
+        self.expect_fail(self.post_json(f'{API}/users/{city_admin2.id}/toggle/'),
+                         message='至少需保留一个启用中的市级管理员')
+        city_admin2.refresh_from_db()
+        self.assertTrue(city_admin2.is_active)
+
+    def test_district_rename_propagates(self):
+        """区县改名后所有引用处联动展示新名称（外键实时读取，无名称快照）"""
+        new_name = '联动新区'
+        self.client.force_login(self.gov_city)
+        self.ok(self.post_json(f'{API}/districts/{self.district_a.id}/edit/',
+                               {'name': new_name}))
+        # 用户列表中的区县名
+        data = self.ok(self.client.get(f'{API}/users/?role=gov_district'))['data']
+        target = next(u for u in data if u['id'] == self.gov_a.id)
+        self.assertEqual(target['district_name'], new_name)
+        # 机构列表中的区县名
+        insts = self.ok(self.client.get(f'{API}/institutions/'))['data']
+        inst = next(i for i in insts if i['id'] == self.shelter_a.id)
+        self.assertEqual(inst['district_name'], new_name)
+        # 区县列表本身
+        dists = self.ok(self.client.get(f'{API}/districts/'))['data']
+        self.assertEqual(next(d['name'] for d in dists if d['id'] == self.district_a.id),
+                         new_name)
+
     def test_toggle_status(self):
         target = make_user(role='shelter', district=self.district_a)
         self.client.force_login(self.gov_a)

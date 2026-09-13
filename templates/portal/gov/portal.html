@@ -664,9 +664,10 @@ const GovPortal = {
       { key: 'phone', title: '电话', render: r => TNR_UI.escape(r.phone || '—') },
       { key: 'status', title: '状态', render: r => { const s = this.getStatusBadge(r.status); return `<span class="badge ${s.badge}">${s.text}</span>`; } }
     ];
-    const rowActions = r => `
-      <button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>
-    `;
+    const selfId = window.TNR_USER && window.TNR_USER.id;
+    const rowActions = r => r.id === selfId
+      ? '<span style="font-size:var(--fs-xs);color:var(--ink-light);">当前账号</span>'
+      : `<button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>`;
     document.getElementById('acctTableWrapper').innerHTML = TNR_UI.renderTable({ columns, data, rowActions, emptyText: '暂无账号' });
     document.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => this.toggleAccountStatus(b.dataset.toggle)));
   },

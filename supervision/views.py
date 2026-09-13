@@ -528,11 +528,24 @@ def user_create(request):
 @role_required('gov_city', 'gov_district')
 @login_required
 def user_toggle_status(request, pk):
-    """切换用户启用/停用状态"""
+    """切换用户启用/停用状态（带自锁保护）"""
     try:
         user = User.objects.get(id=pk)
     except User.DoesNotExist:
         return json_fail('用户不存在', status=404)
+
+    # 停用方向的保护：防止管理员把自己或最后一个市级管理员锁在系统外
+    if user.is_active:
+        if request.user.id == user.id:
+            return json_fail('不能停用当前登录账号自己')
+        if user.is_superuser:
+            return json_fail('超级管理员账号不可停用')
+        if user.role == 'gov_city':
+            has_other = User.objects.filter(
+                role='gov_city', is_active=True,
+            ).exclude(id=user.id).exists()
+            if not has_other:
+                return json_fail('系统至少需保留一个启用中的市级管理员账号')
 
     user.is_active = not user.is_active
     user.status = 'active' if user.is_active else 'inactive'

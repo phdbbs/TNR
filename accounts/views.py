@@ -4,6 +4,8 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
 
+from accounts.models import User
+
 
 def _redirect_by_role(user):
     """根据用户角色重定向到对应门户。"""
@@ -28,7 +30,12 @@ def login_view(request):
         if user is not None:
             login(request, user)
             return _redirect_by_role(user)
-        messages.error(request, '用户名或密码错误')
+        # 区分提示：账号存在但已停用时，明确告知原因而不是误导性的密码错误
+        username_qs = User.objects.filter(username=username)
+        if username_qs.exists() and not username_qs.filter(is_active=True).exists():
+            messages.error(request, '该账号已被停用，请联系管理员恢复')
+        else:
+            messages.error(request, '用户名或密码错误')
 
     return render(request, 'login.html')
 
