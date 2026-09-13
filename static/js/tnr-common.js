@@ -86,7 +86,7 @@ const TNR_UI = {
   drawer({ title, body }) {
     const overlay = document.createElement('div');
     overlay.className = 'drawer-overlay show';
-    overlay.style.zIndex = '1500';
+    // z-index 使用 CSS 默认(1000)，保证抽屉本体(1001)在遮罩之上，避免内容被遮罩模糊
     const drawerEl = document.createElement('div');
     drawerEl.className = 'drawer show';
     drawerEl.innerHTML = `

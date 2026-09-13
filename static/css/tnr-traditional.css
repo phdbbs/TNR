@@ -885,7 +885,6 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
   position: fixed;
   inset: 0;
   background: rgba(28,28,28,0.5);
-  backdrop-filter: blur(4px);
   z-index: 1000;
   align-items: center;
   justify-content: center;
@@ -973,7 +972,6 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
   position: fixed;
   inset: 0;
   background: rgba(28,28,28,0.4);
-  backdrop-filter: blur(2px);
   z-index: 1000;
 }
 

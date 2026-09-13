@@ -55,8 +55,7 @@
   <div class="page-view" id="page-institutions"></div>
   <!-- 3. 账号权限管理 -->
   <div class="page-view" id="page-accounts"></div>
-  <!-- 4. 全业务监管 -->
-  <div class="page-view" id="page-supervision"></div>
+
   <!-- 5. 物料全局监管 -->
   <div class="page-view" id="page-material"></div>
   <!-- 6. 全局台账中心 -->
@@ -85,8 +84,7 @@ const GovPortal = {
     'dashboard': '数据总览大屏',
     'institutions': '机构基础管理',
     'accounts': '账号权限管理',
-    'supervision': '全业务监管',
-    'material': '物料全局监管',
+        'material': '物料全局监管',
     'ledger': '全局台账中心',
     'settings': '系统配置'
   },
@@ -1564,7 +1562,7 @@ const GovPortal = {
     // 通用：添加详情操作列
     columns.push({ key: '_action', title: '操作', width: '90px', render: r => `<button class="btn btn-secondary btn-sm" data-ledger-detail="${r.id}">详情</button>` });
 
-    TNR_UI.mountTable('ledgerTableWrapper', { id: 'gov.ledger.' + (this.state.ledgerTab || 'all'), title: '台账中心', columns, data: records, emptyText: '暂无台账数据' });
+    TNR_UI.mountTable('ledgerTableWrapper', { id: 'gov.ledger.' + tab, title: (typeLabelMap[tab] || '') + '台账', columns, data: records, emptyText: '暂无台账数据' });
 
     document.querySelectorAll('[data-ledger-detail]').forEach(b => {
       b.addEventListener('click', () => this.showLedgerDetail(records, b.dataset.ledgerDetail));
