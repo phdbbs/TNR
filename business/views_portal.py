@@ -4,6 +4,7 @@
 import json
 
 from django.contrib.auth.decorators import login_required
+from django.utils import timezone
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 
@@ -21,8 +22,8 @@ from business.services import (
 # ============================================
 # 捕捉点门户页面
 # ============================================
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def shelter_portal(request):
     """捕捉点端门户页面。"""
     user = request.user
@@ -46,8 +47,8 @@ def shelter_portal(request):
 # ============================================
 # 医院门户页面
 # ============================================
-@login_required
 @role_required('hospital', 'gov_city', 'gov_district')
+@login_required
 def hospital_portal(request):
     """宠物医院端门户页面。"""
     user = request.user
@@ -71,8 +72,8 @@ def hospital_portal(request):
 # ============================================
 # 政府监管门户页面
 # ============================================
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def gov_portal(request):
     """政府监管端门户页面。"""
     user = request.user
@@ -97,8 +98,8 @@ def gov_portal(request):
 # 门户专用辅助 API - 医院
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('hospital', 'shelter', 'gov_city', 'gov_district')
+@login_required
 def hospital_pets(request):
     """医院在院宠物列表（可按 status 过滤）。
 
@@ -124,8 +125,8 @@ def hospital_pets(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'adopter', 'gov_city', 'gov_district')
+@login_required
 def hospital_hall_listings(request):
     """医院领养大厅上架信息列表（含已下架）。
 
@@ -156,8 +157,8 @@ def hospital_hall_listings(request):
 # ============================================
 # 领养人门户页面
 # ============================================
-@login_required
 @role_required('adopter', 'gov_city', 'gov_district')
+@login_required
 def adopter_portal(request):
     """领养人端门户页面（登录后全功能）。"""
     user = request.user
@@ -209,8 +210,8 @@ def adoption_hall_public(request):
 # 门户专用辅助 API - 领养人
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('adopter', 'gov_city', 'gov_district')
+@login_required
 def my_adoptions(request):
     """领养人 - 我的领养记录列表。"""
     qs = Adoption.objects.filter(adopter=request.user).order_by('-id')
@@ -224,8 +225,8 @@ def my_adoptions(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('adopter', 'gov_city', 'gov_district')
+@login_required
 def my_messages(request):
     """领养人 - 我的消息列表。"""
     qs = Message.objects.filter(user=request.user).order_by('-id')
@@ -234,8 +235,8 @@ def my_messages(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('adopter', 'gov_city', 'gov_district')
+@login_required
 def mark_message_read(request, pk):
     """领养人 - 标记消息已读。"""
     if request.method != 'POST':
@@ -254,8 +255,8 @@ def mark_message_read(request, pk):
 # 宠物全生命周期溯源（领养人端）
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('adopter', 'gov_city', 'gov_district', 'shelter', 'hospital')
+@login_required
 def pet_lifecycle(request, pet_id):
     """返回指定宠物的全生命周期溯源记录。
 
@@ -274,7 +275,7 @@ def pet_lifecycle(request, pet_id):
         events.append({
             'type': 'capture',
             'type_display': '捕捉登记',
-            'date': cap.created_at.isoformat() if cap.created_at else '',
+            'date': timezone.localdate(cap.created_at).isoformat() if cap.created_at else '',
             'ledger_no': cap.ledger_no,
             'shelter_name': cap.shelter_name,
             'community_name': cap.community_name,
@@ -288,7 +289,7 @@ def pet_lifecycle(request, pet_id):
         events.append({
             'type': 'transfer',
             'type_display': '转运交接',
-            'date': t.created_at.isoformat() if t.created_at else '',
+            'date': timezone.localdate(t.created_at).isoformat() if t.created_at else '',
             'ledger_no': t.ledger_no,
             'from_shelter_name': t.from_shelter_name,
             'to_hospital_name': t.to_hospital_name,
@@ -308,7 +309,7 @@ def pet_lifecycle(request, pet_id):
         events.append({
             'type': 'treatment',
             'type_display': '诊疗记录',
-            'date': t.created_at.isoformat() if t.created_at else '',
+            'date': timezone.localdate(t.created_at).isoformat() if t.created_at else '',
             'ledger_no': t.ledger_no,
             'hospital_name': t.hospital_name,
             'items': items,

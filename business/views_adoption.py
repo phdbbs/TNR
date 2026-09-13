@@ -53,8 +53,8 @@ def adoption_hall_detail(request, pk):
 # 领养信息编辑（医院）
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('hospital', 'gov_city', 'gov_district')
+@login_required
 def adoption_info_edit(request, pk):
     """编辑领养上架信息
 
@@ -68,6 +68,10 @@ def adoption_info_edit(request, pk):
     }
     """
     data = parse_json_body(request)
+
+    if not data and request.POST:
+        # 兼容 multipart/form-data 提交（照片上传）
+        data = request.POST.dict()
 
     try:
         pet = Pet.objects.get(id=pk)
@@ -117,8 +121,8 @@ def adoption_info_edit(request, pk):
 # 线下领养登记（捕捉点）
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def adoption_register(request):
     """线下领养登记（创建领养人账号 + 领养记录）
 
@@ -228,8 +232,8 @@ def adoption_register(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital')
+@login_required
 def adoption_confirm_claim(request, pk):
     """医院确认领出动物
 
@@ -280,8 +284,8 @@ def adoption_confirm_claim(request, pk):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
 def adoption_list(request):
     """领养记录列表"""
     qs = get_district_filtered_queryset(Adoption, request.user)
@@ -302,8 +306,8 @@ def adoption_list(request):
 # 在线领养申请（领养人提交 / 机构审核）
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('adopter', 'gov_city', 'gov_district')
+@login_required
 def adoption_apply(request):
     """领养人在线提交领养申请。
 
@@ -371,8 +375,8 @@ def adoption_apply(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('adopter', 'gov_city', 'gov_district')
+@login_required
 def my_applications(request):
     """领养人 - 我的领养申请列表。"""
     qs = AdoptionApplication.objects.filter(applicant=request.user).order_by('-id')
@@ -386,8 +390,8 @@ def my_applications(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'shelter', 'gov_city', 'gov_district')
+@login_required
 def adoption_application_list(request):
     """机构 - 领养申请列表（可按状态筛选）。"""
     user = request.user
@@ -418,8 +422,8 @@ def adoption_application_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'shelter', 'gov_city', 'gov_district')
+@login_required
 def adoption_application_review(request, pk):
     """机构审核领养申请（通过 / 拒绝）。
 

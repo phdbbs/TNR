@@ -17,8 +17,8 @@ from core.models import Institution
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def capture_list(request):
     """捕捉登记列表（按区县过滤）"""
     qs = get_district_filtered_queryset(Capture, request.user)
@@ -37,8 +37,8 @@ def capture_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def pet_codes_preview(request):
     """预览即将生成的宠物编号（与提交后实际生成规则一致）。"""
     try:
@@ -51,11 +51,14 @@ def pet_codes_preview(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def capture_create(request):
     """创建捕捉登记（批量生成宠物档案）"""
     data = parse_json_body(request)
+    if not data and request.POST:
+        # 兼容 multipart/form-data 提交（合照上传）
+        data = request.POST.dict()
 
     district_id = data.get('district_id') or getattr(request.user, 'district_id', None)
     if not district_id:
@@ -124,8 +127,8 @@ def capture_create(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def owner_return_list(request):
     """主人领回记录列表"""
     qs = get_district_filtered_queryset(OwnerReturn, request.user)
@@ -139,8 +142,8 @@ def owner_return_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def owner_return_create(request, pk=None):
     """主人领回登记
 
@@ -206,8 +209,8 @@ def owner_return_create(request, pk=None):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district', 'hospital')
+@login_required
 def capture_detail(request, pk):
     """捕捉登记详情（含关联宠物列表）"""
     try:

@@ -20,8 +20,8 @@ from business.services import (
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'shelter', 'gov_city', 'gov_district')
+@login_required
 def treatment_list(request):
     """诊疗列表"""
     user = request.user
@@ -44,8 +44,8 @@ def treatment_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'gov_city', 'gov_district')
+@login_required
 def treatment_create(request):
     """创建诊疗记录
 
@@ -219,8 +219,8 @@ def treatment_create(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'gov_city', 'gov_district')
+@login_required
 def treatment_detail(request, pk):
     """诊疗详情"""
     try:

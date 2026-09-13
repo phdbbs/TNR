@@ -18,8 +18,8 @@ from business.services import (
 # 回访打卡
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('adopter', 'shelter', 'gov_city', 'gov_district')
+@login_required
 def checkin_list(request):
     """回访打卡列表（领养人看自己，捕捉点看全区）"""
     user = request.user
@@ -38,8 +38,8 @@ def checkin_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('adopter')
+@login_required
 def checkin_create(request):
     """领养人提交月度回访打卡
 
@@ -100,8 +100,8 @@ def checkin_create(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def checkin_review(request, pk):
     """审核回访打卡
 
@@ -136,8 +136,8 @@ def checkin_review(request, pk):
 # 黑名单
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def blacklist_list(request):
     """黑名单列表"""
     qs = get_district_filtered_queryset(Blacklist, request.user)
@@ -151,8 +151,8 @@ def blacklist_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def blacklist_create(request):
     """添加黑名单
 
@@ -205,8 +205,8 @@ def blacklist_create(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'hospital', 'adopter', 'gov_city', 'gov_district')
+@login_required
 def blacklist_check(request):
     """检查身份证/电话是否在黑名单中（前端拦截用）
 

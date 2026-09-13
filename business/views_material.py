@@ -21,8 +21,8 @@ from core.models import Institution
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
 def material_list(request):
     """物料列表（含医院库存计算）"""
     user = request.user
@@ -55,8 +55,8 @@ def material_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def purchase_create(request):
     """采购入库
 
@@ -158,8 +158,8 @@ def purchase_create(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def dispatch_create(request):
     """下发至医院
 
@@ -235,8 +235,8 @@ def dispatch_create(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital')
+@login_required
 def material_receive(request, pk):
     """医院确认签收下发物料
 
@@ -288,8 +288,8 @@ def material_receive(request, pk):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'gov_city', 'gov_district')
+@login_required
 def stock_adjustment(request):
     """库存异动（过期/损坏/丢失）
 
@@ -343,8 +343,8 @@ def stock_adjustment(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
 def material_transactions(request):
     """物资流水列表（台账）"""
     user = request.user
@@ -369,8 +369,8 @@ def material_transactions(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def shelter_stock_ledger(request):
     """捕捉点台账（采购+下发+异动）"""
     user = request.user
@@ -391,8 +391,8 @@ def shelter_stock_ledger(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'gov_city', 'gov_district')
+@login_required
 def hospital_stock_ledger(request):
     """医院台账（下发+消耗+异动）"""
     user = request.user

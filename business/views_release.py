@@ -17,8 +17,8 @@ from core.models import Institution
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
 def release_list(request):
     """放养列表（待放养/已放养）"""
     qs = get_district_filtered_queryset(Release, request.user)
@@ -32,8 +32,8 @@ def release_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
 def release_create(request):
     """创建放养记录（从医院回收，匹配原小区）
 
@@ -95,8 +95,8 @@ def release_create(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def release_confirm(request, pk):
     """小区确认放养（接收人签字确认）
 

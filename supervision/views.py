@@ -44,8 +44,8 @@ def _scope_filter(qs, request, field='district'):
 # 1. 数据大屏统计
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def dashboard_stats(request):
     """数据大屏聚合统计（按区县范围过滤）"""
     # 业务总量
@@ -122,8 +122,8 @@ def institution_list(request):
 # 3. 创建机构
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def institution_create(request):
     """创建机构"""
     data = parse_json_body(request)
@@ -175,8 +175,8 @@ def institution_create(request):
 # 4. 编辑机构
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def institution_edit(request, pk):
     """编辑机构"""
     try:
@@ -219,8 +219,8 @@ def institution_edit(request, pk):
 # 5. 机构状态切换
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def institution_toggle_status(request, pk):
     """切换机构启用/停用状态"""
     try:
@@ -252,8 +252,8 @@ def district_list(request):
 # 7. 创建区县
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city')
+@login_required
 def district_create(request):
     """创建区县（仅市级管理员）"""
     data = parse_json_body(request)
@@ -281,8 +281,8 @@ def district_create(request):
 # 7.1 编辑区县
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city')
+@login_required
 def district_edit(request, pk):
     """编辑区县（仅市级管理员）"""
     try:
@@ -320,8 +320,8 @@ def district_edit(request, pk):
 # 7.2 切换区县状态
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city')
+@login_required
 def district_toggle_status(request, pk):
     """切换区县启用/停用状态（仅市级管理员）"""
     try:
@@ -341,8 +341,8 @@ def district_toggle_status(request, pk):
 # 7.3 删除区县
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city')
+@login_required
 def district_delete(request, pk):
     """删除区县（仅市级管理员，且未被业务数据引用）"""
     try:
@@ -384,8 +384,8 @@ def district_delete(request, pk):
 # 8. 用户列表
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def user_list(request):
     """用户列表（按区县范围过滤）"""
     qs = User.objects.all()
@@ -422,8 +422,8 @@ def user_list(request):
 # 9. 创建用户
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def user_create(request):
     """创建用户
 
@@ -525,8 +525,8 @@ def user_create(request):
 # 10. 用户状态切换
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def user_toggle_status(request, pk):
     """切换用户启用/停用状态"""
     try:
@@ -581,8 +581,8 @@ def _pet_brief(pet):
 
 
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def business_supervision(request):
     """业务监管：返回所有业务记录，支持 ?business_type 过滤
 
@@ -709,8 +709,8 @@ def business_supervision(request):
 # 12. 物资监管
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def material_supervision(request):
     """物资全局统计：流水、库存、预警"""
     # 物资列表（含库存）
@@ -762,8 +762,8 @@ def material_supervision(request):
 # 13. 台账中心
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def ledger_center(request):
     """统一台账：合并所有业务台账记录，支持筛选
 
@@ -1019,8 +1019,8 @@ def ledger_center(request):
 # 14. 操作日志
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city', 'gov_district')
+@login_required
 def operation_logs(request):
     """Django admin 操作日志（审计）"""
     qs = LogEntry.objects.all().select_related('user', 'content_type')
@@ -1057,8 +1057,8 @@ def operation_logs(request):
 # 15. 系统配置
 # ============================================
 @csrf_exempt
-@login_required
 @role_required('gov_city')
+@login_required
 def system_config(request):
     """系统配置（仅市级管理员）
 

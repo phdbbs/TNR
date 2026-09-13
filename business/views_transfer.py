@@ -17,8 +17,8 @@ from core.models import Institution
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district', 'hospital')
+@login_required
 def transfer_list(request):
     """转运列表（捕捉点看发出，医院看接收）"""
     user = request.user
@@ -45,8 +45,8 @@ def transfer_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def transfer_create(request):
     """创建转运记录（支持拆分至多家医院 / 简单单医院两种格式）
 
@@ -155,8 +155,8 @@ def transfer_create(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital')
+@login_required
 def transfer_receive(request, pk):
     """医院签收转运"""
     try:
@@ -183,8 +183,8 @@ def transfer_receive(request, pk):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital')
+@login_required
 def transfer_reject(request, pk):
     """医院驳回转运"""
     data = parse_json_body(request)
@@ -213,8 +213,8 @@ def transfer_reject(request, pk):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def transfer_resend(request, pk):
     """重新下发被驳回的转运单。
 

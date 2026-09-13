@@ -18,8 +18,8 @@ from business.services import (
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'shelter', 'gov_city', 'gov_district')
+@login_required
 def euthanasia_list(request):
     """安乐死记录列表"""
     qs = get_district_filtered_queryset(Euthanasia, request.user)
@@ -36,8 +36,8 @@ def euthanasia_list(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('hospital', 'gov_city', 'gov_district')
+@login_required
 def euthanasia_create(request):
     """登记安乐死记录
 
@@ -109,8 +109,8 @@ def euthanasia_create(request):
 
 
 @csrf_exempt
-@login_required
 @role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def body_receive(request, pk):
     """捕捉点领取遗体
 
