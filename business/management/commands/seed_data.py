@@ -14,7 +14,8 @@ from django.db import transaction
 from accounts.models import User
 from business.models import (
     Pet, Capture, Transfer, Treatment, Material, MaterialTransaction,
-    Chip, Release, Adoption, CheckIn, Blacklist, Euthanasia, Message,
+    Chip, Release, Adoption, AdoptionHallListing, CheckIn, Blacklist,
+    Euthanasia, Message,
 )
 from core.models import District, Institution
 
@@ -49,6 +50,7 @@ class Command(BaseCommand):
             self._seed_material_txns(districts, institutions, users, materials)
             self._seed_releases(districts, institutions, users, pets)
             self._seed_adoptions(districts, institutions, users, pets)
+            self._seed_hall_listings(institutions, pets)
             self._seed_checkins(users, pets)
             self._seed_blacklist(districts, users)
             self._seed_euthanasia(districts, institutions, users, pets)
@@ -562,6 +564,26 @@ class Command(BaseCommand):
                     'district': districts[dist],
                 }
             )
+
+    # ============================================
+    # 13.1 领养大厅上架信息
+    # ============================================
+    def _seed_hall_listings(self, institutions, pets):
+        self.stdout.write('创建领养大厅上架信息...')
+        # PET003 黑犬三号（待领养）上架展示，保证公开领养大厅有可看内容
+        AdoptionHallListing.objects.get_or_create(
+            pet=pets['PET003'],
+            defaults={
+                'hospital': institutions['I003'],
+                'hospital_name': '爱心宠物医院',
+                'intro': '性格沉稳亲人，已完成绝育和疫苗接种，已植入芯片。适合有固定住所的家庭领养。',
+                'personality': '安静温顺，对人友好，与其他狗狗相处融洽',
+                'body_condition': '体况良好，已驱虫，疫苗齐全',
+                'flow_doc': '提交领养申请 → 机构审核 → 签署领养协议 → 医院确认领出 → 每月回访打卡',
+                'is_active': True,
+                'published_at': date(2025, 1, 20),
+            }
+        )
 
     # ============================================
     # 14. 回访打卡

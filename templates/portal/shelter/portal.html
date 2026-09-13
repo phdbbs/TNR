@@ -261,7 +261,7 @@ const Shelter = {
   /* ========== 辅助方法 ========== */
   statusBadge(status) {
     const map = {
-      pending: ['待下发', 'warning'],
+      pending: ['待签收', 'warning'],
       dispatched: ['已下发', 'info'],
       received: ['已签收', 'success'],
       rejected: ['已驳回', 'danger'],
@@ -299,11 +299,11 @@ const Shelter = {
     const lowStock = materials.filter(m => (m.shelterStock ?? m.shelter_stock ?? 0) <= (m.safetyStock ?? m.safety_stock ?? 0)).length;
 
     const todoItems = [];
-    if (pendingTransfer > 0) todoItems.push({ label: pendingTransfer + ' 笔转运单待下发/签收', page: 'transfer', badge: 'warning' });
+    if (pendingTransfer > 0) todoItems.push({ label: pendingTransfer + ' 笔转运单待医院签收', page: 'transfer', badge: 'warning' });
     if (pendingRelease > 0) todoItems.push({ label: pendingRelease + ' 只动物待放养确认', page: 'release', badge: 'cinnabar' });
     if (pendingAdoption > 0) todoItems.push({ label: pendingAdoption + ' 笔领养申请待审核', page: 'adoption', badge: 'info' });
     if (lowStock > 0) todoItems.push({ label: lowStock + ' 项物料库存低于安全线', page: 'material', badge: 'danger' });
-    if (todoItems.length === 0) todoItems.push({ label: '暂无待办任务', page: null, badge: 'success' });
+    if (todoItems.length === 0) todoItems.push({ label: '暂无待办任务，今天也是善待动物的一天', page: null, badge: null });
 
     const quickActions = [
       { icon: '➕', text: '新增捕捉', desc: '录入流浪动物捕捉信息', page: 'capture-add' },
@@ -325,7 +325,7 @@ const Shelter = {
     html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>待办任务</div></div><div class="card-body" style="padding:0;">';
     todoItems.forEach(item => {
       html += '<div class="todo-list-item" ' + (item.page ? 'data-todo="' + item.page + '"' : '') + '>';
-      html += '<span class="badge badge-' + item.badge + '">' + (item.badge === 'danger' ? '紧急' : (item.badge === 'warning' ? '待处理' : (item.badge === 'info' ? '审核中' : '正常'))) + '</span>';
+      html += (item.badge ? '<span class="badge badge-' + item.badge + '">' + (item.badge === 'danger' ? '紧急' : (item.badge === 'warning' ? '待处理' : (item.badge === 'info' ? '审核中' : '正常'))) + '</span>' : '');
       html += '<span style="flex:1;font-size:14px;">' + TNR_UI.escape(item.label) + '</span>';
       if (item.page) html += '<span class="btn-link">前往 ›</span>';
       html += '</div>';
@@ -439,7 +439,7 @@ const Shelter = {
       { label: '捕捉数量', value: rec.petCount + ' 只' },
       { label: '状态', value: this.statusBadge(rec.status), full: false },
       { label: '操作员', value: rec.operatorName },
-      { label: '登记时间', value: rec.createdAt },
+      { label: '登记时间', value: TNR_UI.formatDateTime(rec.createdAt) },
       { label: '宠物编号', value: (rec.petCodes || []).map(c => '<span class="pet-code-chip">' + c + '</span>').join(''), full: true }
     ];
     TNR_UI.drawer({ title: '捕捉记录详情', body: TNR_UI.renderDescList(items) });
@@ -682,7 +682,7 @@ const Shelter = {
               { label: '身份证号', value: rec.ownerIdCard || '—' },
               { label: '领回原因', value: rec.reason || '—', full: true },
               { label: '操作员', value: rec.operatorName || '—' },
-              { label: '登记时间', value: rec.createdAt || '—' }
+              { label: '登记时间', value: TNR_UI.formatDateTime(rec.createdAt) }
             ]) });
           }
         });
@@ -773,8 +773,7 @@ const Shelter = {
     const el = document.getElementById('page-transfer');
     el.innerHTML = `
       <div class="tabs" id="transferTabs">
-        <div class="tab-item active" data-tab="pending">待下发</div>
-        <div class="tab-item" data-tab="dispatched">已下发</div>
+        <div class="tab-item active" data-tab="pending">待签收</div>
         <div class="tab-item" data-tab="received">已签收</div>
         <div class="tab-item" data-tab="rejected">已驳回</div>
       </div>
@@ -819,17 +818,17 @@ const Shelter = {
       html += '</div></div>';
 
       const pendingOrders = all.filter(t => t.status === 'pending');
-      html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>待下发转运单（' + pendingOrders.length + '）</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
+      html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>待医院签收转运单（' + pendingOrders.length + '）</div></div><div class="card-body" style="padding:0;"><div class="table-wrapper">';
       const columns = [
         { title: '转运单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
         { title: '接收医院', key: 'toHospitalName' },
         { title: '宠物数量', key: 'petCount', render: r => '<span class="badge badge-info">' + r.petCount + '</span>' },
         { title: '宠物编号', render: r => (r.petCodes || []).map(c => '<span class="pet-code-chip">' + c + '</span>').join('') },
         { title: '状态', render: r => this.statusBadge(r.status) },
-        { title: '创建时间', key: 'createdAt' }
+        { title: '创建时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
-      html += TNR_UI.renderTable({ columns, data: pendingOrders, emptyText: '暂无待下发转运单', rowActions });
+      html += TNR_UI.renderTable({ columns, data: pendingOrders, emptyText: '暂无待签收转运单', rowActions });
       html += '</div></div></div>';
 
       wrap.innerHTML = html;
@@ -848,7 +847,9 @@ const Shelter = {
             note: document.getElementById('tr_note').value.trim()
           });
           if (res && res.success !== false) {
-            TNR_UI.toast('转运单创建成功：' + (res.data?.ledger_no || ''), 'success');
+            const nos = (Array.isArray(res.data) ? res.data : [res.data])
+              .map(t => t?.ledgerNo || t?.ledger_no).filter(Boolean);
+            TNR_UI.toast('转运单创建成功' + (nos.length ? '：' + nos.join('、') : ''), 'success');
             this._transfers = await TNR_API.getTransfers();
             this.renderTransferTab('pending');
           } else {
@@ -871,7 +872,7 @@ const Shelter = {
               { label: '状态', value: this.statusBadge(rec.status) },
               { label: '驳回原因', value: rec.rejectReason || '—' },
               { label: '备注', value: rec.note || '—', full: true },
-              { label: '创建时间', value: rec.createdAt }
+              { label: '创建时间', value: TNR_UI.formatDateTime(rec.createdAt) }
             ]) });
           }
         });
@@ -884,8 +885,8 @@ const Shelter = {
         { title: '宠物数量', key: 'petCount', render: r => '<span class="badge badge-info">' + r.petCount + '</span>' },
         { title: '宠物编号', render: r => (r.petCodes || []).map(c => '<span class="pet-code-chip">' + c + '</span>').join('') },
         { title: '状态', render: r => this.statusBadge(r.status) },
-        { title: '创建时间', key: 'createdAt' },
-        { title: '签收时间', key: 'receivedAt', render: r => r.receivedAt || '—' }
+        { title: '创建时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) },
+        { title: '签收时间', key: 'receivedAt', render: r => TNR_UI.formatDateTime(r.receivedAt) }
       ];
       const rowActions = (r) => {
         let html = '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
@@ -909,7 +910,7 @@ const Shelter = {
               { label: '状态', value: this.statusBadge(rec.status) },
               { label: '驳回原因', value: rec.rejectReason || '—' },
               { label: '签收时间', value: rec.receivedAt || '—' },
-              { label: '创建时间', value: rec.createdAt }
+              { label: '创建时间', value: TNR_UI.formatDateTime(rec.createdAt) }
             ]) });
           } else if (btn.dataset.act === 'resend') {
             TNR_UI.confirm('确认重新下发该转运单？宠物将重新进入待签收状态。', '重新下发').then(async ok => {
@@ -1221,7 +1222,7 @@ const Shelter = {
         { title: '放养小区', key: 'communityName', render: r => TNR_UI.escape(r.communityName || r.community_name || '—') },
         { title: '接收人', key: 'receiverName', render: r => TNR_UI.escape(r.receiverName || r.receiver_name || '—') },
         { title: '联系电话', key: 'receiverPhone', render: r => TNR_UI.escape(r.receiverPhone || r.receiver_phone || '—') },
-        { title: '登记时间', key: 'createdAt', render: r => TNR_UI.escape(r.createdAt || r.created_at || '—') },
+        { title: '登记时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt || r.created_at) },
         { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-confirm-release="' + r.id + '">确认放养</button><button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>' }
       ];
       html += TNR_UI.renderTable({ columns, data: pendingReleases, emptyText: '暂无待放养记录' });
@@ -1241,7 +1242,7 @@ const Shelter = {
             { label: '放养小区', value: rec.communityName || rec.community_name || '—' },
             { label: '接收人', value: rec.receiverName || rec.receiver_name || '—' },
             { label: '联系电话', value: rec.receiverPhone || rec.receiver_phone || '—' },
-            { label: '登记时间', value: rec.createdAt || rec.created_at },
+            { label: '登记时间', value: TNR_UI.formatDateTime(rec.createdAt || rec.created_at) },
             { label: '操作员', value: rec.operatorName || rec.operator_name }
           ]) });
         });
@@ -1581,7 +1582,7 @@ const Shelter = {
               { label: '打卡月份', value: rec.month },
               { label: '近况说明', value: rec.note, full: true },
               { label: '状态', value: rec.status === 'approved' ? '已通过' : (rec.status === 'rejected' ? '未通过' : '待审核') },
-              { label: '提交时间', value: rec.createdAt }
+              { label: '提交时间', value: TNR_UI.formatDateTime(rec.createdAt) }
             ]) });
           }
         });
@@ -1923,7 +1924,7 @@ const Shelter = {
         { title: '接收医院', key: 'toHospitalName' },
         { title: '数量', key: 'petCount' },
         { title: '状态', render: r => this.statusBadge(r.status) },
-        { title: '创建时间', key: 'createdAt' }
+        { title: '创建时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
     } else if (tab === 'treatments') {
       title = '诊疗台账';

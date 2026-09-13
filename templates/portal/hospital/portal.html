@@ -501,8 +501,8 @@ const Hospital = {
     html += '<div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">📋</div><div class="form-section-title">基础信息</div></div><div class="form-section-body"><div class="desc-list">' +
       '<div class="desc-item"><div class="desc-label">宠物编号</div><div class="desc-value">' + esc(pet.code) + '</div></div>' +
       '<div class="desc-item"><div class="desc-label">名称</div><div class="desc-value">' + esc(pet.name || '—') + '</div></div>' +
-      '<div class="desc-item"><div class="desc-label">物种/品种</div><div class="desc-value">' + esc(pet.species || '') + ' / ' + esc(pet.breed || '') + '</div></div>' +
-      '<div class="desc-item"><div class="desc-label">性别/年龄</div><div class="desc-value">' + esc(pet.gender || '') + ' / ' + esc(pet.age || '') + '</div></div>' +
+      '<div class="desc-item"><div class="desc-label">物种/品种</div><div class="desc-value">' + (pet.species ? esc(pet.species) + (pet.breed ? ' / ' + esc(pet.breed) : '') : '—') + '</div></div>' +
+      '<div class="desc-item"><div class="desc-label">性别/年龄</div><div class="desc-value">' + (pet.gender ? esc(pet.gender) + (pet.age ? ' / ' + esc(pet.age) : '') : (pet.age ? esc(pet.age) : '—')) + '</div></div>' +
       '<div class="desc-item"><div class="desc-label">芯片号</div><div class="desc-value">' + esc(pet.chip_no || '—') + '</div></div>' +
       '</div></div></div>';
 
@@ -767,8 +767,8 @@ const Hospital = {
       let html = '<div class="detail-section"><div class="detail-section-title">宠物信息</div>' + TNR_UI.renderDescList([
         {label: '宠物编号', value: this.escape(t.pet_code)},
         {label: '名称', value: this.escape(pet.name || '—')},
-        {label: '物种/品种', value: this.escape(pet.species || '') + ' / ' + this.escape(pet.breed || '')},
-        {label: '性别/年龄', value: this.escape(pet.gender || '') + ' / ' + this.escape(pet.age || '')}
+        {label: '物种/品种', value: pet.species ? (this.escape(pet.species) + (pet.breed ? ' / ' + this.escape(pet.breed) : '')) : '—'},
+        {label: '性别/年龄', value: (pet.gender || pet.age) ? ((pet.gender ? this.escape(pet.gender) : '') + (pet.gender && pet.age ? ' / ' : '') + (pet.age ? this.escape(pet.age) : '')) : '—'}
       ]) + '</div>';
 
       html += '<div class="detail-section"><div class="detail-section-title">诊疗项目</div>' + TNR_UI.renderDescList([

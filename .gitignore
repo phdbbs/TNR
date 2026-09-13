@@ -14,3 +14,4 @@ tnr_e2e*.py
 tnr_recon*.py
 tnr_test*.py
 tnr_check_db.py
+gui-test-screenshots/

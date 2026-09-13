@@ -231,7 +231,6 @@ const GovPortal = {
       // 最近活动
       const activities = [];
       (captures || []).forEach(c => activities.push({ time: c.created_at, title: '捕捉登记', desc: (c.community_name || '') + ' · ' + (c.pet_count || 0) + '只', type: 'capture' }));
-      (stats && stats.capture_total !== undefined ? [] : []).forEach(() => {});
       const transfers = await TNR_API.getTransfers();
       (transfers || []).forEach(t => activities.push({ time: t.created_at, title: '转运交接', desc: (t.from_shelter_name || '') + ' → ' + (t.to_hospital_name || ''), type: 'transfer' }));
       (treatments || []).forEach(t => activities.push({ time: t.created_at, title: '诊疗记录', desc: (t.pet_code || '') + ' · ' + (t.hospital_name || ''), type: 'treatment' }));
@@ -246,7 +245,7 @@ const GovPortal = {
         <div class="stat-grid">
           <div class="stat-card">
             <div class="stat-card-icon">🐾</div>
-            <div><div class="stat-card-value">${totalCaptures}</div><div class="stat-card-label">捕捉总量</div></div>
+            <div><div class="stat-card-value">${totalCaptures}</div><div class="stat-card-label">累计捕捉（只）</div></div>
           </div>
           <div class="stat-card blue">
             <div class="stat-card-icon">🏥</div>

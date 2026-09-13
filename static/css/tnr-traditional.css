@@ -587,7 +587,11 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
   border-radius: var(--r-sm);
   transition: background var(--t-fast);
 }
+.btn-link { white-space: nowrap; }
 .btn-link:hover { background: var(--cinnabar-light); }
+/* 表格操作列：多个操作按钮保持一行，避免竖排折行 */
+.table-wrapper td:last-child { white-space: nowrap; }
+
 .btn-link.danger { color: var(--rouge); }
 .btn-link.danger:hover { background: var(--rouge-light); }
 .btn-link.success { color: var(--bamboo-green); }
