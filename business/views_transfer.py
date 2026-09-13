@@ -172,7 +172,7 @@ def transfer_receive(request, pk):
         return json_fail('无权签收此转运记录')
 
     transfer.status = 'received'
-    transfer.received_at = timezone.now().date()
+    transfer.received_at = timezone.localdate()
     transfer.save(update_fields=['status', 'received_at'])
 
     # 更新宠物状态为待诊疗

@@ -324,7 +324,7 @@ def pet_lifecycle(request, pet_id):
         events.append({
             'type': 'release',
             'type_display': '放养记录',
-            'date': r.released_at.isoformat() if r.released_at else (r.created_at.isoformat() if r.created_at else ''),
+            'date': r.released_at.isoformat() if r.released_at else (timezone.localdate(r.created_at).isoformat() if r.created_at else ''),
             'ledger_no': r.ledger_no,
             'community_name': r.community_name,
             'receiver_name': r.receiver_name,
@@ -338,7 +338,7 @@ def pet_lifecycle(request, pet_id):
         events.append({
             'type': 'adoption',
             'type_display': '领养记录',
-            'date': a.adopted_at.isoformat() if a.adopted_at else (a.created_at.isoformat() if a.created_at else ''),
+            'date': a.adopted_at.isoformat() if a.adopted_at else (timezone.localdate(a.created_at).isoformat() if a.created_at else ''),
             'ledger_no': a.ledger_no,
             'adopter_name': a.adopter_name,
             'hospital_name': a.hospital_name,
@@ -352,7 +352,7 @@ def pet_lifecycle(request, pet_id):
         events.append({
             'type': 'euthanasia',
             'type_display': '安乐死记录',
-            'date': e.euthanized_at.isoformat() if e.euthanized_at else (e.created_at.isoformat() if e.created_at else ''),
+            'date': e.euthanized_at.isoformat() if e.euthanized_at else (timezone.localdate(e.created_at).isoformat() if e.created_at else ''),
             'ledger_no': e.ledger_no,
             'hospital_name': e.hospital_name,
             'reason': e.reason,

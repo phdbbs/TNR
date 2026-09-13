@@ -78,7 +78,7 @@ const GovPortal = {
   currentUser: window.TNR_USER || null,
   instState: { tab: 'district' },
   supState: { tab: 'capture' },
-  ledgerState: { tab: 'capture' },
+  ledgerState: { tab: 'pet' },
   settingsState: { tab: 'prefix' },
   titles: {
     'dashboard': '数据总览大屏',
@@ -1387,6 +1387,7 @@ const GovPortal = {
   async render_ledger() {
     const el = document.getElementById('page-ledger');
     const tabs = [
+      { id: 'pet', label: '一宠一档' },
       { id: 'capture', label: '捕捉台账' },
       { id: 'transfer', label: '转运台账' },
       { id: 'treatment', label: '诊疗台账' },
@@ -1461,7 +1462,32 @@ const GovPortal = {
 
     // 按业务类型定义不同的列
     let columns;
-    if (tab === 'capture') {
+    if (tab === 'pet') {
+      const petStatus = {
+        in_transit: ['在途', 'badge-info'], in_treatment: ['待诊疗', 'badge-warning'],
+        pending_adopt: ['待领养', 'badge-info'], pending_claim: ['待领出', 'badge-warning'],
+        adopted: ['已领养', 'badge-success'], released: ['已放养', 'badge-success'],
+        euthanized: ['已安乐死', 'badge-danger'], owner_returned: ['主人领回', 'badge-default'],
+      };
+      columns = [
+        { key: 'ledger_no', title: '档案编号', render: r => `<strong>${esc(r.ledger_no)}</strong>` },
+        { key: 'species', title: '分类', width: '70px' },
+        { key: 'breed', title: '品种', render: r => esc(r.breed) },
+        { key: 'gender', title: '性别', width: '70px', render: r => esc(r.gender) },
+        { key: 'age', title: '年龄', width: '90px', render: r => esc(r.age) },
+        { key: 'chip_no', title: '芯片号码', render: r => esc(r.chip_no || '—') },
+        { key: 'status_display', title: '当前状态', width: '100px', sortable: false, render: r => {
+          const m = petStatus[r.status];
+          const text = m ? m[0] : (r.status_display || r.status || '—');
+          const cls = m ? m[1] : 'badge-default';
+          return `<span class="badge ${cls}">${text}</span>`;
+        } },
+        { key: 'intake_at', title: '进站时间', width: '140px', render: dateRender },
+        { key: 'outbound_reason', title: '出库原因', width: '100px', render: r => esc(r.outbound_reason || '在库') },
+        { key: 'delivery_unit', title: '送达单位', render: r => esc(r.delivery_unit || '—') },
+        { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
+      ];
+    } else if (tab === 'capture') {
       columns = [
         { key: 'business_type', title: '类型', width: '80px', render: typeBadge },
         { key: 'ledger_no', title: '单据号', render: r => esc(r.ledger_no) },
@@ -1579,7 +1605,36 @@ const GovPortal = {
     let items = [];
     let extraHtml = '';
 
-    if (tab === 'capture') {
+    if (tab === 'pet') {
+      // 一宠一档：按《犬只收容档案》字段组织
+      const sterilText = r.sterilized
+        ? `是${r.sterilized_at ? '（' + TNR_UI.formatDate(r.sterilized_at) + '）' : ''}`
+        : '否';
+      items = [
+        { label: '档案编号', value: `<strong>${esc(r.ledger_no)}</strong>` },
+        { label: '分类', value: esc(r.species) },
+        { label: '品种', value: esc(r.breed) },
+        { label: '性别', value: esc(r.gender) },
+        { label: '年龄', value: esc(r.age) },
+        { label: '芯片号码', value: esc(r.chip_no) },
+        { label: '当前状态', value: esc(r.status_display) },
+        { label: '进站时间', value: r.intake_at ? TNR_UI.formatDateTime(r.intake_at) : '—' },
+        { label: '收容来源', value: esc(r.intake_from || '—') },
+        { label: '收容登记表档案号', value: esc(r.intake_ledger_no || '—') },
+        { label: '绝育情况', value: sterilText },
+        { label: '出库时间', value: r.outbound_at ? TNR_UI.formatDateTime(r.outbound_at) : '—' },
+        { label: '出库原因', value: esc(r.outbound_reason || '在库') },
+        { label: '送达单位', value: esc(r.delivery_unit || '—') },
+        { label: '区县', value: esc(r.district_name || '—') },
+        { label: '建档时间', value: TNR_UI.formatDateTime(r.date) },
+      ];
+      const recTable = (records) => (!records || !records.length) ? '<div class="text-muted" style="font-size:13px;">暂无记录</div>' :
+        '<table class="data-table"><thead><tr><th>药品名</th><th>时间</th></tr></thead><tbody>' +
+        records.map(x => `<tr><td>${esc(x.drug)}</td><td>${esc(x.date)}</td></tr>`).join('') + '</tbody></table>';
+      extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">驱虫记录</h4>${recTable(d.deworm_records)}</div>`;
+      extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">免疫记录</h4>${recTable(d.vaccine_records)}</div>`;
+      if (d.pet) extraHtml += this.renderPetPhotos(d.pet, '动物照片');
+    } else if (tab === 'capture') {
       items = [
         { label: '单据号', value: r.ledger_no },
         { label: '捕捉点', value: r.shelter_name },
@@ -1703,7 +1758,7 @@ const GovPortal = {
     }
 
     TNR_UI.drawer({
-      title: '台账详情 · ' + ({ capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放养', adoption: '领养', material: '物料', euthanasia: '安乐死' }[tab] || tab),
+      title: '台账详情 · ' + ({ pet: '一宠一档', capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放养', adoption: '领养', material: '物料', euthanasia: '安乐死' }[tab] || tab),
       body: bodyEl => { bodyEl.innerHTML = TNR_UI.renderDescList(items) + extraHtml; }
     });
   },

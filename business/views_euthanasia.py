@@ -130,7 +130,7 @@ def body_receive(request, pk):
         return json_fail('遗体已被领取')
 
     record.body_received = True
-    record.body_received_at = timezone.now().date()
+    record.body_received_at = timezone.localdate()
     record.body_received_by = request.user
     record.body_received_by_name = data.get('receiver_name', request.user.get_full_name() or request.user.username)
     record.save(update_fields=[

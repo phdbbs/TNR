@@ -121,7 +121,7 @@ def release_confirm(request, pk):
     release.receiver_phone = data.get('receiver_phone', release.receiver_phone)
     release.signature = data.get('signature', '')
     release.status = 'released'
-    release.released_at = timezone.now().date()
+    release.released_at = timezone.localdate()
     release.save(update_fields=[
         'receiver_name', 'receiver_phone', 'signature', 'status', 'released_at',
     ])

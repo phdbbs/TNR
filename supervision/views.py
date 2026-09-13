@@ -805,6 +805,79 @@ def ledger_center(request):
                 pass
         return qs
 
+    # 一宠一档（按宠物档案聚合全生命周期数据）
+    if business_type == 'pet':
+        qs = _scope_filter(Pet.objects.all(), request)
+        qs = _date_filter(qs)
+        for p in qs:
+            capture = p.capture
+            # 出库信息：按当前状态从对应业务记录推导
+            outbound_at, outbound_reason, delivery_unit = '', '', ''
+            if p.status == 'released':
+                rel = p.releases.filter(status='released').order_by('-id').first()
+                if rel:
+                    outbound_at = rel.released_at.isoformat() if rel.released_at else ''
+                    outbound_reason = '放养'
+                    delivery_unit = rel.community_name or ''
+            elif p.status == 'adopted':
+                ad = p.adoptions.filter(status='completed').order_by('-id').first()
+                if ad:
+                    outbound_at = ad.adopted_at.isoformat() if ad.adopted_at else ''
+                    outbound_reason = '领养'
+                    delivery_unit = ((ad.adopter_name or '') + (f'（{ad.hospital_name}确认）' if ad.hospital_name else ''))
+            elif p.status == 'euthanized':
+                eu = p.euthanasia_records.order_by('-id').first()
+                if eu:
+                    outbound_at = eu.euthanized_at.isoformat() if eu.euthanized_at else ''
+                    outbound_reason = '安乐死'
+                    delivery_unit = eu.hospital_name or ''
+            elif p.status == 'owner_returned':
+                orr = p.owner_returns.order_by('-id').first()
+                if orr:
+                    outbound_at = orr.created_at.isoformat() if orr.created_at else ''
+                    outbound_reason = '主人领回'
+                    delivery_unit = orr.owner_name or ''
+            # 绝育 / 驱虫 / 免疫记录（聚合该宠物全部诊疗）
+            sterilized, sterilized_at = False, ''
+            deworm_records, vaccine_records = [], []
+            for t in p.treatments.all().order_by('id'):
+                if t.items_sterilization and not sterilized:
+                    sterilized = True
+                    sterilized_at = t.sterilization_surgery_date.isoformat() if t.sterilization_surgery_date else ''
+                if t.items_deworming:
+                    deworm_records.append({'drug': t.deworming_type or '', 'date': t.deworming_date.isoformat() if t.deworming_date else ''})
+                if t.items_vaccine:
+                    vaccine_records.append({'drug': t.vaccine_type or '', 'date': t.vaccine_date.isoformat() if t.vaccine_date else ''})
+            records.append({
+                'business_type': 'pet',
+                'ledger_no': p.code,
+                'id': p.id,
+                'date': p.created_at.isoformat() if p.created_at else '',
+                'species': p.species,
+                'breed': p.breed,
+                'gender': p.gender,
+                'age': p.age,
+                'chip_no': p.chip_no,
+                'status': p.status,
+                'status_display': p.get_status_display(),
+                'district_name': p.district.name if p.district else '',
+                'intake_at': capture.created_at.isoformat() if capture and capture.created_at else '',
+                'intake_from': ((capture.community_name if capture else '') or (capture.address if capture else '') or ''),
+                'intake_ledger_no': capture.ledger_no if capture else '',
+                'outbound_at': outbound_at,
+                'outbound_reason': outbound_reason,
+                'delivery_unit': delivery_unit,
+                'sterilized': sterilized,
+                'sterilized_at': sterilized_at,
+                'deworm_records': deworm_records,
+                'vaccine_records': vaccine_records,
+                'detail': {
+                    'pet': _pet_brief(p),
+                    'deworm_records': deworm_records,
+                    'vaccine_records': vaccine_records,
+                },
+            })
+
     # 捕捉台账
     if business_type is None or business_type == 'capture':
         qs = _scope_filter(Capture.objects.all(), request)

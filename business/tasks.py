@@ -35,7 +35,7 @@ def auto_promote_to_adoptable(force=False):
                     'hospital': pet.hospital,
                     'hospital_name': pet.hospital.name if pet.hospital else '',
                     'is_active': True,
-                    'published_at': timezone.now().date(),
+                    'published_at': timezone.localdate(),
                 }
             )
             count += 1

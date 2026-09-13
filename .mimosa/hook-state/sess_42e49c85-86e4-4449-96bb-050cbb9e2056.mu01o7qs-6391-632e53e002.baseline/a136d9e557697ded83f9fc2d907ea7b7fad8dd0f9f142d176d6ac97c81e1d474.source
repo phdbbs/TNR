@@ -1,0 +1,181 @@
+"""共享测试基座：最小化夹具工厂 + API 调用助手。
+
+设计原则：
+- 不依赖 seed_data，每个测试类自建所需最小数据，结果确定、运行快；
+- 编号自动递增，保证跨用例唯一；
+- 统一 JSON 请求与断言助手，减少重复样板。
+"""
+import json
+
+from django.test import TestCase
+
+from accounts.models import User
+from business.models import Pet
+from core.models import District, Institution
+
+SEQ = {"district": 0, "institution": 0, "user": 0, "pet": 0, "material": 0,
+       "chip": 0, "capture": 0}
+
+
+def _next(key, fmt):
+    SEQ[key] += 1
+    return fmt.format(SEQ[key])
+
+
+def make_district(name=None, code=None, is_city=False, status="active"):
+    return District.objects.create(
+        name=name or _next("district", "测试区{}"),
+        code=code or _next("district", "T{:03d}"),
+        is_city=is_city,
+        status=status,
+    )
+
+
+def make_institution(type="shelter", district=None, name=None, status="active", **kw):
+    return Institution.objects.create(
+        name=name or _next("institution", {"shelter": "捕捉点{}", "hospital": "医院{}", "community": "小区{}"}[type]),
+        type=type,
+        district=district or make_district(),
+        status=status,
+        **kw,
+    )
+
+
+def make_user(username=None, role="shelter", district=None, institution=None,
+              password="123456", **kw):
+    return User.objects.create_user(
+        username=username or _next("user", "u{:04d}"),
+        password=password,
+        role=role,
+        district=district,
+        institution=institution,
+        **kw,
+    )
+
+
+def make_pet(code=None, status="in_transit", district=None, shelter=None,
+             hospital=None, capture=None, species="猫", **kw):
+    SEQ["pet"] += 1
+    return Pet.objects.create(
+        code=code or f"TESTPET{SEQ['pet']:05d}",
+        status=status,
+        district=district or make_district(),
+        shelter=shelter,
+        hospital=hospital,
+        capture=capture,
+        species=species,
+        **kw,
+    )
+
+
+def make_capture(district=None, shelter=None, pet_codes=None, **kw):
+    from business.models import Capture
+    shelter = shelter or make_institution(type="shelter")
+    return Capture.objects.create(
+        district=district or shelter.district,
+        shelter=shelter,
+        shelter_name=shelter.name,
+        pet_count=len(pet_codes or []),
+        pet_codes=",".join(pet_codes or []),
+        status="completed",
+        ledger_no=kw.pop("ledger_no", None) or _next("capture", "CAP-T{:04d}"),
+        **kw,
+    )
+
+
+def make_material(category="vaccine", name=None, district=None, shelter_stock=100, **kw):
+    from business.models import Material
+    return Material.objects.create(
+        name=name or _next("material", "物料{}"),
+        category=category,
+        unit=kw.pop("unit", "支"),
+        shelter_stock=shelter_stock,
+        district=district or make_district(),
+        **kw,
+    )
+
+
+def make_chip(number=None, status="available", pet=None):
+    from business.models import Chip
+    SEQ["chip"] += 1
+    return Chip.objects.create(
+        number=number or f"CHIP{SEQ['chip']:010d}",
+        status=status,
+        pet=pet,
+    )
+
+
+def make_hospital_txn(material, hospital, type="receive", quantity=10, **kw):
+    """直接造一条医院侧流水（receive 增加医院库存，consume 减少）。"""
+    from business.models import MaterialTransaction
+    from django.utils import timezone
+    return MaterialTransaction.objects.create(
+        material=material,
+        material_name=material.name,
+        quantity=quantity,
+        type=type,
+        hospital=hospital,
+        date=kw.pop("date", timezone.localdate()),
+        district=kw.pop("district", material.district),
+        **kw,
+    )
+
+
+class ApiMixin:
+    """登录态 + JSON API 助手。"""
+
+    def login_as(self, user):
+        """强制登录（绕过登录视图，登录视图本身在 accounts 测试覆盖）。"""
+        self.client.force_login(user)
+        return user
+
+    def post_json(self, url, payload=None):
+        return self.client.post(
+            url, data=json.dumps(payload or {}), content_type="application/json"
+        )
+
+    def get_json(self, url):
+        return self.client.get(url)
+
+    def ok(self, resp, msg=None):
+        self.assertEqual(resp.status_code, 200, msg or resp.content)
+        body = resp.json()
+        self.assertTrue(body.get("success"), msg or body)
+        return body
+
+    def expect_fail(self, resp, status=400, message=None, msg=None):
+        self.assertEqual(resp.status_code, status, msg or resp.content)
+        body = resp.json()
+        self.assertFalse(body.get("success"), msg or body)
+        if message is not None:
+            self.assertIn(message, body.get("message", ""), msg)
+        return body
+
+
+class BusinessTestBase(ApiMixin, TestCase):
+    """业务域测试基类。"""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.city = make_district(name="全市", code="TCITY", is_city=True)
+        cls.district_a = make_district(name="甲区", code="TA")
+        cls.district_b = make_district(name="乙区", code="TB")
+
+        cls.shelter_a = make_institution(type="shelter", district=cls.district_a, name="甲区捕捉点")
+        cls.shelter_b = make_institution(type="shelter", district=cls.district_b, name="乙区捕捉点")
+        cls.hospital_a = make_institution(type="hospital", district=cls.district_a, name="甲区医院")
+        cls.hospital_b = make_institution(type="hospital", district=cls.district_b, name="乙区医院")
+        cls.community_a = make_institution(type="community", district=cls.district_a, name="甲区小区")
+
+        cls.gov_city = make_user("gov_city_t", role="gov_city", district=cls.city)
+        cls.gov_a = make_user("gov_a_t", role="gov_district", district=cls.district_a)
+        cls.gov_b = make_user("gov_b_t", role="gov_district", district=cls.district_b)
+        cls.shelter_user_a = make_user("shelter_a_t", role="shelter",
+                                       district=cls.district_a, institution=cls.shelter_a)
+        cls.shelter_user_b = make_user("shelter_b_t", role="shelter",
+                                       district=cls.district_b, institution=cls.shelter_b)
+        cls.hospital_user_a = make_user("hospital_a_t", role="hospital",
+                                        district=cls.district_a, institution=cls.hospital_a)
+        cls.hospital_user_b = make_user("hospital_b_t", role="hospital",
+                                        district=cls.district_b, institution=cls.hospital_b)
+        cls.adopter = make_user("adopter_t", role="adopter")

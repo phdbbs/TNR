@@ -379,6 +379,41 @@ class SupervisionDataTest(SupervisionBase):
         records = body['data']['records']
         self.assertEqual(records[0]['ledger_no'], 'CAP-SV-1')
 
+    def test_ledger_pet_archive(self):
+        """一宠一档：按宠物聚合档案字段（分类/芯片/绝育/驱虫/免疫/出库）"""
+        from accounts.models import User as UserModel
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a, status='adopted',
+                       species='狗', breed='中华田园犬', gender='公',
+                       age='约2岁', chip_no='CHIP-ARC-0001')
+        Treatment.objects.create(
+            pet=pet, pet_code=pet.code, hospital=self.hospital_a,
+            items_sterilization=True, items_vaccine=True, items_deworming=True,
+            vaccine_type='狂犬疫苗', deworming_type='体内外驱虫',
+            status='completed', district=self.district_a)
+        adopter = UserModel.objects.create_user(username='arc_adopter', password='x',
+                                                role='adopter')
+        Adoption.objects.create(
+            pet=pet, pet_code=pet.code, adopter=adopter,
+            adopter_name='档案领养人', adopter_phone='13800001234',
+            hospital=self.hospital_a, status='completed',
+            adopted_at=__import__('datetime').date.today(),
+            ledger_no='ADP-ARC-001', district=self.district_a)
+        self.client.force_login(self.gov_city)
+        data = self.ok(self.client.get(f'{API}/ledger/?business_type=pet'))['data']
+        self.assertGreaterEqual(data['total'], 1)
+        rec = next(r for r in data['records'] if r['ledger_no'] == pet.code)
+        self.assertEqual(rec['species'], '狗')
+        self.assertEqual(rec['breed'], '中华田园犬')
+        self.assertEqual(rec['gender'], '公')
+        self.assertEqual(rec['chip_no'], 'CHIP-ARC-0001')
+        self.assertEqual(rec['status_display'], '已领养')
+        self.assertTrue(rec['sterilized'], '绝育情况应为是')
+        self.assertEqual(rec['outbound_reason'], '领养')
+        self.assertIn('档案领养人', rec['delivery_unit'])
+        self.assertTrue(any(v['drug'] == '狂犬疫苗' for v in rec['vaccine_records']))
+        self.assertTrue(any(v['drug'] == '体内外驱虫' for v in rec['deworm_records']))
+
     def test_ledger_date_filter_includes_end_date(self):
         """回归：结束日期应包含当天全部记录（此前 __lte 当天零点排除当天记录）"""
         from datetime import date
