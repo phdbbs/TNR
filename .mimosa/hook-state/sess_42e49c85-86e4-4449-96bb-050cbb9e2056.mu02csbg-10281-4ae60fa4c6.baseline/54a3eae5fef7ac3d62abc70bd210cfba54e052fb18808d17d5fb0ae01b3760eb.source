@@ -278,7 +278,7 @@ def material_receive(request, pk):
         hospital=txn.hospital,
         operator=user,
         operator_name=user.get_full_name() or user.username,
-        date=timezone.now().date(),
+        date=timezone.localdate(),
         ledger_no=txn.ledger_no,  # 复用原 dispatch 单号，便于关联
         district=txn.district,
         note=f'签收下发物料（原单号：{txn.ledger_no}）',

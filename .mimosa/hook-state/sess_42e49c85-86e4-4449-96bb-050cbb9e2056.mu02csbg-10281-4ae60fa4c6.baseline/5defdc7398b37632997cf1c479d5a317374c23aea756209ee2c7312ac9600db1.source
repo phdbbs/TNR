@@ -173,7 +173,7 @@ def use_chip(chip_no, pet):
 
     chip.status = 'used'
     chip.pet = pet
-    chip.used_at = timezone.now().date()
+    chip.used_at = timezone.localdate()
     chip.save(update_fields=['status', 'pet', 'used_at'])
 
     # 同步写入宠物档案
@@ -201,7 +201,7 @@ def adjust_stock(material, hospital, quantity, txn_type, **extra):
     """
     district = extra.get('district') or material.district
     operator = extra.get('operator')
-    today = timezone.now().date()
+    today = timezone.localdate()
 
     txn = MaterialTransaction.objects.create(
         type=txn_type,

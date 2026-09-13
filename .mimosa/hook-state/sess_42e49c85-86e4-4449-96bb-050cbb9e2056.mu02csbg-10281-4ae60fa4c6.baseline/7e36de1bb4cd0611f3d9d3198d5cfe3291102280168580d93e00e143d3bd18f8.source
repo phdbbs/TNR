@@ -104,7 +104,7 @@ def adoption_info_edit(request, pk):
 
     if created or not listing.published_at:
         from django.utils import timezone
-        listing.published_at = timezone.now().date()
+        listing.published_at = timezone.localdate()
 
     listing.save()
 
@@ -263,7 +263,7 @@ def adoption_confirm_claim(request, pk):
     # 确认领出
     adoption.status = 'completed'
     if not adoption.adopted_at:
-        adoption.adopted_at = timezone.now().date()
+        adoption.adopted_at = timezone.localdate()
     adoption.save(update_fields=['status', 'adopted_at'])
 
     # 更新宠物状态为已领养

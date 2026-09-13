@@ -837,17 +837,34 @@ def ledger_center(request):
                     outbound_at = orr.created_at.isoformat() if orr.created_at else ''
                     outbound_reason = '主人领回'
                     delivery_unit = orr.owner_name or ''
-            # 绝育 / 驱虫 / 免疫记录（聚合该宠物全部诊疗）
+            # 绝育 / 诊疗记录（医院/医师） / 驱虫 / 免疫记录（聚合该宠物全部诊疗）
             sterilized, sterilized_at = False, ''
-            deworm_records, vaccine_records = [], []
+            treatment_records, deworm_records, vaccine_records = [], [], []
             for t in p.treatments.all().order_by('id'):
+                items = []
+                if t.items_sterilization: items.append('绝育')
+                if t.items_vaccine: items.append('疫苗')
+                if t.items_deworming: items.append('驱虫')
+                if t.items_chip: items.append('芯片')
+                doctor = t.sterilization_surgeon or t.operator_name or ''
+                hospital = (t.hospital.name if t.hospital_id else '') or t.hospital_name or ''
+                treatment_records.append({
+                    'ledger_no': f'TRE-{t.id:06d}',
+                    'hospital': hospital,
+                    'doctor': doctor,
+                    'items': '、'.join(items) or '—',
+                    'date': (t.sterilization_surgery_date or t.created_at.date()).isoformat() if (t.sterilization_surgery_date or t.created_at) else '',
+                    'status': t.get_status_display(),
+                })
                 if t.items_sterilization and not sterilized:
                     sterilized = True
                     sterilized_at = t.sterilization_surgery_date.isoformat() if t.sterilization_surgery_date else ''
                 if t.items_deworming:
-                    deworm_records.append({'drug': t.deworming_type or '', 'date': t.deworming_date.isoformat() if t.deworming_date else ''})
+                    deworm_records.append({'drug': t.deworming_type or '', 'date': t.deworming_date.isoformat() if t.deworming_date else '',
+                                           'hospital': hospital, 'doctor': doctor})
                 if t.items_vaccine:
-                    vaccine_records.append({'drug': t.vaccine_type or '', 'date': t.vaccine_date.isoformat() if t.vaccine_date else ''})
+                    vaccine_records.append({'drug': t.vaccine_type or '', 'date': t.vaccine_date.isoformat() if t.vaccine_date else '',
+                                            'hospital': hospital, 'doctor': doctor})
             records.append({
                 'business_type': 'pet',
                 'ledger_no': p.code,
@@ -869,10 +886,12 @@ def ledger_center(request):
                 'delivery_unit': delivery_unit,
                 'sterilized': sterilized,
                 'sterilized_at': sterilized_at,
+                'treatment_records': treatment_records,
                 'deworm_records': deworm_records,
                 'vaccine_records': vaccine_records,
                 'detail': {
                     'pet': _pet_brief(p),
+                    'treatment_records': treatment_records,
                     'deworm_records': deworm_records,
                     'vaccine_records': vaccine_records,
                 },

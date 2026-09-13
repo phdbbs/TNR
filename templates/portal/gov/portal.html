@@ -1628,9 +1628,14 @@ const GovPortal = {
         { label: '区县', value: esc(r.district_name || '—') },
         { label: '建档时间', value: TNR_UI.formatDateTime(r.date) },
       ];
-      const recTable = (records) => (!records || !records.length) ? '<div class="text-muted" style="font-size:13px;">暂无记录</div>' :
-        '<table class="data-table"><thead><tr><th>药品名</th><th>时间</th></tr></thead><tbody>' +
-        records.map(x => `<tr><td>${esc(x.drug)}</td><td>${esc(x.date)}</td></tr>`).join('') + '</tbody></table>';
+      const recTable = (records, cols = [['药品名', x => esc(x.drug)], ['时间', x => esc(x.date)], ['医院', x => esc(x.hospital)], ['医师', x => esc(x.doctor)]]) =>
+        (!records || !records.length) ? '<div class="text-muted" style="font-size:13px;">暂无记录</div>' :
+        '<table class="data-table"><thead><tr>' + cols.map(([t]) => `<th>${t}</th>`).join('') + '</tr></thead><tbody>' +
+        records.map(x => '<tr>' + cols.map(([, fn]) => `<td>${fn(x)}</td>`).join('') + '</tr>').join('') + '</tbody></table>';
+      const trtTable = (records) => (!records || !records.length) ? '<div class="text-muted" style="font-size:13px;">暂无诊疗记录</div>' :
+        '<table class="data-table"><thead><tr><th>单号</th><th>医院</th><th>医师/操作人</th><th>项目</th><th>日期</th><th>状态</th></tr></thead><tbody>' +
+        records.map(x => `<tr><td>${esc(x.ledger_no)}</td><td>${esc(x.hospital)}</td><td>${esc(x.doctor)}</td><td>${esc(x.items)}</td><td>${esc(x.date)}</td><td>${esc(x.status)}</td></tr>`).join('') + '</tbody></table>';
+      extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">诊疗记录</h4>${trtTable(d.treatment_records)}</div>`;
       extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">驱虫记录</h4>${recTable(d.deworm_records)}</div>`;
       extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">免疫记录</h4>${recTable(d.vaccine_records)}</div>`;
       if (d.pet) extraHtml += this.renderPetPhotos(d.pet, '动物照片');
