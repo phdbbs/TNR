@@ -6,6 +6,7 @@ import json
 from django.contrib.auth.decorators import login_required
 from django.utils import timezone
 from django.shortcuts import render
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
@@ -22,6 +23,7 @@ from business.services import (
 # ============================================
 # 捕捉点门户页面
 # ============================================
+@never_cache  # 门户页面禁用缓存，避免手机浏览器缓存旧版本页面
 @role_required('shelter', 'gov_city', 'gov_district')
 @login_required
 def shelter_portal(request):
@@ -47,6 +49,7 @@ def shelter_portal(request):
 # ============================================
 # 医院门户页面
 # ============================================
+@never_cache
 @role_required('hospital', 'gov_city', 'gov_district')
 @login_required
 def hospital_portal(request):
@@ -72,6 +75,7 @@ def hospital_portal(request):
 # ============================================
 # 政府监管门户页面
 # ============================================
+@never_cache
 @role_required('gov_city', 'gov_district')
 @login_required
 def gov_portal(request):
@@ -157,6 +161,7 @@ def hospital_hall_listings(request):
 # ============================================
 # 领养人门户页面
 # ============================================
+@never_cache
 @role_required('adopter', 'gov_city', 'gov_district')
 @login_required
 def adopter_portal(request):

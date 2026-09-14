@@ -18,6 +18,7 @@ urlpatterns = [
     # ============================================
     path('captures/', views_capture.capture_list, name='capture_list'),
     path('captures/codes-preview/', views_capture.pet_codes_preview, name='capture_codes_preview'),
+    path('geocode/reverse/', views_capture.geocode_reverse, name='geocode_reverse'),
     path('captures/create/', views_capture.capture_create, name='capture_create'),
     path('captures/<int:pk>/', views_capture.capture_detail, name='capture_detail'),
     path('captures/<int:pk>/owner-return/', views_capture.owner_return_create, name='owner_return_create'),

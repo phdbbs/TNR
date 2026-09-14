@@ -434,6 +434,8 @@ const Shelter = {
       { label: '小区', value: rec.communityName },
       { label: '物业名称', value: rec.propertyName },
       { label: '详细地址', value: rec.address },
+      { label: '定位地址', value: rec.geoAddress || '—' },
+      { label: '经纬度', value: (rec.latitude != null && rec.longitude != null) ? (rec.latitude + ', ' + rec.longitude) : '—' },
       { label: '交接人', value: rec.contactPerson },
       { label: '联系电话', value: rec.contactPhone },
       { label: '捕捉数量', value: rec.petCount + ' 只' },
@@ -495,7 +497,6 @@ const Shelter = {
     const el = document.getElementById('page-capture-add');
     const districts = await TNR_API.getDistricts();
     const user = TNR_API.getCurrentUser();
-    const communities = await TNR_API.getInstitutions('community');
 
     el.innerHTML = `
       <div class="card">
@@ -504,13 +505,17 @@ const Shelter = {
           <div class="form-row">
             <div class="form-group"><label class="form-label">物业名称<span class="req">*</span></label><input class="form-input" id="ca_propertyName" placeholder="如：阳光物业"></div>
             <div class="form-group"><label class="form-label">所在小区<span class="req">*</span></label>
-              <select class="form-select" id="ca_communityId">
-                ${(communities || []).map(c => '<option value="' + c.id + '" data-name="' + TNR_UI.escape(c.name) + '" data-address="' + TNR_UI.escape(c.address || '') + '">' + TNR_UI.escape(c.name) + '</option>').join('')}
-              </select>
+              <input class="form-input" id="ca_communityName" placeholder="请手动填写小区名称">
             </div>
           </div>
           <div class="form-row">
-            <div class="form-group"><label class="form-label">详细地址</label><input class="form-input" id="ca_address" placeholder="门牌号"></div>
+            <div class="form-group"><label class="form-label">详细地址</label>
+              <div class="flex gap-2 items-center">
+                <input class="form-input" id="ca_address" placeholder="点击「定位」自动填入，或手动填写门牌号">
+                <button type="button" class="btn btn-secondary btn-sm" id="btnLocate" style="white-space:nowrap;">📍 定位</button>
+              </div>
+              <div class="form-hint" id="ca_locInfo">未定位（点击"定位"获取当前地址及经纬度）</div>
+            </div>
             <div class="form-group"><label class="form-label">归属区县</label>
               <select class="form-select" id="ca_districtId">
                 ${(districts || []).map(d => '<option value="' + d.id + '"' + (d.id === user?.district_id ? ' selected' : '') + '>' + TNR_UI.escape(d.name) + '</option>').join('')}
@@ -571,11 +576,81 @@ const Shelter = {
       </div>
     `;
 
-    const commSel = document.getElementById('ca_communityId');
-    const addrInput = document.getElementById('ca_address');
-    commSel.addEventListener('change', () => {
-      const opt = commSel.options[commSel.selectedIndex];
-      if (!addrInput.value) addrInput.value = opt.dataset.address || '';
+    // ========== 定位功能 ==========
+    // 流程：浏览器 Geolocation（WGS-84）→ 转换为高德 GCJ-02 坐标 → 请求后端逆地理编码接口
+    //（/api/business/geocode/reverse/，由服务端代理调用高德API，避免跨域及Key泄露）。
+    // 高德 Key 在 .env 中配置：TNR_AMAP_KEY（见 .env.example 说明）。
+    let pendingLocation = null;
+
+    // WGS-84（GPS原始坐标）→ GCJ-02（国测局/高德坐标）纠偏，否则逆地理结果会偏移数百米
+    function wgs84ToGcj02(wgsLat, wgsLng) {
+      const a = 6378245.0, ee = 0.00669342162296594323;
+      const outOfChina = wgsLng < 72.004 || wgsLng > 137.8347 || wgsLat < 0.8293 || wgsLat > 55.8271;
+      if (outOfChina) return { lat: wgsLat, lng: wgsLng };
+      const transformLat = (x, y) => {
+        let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+        ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+        ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+        ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+        return ret;
+      };
+      const transformLng = (x, y) => {
+        let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+        ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+        ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+        ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+        return ret;
+      };
+      let dLat = transformLat(wgsLng - 105.0, wgsLat - 35.0);
+      let dLng = transformLng(wgsLng - 105.0, wgsLat - 35.0);
+      const radLat = wgsLat / 180.0 * Math.PI;
+      let magic = Math.sin(radLat);
+      magic = 1 - ee * magic * magic;
+      const sqrtMagic = Math.sqrt(magic);
+      dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+      dLng = (dLng * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+      return { lat: wgsLat + dLat, lng: wgsLng + dLng };
+    }
+
+    // 调用后端逆地理编码接口（服务端持有高德Key并转发请求）
+    async function reverseGeocode(lat, lng) {
+      const res = await fetch('/api/business/geocode/reverse/?lat=' + lat + '&lng=' + lng, { credentials: 'same-origin' });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.message || '地址解析失败');
+      return json.data || {};
+    }
+
+    document.getElementById('btnLocate').addEventListener('click', () => {
+      if (!navigator.geolocation) { TNR_UI.toast('当前浏览器不支持定位', 'warning'); return; }
+      const locBtn = document.getElementById('btnLocate');
+      const locInfo = document.getElementById('ca_locInfo');
+      locBtn.disabled = true;
+      locInfo.textContent = '定位中…';
+      navigator.geolocation.getCurrentPosition(async (pos) => {
+        const wgs = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        const gcj = wgs84ToGcj02(wgs.lat, wgs.lng);
+        const lat = +gcj.lat.toFixed(6), lng = +gcj.lng.toFixed(6);
+        pendingLocation = { latitude: lat, longitude: lng, geoAddress: '' };
+        try {
+          const info = await reverseGeocode(lat, lng);
+          const addr = (info.address || '').trim();
+          if (addr) {
+            pendingLocation.geoAddress = addr;
+            const addrInput = document.getElementById('ca_address');
+            if (!addrInput.value.trim()) addrInput.value = addr;
+            locInfo.textContent = addr + '（' + lat + ', ' + lng + '）';
+          } else {
+            locInfo.textContent = '已获取经纬度：' + lat + ', ' + lng + '（未能解析地址名称，请手动填写）';
+          }
+        } catch (e) {
+          locInfo.textContent = '已获取经纬度：' + lat + ', ' + lng + '（地址解析失败：' + (e.message || '未知错误') + '）';
+        }
+        locBtn.disabled = false;
+      }, (err) => {
+        pendingLocation = null;
+        locInfo.textContent = '定位失败：' + (err.message || '请允许浏览器获取定位权限（需 HTTPS 或 localhost）');
+        locBtn.disabled = false;
+      }, { enableHighAccuracy: true, timeout: 15000 });
     });
 
     document.getElementById('btnGenCodes').addEventListener('click', async () => {
@@ -599,19 +674,22 @@ const Shelter = {
       if (!propertyName) { TNR_UI.toast('请填写物业名称', 'warning'); return; }
       if (!contactPerson) { TNR_UI.toast('请填写物业交接人', 'warning'); return; }
       if (!contactPhone) { TNR_UI.toast('请填写联系电话', 'warning'); return; }
+      const communityName = document.getElementById('ca_communityName').value.trim();
+      if (!communityName) { TNR_UI.toast('请填写所在小区', 'warning'); return; }
       if (!this._pendingCodes || this._pendingCodes.length === 0) { TNR_UI.toast('请先生成宠物编号', 'warning'); return; }
       if (sigPad.isEmpty()) { TNR_UI.toast('请完成物业电子签名', 'warning'); return; }
 
       const user = TNR_API.getCurrentUser();
-      const cId = document.getElementById('ca_communityId').value;
-      const comm = (communities || []).find(c => c.id === cId);
 
       const payload = {
         district_id: document.getElementById('ca_districtId').value,
         shelter_id: user?.institution_id,
-        community_id: cId,
-        community_name: comm ? comm.name : '',
+        community_id: null,
+        community_name: communityName,
         address: document.getElementById('ca_address').value.trim(),
+        latitude: pendingLocation ? pendingLocation.latitude : null,
+        longitude: pendingLocation ? pendingLocation.longitude : null,
+        geo_address: pendingLocation ? (pendingLocation.geoAddress || '') : '',
         property_name: propertyName,
         contact_person: contactPerson,
         contact_phone: contactPhone,
@@ -635,6 +713,8 @@ const Shelter = {
       document.getElementById('ca_petCount').value = 1;
       document.getElementById('ca_petCodes').innerHTML = '<span class="text-light fs-sm">点击"生成编号"按钮</span>';
       document.getElementById('ca_petPhotos').innerHTML = '';
+      document.getElementById('ca_locInfo').textContent = '未定位（点击"定位"获取当前地址及经纬度）';
+      pendingLocation = null;
       sigPad.clear();
       this._pendingCodes = null;
     });

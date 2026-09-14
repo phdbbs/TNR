@@ -3,8 +3,11 @@ TNR 业务系统 - 共享服务层
 提供编号生成、芯片管理、库存调整、黑名单检查、区县过滤等通用功能。
 """
 import json
+import os
 import random
 import re
+import urllib.parse
+import urllib.request
 from datetime import date
 
 from django.db.models import Sum
@@ -36,6 +39,45 @@ def parse_json_body(request):
         return json.loads(request.body)
     except (json.JSONDecodeError, ValueError, TypeError):
         return {}
+
+
+# ============================================
+# 地图服务（高德逆地理编码）
+# ============================================
+def amap_regeo(lng, lat):
+    """高德逆地理编码：经纬度（GCJ-02）→ 地址名称。
+
+    Key 从环境变量 TNR_AMAP_KEY 读取（.env 中配置，见 .env.example）。
+    此接口必须在服务端调用：浏览器直连 restapi.amap.com 存在跨域（CORS）限制，
+    且 Key 不应暴露到前端。
+
+    成功返回 dict（address/province/city/district），失败抛 ValueError（中文错误信息）。
+    """
+    key = os.environ.get('TNR_AMAP_KEY', '').strip()
+    if not key:
+        raise ValueError('未配置地图服务Key，请在 .env 中设置 TNR_AMAP_KEY（高德开放平台申请）')
+    url = 'https://restapi.amap.com/v3/geocode/regeo?' + urllib.parse.urlencode({
+        'key': key,
+        'location': '%.6f,%.6f' % (lng, lat),  # 高德要求：经度在前，纬度在后
+        'extensions': 'base',
+    })
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'TNR-System/1.0'})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+    except Exception as e:  # 网络超时 / DNS 失败等
+        raise ValueError('地图服务请求失败：%s' % e)
+    if str(data.get('status')) != '1':
+        # status=0：常见于 Key 无效（INVALID_USER_KEY）、配额超限（DAILY_QUERY_OVER_LIMIT）等
+        raise ValueError('地图服务返回错误：%s（infocode=%s）' % (data.get('info', '未知错误'), data.get('infocode', '')))
+    regeocode = data.get('regeocode') or {}
+    component = regeocode.get('addressComponent') or {}
+    return {
+        'address': (regeocode.get('formatted_address') or '').strip(),
+        'province': component.get('province') or '',
+        'city': component.get('city') if isinstance(component.get('city'), str) else '',
+        'district': component.get('district') if isinstance(component.get('district'), str) else '',
+    }
 
 
 def serialize_instance(instance, fields=None):

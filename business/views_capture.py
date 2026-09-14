@@ -11,7 +11,7 @@ from business.models import Capture, Pet, OwnerReturn
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_pet_codes, generate_ledger_no, get_district_scope,
-    get_district_filtered_queryset, check_blacklist,
+    get_district_filtered_queryset, check_blacklist, amap_regeo,
 )
 from core.models import Institution
 
@@ -53,6 +53,33 @@ def pet_codes_preview(request):
 @csrf_exempt
 @role_required('shelter', 'gov_city', 'gov_district')
 @login_required
+def geocode_reverse(request):
+    """逆地理编码：经纬度 → 地址名称（服务端代理高德API，避免前端跨域及Key泄露）。
+
+    GET 参数：lat（纬度）、lng（经度）。前端传入的是 WGS-84（GPS）坐标，
+    由前端先转换为 GCJ-02 后再请求本接口。
+    """
+    try:
+        lat = float(request.GET.get('lat'))
+        lng = float(request.GET.get('lng'))
+    except (TypeError, ValueError):
+        return json_fail('缺少有效的经纬度参数')
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        return json_fail('经纬度超出有效范围')
+
+    try:
+        info = amap_regeo(lng, lat)
+    except ValueError as e:
+        return json_fail(str(e))
+
+    info['latitude'] = lat
+    info['longitude'] = lng
+    return json_ok(info, message='定位解析成功')
+
+
+@csrf_exempt
+@role_required('shelter', 'gov_city', 'gov_district')
+@login_required
 def capture_create(request):
     """创建捕捉登记（批量生成宠物档案）"""
     data = parse_json_body(request)
@@ -83,6 +110,13 @@ def capture_create(request):
     pet_codes = generate_pet_codes(pet_count)
 
     # 创建捕捉记录
+    # 定位信息（前端通过浏览器定位 + 高德逆地理编码获得）
+    def _to_float(v):
+        try:
+            return float(v) if v not in (None, '') else None
+        except (TypeError, ValueError):
+            return None
+
     capture = Capture.objects.create(
         district_id=district_id,
         shelter=shelter,
@@ -90,6 +124,9 @@ def capture_create(request):
         community_id=data.get('community_id') or None,
         community_name=data.get('community_name', ''),
         address=data.get('address', ''),
+        latitude=_to_float(data.get('latitude')),
+        longitude=_to_float(data.get('longitude')),
+        geo_address=data.get('geo_address', ''),
         property_name=data.get('property_name', ''),
         contact_person=data.get('contact_person', ''),
         contact_phone=data.get('contact_phone', ''),
