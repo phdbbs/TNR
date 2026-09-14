@@ -12,6 +12,7 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_pet_codes, generate_ledger_no, get_district_scope,
     get_district_filtered_queryset, check_blacklist, amap_regeo,
+    amap_ip_location,
 )
 from core.models import Institution
 
@@ -75,6 +76,42 @@ def geocode_reverse(request):
     info['latitude'] = lat
     info['longitude'] = lng
     return json_ok(info, message='定位解析成功')
+
+
+@csrf_exempt
+@role_required('shelter', 'gov_city', 'gov_district')
+@login_required
+def geocode_ip(request):
+    """IP 定位兜底（浏览器精确定位不可用时的降级方案）。
+
+    浏览器 Geolocation 仅允许在 HTTPS 或 localhost（安全源）下使用，
+    通过 http://局域网IP:8000 访问时前端定位报错
+    "Only secure origins are allowed"。手机与服务器通常处于同一网络
+    （同一公网出口 IP），故由服务端调用高德 IP 定位，得到城市/区级
+    粗略位置（rectangle 中心点），再逆地理出地址名称一并返回。
+    data.precision = 'city' 标识粗定位，前端应提示用户核对详细地址。
+    """
+    try:
+        loc = amap_ip_location()
+    except ValueError as e:
+        return json_fail(str(e))
+    lat = loc.pop('latitude')
+    lng = loc.pop('longitude')
+
+    try:
+        info = amap_regeo(lng, lat)
+    except ValueError as e:
+        # IP 定位成功但逆地理失败：仍返回坐标，地址留空由用户手填
+        return json_ok({
+            'address': '', 'province': loc.get('province', ''),
+            'city': loc.get('city', ''), 'district': '',
+            'latitude': lat, 'longitude': lng, 'precision': 'city',
+        }, message='已获取大致位置坐标，但地址解析失败：%s' % e)
+
+    info['latitude'] = lat
+    info['longitude'] = lng
+    info['precision'] = 'city'
+    return json_ok(info, message='IP定位成功（城市/区级精度，请核对并完善详细地址）')
 
 
 @csrf_exempt

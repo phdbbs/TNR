@@ -1,6 +1,8 @@
 """服务层单元测试：编号生成、芯片管理、库存、黑名单、区县隔离、序列化。"""
+import json as json_lib
 import re
 from datetime import date
+from unittest import mock
 
 from django.test import TestCase
 
@@ -8,7 +10,7 @@ from business.models import Material, MaterialTransaction, Pet
 from business.services import (
     check_blacklist, generate_ledger_no, generate_pet_codes,
     get_district_filtered_queryset, get_hospital_stock, serialize_instance,
-    adjust_stock, use_chip,
+    adjust_stock, use_chip, amap_ip_location,
 )
 from business.tests.base import (
     BusinessTestBase, make_chip, make_district, make_hospital_txn,
@@ -213,3 +215,52 @@ class SerializeInstanceTest(TestCase):
 
     def test_none_instance(self):
         self.assertIsNone(serialize_instance(None))
+
+
+class AmapIpLocationTest(TestCase):
+    """amap_ip_location：高德 IP 定位（rectangle 取中心点）+ 中文错误信息。"""
+
+    @mock.patch.dict('os.environ', {'TNR_AMAP_KEY': 'test-key'})
+    @mock.patch('business.services.urllib.request.urlopen')
+    def test_rectangle_center_success(self, m_open):
+        resp = mock.Mock()
+        resp.read.return_value = json_lib.dumps({
+            'status': '1', 'info': 'OK', 'province': '浙江省', 'city': '杭州市',
+            'adcode': '330100', 'rectangle': '119.5,30.0;120.0,30.5',  # 高德实际用分号分隔
+        }).encode('utf-8')
+        m_open.return_value.__enter__.return_value = resp
+        out = amap_ip_location()
+        self.assertEqual(out['latitude'], 30.25)
+        self.assertEqual(out['longitude'], 119.75)
+        self.assertEqual(out['province'], '浙江省')
+        self.assertEqual(out['city'], '杭州市')
+
+    @mock.patch.dict('os.environ', {'TNR_AMAP_KEY': 'test-key'})
+    @mock.patch('business.services.urllib.request.urlopen')
+    def test_no_rectangle_raises(self, m_open):
+        resp = mock.Mock()
+        resp.read.return_value = json_lib.dumps({
+            'status': '1', 'info': 'OK', 'province': [], 'city': [], 'rectangle': '',
+        }).encode('utf-8')
+        m_open.return_value.__enter__.return_value = resp
+        with self.assertRaises(ValueError) as ctx:
+            amap_ip_location()
+        self.assertIn('未获取到有效位置范围', str(ctx.exception))
+
+    @mock.patch.dict('os.environ', {'TNR_AMAP_KEY': ''})
+    def test_missing_key_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            amap_ip_location()
+        self.assertIn('未配置地图服务Key', str(ctx.exception))
+
+    @mock.patch.dict('os.environ', {'TNR_AMAP_KEY': 'test-key'})
+    @mock.patch('business.services.urllib.request.urlopen')
+    def test_amap_error_raises_chinese_message(self, m_open):
+        resp = mock.Mock()
+        resp.read.return_value = json_lib.dumps({
+            'status': '0', 'info': 'DAILY_QUERY_OVER_LIMIT', 'infocode': '10021',
+        }).encode('utf-8')
+        m_open.return_value.__enter__.return_value = resp
+        with self.assertRaises(ValueError) as ctx:
+            amap_ip_location()
+        self.assertIn('DAILY_QUERY_OVER_LIMIT', str(ctx.exception))

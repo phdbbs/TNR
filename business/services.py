@@ -78,6 +78,57 @@ def amap_regeo(lng, lat):
         'city': component.get('city') if isinstance(component.get('city'), str) else '',
         'district': component.get('district') if isinstance(component.get('district'), str) else '',
     }
+def amap_ip_location():
+    """高德 IP 定位：按服务器出口公网 IP 粗略定位（城市/区级精度）。
+
+    使用场景：浏览器 Geolocation 仅允许在 HTTPS 或 localhost 下使用，
+    本系统常通过 http://局域网IP:8000 访问，前端 GPS 定位会被浏览器
+    拒绝（"Only secure origins are allowed"）。手机与服务器通常处于
+    同一网络（同一公网出口 IP），因此由服务端调用 IP 定位可得到
+    与手机一致的城市级位置。
+
+    成功返回 dict（province/city/adcode/latitude/longitude，
+    经纬度取城市范围 rectangle 的中心点，GCJ-02 坐标），
+    失败抛 ValueError（中文错误信息）。
+    """
+    key = os.environ.get('TNR_AMAP_KEY', '').strip()
+    if not key:
+        raise ValueError('未配置地图服务Key，请在 .env 中设置 TNR_AMAP_KEY（高德开放平台申请）')
+    url = 'https://restapi.amap.com/v3/ip?' + urllib.parse.urlencode({'key': key})
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'TNR-System/1.0'})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+    except Exception as e:  # 网络超时 / DNS 失败等
+        raise ValueError('IP定位服务请求失败：%s' % e)
+    if str(data.get('status')) != '1':
+        raise ValueError('IP定位服务返回错误：%s（infocode=%s）' % (
+            data.get('info', '未知错误'), data.get('infocode', '')))
+    province = data.get('province') or ''
+    # 直辖市/无法定位时 city 可能是空列表 []
+    city = data.get('city') if isinstance(data.get('city'), str) else ''
+    rectangle = data.get('rectangle') or ''
+    lat = lng = None
+    if rectangle:
+        # rectangle 格式："minLng,minLat;maxLng,maxLat"（高德 v3 实际用分号，
+        # 兼容部分文档示例中的波浪号 "~"），取对角线中心点
+        try:
+            corners = [p for p in re.split(r'[;~]', rectangle) if p.strip()]
+            (min_lng, min_lat) = tuple(float(v) for v in corners[0].split(','))
+            (max_lng, max_lat) = tuple(float(v) for v in corners[1].split(','))
+            lng = round((min_lng + max_lng) / 2, 6)
+            lat = round((min_lat + max_lat) / 2, 6)
+        except (ValueError, IndexError):
+            pass
+    if lat is None or lng is None:
+        raise ValueError('IP定位未获取到有效位置范围（服务器可能处于内网或运营商无法识别）')
+    return {
+        'province': province,
+        'city': city,
+        'adcode': data.get('adcode') or '',
+        'latitude': lat,
+        'longitude': lng,
+    }
 
 
 def serialize_instance(instance, fields=None):

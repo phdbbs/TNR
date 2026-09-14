@@ -1,5 +1,6 @@
 """捕捉登记与主人领回视图测试。"""
 import tempfile
+from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
@@ -234,3 +235,59 @@ class OwnerReturnListTest(BusinessTestBase):
         self.assertEqual(len(data), 1)
         data = self.ok(self.get_json('/api/business/owner-returns/?keyword=王找找'))['data']
         self.assertEqual([r['id'] for r in data], [record.id])
+
+
+GEOCODE_IP_URL = '/api/business/geocode/ip/'
+
+
+class GeocodeIpTest(BusinessTestBase):
+    """IP 定位兜底接口：浏览器在 HTTP 非安全源下精确定位不可用时的降级。"""
+
+    def test_anonymous_gets_401(self):
+        self.expect_fail(self.get_json(GEOCODE_IP_URL), status=401, message='请先登录')
+
+    def test_adopter_gets_403(self):
+        self.login_as(self.adopter)
+        self.expect_fail(self.get_json(GEOCODE_IP_URL), status=403, message='无权访问该接口')
+
+    @mock.patch('business.views_capture.amap_regeo')
+    @mock.patch('business.views_capture.amap_ip_location')
+    def test_success_returns_city_precision(self, m_ip, m_regeo):
+        m_ip.return_value = {
+            'province': '浙江省', 'city': '杭州市', 'adcode': '330100',
+            'latitude': 30.25, 'longitude': 119.75,
+        }
+        m_regeo.return_value = {
+            'address': '浙江省杭州市余杭区', 'province': '浙江省',
+            'city': '杭州市', 'district': '余杭区',
+        }
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.get_json(GEOCODE_IP_URL))
+        self.assertEqual(body['data']['precision'], 'city')
+        self.assertEqual(body['data']['latitude'], 30.25)
+        self.assertEqual(body['data']['longitude'], 119.75)
+        self.assertEqual(body['data']['address'], '浙江省杭州市余杭区')
+        self.assertEqual(body['data']['district'], '余杭区')
+        m_regeo.assert_called_once_with(119.75, 30.25)
+
+    @mock.patch('business.views_capture.amap_ip_location',
+                side_effect=ValueError('IP定位服务返回错误：DAILY_QUERY_OVER_LIMIT'))
+    def test_ip_location_fail_returns_400(self, m_ip):
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.get_json(GEOCODE_IP_URL), status=400,
+                         message='IP定位服务返回错误：DAILY_QUERY_OVER_LIMIT')
+
+    @mock.patch('business.views_capture.amap_ip_location')
+    @mock.patch('business.views_capture.amap_regeo',
+                side_effect=ValueError('地图服务请求失败：超时'))
+    def test_regeo_fail_still_returns_coordinates(self, m_regeo, m_ip):
+        m_ip.return_value = {
+            'province': '浙江省', 'city': '杭州市', 'adcode': '330100',
+            'latitude': 30.25, 'longitude': 119.75,
+        }
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.get_json(GEOCODE_IP_URL))
+        self.assertEqual(body['data']['latitude'], 30.25)
+        self.assertEqual(body['data']['longitude'], 119.75)
+        self.assertEqual(body['data']['address'], '')
+        self.assertEqual(body['data']['precision'], 'city')

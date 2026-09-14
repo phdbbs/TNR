@@ -781,8 +781,25 @@ const Shelter = {
       }
     }
 
+    // IP 定位兜底：浏览器 Geolocation 仅在 HTTPS/localhost 可用，
+    // HTTP 局域网环境下报 "Only secure origins are allowed"，降级为城市/区级粗定位
+    async function ipLocate() {
+      const res = await fetch('/api/business/geocode/ip/', { credentials: 'same-origin' });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.message || 'IP定位失败');
+      return json.data || {};
+    }
+
+    // 应用定位结果：写入 pendingLocation，地址栏为空时自动填入
+    function applyLocation(lat, lng, geoAddress, tip) {
+      pendingLocation = { latitude: lat, longitude: lng, geoAddress: geoAddress || '' };
+      const addrInput = document.getElementById('ca_address');
+      if ((geoAddress || '').trim() && !addrInput.value.trim()) addrInput.value = geoAddress.trim();
+      document.getElementById('ca_locInfo').textContent = tip;
+    }
+
     document.getElementById('btnLocate').addEventListener('click', () => {
-      if (!navigator.geolocation) { TNR_UI.toast('当前浏览器不支持定位', 'warning'); return; }
+      if (!navigator.geolocation) { TNR_UI.toast('当前浏览器不支持定位，尝试IP定位', 'warning'); fallbackToIpLocate('当前浏览器不支持GPS定位'); return; }
       const locBtn = document.getElementById('btnLocate');
       const locInfo = document.getElementById('ca_locInfo');
       locBtn.disabled = true;
@@ -791,28 +808,51 @@ const Shelter = {
         const wgs = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         const gcj = wgs84ToGcj02(wgs.lat, wgs.lng);
         const lat = +gcj.lat.toFixed(6), lng = +gcj.lng.toFixed(6);
-        pendingLocation = { latitude: lat, longitude: lng, geoAddress: '' };
         try {
           const info = await reverseGeocode(lat, lng);
           const addr = (info.address || '').trim();
-          if (addr) {
-            pendingLocation.geoAddress = addr;
-            const addrInput = document.getElementById('ca_address');
-            if (!addrInput.value.trim()) addrInput.value = addr;
-            locInfo.textContent = addr + '（' + lat + ', ' + lng + '）';
-          } else {
-            locInfo.textContent = '已获取经纬度：' + lat + ', ' + lng + '（未能解析地址名称，请手动填写）';
-          }
+          applyLocation(lat, lng, addr,
+            addr ? addr + '（' + lat + ', ' + lng + '）'
+                 : '已获取经纬度：' + lat + ', ' + lng + '（未能解析地址名称，请手动填写）');
         } catch (e) {
+          pendingLocation = { latitude: lat, longitude: lng, geoAddress: '' };
           locInfo.textContent = '已获取经纬度：' + lat + ', ' + lng + '（地址解析失败：' + (e.message || '未知错误') + '）';
         }
         locBtn.disabled = false;
-      }, (err) => {
-        pendingLocation = null;
-        locInfo.textContent = '定位失败：' + (err.message || '请允许浏览器获取定位权限（需 HTTPS 或 localhost）');
+      }, async (err) => {
+        // 精确定位失败（HTTP 环境被浏览器拦截 / 拒绝授权 / 超时）→ IP 粗定位兜底
+        const reason = err && err.message ? err.message : '请允许浏览器获取定位权限';
+        try {
+          const info = await ipLocate();
+          const addr = (info.address || '').trim();
+          applyLocation(info.latitude, info.longitude, addr,
+            '浏览器精确定位不可用（' + reason + '），已按网络位置定位到：' + (addr || info.city || info.province || '未知城市')
+            + '（' + info.latitude + ', ' + info.longitude + '，城市/区级精度，请核对详细地址）');
+        } catch (e2) {
+          pendingLocation = null;
+          locInfo.textContent = '定位失败：' + reason + '；IP定位也不可用（' + (e2.message || '未知错误') + '）';
+        }
         locBtn.disabled = false;
       }, { enableHighAccuracy: true, timeout: 15000 });
     });
+
+    async function fallbackToIpLocate(reason) {
+      const locBtn = document.getElementById('btnLocate');
+      const locInfo = document.getElementById('ca_locInfo');
+      locBtn.disabled = true;
+      locInfo.textContent = 'IP定位中…';
+      try {
+        const info = await ipLocate();
+        const addr = (info.address || '').trim();
+        applyLocation(info.latitude, info.longitude, addr,
+          '已按网络位置定位到：' + (addr || info.city || info.province || '未知城市')
+          + '（' + info.latitude + ', ' + info.longitude + '，城市/区级精度，请核对详细地址）');
+      } catch (e) {
+        pendingLocation = null;
+        locInfo.textContent = 'IP定位失败：' + (e.message || '未知错误');
+      }
+      locBtn.disabled = false;
+    }
 
     // 生成编号
     document.getElementById('btnGenCodes').addEventListener('click', () => {
