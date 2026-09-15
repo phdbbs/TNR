@@ -400,7 +400,7 @@ const Shelter = {
         { title: '数量', key: 'petCount', render: r => '<span class="badge badge-info">' + r.petCount + '</span>' },
         { title: '宠物编号', render: r => (r.petCodes || []).map(c => '<span class="pet-code-chip">' + c + '</span>').join('') },
         { title: '状态', render: r => this.statusBadge(r.status) },
-        { title: '时间', key: 'createdAt' }
+        { title: '时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
       const rowActions = (r) => {
         let html = '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
@@ -784,7 +784,7 @@ const Shelter = {
         { title: '主人姓名', key: 'ownerName' },
         { title: '联系电话', key: 'ownerPhone' },
         { title: '状态', render: r => TNR_UI.statusBadge('已领回', 'default') },
-        { title: '时间', key: 'createdAt' }
+        { title: '时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
       TNR_UI.mountTable('returnTableWrap', { id: 'shelter.ownerReturns', title: '主人领回记录', columns, data: filtered, emptyText: '暂无主人领回记录', rowActions });
@@ -1365,7 +1365,7 @@ const Shelter = {
         { title: '接收人', key: 'receiverName', render: r => TNR_UI.escape(r.receiverName || r.receiver_name || '—') },
         { title: '联系电话', key: 'receiverPhone', render: r => TNR_UI.escape(r.receiverPhone || r.receiver_phone || '—') },
         { title: '状态', render: r => TNR_UI.statusBadge('已放养', 'success') },
-        { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.escape(r.releasedAt || r.released_at || '—') }
+        { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt || r.released_at) }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
       TNR_UI.mountTable(wrap, { id: 'shelter.release.released', title: '放养记录', columns, data: released, emptyText: '暂无放养记录', rowActions });
@@ -1380,7 +1380,7 @@ const Shelter = {
               { label: '放养小区', value: rec.communityName || rec.community_name || '—' },
               { label: '接收人', value: rec.receiverName || rec.receiver_name || '—' },
               { label: '联系电话', value: rec.receiverPhone || rec.receiver_phone || '—' },
-              { label: '放养时间', value: rec.releasedAt || rec.released_at },
+              { label: '放养时间', value: TNR_UI.formatDateTime(rec.releasedAt || rec.released_at) },
               { label: '备注', value: rec.note || '—', full: true },
               { label: '操作员', value: rec.operatorName || rec.operator_name }
             ]) });
@@ -1569,7 +1569,7 @@ const Shelter = {
         { title: '联系电话', key: 'adopterPhone' },
         { title: '资质', key: 'qualification' },
         { title: '状态', render: r => this.statusBadge(r.status || 'completed') },
-        { title: '领养时间', key: 'adoptedAt' }
+        { title: '领养时间', key: 'adoptedAt', render: r => TNR_UI.formatDateTime(r.adoptedAt) }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
       TNR_UI.mountTable('adoptionTableWrap', { id: 'shelter.adoption', title: '领养记录', columns, data: list, emptyText: '暂无领养记录', rowActions });
@@ -1587,7 +1587,7 @@ const Shelter = {
               { label: '地址', value: rec.adopterAddress || '—' },
               { label: '资质', value: rec.qualification, full: true },
               { label: '状态', value: this.statusBadge(rec.status || 'completed') },
-              { label: '领养时间', value: rec.adoptedAt || '—' }
+              { label: '领养时间', value: TNR_UI.formatDateTime(rec.adoptedAt) }
             ]) });
           }
         });
@@ -1664,7 +1664,7 @@ const Shelter = {
         { title: '打卡月份', key: 'month' },
         { title: '近况说明', key: 'note' },
         { title: '状态', render: r => r.status === 'approved' ? TNR_UI.statusBadge('已通过', 'success') : (r.status === 'rejected' ? TNR_UI.statusBadge('未通过', 'danger') : TNR_UI.statusBadge('待审核', 'warning')) },
-        { title: '提交时间', key: 'createdAt' }
+        { title: '提交时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
       const rowActions = (r) => {
         if (r.status === 'pending') return '<button class="btn-link success" data-act="approve" data-id="' + r.id + '">通过</button><button class="btn-link danger" data-act="reject" data-id="' + r.id + '">驳回</button>';
@@ -1747,7 +1747,7 @@ const Shelter = {
         { title: '拉黑原因', key: 'reason' },
         { title: '违规日期', key: 'violationDate' },
         { title: '操作员', key: 'operatorName' },
-        { title: '登记时间', key: 'createdAt' }
+        { title: '登记时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="edit" data-id="' + r.id + '">编辑</button><button class="btn-link danger" data-act="del" data-id="' + r.id + '">删除</button>';
       TNR_UI.mountTable('blackTableWrap', { id: 'shelter.blacklist', title: '黑名单', columns, data: list, emptyText: '暂无黑名单记录', rowActions });
@@ -1890,7 +1890,7 @@ const Shelter = {
         { title: '处置医院', key: 'hospitalName' },
         { title: '原因', key: 'reason' },
         { title: '病情', key: 'condition' },
-        { title: '处置时间', key: 'euthanizedAt' },
+        { title: '处置时间', key: 'euthanizedAt', render: r => TNR_UI.formatDateTime(r.euthanizedAt) },
         { title: '操作', render: r => '<button class="btn btn-primary btn-sm" data-receive="' + r.id + '">接收备案</button>' }
       ];
       html += '<div data-mt="shelter.euth.bodyReceived"></div>';
@@ -1900,8 +1900,8 @@ const Shelter = {
         { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + r.petCode + '</span>' },
         { title: '处置医院', key: 'hospitalName' },
         { title: '原因', key: 'reason' },
-        { title: '处置时间', key: 'euthanizedAt' },
-        { title: '接收时间', key: 'bodyReceivedAt' },
+        { title: '处置时间', key: 'euthanizedAt', render: r => TNR_UI.formatDateTime(r.euthanizedAt) },
+        { title: '接收时间', key: 'bodyReceivedAt', render: r => TNR_UI.formatDateTime(r.bodyReceivedAt) },
         { title: '接收人', key: 'bodyReceivedByName' }
       ];
       wrap.innerHTML = html;
@@ -1944,7 +1944,7 @@ const Shelter = {
           { title: '处置医院', key: 'hospitalName' },
           { title: '原因', key: 'reason' },
           { title: '病情', key: 'condition' },
-          { title: '处置时间', key: 'euthanizedAt' },
+          { title: '处置时间', key: 'euthanizedAt', render: r => TNR_UI.formatDateTime(r.euthanizedAt) },
           { title: '尸体状态', render: r => r.bodyReceived ? TNR_UI.statusBadge('已接收', 'success') : TNR_UI.statusBadge('待接收', 'warning') },
           { title: '操作', render: r => '<button class="btn-link" data-view="' + r.id + '">详情</button>' }
         ];
@@ -2019,7 +2019,7 @@ const Shelter = {
         { title: '数量', key: 'petCount' },
         { title: '状态', render: r => this.statusBadge(r.status) },
         { title: '操作员', key: 'operatorName' },
-        { title: '登记时间', key: 'createdAt' }
+        { title: '登记时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
     } else if (tab === 'transfers') {
       title = '转运台账';
@@ -2043,7 +2043,7 @@ const Shelter = {
         { title: '驱虫', render: r => r.items && r.items.deworming ? TNR_UI.statusBadge('已驱虫', 'success') : '—' },
         { title: '芯片', render: r => r.chip ? '<span class="chip-display">' + TNR_UI.escape(r.chip.chipNo || '') + '</span>' : '—' },
         { title: '状态', render: r => this.statusBadge(r.status) },
-        { title: '时间', key: 'createdAt' }
+        { title: '时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
     } else if (tab === 'releases') {
       title = '放养台账';
@@ -2054,7 +2054,7 @@ const Shelter = {
         { title: '放养小区', key: 'communityName' },
         { title: '接收人', key: 'receiverName' },
         { title: '状态', render: r => TNR_UI.statusBadge('已放养', 'success') },
-        { title: '放养时间', key: 'releasedAt' }
+        { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt) }
       ];
     } else if (tab === 'adoptions') {
       title = '领养台账';
@@ -2066,7 +2066,7 @@ const Shelter = {
         { title: '电话', key: 'adopterPhone' },
         { title: '医院', key: 'hospitalName' },
         { title: '状态', render: r => this.statusBadge(r.status || 'completed') },
-        { title: '领养时间', key: 'adoptedAt' }
+        { title: '领养时间', key: 'adoptedAt', render: r => TNR_UI.formatDateTime(r.adoptedAt) }
       ];
     } else if (tab === 'materials') {
       title = '物料台账';
