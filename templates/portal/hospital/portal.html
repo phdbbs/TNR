@@ -164,7 +164,7 @@ const Hospital = {
   escape(s) { return TNR_UI.escape(s); },
 
   transferStatusBadge(s) {
-    const m = {'pending': ['待接收', 'badge-warning'], 'received': ['已接收', 'badge-success'], 'rejected': ['已驳回', 'badge-danger']};
+    const m = {'pending': ['待接收', 'badge-warning'], 'received': ['已接收', 'badge-success'], 'rejected': ['已驳回', 'badge-danger'], 'void': ['已撤回', 'badge-default']};
     const v = m[s] || [s, 'badge-default'];
     return '<span class="badge ' + v[1] + '">' + v[0] + '</span>';
   },
@@ -285,11 +285,13 @@ const Hospital = {
       const pend = transfers.filter(t => t.status === 'pending').length;
       const recv = transfers.filter(t => t.status === 'received').length;
       const rej = transfers.filter(t => t.status === 'rejected').length;
+      const vd = transfers.filter(t => t.status === 'void').length;
 
       let html = '<div class="tabs">' +
         '<div class="tab-item ' + (this.state.receiveTab === 'pending' ? 'active' : '') + '" data-rtab="pending">待接收 (' + pend + ')</div>' +
         '<div class="tab-item ' + (this.state.receiveTab === 'received' ? 'active' : '') + '" data-rtab="received">已接收 (' + recv + ')</div>' +
         '<div class="tab-item ' + (this.state.receiveTab === 'rejected' ? 'active' : '') + '" data-rtab="rejected">已驳回 (' + rej + ')</div>' +
+        '<div class="tab-item ' + (this.state.receiveTab === 'void' ? 'active' : '') + '" data-rtab="void">已撤回 (' + vd + ')</div>' +
         '</div><div id="receiveTabContent"></div>';
 
       document.getElementById('page-receive').innerHTML = html;
@@ -297,8 +299,8 @@ const Hospital = {
       document.querySelectorAll('#page-receive [data-rtab]').forEach(el => {
         el.addEventListener('click', () => {
           this.state.receiveTab = el.dataset.rtab;
-          document.querySelectorAll('#page-receive .tab-item').forEach((t, i) => {
-            t.classList.toggle('active', ['pending','received','rejected'][i] === this.state.receiveTab);
+          document.querySelectorAll('#page-receive .tab-item').forEach(t => {
+            t.classList.toggle('active', t.dataset.rtab === this.state.receiveTab);
           });
           this.renderReceiveTab(transfers);
         });
@@ -316,7 +318,7 @@ const Hospital = {
     if (!c) return;
 
     if (transfers.length === 0) {
-      const labels = {pending: '待接收', received: '已接收', rejected: '已驳回'};
+      const labels = {pending: '待接收', received: '已接收', rejected: '已驳回', void: '已撤回'};
       c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div><div class="empty-state-text">暂无数据</div><div class="empty-state-desc">暂无' + (labels[this.state.receiveTab] || '') + '的交接单</div></div>';
       return;
     }
@@ -337,6 +339,8 @@ const Hospital = {
         actions = '<button class="btn btn-success btn-sm" data-receive="' + t.id + '">确认签收</button><button class="btn btn-danger btn-sm" data-reject="' + t.id + '">驳回</button>';
       } else if (t.status === 'rejected') {
         actions = '<button class="btn btn-secondary btn-sm" data-view-reject="' + t.id + '">查看驳回理由</button>';
+      } else if (t.status === 'void') {
+        actions = '<span style="font-size:var(--fs-sm);color:var(--ink-muted);">捕捉点已撤回</span>';
       }
 
       return {

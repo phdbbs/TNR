@@ -851,7 +851,7 @@ async function renderHall() {
             <div class="pet-card-photo photo-placeholder ${photoClass}">${emoji}</div>
             <div class="pet-card-info">
               <div class="pet-card-name">
-                ${TNR_UI.escape(pet.name || '未命名')}
+                ${TNR_UI.escape(pet.code || '')}
                 <span class="badge badge-cinnabar">待领养</span>
               </div>
               <div class="pet-card-code">${TNR_UI.escape(pet.code || '')}</div>
@@ -1044,7 +1044,7 @@ function openApplyForm(listingId) {
     <div class="detail-section">
       <div class="detail-section-title">申请领养</div>
       <div style="font-size:13px;color:var(--ink-muted);margin-bottom:12px;">
-        宠物：${TNR_UI.escape(activeApplyPet.petName || '未命名')}（${TNR_UI.escape(activeApplyPet.petCode || '')}）
+        宠物：${TNR_UI.escape(activeApplyPet.petCode || '')}
       </div>
       <div class="form-group">
         <label class="form-label">姓名 *</label>
@@ -1131,7 +1131,7 @@ async function renderMyAdoption() {
     } else {
       applications.forEach(app => {
         const pet = app.pet;
-        const petName = pet ? (pet.name || '未命名') : '';
+        const petName = pet ? pet.code : '';
         const petCode = pet ? pet.code : (app.pet_code || '');
         const statusBadge = getApplyStatusBadge(app.status);
         const appliedAt = app.applied_at ? app.applied_at.substring(0, 10) : '—';
@@ -1181,7 +1181,7 @@ async function renderMyAdoption() {
           <div class="adoption-card-header">
             <div class="pet-card-photo photo-placeholder ${photoClass}">${emoji}</div>
             <div class="pet-card-info">
-              <div class="pet-card-name">${TNR_UI.escape(pet.name || '未命名')} <span class="badge badge-success">已领养</span></div>
+              <div class="pet-card-name">${TNR_UI.escape(pet.code || '')} <span class="badge badge-success">已领养</span></div>
               <div class="pet-card-code">${TNR_UI.escape(pet.code || '')}</div>
               <div class="pet-card-meta">
                 <span class="pet-card-meta-item">${TNR_UI.escape(pet.species || '')} · ${TNR_UI.escape(pet.breed || '')}</span>
@@ -1233,7 +1233,7 @@ async function showLifecycle(adoptionId) {
   // 宠物概要
   html += '<div class="detail-section" style="text-align:center;">';
   html += `<div class="pet-card-photo photo-placeholder ${photoClass}" style="width:80px;height:80px;margin:0 auto 12px;font-size:40px;">${emoji}</div>`;
-  html += `<div style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--ink);">${TNR_UI.escape(pet.name || '未命名')}</div>`;
+  html += `<div style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--ink);">${TNR_UI.escape(pet.code || '')}</div>`;
   html += `<div style="font-size:12px;color:var(--ink-light);font-family:var(--font-mono);margin-top:4px;">${TNR_UI.escape(pet.code || '')}</div>`;
   html += `<div style="margin-top:8px;">${TNR_UI.statusBadge(TNR_API.getPetStatusText(pet.status), TNR_API.getPetStatusBadge(pet.status).replace('badge-',''))}</div>`;
   html += '</div>';
@@ -1259,7 +1259,7 @@ async function showLifecycle(adoptionId) {
       if (ev.type === 'capture') {
         desc = `捕捉点：${TNR_UI.escape(ev.shelter_name || '—')}<br>小区：${TNR_UI.escape(ev.community_name || '—')}<br>地址：${TNR_UI.escape(ev.address || '—')}`;
       } else if (ev.type === 'transfer') {
-        desc = `发出：${TNR_UI.escape(ev.from_shelter_name || '—')}<br>接收：${TNR_UI.escape(ev.to_hospital_name || '—')}<br>状态：${TNR_UI.escape(ev.status === 'received' ? '已签收' : (ev.status === 'rejected' ? '已驳回' : '待签收'))}`;
+        desc = `发出：${TNR_UI.escape(ev.from_shelter_name || '—')}<br>接收：${TNR_UI.escape(ev.to_hospital_name || '—')}<br>状态：${TNR_UI.escape({ received: '已签收', rejected: '已驳回', void: '已撤回' }[ev.status] || '待签收')}`;
       } else if (ev.type === 'treatment') {
         desc = `医院：${TNR_UI.escape(ev.hospital_name || '—')}<br>项目：${TNR_UI.escape((ev.items || []).join('、') || '—')}<br>状态：${TNR_UI.escape(ev.status === 'completed' ? '已完成' : '进行中')}`;
         if (ev.chip_no) desc += `<br>芯片号：${TNR_UI.escape(ev.chip_no)}`;
@@ -1328,7 +1328,7 @@ async function renderCheckin() {
       pendingPets.forEach(adoption => {
         const pet = adoption.pet;
         if (!pet) return;
-        html += `<span class="pending-month-tag">⏰ ${TNR_UI.escape(pet.name || '未命名')} - ${currentMonth}</span>`;
+        html += `<span class="pending-month-tag">⏰ ${TNR_UI.escape(pet.code || '')} - ${currentMonth}</span>`;
       });
       html += '</div>';
     }
@@ -1346,7 +1346,7 @@ async function renderCheckin() {
       if (!pet) return;
       const active = (idx === 0) ? ' active' : '';
       const petId = pet.id || adoption.pet;
-      html += `<div class="checkin-pet-item${active}" data-pet-id="${petId}" onclick="selectCheckinPet('${petId}', this)">${TNR_UI.escape(pet.name || '未命名')} · ${TNR_UI.escape(pet.code || '')}</div>`;
+      html += `<div class="checkin-pet-item${active}" data-pet-id="${petId}" onclick="selectCheckinPet('${petId}', this)">${TNR_UI.escape(pet.code || '')}</div>`;
     });
     html += '</div>';
 

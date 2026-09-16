@@ -35,6 +35,7 @@ urlpatterns = [
     path('transfers/<int:pk>/receive/', views_transfer.transfer_receive, name='transfer_receive'),
     path('transfers/<int:pk>/reject/', views_transfer.transfer_reject, name='transfer_reject'),
     path('transfers/<int:pk>/resend/', views_transfer.transfer_resend, name='transfer_resend'),
+    path('transfers/<int:pk>/withdraw/', views_transfer.transfer_withdraw, name='transfer_withdraw'),
 
     # ============================================
     # Task 6: 诊疗与物料库存联动

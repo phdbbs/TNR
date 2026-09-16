@@ -3,6 +3,8 @@ Task 4: 捕捉登记与主人领回
 - 捕捉登记列表/详情/创建/编辑/逻辑删除
 - 主人领回登记
 """
+from datetime import datetime
+
 from django.contrib.auth.decorators import login_required
 from django.db.models import Q
 from django.utils import timezone
@@ -32,6 +34,32 @@ def _to_float(v):
         return float(v) if v not in (None, '') else None
     except (TypeError, ValueError):
         return None
+
+
+def _parse_return_time(v):
+    """解析回收时间：支持 ISO 串与 ``datetime-local`` 的 ``YYYY-MM-DDTHH:MM``。
+
+    前端 ``<input type="datetime-local">`` 提交的是不带时区的本地时间，
+    必须补上时区信息再入库（本项目 ``USE_TZ=True``），否则会触发
+    ``RuntimeWarning: received a naive datetime``。空值/非法值返回 None。
+    """
+    if not v:
+        return None
+    if hasattr(v, 'tzinfo'):  # 已是 datetime 对象
+        return v if timezone.is_aware(v) else timezone.make_aware(v)
+    text = str(v).strip()
+    if not text:
+        return None
+    parsed = None
+    for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        return None
+    return parsed if timezone.is_aware(parsed) else timezone.make_aware(parsed)
 
 
 def _get_capture_for_user(pk, user):
@@ -406,6 +434,15 @@ def capture_update(request, pk):
     if 'district_id' in changed:
         Pet.objects.filter(capture=capture).update(district_id=capture.district_id)
 
+    # 单只照片更新：按 pet_photo_<pet_id> 匹配
+    for key, f in request.FILES.items():
+        if key.startswith('pet_photo_'):
+            pet_id = key[len('pet_photo_'):]
+            pet = Pet.objects.filter(id=pet_id, capture=capture).first()
+            if pet:
+                pet.photo_capture = f
+                pet.save(update_fields=['photo_capture'])
+
     result = serialize_instance(capture)
     result['transferState'] = state
     return json_ok(result, message='捕捉记录已更新')
@@ -530,6 +567,8 @@ def owner_return_create(request, pk=None):
         owner_name=owner_name,
         owner_phone=owner_phone,
         owner_id_card=owner_id_card,
+        owner_address=data.get('owner_address', '').strip(),
+        return_time=_parse_return_time(data.get('return_time')),
         reason=data.get('reason', ''),
         signature=data.get('signature', ''),
         operator=request.user,

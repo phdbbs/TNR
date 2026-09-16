@@ -1039,7 +1039,7 @@ const GovPortal = {
         { key: 'district_id', title: '区县', render: districtRender },
         { key: 'created_at', title: '时间', width: '140px', render: r => TNR_UI.formatDateTime(r.created_at) },
         { key: 'status', title: '状态', render: r => {
-          const m = { pending: { t: '待接收', b: 'badge-warning' }, received: { t: '已接收', b: 'badge-success' }, rejected: { t: '已驳回', b: 'badge-danger' } };
+          const m = { pending: { t: '待接收', b: 'badge-warning' }, received: { t: '已接收', b: 'badge-success' }, rejected: { t: '已驳回', b: 'badge-danger' }, void: { t: '已撤回', b: 'badge-default' } };
           const s = m[r.status] || { t: r.status, b: 'badge-default' };
           return `<span class="badge ${s.b}">${s.t}</span>`;
         } }
@@ -1471,7 +1471,7 @@ const GovPortal = {
         in_transit: ['在途', 'badge-info'], in_treatment: ['待诊疗', 'badge-warning'],
         pending_adopt: ['待领养', 'badge-info'], pending_claim: ['待领出', 'badge-warning'],
         adopted: ['已领养', 'badge-success'], released: ['已放养', 'badge-success'],
-        euthanized: ['已安乐死', 'badge-danger'], owner_returned: ['主人领回', 'badge-default'],
+        euthanized: ['已死亡', 'badge-danger'], owner_returned: ['主人领回', 'badge-default'],
       };
       columns = [
         { key: 'ledger_no', title: '档案编号', render: r => `<strong>${esc(r.ledger_no)}</strong>` },
@@ -1512,7 +1512,7 @@ const GovPortal = {
         { key: 'to_hospital_name', title: '接收医院', render: r => esc(r.to_hospital_name) },
         { key: 'pet_count', title: '数量', width: '80px', render: r => `<strong>${r.pet_count || 0}</strong>` },
         { key: 'status', title: '状态', width: '90px', render: r => {
-          const m = { pending: { t: '待接收', b: 'badge-warning' }, received: { t: '已接收', b: 'badge-success' }, rejected: { t: '已驳回', b: 'badge-danger' } };
+          const m = { pending: { t: '待接收', b: 'badge-warning' }, received: { t: '已接收', b: 'badge-success' }, rejected: { t: '已驳回', b: 'badge-danger' }, void: { t: '已撤回', b: 'badge-default' } };
           const v = m[r.status] || { t: r.status || '—', b: 'badge-default' };
           return `<span class="badge ${v.b}">${v.t}</span>`;
         } },
@@ -1589,8 +1589,16 @@ const GovPortal = {
       ];
     }
 
-    // 通用：添加详情操作列
-    columns.push({ key: '_action', title: '操作', width: '90px', render: r => `<button class="btn btn-secondary btn-sm" data-ledger-detail="${r.id}">详情</button>` });
+    // 让单号列可点击弹详情（替代单独的「详情」按钮列）
+    // 一宠一档/各台账首列都是 ledger_no（档案编号/单据号），统一处理
+    const detailCol = columns.find(c => c.key === 'ledger_no');
+    if (detailCol) {
+      const origRender = detailCol.render;
+      detailCol.render = r => {
+        const val = origRender ? origRender(r) : (r.ledger_no || r.id || '');
+        return `<span data-ledger-detail="${r.id}" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;">${val}</span>`;
+      };
+    }
 
     TNR_UI.mountTable('ledgerTableWrapper', { id: 'gov.ledger.' + tab, title: (typeLabelMap[tab] || '') + '台账', columns, data: records, emptyText: '暂无台账数据' });
 
@@ -1672,7 +1680,7 @@ const GovPortal = {
         { label: '接收医院', value: r.to_hospital_name },
         { label: '动物数量', value: r.pet_count },
         { label: '宠物编号', value: (d.pet_codes || []).join('、') || '—' },
-        { label: '状态', value: ({ pending: '待接收', received: '已接收', rejected: '已驳回' })[r.status] || r.status || '—' },
+        { label: '状态', value: ({ pending: '待接收', received: '已接收', rejected: '已驳回', void: '已撤回' })[r.status] || r.status || '—' },
         { label: '接收时间', value: d.received_at ? TNR_UI.formatDateTime(d.received_at) : '—' },
         { label: '驳回原因', value: d.reject_reason || '—' },
         { label: '操作人', value: r.operator_name || '—' },

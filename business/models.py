@@ -12,7 +12,7 @@ class Pet(models.Model):
         ('pending_claim', '待领出'),
         ('adopted', '已领养'),
         ('released', '已放养'),
-        ('euthanized', '已安乐死'),
+        ('euthanized', '已死亡'),
         ('owner_returned', '主人领回'),
     ]
     SPECIES_CHOICES = [
@@ -121,6 +121,9 @@ class OwnerReturn(models.Model):
     owner_name = models.CharField('主人姓名', max_length=50)
     owner_phone = models.CharField('主人电话', max_length=20, blank=True, default='')
     owner_id_card = models.CharField('主人身份证', max_length=30, blank=True, default='')
+    # 需求：回收单需记录住址与回收时间（此前只落 owner_name/phone，住址与时间被静默丢弃）
+    owner_address = models.CharField('主人住址', max_length=200, blank=True, default='')
+    return_time = models.DateTimeField('回收时间', null=True, blank=True)
     reason = models.TextField('领回原因')
     signature = models.TextField('签字', blank=True, default='')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='owner_returns', verbose_name='操作员')
@@ -146,6 +149,10 @@ class Transfer(models.Model):
         ('pending', '待签收'),
         ('received', '已签收'),
         ('rejected', '已驳回'),
+        # 捕捉点主动撤回（医院尚未签收）。注意：void 既不计入
+        # ACTIVE_TRANSFER_STATUSES，也不是 rejected，因此不占用捕捉单、
+        # 也不影响捕捉单状态推导，宠物回退为 in_transit 可再次被选择转运。
+        ('void', '已撤回'),
     ]
     capture = models.ForeignKey('business.Capture', on_delete=models.SET_NULL, null=True, blank=True, related_name='transfers', verbose_name='捕捉记录')
     from_shelter = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='sent_transfers', verbose_name='发出捕捉点')

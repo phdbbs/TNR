@@ -12,7 +12,7 @@ from business.models import Transfer, Pet, Capture
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
-    recalc_capture_status,
+    recalc_capture_status, get_scoped_object,
 )
 from core.models import Institution
 
@@ -288,3 +288,43 @@ def transfer_resend(request, pk):
         recalc_capture_status(new_transfer.capture)
 
     return json_ok(serialize_instance(new_transfer), message='重新下发成功')
+
+
+@csrf_exempt
+@role_required('shelter', 'gov_city', 'gov_district')
+@login_required
+def transfer_withdraw(request, pk):
+    """捕捉点撤回转运单（医院未签收时才可撤回）。
+
+    撤回后：
+    - 转运单状态变为 ``void``（撤回），不再占位
+    - 宠物状态回退为 ``in_transit``、解除医院归属
+    - 捕捉单状态重算（可能从「部分转运」回退为「待转运」）
+    - 宠物可被选到新的转运单中
+    """
+    user = request.user
+
+    # 先按区县范围取单（禁止裸查：裸查不做范围校验，任何登录用户猜到主键
+    # 就能操作其他区县的转运单）。区县过滤之后再叠加更严的「发出捕捉点」校验。
+    transfer = get_scoped_object(Transfer, pk, user)
+    if transfer is None:
+        return json_fail('转运记录不存在', status=404)
+
+    if transfer.status != 'pending':
+        return json_fail(f'当前状态({transfer.get_status_display()})不可撤回，仅待签收的转运单可撤回')
+
+    if user.role == 'shelter' and user.institution_id and user.institution_id != transfer.from_shelter_id:
+        return json_fail('无权撤回此转运记录')
+
+    transfer.status = 'void'
+    transfer.save(update_fields=['status'])
+
+    pet_codes = [c.strip() for c in transfer.pet_codes.split(',') if c.strip()]
+    # 宠物编号全局唯一，按编号回退状态；同时限定本单区县以防编号被伪造
+    Pet.objects.filter(code__in=pet_codes, district_id=transfer.district_id).update(
+        status='in_transit', hospital=None)
+
+    if transfer.capture_id:
+        recalc_capture_status(transfer.capture)
+
+    return json_ok(serialize_instance(transfer), message='转运单已撤回，宠物回退为待转运')

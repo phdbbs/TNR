@@ -517,7 +517,10 @@ def capture_transfer_state(capture):
 
     返回 dict:
       total        本单未删除的宠物数
-      transferred  已提交转运单且尚未退回的宠物数（= 已转运）
+      transferred  已提交转运单且尚未退回的宠物数（= 已转运，含待签收与已签收）
+      received     医院已签收的宠物数（用于区分「转运中」与「部分完成」）
+      settled      已离开本单流程的宠物数（医院签收 / 主人领回 / 已死亡…，
+                   即宠物状态不再是 in_transit；达成 total 即为「完成」）
       rejected     被医院退回、已回到未转运状态的宠物数
       can_edit     是否允许编辑（未作废 且 无任何宠物处于已转运状态）
       can_delete   是否允许删除（同上；须医院全部退回）
@@ -525,25 +528,33 @@ def capture_transfer_state(capture):
     pets = Pet.objects.filter(capture=capture, is_deleted=False)
     total = pets.count()
     codes = set(pets.values_list('code', flat=True))
+    # 「已离开本单流程」以宠物自身状态为准：签收后转 in_treatment、
+    # 主人领回转 owner_returned、死亡转 euthanized，都不会再是 in_transit。
+    settled = pets.exclude(status='in_transit').count() if total else 0
 
-    active_codes, rejected_codes = set(), set()
+    active_codes, received_codes, rejected_codes = set(), set(), set()
     for t in capture_transfers(capture):
         matched = set(_split_codes(t.pet_codes)) & codes
         if not matched:
             continue
         if t.status in ACTIVE_TRANSFER_STATUSES:
             active_codes |= matched
+            if t.status == 'received':
+                received_codes |= matched
         elif t.status == 'rejected':
             rejected_codes |= matched
 
     # 同一宠物既被退回又重新下发时，以「当前仍在转运」为准
     rejected_codes -= active_codes
+    received_codes &= active_codes
     transferred = len(active_codes)
 
     not_deleted = not capture.is_deleted
     return {
         'total': total,
         'transferred': transferred,
+        'received': len(received_codes),
+        'settled': settled,
         'rejected': len(rejected_codes),
         'untouched': max(total - transferred - len(rejected_codes), 0),
         'can_edit': not_deleted and transferred == 0,
@@ -561,43 +572,47 @@ def capture_states_bulk(captures):
     if not captures:
         return {}
 
-    # 宠物编号 → 所属捕捉单（仅未删除宠物参与统计）
+    # 宠物编号 → 所属捕捉单（仅未删除宠物参与统计），同时统计「已离开流程」数
     code_to_capture = {}
     codes_by_capture = {}
-    for cap_id, code in Pet.objects.filter(
+    settled_by_capture = {}
+    for cap_id, code, pet_status in Pet.objects.filter(
         capture__in=captures, is_deleted=False
-    ).values_list('capture_id', 'code'):
+    ).values_list('capture_id', 'code', 'status'):
         code_to_capture[code] = cap_id
         codes_by_capture.setdefault(cap_id, set()).add(code)
+        if pet_status != 'in_transit':
+            settled_by_capture[cap_id] = settled_by_capture.get(cap_id, 0) + 1
 
-    # 编号 → 转运状态标记（active 优先于 rejected）
+    # 编号 → 转运状态标记。优先级 pending > received > rejected：
+    # 被驳回后重新下发的宠物必须算「转运中」，而不是停留在旧的 rejected。
     code_flag = {}
+    _FLAG_RANK = {'pending': 3, 'received': 2, 'rejected': 1}
     all_codes = set(code_to_capture)
     if all_codes:
         probe = Q()
         for code in all_codes:
             probe |= Q(pet_codes__contains=code)
         for t in Transfer.objects.filter(probe):
-            if t.status in ACTIVE_TRANSFER_STATUSES:
-                flag = 'active'
-            elif t.status == 'rejected':
-                flag = 'rejected'
-            else:
+            if t.status not in _FLAG_RANK:
                 continue
             for code in _split_codes(t.pet_codes):
-                if code in all_codes and code_flag.get(code) != 'active':
-                    code_flag[code] = flag
+                if code in all_codes and _FLAG_RANK[t.status] > _FLAG_RANK.get(code_flag.get(code), 0):
+                    code_flag[code] = t.status
 
     result = {}
     for cap in captures:
         codes = codes_by_capture.get(cap.id, set())
-        transferred = sum(1 for c in codes if code_flag.get(c) == 'active')
+        transferred = sum(1 for c in codes if code_flag.get(c) in ('pending', 'received'))
+        received = sum(1 for c in codes if code_flag.get(c) == 'received')
         rejected = sum(1 for c in codes if code_flag.get(c) == 'rejected')
         total = len(codes)
         not_deleted = not cap.is_deleted
         result[cap.id] = {
             'total': total,
             'transferred': transferred,
+            'received': received,
+            'settled': settled_by_capture.get(cap.id, 0),
             'rejected': rejected,
             'untouched': max(total - transferred - rejected, 0),
             'can_edit': not_deleted and transferred == 0,

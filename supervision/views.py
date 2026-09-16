@@ -840,7 +840,7 @@ def ledger_center(request):
                 eu = p.euthanasia_records.order_by('-id').first()
                 if eu:
                     outbound_at = eu.euthanized_at.isoformat() if eu.euthanized_at else ''
-                    outbound_reason = '安乐死'
+                    outbound_reason = '死亡'
                     delivery_unit = eu.hospital_name or ''
             elif p.status == 'owner_returned':
                 orr = p.owner_returns.order_by('-id').first()

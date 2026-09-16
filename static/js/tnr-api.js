@@ -114,6 +114,7 @@ const TNR_API = {
   async receiveTransfer(id) { return this._post(`/api/business/transfers/${id}/receive/`, {}); },
   async rejectTransfer(id, reason) { return this._post(`/api/business/transfers/${id}/reject/`, {reason}); },
   async resendTransfer(id) { return this._post(`/api/business/transfers/${id}/resend/`, {}); },
+  async withdrawTransfer(id) { return this._post(`/api/business/transfers/${id}/withdraw/`, {}); },
   async getTreatments() { return this._get('/api/business/treatments/'); },
   async createTreatment(data) { return this._post('/api/business/treatments/create/', data); },
   async getMaterials() { return this._get('/api/business/materials/'); },
@@ -216,7 +217,7 @@ const TNR_API = {
     return Array.from({length: count}, (_, i) => 'TNR' + yearStr + String(i+1).padStart(3,'0'));
   },
   getPetStatusText(status) {
-    const map = {'in_transit':'在途','in_treatment':'待诊疗/诊疗中','pending_adopt':'待领养','pending_claim':'待领出','adopted':'已领养','released':'已放养','euthanized':'已安乐死','owner_returned':'主人领回'};
+    const map = {'in_transit':'在途','in_treatment':'待诊疗/诊疗中','pending_adopt':'待领养','pending_claim':'待领出','adopted':'已领养','released':'已放养','euthanized':'已死亡','owner_returned':'主人领回'};
     return map[status] || status;
   },
   getPetStatusBadge(status) {
