@@ -2,7 +2,10 @@
 Django settings for tnr_system project.
 TNR (Trap-Neuter-Return) 流浪动物管理系统
 """
+import secrets
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 import os
 
@@ -13,12 +16,52 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# Quick-start development settings - unsuitable for production
-SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-dev-default-key-change-me-in-production')
-DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes', 'on')
+def _env_bool(name, default=False):
+    """环境变量取布尔值。未设置时用 default。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ('true', '1', 'yes', 'on')
 
-_allowed_hosts_env = os.environ.get('ALLOWED_HOSTS', '*')
-ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(',') if h.strip()]
+
+def _env_list(name, default=()):
+    """环境变量取逗号分隔列表。未设置或全为空白时用 default。"""
+    raw = os.environ.get(name, '')
+    return [v.strip() for v in raw.split(',') if v.strip()] or list(default)
+
+
+# ============================================
+# 基础安全配置
+# ============================================
+# DEBUG 默认关闭。生产环境忘记配置时必须退化成「安全但不好用」，
+# 而不是把完整堆栈、settings、SQL 全部暴露给访问者。
+DEBUG = _env_bool('DEBUG', False)
+
+# SECRET_KEY 没有兜底默认值。早期版本这里内置了一把公开的固定密钥，
+# 一旦 .env 缺失（手动 gunicorn、supervisor 只起了 gunicorn 等），
+# 所有实例就会共用同一把人人可查的密钥——会话 Cookie 可被伪造。
+SECRET_KEY = os.environ.get('SECRET_KEY', '').strip()
+if not SECRET_KEY:
+    if DEBUG:
+        # 开发环境图省事：随机生成临时密钥（重启进程即失效，会要求重新登录）
+        SECRET_KEY = 'django-insecure-dev-%s' % secrets.token_urlsafe(32)
+    else:
+        raise ImproperlyConfigured(
+            '未配置 SECRET_KEY。生产环境必须显式设置，否则会话 Cookie 可被伪造。\n'
+            '生成方式：python -c "import secrets; print(secrets.token_urlsafe(50))"'
+        )
+
+# ALLOWED_HOSTS 同样不兜底成 '*'：Host 头伪造可被用于
+# 密码重置链接投毒、缓存污染等。
+ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS')
+if not ALLOWED_HOSTS:
+    if DEBUG:
+        ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]', '0.0.0.0']
+    else:
+        raise ImproperlyConfigured(
+            '未配置 ALLOWED_HOSTS。生产环境必须显式列出可访问的域名/IP，'
+            '例如 ALLOWED_HOSTS=example.com,127.0.0.1'
+        )
 
 
 # Application definition
@@ -67,6 +110,60 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'tnr_system.wsgi.application'
+
+
+# ============================================
+# 反向代理 / HTTPS 安全
+# ============================================
+# nginx 反代时必须显式告知 Django 原始协议，否则 request.is_secure() 恒为 False，
+# 下游所有 HTTPS 判断（安全 Cookie、SSL 跳转）都会失真。
+# gunicorn 只监听 127.0.0.1:8000，外部无法直连，因此可以信任该头。
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# 是否已启用 HTTPS。deploy.sh 生成 .env 时默认 off，
+# 执行完 certbot 申请证书后改为 HTTPS=on 并重启应用即可启用下面这批加固项。
+HTTPS_ENABLED = _env_bool('HTTPS', False)
+
+if not DEBUG and HTTPS_ENABLED:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = _env_bool('SECURE_SSL_REDIRECT', True)
+    SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', 31536000))
+
+# 这些项与是否 HTTPS 无关，任何环境都应保持：
+# Session Cookie 禁止 JS 读取；SameSite=Lax 是当前 CSRF 防护的兜底
+# ——业务接口普遍 @csrf_exempt，跨站 POST 不携带 Cookie 全靠它。
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_HTTPONLY = False  # 前端需要读取 csrftoken 放进 X-CSRFToken 头
+X_FRAME_OPTIONS = 'DENY'
+SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# 站点通过域名（或 https）访问时，Django 会校验 Origin/Referer；
+# 未列入的域名提交表单会 403。多个用逗号分隔。
+CSRF_TRUSTED_ORIGINS = _env_list('CSRF_TRUSTED_ORIGINS')
+
+# 生产环境把请求日志落到 stderr，由 supervisor 收进 /var/log/tnr/*.log
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{asctime}] {levelname} {name}: {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'verbose'},
+    },
+    'root': {'handlers': ['console'], 'level': LOG_LEVEL},
+    'loggers': {
+        # 4xx/5xx 单独提级，便于从日志里捞出异常请求
+        'django.request': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
+    },
+}
 
 
 # Database
