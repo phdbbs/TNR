@@ -38,10 +38,14 @@ class Pet(models.Model):
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='hospital_pets', verbose_name='医院')
     chip_no = models.CharField('芯片号', max_length=30, blank=True, default='')
     description = models.TextField('描述', blank=True, default='')
+    photo_capture = models.ImageField('捕捉照片', upload_to='photos/', null=True, blank=True)
     photo_group = models.ImageField('合照', upload_to='photos/', null=True, blank=True)
     photo_before = models.ImageField('术前照片', upload_to='photos/', null=True, blank=True)
     photo_after = models.ImageField('术后照片', upload_to='photos/', null=True, blank=True)
     photo_treatment = models.ImageField('诊疗照片', upload_to='photos/', null=True, blank=True)
+    # 逻辑删除：随所属捕捉记录一并作废，不做物理删除
+    is_deleted = models.BooleanField('已删除', default=False, db_index=True)
+    deleted_at = models.DateTimeField('删除时间', null=True, blank=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     class Meta:
@@ -57,6 +61,20 @@ class Pet(models.Model):
 # 捕捉记录
 # ============================================
 class Capture(models.Model):
+    """捕捉记录。
+
+    状态由系统按「本单宠物的转运情况」自动推导，不允许人工随意填写：
+    - pending   待转运：本单还没有提交任何转运单
+    - partial   部分转运：部分宠物已提交转运单（尚未全部退回）
+    - completed 已完成：全部宠物均已提交转运单
+    - void      已作废：记录被逻辑删除
+    """
+    STATUS_CHOICES = [
+        ('pending', '待转运'),
+        ('partial', '部分转运'),
+        ('completed', '已完成'),
+        ('void', '已作废'),
+    ]
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='captures', verbose_name='所属区县')
     shelter = models.ForeignKey('core.Institution', on_delete=models.PROTECT, related_name='captures', verbose_name='捕捉点')
     shelter_name = models.CharField('捕捉点名称', max_length=100, blank=True, default='')
@@ -73,11 +91,17 @@ class Capture(models.Model):
     pet_codes = models.TextField('动物编号', blank=True, default='', help_text='逗号分隔')
     group_photo = models.ImageField('合照', upload_to='photos/', null=True, blank=True)
     signature = models.TextField('签字', blank=True, default='', help_text='base64')
-    status = models.CharField('状态', max_length=20, default='completed')
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='captures', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    # 逻辑删除：删除只做标记，数据库记录保留，便于追溯与监管核查
+    is_deleted = models.BooleanField('已删除', default=False, db_index=True)
+    deleted_at = models.DateTimeField('删除时间', null=True, blank=True)
+    deleted_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='deleted_captures', verbose_name='删除人')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
         ordering = ['-id']
@@ -440,6 +464,9 @@ class Blacklist(models.Model):
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='blacklist_added', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='blacklist', verbose_name='所属区县')
+    # 逻辑删除：移出黑名单只打标记，保留历史记录便于追溯
+    is_deleted = models.BooleanField('已移出', default=False, db_index=True)
+    deleted_at = models.DateTimeField('移出时间', null=True, blank=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     class Meta:

@@ -10,13 +10,14 @@ import urllib.parse
 import urllib.request
 from datetime import date
 
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.http import JsonResponse
 from django.utils import timezone
 
 from accounts.models import User
 from business.models import (
-    Pet, Material, MaterialTransaction, Chip, Blacklist,
+    Pet, Material, MaterialTransaction, Chip, Blacklist, Transfer,
+    Release, Adoption,
 )
 
 
@@ -131,7 +132,7 @@ def amap_ip_location():
     }
 
 
-def serialize_instance(instance, fields=None):
+def serialize_instance(instance, fields=None, exclude=None):
     """将模型实例序列化为字典。
 
     - 外键返回 pk
@@ -139,10 +140,13 @@ def serialize_instance(instance, fields=None):
     - ImageField/FileField 返回 URL（有文件时）或空字符串
     - 同时返回蛇形命名（Python 惯例）和驼峰命名（前端 JS 惯例）字段
     - pet_codes 字符串自动转为数组
+    - exclude: 需要剔除的字段名集合（如列表接口剔除体积巨大的 signature base64）
     """
     if instance is None:
         return None
     from django.db.models.fields.files import FieldFile
+
+    skip = set(exclude or ())
 
     def _to_camel(snake):
         """snake_case → camelCase"""
@@ -154,6 +158,8 @@ def serialize_instance(instance, fields=None):
     data = {}
     for f in instance._meta.concrete_fields:
         if fields and f.name not in fields:
+            continue
+        if f.name in skip:
             continue
         value = getattr(instance, f.attname, None)
         if value is None:
@@ -376,7 +382,8 @@ def check_blacklist(id_card, phone):
     if not id_card and not phone:
         return None
 
-    qs = Blacklist.objects.all()
+    # 已移出黑名单的记录不再参与拦截
+    qs = Blacklist.objects.filter(is_deleted=False)
 
     # 电话精确匹配
     if phone:
@@ -422,6 +429,188 @@ def get_district_filtered_queryset(model, user):
     if district_id:
         return model.objects.filter(district_id=district_id)
     return model.objects.none()
+
+
+def get_scoped_object(model, pk, user, **extra):
+    """按区县权限范围取单条记录；越权或不存在一律返回 None。
+
+    统一替代裸 ``Model.objects.get(id=pk)``——后者不做任何范围校验，
+    任何登录用户只要猜到主键就能跨区县读取/操作他人数据。
+    """
+    qs = get_district_filtered_queryset(model, user)
+    if extra:
+        qs = qs.filter(**extra)
+    return qs.filter(pk=pk).first()
+
+
+def get_active_pet(pk, user):
+    """取用户权限范围内、未被逻辑删除的宠物档案；不存在或越权返回 None。"""
+    return get_scoped_object(Pet, pk, user, is_deleted=False)
+
+
+def pet_has_pending_release(pet):
+    """宠物是否已有「待放养」记录。
+
+    用于防止同一只动物被放养流程与领养流程同时占用（双重承诺）。
+    """
+    return Release.objects.filter(pet=pet, status='pending').exists()
+
+
+def pet_has_active_adoption(pet):
+    """宠物是否存在未完结的领养记录（待领出视为占用中）。"""
+    return Adoption.objects.filter(pet=pet, status='pending_claim').exists()
+
+
+# ============================================
+# 捕捉单转运状态推导
+# ============================================
+# 已提交给医院、尚未被退回的转运单状态（含待签收与已签收）
+ACTIVE_TRANSFER_STATUSES = ('pending', 'received')
+
+
+def _split_codes(raw):
+    """逗号分隔编号字符串 → 去空列表。"""
+    return [c.strip() for c in (raw or '').split(',') if c.strip()]
+
+
+def capture_transfers(capture):
+    """取与本捕捉单相关的全部转运单（含未回填 capture 外键的历史数据）。
+
+    早期转运单由前端「选择在途宠物」直接下发，未回填 capture 外键，
+    因此这里额外按宠物编号做精确比对补齐，避免漏算导致状态失真。
+    """
+    transfers = list(Transfer.objects.filter(capture=capture))
+
+    codes = list(Pet.objects.filter(capture=capture).values_list('code', flat=True))
+    if codes:
+        legacy_q = Q()
+        for code in codes:
+            legacy_q |= Q(pet_codes__contains=code)
+        # contains 只是预筛（存在子串误命中），下面按编号集合精确取交集
+        for t in Transfer.objects.filter(capture__isnull=True).filter(legacy_q):
+            if set(_split_codes(t.pet_codes)) & set(codes):
+                transfers.append(t)
+    return transfers
+
+
+def capture_transfer_state(capture):
+    """统计捕捉单下宠物的转运情况，供状态推导与编辑/删除权限判断。
+
+    返回 dict:
+      total        本单未删除的宠物数
+      transferred  已提交转运单且尚未退回的宠物数（= 已转运）
+      rejected     被医院退回、已回到未转运状态的宠物数
+      can_edit     是否允许编辑（未作废 且 无任何宠物处于已转运状态）
+      can_delete   是否允许删除（同上；须医院全部退回）
+    """
+    pets = Pet.objects.filter(capture=capture, is_deleted=False)
+    total = pets.count()
+    codes = set(pets.values_list('code', flat=True))
+
+    active_codes, rejected_codes = set(), set()
+    for t in capture_transfers(capture):
+        matched = set(_split_codes(t.pet_codes)) & codes
+        if not matched:
+            continue
+        if t.status in ACTIVE_TRANSFER_STATUSES:
+            active_codes |= matched
+        elif t.status == 'rejected':
+            rejected_codes |= matched
+
+    # 同一宠物既被退回又重新下发时，以「当前仍在转运」为准
+    rejected_codes -= active_codes
+    transferred = len(active_codes)
+
+    not_deleted = not capture.is_deleted
+    return {
+        'total': total,
+        'transferred': transferred,
+        'rejected': len(rejected_codes),
+        'untouched': max(total - transferred - len(rejected_codes), 0),
+        'can_edit': not_deleted and transferred == 0,
+        'can_delete': not_deleted and transferred == 0,
+    }
+
+
+def capture_states_bulk(captures):
+    """批量计算多张捕捉单的转运状态，避免列表接口 N+1 查询。
+
+    :param captures: Capture 可迭代对象（或 QuerySet）
+    :return: {capture_id: 与 capture_transfer_state 同结构的 dict}
+    """
+    captures = list(captures)
+    if not captures:
+        return {}
+
+    # 宠物编号 → 所属捕捉单（仅未删除宠物参与统计）
+    code_to_capture = {}
+    codes_by_capture = {}
+    for cap_id, code in Pet.objects.filter(
+        capture__in=captures, is_deleted=False
+    ).values_list('capture_id', 'code'):
+        code_to_capture[code] = cap_id
+        codes_by_capture.setdefault(cap_id, set()).add(code)
+
+    # 编号 → 转运状态标记（active 优先于 rejected）
+    code_flag = {}
+    all_codes = set(code_to_capture)
+    if all_codes:
+        probe = Q()
+        for code in all_codes:
+            probe |= Q(pet_codes__contains=code)
+        for t in Transfer.objects.filter(probe):
+            if t.status in ACTIVE_TRANSFER_STATUSES:
+                flag = 'active'
+            elif t.status == 'rejected':
+                flag = 'rejected'
+            else:
+                continue
+            for code in _split_codes(t.pet_codes):
+                if code in all_codes and code_flag.get(code) != 'active':
+                    code_flag[code] = flag
+
+    result = {}
+    for cap in captures:
+        codes = codes_by_capture.get(cap.id, set())
+        transferred = sum(1 for c in codes if code_flag.get(c) == 'active')
+        rejected = sum(1 for c in codes if code_flag.get(c) == 'rejected')
+        total = len(codes)
+        not_deleted = not cap.is_deleted
+        result[cap.id] = {
+            'total': total,
+            'transferred': transferred,
+            'rejected': rejected,
+            'untouched': max(total - transferred - rejected, 0),
+            'can_edit': not_deleted and transferred == 0,
+            'can_delete': not_deleted and transferred == 0,
+        }
+    return result
+
+
+def recalc_capture_status(capture, save=True):
+    """按宠物转运情况重新推导并写回捕捉单状态。
+
+    规则：
+    - 已逻辑删除 → void 已作废
+    - 无宠物 / 无任何有效转运单 → pending 待转运
+    - 部分宠物已提交转运单 → partial 部分转运
+    - 全部宠物已提交转运单 → completed 已完成
+    """
+    if capture.is_deleted:
+        new_status = 'void'
+    else:
+        state = capture_transfer_state(capture)
+        if state['total'] == 0 or state['transferred'] == 0:
+            new_status = 'pending'
+        elif state['transferred'] < state['total']:
+            new_status = 'partial'
+        else:
+            new_status = 'completed'
+
+    if save and capture.status != new_status:
+        capture.status = new_status
+        capture.save(update_fields=['status', 'updated_at'])
+    return new_status
 
 
 def get_district_scope(request):
