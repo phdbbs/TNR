@@ -140,7 +140,7 @@
   <div class="page-view" id="page-transfer" data-page-node-id="zTE4o5yu3LoenTxQSuQpXI"></div>
   <!-- 6. 物料供应链 -->
   <div class="page-view" id="page-material" data-page-node-id="vgSihdJulQ9qLtocTiLmSb"></div>
-  <!-- 7. 动物回收放养 -->
+  <!-- 7. 动物去向 -->
   <div class="page-view" id="page-release" data-page-node-id="pNqB80DtO4GMSd6VibXMcy"></div>
   <!-- 8. 领养审核管理 -->
   <div class="page-view" id="page-adoption" data-page-node-id="bTZFcs5FroFmRn26c9md6Z"></div>
@@ -148,8 +148,6 @@
   <div class="page-view" id="page-followup" data-page-node-id="KJq3cfCbZ3ZZYjTBBq0edr"></div>
   <!-- 10. 黑名单管理 -->
   <div class="page-view" id="page-blacklist" data-page-node-id="R1Zp3OtphUIqoRqTK21F9U"></div>
-  <!-- 11. 安乐死备案 -->
-  <div class="page-view" id="page-euthanasia" data-page-node-id="HFPVPofqD4jRwQkLT1n1dW"></div>
   <!-- 12. 全量台账 -->
   <div class="page-view" id="page-ledger" data-page-node-id="HMOC094zXH8kgMiLOzpQn2"></div>
   <!-- 13. 个人中心 -->
@@ -179,16 +177,13 @@ const Shelter = {
     { title: '物料管理', items: [
       { id: 'material', icon: '📦', label: '物料供应链' }
     ]},
-    { title: '回收放养', items: [
-      { id: 'release', icon: '🌿', label: '动物回收放养' }
+    { title: '动物去向', items: [
+      { id: 'release', icon: '🌿', label: '动物去向' }
     ]},
     { title: '领养管理', items: [
       { id: 'adoption', icon: '👤', label: '领养审核管理' },
       { id: 'followup', icon: '📝', label: '领养回访管控' },
       { id: 'blacklist', icon: '⛔', label: '黑名单管理' }
-    ]},
-    { title: '安乐死', items: [
-      { id: 'euthanasia', icon: '⚰️', label: '安乐死备案' }
     ]},
     { title: '台账中心', items: [
       { id: 'ledger', icon: '📊', label: '全量台账' }
@@ -205,11 +200,10 @@ const Shelter = {
     'owner-return': '主人领回',
     'transfer': '转运管理',
     'material': '物料供应链管理',
-    'release': '动物回收放养',
+    'release': '动物去向',
     'adoption': '领养审核管理',
     'followup': '领养回访管控',
     'blacklist': '黑名单管理',
-    'euthanasia': '安乐死备案',
     'ledger': '全量台账',
     'profile': '个人中心'
   },
@@ -228,8 +222,7 @@ const Shelter = {
       '捕捉管理': 'capture-list',
       '转运交接': 'transfer',
       '物料供应链': 'material',
-      '动物回收放养': 'release',
-      '安乐死备案': 'euthanasia',
+      '动物去向': 'release',
       '领养审核管理': 'adoption',
       '领养回访管控': 'followup',
       '全量台账中心': 'ledger',
@@ -268,6 +261,7 @@ const Shelter = {
       dispatched: ['已下发', 'info'],
       received: ['已签收', 'success'],
       rejected: ['已驳回', 'danger'],
+      void: ['已撤回', 'default'],
       completed: ['已完成', 'success'],
       released: ['已放养', 'success'],
       adopted: ['已领养', 'success'],
@@ -279,7 +273,7 @@ const Shelter = {
       in_treatment: ['诊疗中', 'info'],
       /* Treatment.status：进行中 */
       in_progress: ['进行中', 'info'],
-      euthanized: ['已安乐', 'danger'],
+      euthanized: ['已死亡', 'danger'],
       owner_returned: ['已领回', 'default'],
       active: ['启用', 'success'],
       inactive: ['停用', 'default']
@@ -310,6 +304,40 @@ const Shelter = {
     return 0;
   },
 
+  /* 合并后的转运状态列：未转运 / x/y 转运中 / x/y 部分完成 / 完成
+     判定依据（全部来自后端 capture_transfer_state / capture_states_bulk）：
+       total      本单动物总数
+       transferred 已提交转运单的动物数（待签收 + 已签收）
+       received   医院已签收的动物数
+       settled    已离开本单流程的动物数（医院签收 / 主人领回 / 已死亡…）
+     规则：
+       全部动物都已离开本单流程        → 完成
+       有动物被医院签收但尚未全部完成  → x/y 部分完成
+       有动物提交了转运单但都未签收    → x/y 转运中
+       一只都没提交转运单              → 未转运 */
+  transferStatusBadge(rec) {
+    const st = rec.transferState || rec.transfer_state || {};
+    const total = st.total || rec.petCount || 0;
+    const submitted = st.transferred || 0;
+    const received = st.received || 0;
+    const settled = st.settled || 0;
+
+    if (total > 0 && settled >= total) return '<span class="badge badge-success">完成</span>';
+    if (received > 0) return '<span class="badge badge-info">' + received + '/' + total + ' 部分完成</span>';
+    if (submitted > 0) return '<span class="badge badge-info">' + submitted + '/' + total + ' 转运中</span>';
+    return '<span class="badge badge-warning">未转运</span>';
+  },
+
+  /* 照片放大查看：点击图片弹出全屏遮罩 */
+  photoZoom(url) {
+    if (!url) return;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;cursor:zoom-out;';
+    overlay.innerHTML = '<img src="' + url + '" style="max-width:92vw;max-height:92vh;object-fit:contain;border-radius:8px;">';
+    overlay.addEventListener('click', () => overlay.remove());
+    document.body.appendChild(overlay);
+  },
+
   getPetByCode(code, pets) {
     return (pets || []).find(p => p.code === code);
   },
@@ -323,6 +351,7 @@ const Shelter = {
     const materials = await TNR_API.getMaterials();
 
     const totalCaptures = captures.length;
+    const totalAnimals = captures.reduce((s, c) => s + (c.petCount || 0), 0);
     const pendingTransfer = transfers.filter(t => t.status === 'pending').length;
     const pendingRelease = releases.filter(r => r.status === 'pending').length;
     const pendingAdoption = adoptions.filter(a => a.status === 'pending').length;
@@ -344,7 +373,7 @@ const Shelter = {
 
     let html = '';
     html += '<div class="stat-grid">';
-    html += '<div class="stat-card"><div class="stat-card-icon">📋</div><div><div class="stat-card-value">' + totalCaptures + '</div><div class="stat-card-label">累计捕捉</div></div></div>';
+    html += '<div class="stat-card"><div class="stat-card-icon">📋</div><div><div class="stat-card-value" style="font-size:28px;font-weight:700;">' + totalCaptures + '<span style="font-size:14px;font-weight:400;color:var(--ink-muted);margin-left:4px;">单</span> / ' + totalAnimals + '<span style="font-size:14px;font-weight:400;color:var(--ink-muted);margin-left:4px;">只</span></div><div class="stat-card-label">累计捕捉</div></div></div>';
     html += '<div class="stat-card blue"><div class="stat-card-icon">🚚</div><div><div class="stat-card-value">' + pendingTransfer + '</div><div class="stat-card-label">待转运</div></div></div>';
     html += '<div class="stat-card green"><div class="stat-card-icon">🌿</div><div><div class="stat-card-value">' + pendingRelease + '</div><div class="stat-card-label">待回收放养</div></div></div>';
     html += '<div class="stat-card gold"><div class="stat-card-icon">👤</div><div><div class="stat-card-value">' + pendingAdoption + '</div><div class="stat-card-label">待领养审核</div></div></div>';
@@ -432,24 +461,18 @@ const Shelter = {
       });
 
       const columns = [
-        { title: '捕捉单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
+        { title: '捕捉单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
         { title: '小区', key: 'communityName' },
         { title: '物业', key: 'propertyName' },
         { title: '数量', key: 'petCount', render: r => '<span class="badge badge-info">' + r.petCount + '</span>' },
-        { title: '转运情况', render: r => {
-            const st = r.transferState || r.transfer_state || {};
-            const done = st.transferred || 0, total = st.total || r.petCount || 0;
-            if (!done) return '<span class="badge badge-warning">未转运</span>';
-            return '<span class="badge badge-success">' + done + ' / ' + total + ' 已转运</span>';
-          } },
-        { title: '状态', render: r => this.captureStatusBadge(r.status) },
+        { title: '转运状态', render: r => this.transferStatusBadge(r) },
         { title: '时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
       const rowActions = (r) => {
         const locked = this.captureLocked(r);
         const tip = locked ? ' title="该捕捉单已有动物提交转运，需医院全部退回后才能操作"' : '';
         const dis = ' style="opacity:.4;cursor:not-allowed;" disabled';
-        let html = '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
+        let html = '';
         html += '<button class="btn-link" data-act="edit" data-id="' + r.id + '"' + (locked ? tip + dis : '') + '>编辑</button>';
         html += '<button class="btn-link danger" data-act="del" data-id="' + r.id + '"' + (locked ? tip + dis : '') + '>删除</button>';
         return html;
@@ -487,7 +510,7 @@ const Shelter = {
     const esc = TNR_UI.escape.bind(TNR_UI);
 
     const imgCell = (url, label) => url
-      ? '<div class="desc-item desc-full"><div class="desc-label">' + label + '</div><div class="desc-value"><img src="' + url + '" alt="' + label + '" style="max-width:100%;max-height:260px;object-fit:contain;border-radius:6px;border:1px solid var(--border-light);background:#fff;"></div></div>'
+      ? '<div class="desc-item desc-full"><div class="desc-label">' + label + '</div><div class="desc-value"><img src="' + url + '" alt="' + label + '" data-zoom="' + url + '" style="max-width:100%;max-height:260px;object-fit:contain;border-radius:6px;border:1px solid var(--border-light);background:#fff;cursor:zoom-in;"></div></div>'
       : '<div class="desc-item desc-full"><div class="desc-label">' + label + '</div><div class="desc-value">—</div></div>';
 
     const petList = pets.length
@@ -495,7 +518,7 @@ const Shelter = {
           const photo = p.photoCapture || p.photo_capture || '';
           return '<div class="pet-select-item" style="cursor:default;">'
             + (photo
-                ? '<img src="' + photo + '" alt="' + esc(p.code) + '" style="width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid var(--border-light);">'
+                ? '<img src="' + photo + '" alt="' + esc(p.code) + '" data-zoom="' + photo + '" style="width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid var(--border-light);cursor:zoom-in;">'
                 : '<span style="font-size:18px;">🐾</span>')
             + '<span class="pet-code-chip">' + esc(p.code) + '</span>'
             + '<span class="badge ' + TNR_API.getPetStatusBadge(p.status) + '">' + esc(TNR_API.getPetStatusText(p.status)) + '</span>'
@@ -514,9 +537,7 @@ const Shelter = {
       { label: '物业交接人', value: esc(full.contactPerson || '—') },
       { label: '联系电话', value: esc(full.contactPhone || '—') },
       { label: '捕捉数量', value: (full.petCount || 0) + ' 只' },
-      { label: '状态', value: this.captureStatusBadge(full.status) },
-      { label: '转运情况', value: (st.transferred || 0) + ' / ' + (st.total || full.petCount || 0) + ' 已转运'
-          + (st.rejected ? '（' + st.rejected + ' 只已退回）' : '') },
+      { label: '转运状态', value: this.transferStatusBadge(full) + (st.rejected ? ' <span style="color:var(--ink-muted);font-size:13px;">（' + st.rejected + ' 只已退回）</span>' : '') },
       { label: '操作员', value: esc(full.operatorName || '—') },
       { label: '登记时间', value: TNR_UI.formatDateTime(full.createdAt) },
       { label: '宠物编号', value: (full.petCodes || []).map(c => '<span class="pet-code-chip">' + esc(c) + '</span>').join('') || '—', full: true }
@@ -530,6 +551,13 @@ const Shelter = {
       : '<div class="desc-item desc-full"><div class="desc-label">物业电子签名</div><div class="desc-value">—</div></div>');
 
     TNR_UI.drawer({ title: '捕捉记录详情 · ' + esc(full.ledgerNo || full.id), body: html });
+
+    // 绑定照片点击放大
+    setTimeout(() => {
+      document.querySelectorAll('[data-zoom]').forEach(img => {
+        img.addEventListener('click', () => this.photoZoom(img.dataset.zoom));
+      });
+    }, 50);
   },
 
   /* 编辑：主要信息可改；小区为文本输入；已转运的记录禁止编辑 */
@@ -551,6 +579,9 @@ const Shelter = {
       if (detail) full = detail;
     } catch (e) { /* 降级 */ }
     const esc = TNR_UI.escape.bind(TNR_UI);
+    // 单只照片控件的数据源：本方法作用域内没有 pets（那是 render_capture_list 的局部变量），
+    // 必须从详情接口返回的 full.pets 取；否则渲染时抛 ReferenceError，弹窗整体打不开。
+    const pets = full.pets || [];
 
     const body = (el) => {
       el.innerHTML = `
@@ -574,9 +605,13 @@ const Shelter = {
           <div class="form-group"><label class="form-label">联系电话<span class="req">*</span></label><input class="form-input" id="ed_contactPhone" value="${esc(full.contactPhone || '')}"></div>
         </div>
         <div class="form-group"><label class="form-label">整体合影（重新上传将替换原图）</label>
-          <div id="ed_groupPreview" style="margin-bottom:8px;">${(full.groupPhoto || full.group_photo) ? '<img src="' + (full.groupPhoto || full.group_photo) + '" style="max-width:180px;border-radius:6px;border:1px solid var(--border-light);">' : '<span class="text-light fs-sm">未上传</span>'}</div>
+          <div id="ed_groupPreview" style="margin-bottom:8px;">${(full.groupPhoto || full.group_photo) ? '<img src="' + (full.groupPhoto || full.group_photo) + '" data-zoom="' + (full.groupPhoto || full.group_photo) + '" style="max-width:180px;border-radius:6px;border:1px solid var(--border-light);cursor:zoom-in;">' : '<span class="text-light fs-sm">未上传</span>'}</div>
           <input type="file" class="form-input" id="ed_groupPhoto" accept="image/*">
         </div>
+        ${pets.length ? '<div class="form-group"><label class="form-label">单只照片（按编号对应，重新上传将替换原图）</label><div style="display:flex;flex-wrap:wrap;gap:8px;">' + pets.map(p => {
+          const ph = p.photoCapture || p.photo_capture || '';
+          return '<div style="text-align:center;"><div style="margin-bottom:4px;">' + (ph ? '<img src="' + ph + '" data-zoom="' + ph + '" style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid var(--border-light);cursor:zoom-in;">' : '<div style="width:60px;height:60px;border:2px dashed var(--border-light);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:18px;">🐾</div>') + '</div><div class="pet-code-chip" style="font-size:11px;">' + esc(p.code) + '</div><input type="file" accept="image/*" data-pet-photo="' + p.id + '" style="font-size:11px;width:80px;"></div>';
+        }).join('') + '</div></div>' : ''}
         <div class="form-group"><label class="form-label">状态（由转运情况自动推导，不可修改）</label>
           <div>${this.captureStatusBadge(full.status)}<span class="form-hint" style="margin-left:8px;">宠物数量与编号不可修改，如需调整请删除后重新登记</span></div>
         </div>
@@ -597,6 +632,10 @@ const Shelter = {
 
     const sigPad = TNR_UI.initSignaturePad(document.getElementById('ed_signature'));
     document.getElementById('btnClearEditSig').addEventListener('click', () => sigPad.clear());
+    // 绑定照片点击放大
+    document.querySelectorAll('[data-zoom]').forEach(img => {
+      img.addEventListener('click', () => this.photoZoom(img.dataset.zoom));
+    });
 
     document.getElementById('btnSaveCaptureEdit').addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
@@ -619,6 +658,12 @@ const Shelter = {
       if (!sigPad.isEmpty()) fd.append('signature', sigPad.getDataURL());
       const photoInput = document.getElementById('ed_groupPhoto');
       if (photoInput.files && photoInput.files[0]) fd.append('group_photo', photoInput.files[0]);
+      // 单只照片：按 pet_id 匹配（后端 pet_photo_<pet_id> 落库到该宠物 photo_capture）
+      // 注意：必须用 document 查询——本方法是独立方法，作用域内没有 wrap；
+      // 误用 wrap 会抛 ReferenceError，导致保存流程整体中断。
+      document.querySelectorAll('[data-pet-photo]').forEach(inp => {
+        if (inp.files && inp.files[0]) fd.append('pet_photo_' + inp.dataset.petPhoto, inp.files[0]);
+      });
 
       btn.disabled = true;
       btn.textContent = '保存中…';
@@ -1160,7 +1205,7 @@ const Shelter = {
       el.innerHTML = `
         <div class="form-group"><label class="form-label">选择在途宠物<span class="req">*</span></label>
           <select class="form-select" id="or_petCode">
-            ${inTransitPets.length === 0 ? '<option value="">暂无在途宠物</option>' : inTransitPets.map(p => '<option value="' + p.id + '" data-pet-id="' + p.id + '">' + p.code + '（' + (p.name || '未命名') + '）</option>').join('')}
+            ${inTransitPets.length === 0 ? '<option value="">暂无在途宠物</option>' : inTransitPets.map(p => '<option value="' + p.id + '" data-pet-id="' + p.id + '">' + p.code + '</option>').join('')}
           </select>
         </div>
         <div class="form-row">
@@ -1235,6 +1280,7 @@ const Shelter = {
         <div class="tab-item active" data-tab="pending">待签收</div>
         <div class="tab-item" data-tab="received">已签收</div>
         <div class="tab-item" data-tab="rejected">已驳回</div>
+        <div class="tab-item" data-tab="void">已撤回</div>
       </div>
       <div id="transferContent"></div>
     `;
@@ -1252,24 +1298,76 @@ const Shelter = {
   async renderTransferTab(tab) {
     const wrap = document.getElementById('transferContent');
     const all = this._transfers || [];
+    const esc = TNR_UI.escape.bind(TNR_UI);
+
+    // 转运单详情抽屉（复用）
+    const showTransferDetail = (rec) => {
+      TNR_UI.drawer({ title: '转运单详情 · ' + esc(rec.ledgerNo || rec.id), body: TNR_UI.renderDescList([
+        { label: '转运单号', value: rec.ledgerNo || rec.id },
+        { label: '发出捕捉点', value: rec.fromShelterName },
+        { label: '接收医院', value: rec.toHospitalName },
+        { label: '宠物数量', value: rec.petCount },
+        { label: '宠物编号', value: (rec.petCodes || []).map(c => '<span class="pet-code-chip">' + esc(c) + '</span>').join(''), full: true },
+        { label: '状态', value: this.statusBadge(rec.status) },
+        { label: '驳回原因', value: rec.rejectReason || '—' },
+        { label: '备注', value: rec.note || '—', full: true },
+        { label: '签收时间', value: rec.receivedAt || '—' },
+        { label: '创建时间', value: TNR_UI.formatDateTime(rec.createdAt) }
+      ]) });
+    };
+
+    // 点击宠物编号 → 弹出捕捉单只照片
+    const showPetPhoto = async (petCode) => {
+      const pets = await TNR_API.getPets();
+      const pet = pets.find(p => p.code === petCode);
+      if (!pet) { TNR_UI.toast('未找到宠物档案', 'warning'); return; }
+      const photo = pet.photoCapture || pet.photo_capture || '';
+      if (!photo) {
+        TNR_UI.drawer({ title: '捕捉照片 · ' + petCode, body: '<div class="empty-block"><div class="empty-block-icon">🐾</div>该动物暂无捕捉照片</div>' });
+        return;
+      }
+      TNR_UI.drawer({ title: '捕捉照片 · ' + petCode, body: '<img src="' + photo + '" data-zoom="' + photo + '" alt="' + petCode + '" style="max-width:100%;max-height:400px;object-fit:contain;border-radius:8px;border:1px solid var(--border-light);cursor:zoom-in;">' });
+      setTimeout(() => {
+        const img = document.querySelector('[data-zoom]');
+        if (img) img.addEventListener('click', () => this.photoZoom(img.dataset.zoom));
+      }, 50);
+    };
+
+    // 绑定宠物编号点击和单号点击
+    const bindPetCodeClicks = (container) => {
+      container.querySelectorAll('[data-pet-code]').forEach(el => {
+        el.addEventListener('click', () => showPetPhoto(el.dataset.petCode));
+      });
+      container.querySelectorAll('[data-act="view"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const rec = all.find(r => String(r.id) === String(btn.dataset.id));
+          if (rec) showTransferDetail(rec);
+        });
+      });
+    };
 
     if (tab === 'pending') {
       const pets = await TNR_API.getPets();
       const hospitals = await TNR_API.getInstitutions('hospital');
       const user = TNR_API.getCurrentUser();
-      const inTransitPets = pets.filter(p => p.status === 'in_transit');
+      // 待转运宠物：在途状态 且 没有在待签收转运单中的宠物
+      const pendingTransferCodes = new Set(
+        all.filter(t => t.status === 'pending')
+           .flatMap(t => (t.petCodes || []))
+      );
+      const availablePets = pets.filter(p => p.status === 'in_transit' && !pendingTransferCodes.has(p.code));
 
       let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>新建转运单</div></div><div class="card-body">';
-      if (inTransitPets.length === 0) {
-        html += '<div class="empty-block"><div class="empty-block-icon">📦</div>暂无在途宠物可转运</div>';
+      if (availablePets.length === 0) {
+        html += '<div class="empty-block"><div class="empty-block-icon">📦</div>暂无待转运动物</div>';
       } else {
-        html += '<div class="form-group"><label class="form-label">选择在途宠物（可多选拆分转运）<span class="req">*</span></label><div id="transferPetList">';
-        inTransitPets.forEach(p => {
-          html += '<label class="pet-select-item"><input type="checkbox" value="' + p.code + '" data-name="' + TNR_UI.escape(p.name || '') + '"><span class="pet-code-chip">' + p.code + '</span><span class="fs-sm text-muted">' + TNR_UI.escape(p.name || '未命名') + '</span></label>';
+        html += '<div class="form-group"><label class="form-label">选择待转运动物（可多选拆分转运，点击编号查看照片）<span class="req">*</span></label><div id="transferPetList">';
+        availablePets.forEach(p => {
+          html += '<label class="pet-select-item"><input type="checkbox" value="' + p.code + '"><span class="pet-code-chip" data-pet-code="' + p.code + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + p.code + '</span></label>';
         });
         html += '</div></div>';
         html += '<div class="form-row">';
-        html += '<div class="form-group"><label class="form-label">接收医院<span class="req">*</span></label><select class="form-select" id="tr_hospital">' + (hospitals || []).map(h => '<option value="' + h.id + '" data-name="' + TNR_UI.escape(h.name) + '">' + TNR_UI.escape(h.name) + '</option>').join('') + '</select></div>';
+        html += '<div class="form-group"><label class="form-label">接收医院<span class="req">*</span></label><select class="form-select" id="tr_hospital">' + (hospitals || []).map(h => '<option value="' + h.id + '" data-name="' + esc(h.name) + '">' + esc(h.name) + '</option>').join('') + '</select></div>';
         html += '<div class="form-group"><label class="form-label">备注</label><input class="form-input" id="tr_note" placeholder="转运备注"></div>';
         html += '</div>';
         html += '<button class="btn btn-primary" id="btnCreateTransfer">下发转运单</button>';
@@ -1279,22 +1377,22 @@ const Shelter = {
       const pendingOrders = all.filter(t => t.status === 'pending');
       html += '<div data-mt="shelter.transfers.pending"></div>';
       const columns = [
-        { title: '转运单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
+        { title: '转运单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
         { title: '接收医院', key: 'toHospitalName' },
         { title: '宠物数量', key: 'petCount', render: r => '<span class="badge badge-info">' + r.petCount + '</span>' },
-        { title: '宠物编号', render: r => (r.petCodes || []).map(c => '<span class="pet-code-chip">' + c + '</span>').join('') },
+        { title: '宠物编号', render: r => (r.petCodes || []).map(c => '<span class="pet-code-chip" data-pet-code="' + c + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + c + '</span>').join('') },
         { title: '状态', render: r => this.statusBadge(r.status) },
         { title: '创建时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
-      const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
+      const rowActions = (r) => '<button class="btn-link warning" data-act="withdraw" data-id="' + r.id + '">撤回</button>';
 
       wrap.innerHTML = html;
       TNR_UI.mountTable('[data-mt="shelter.transfers.pending"]', { id: 'shelter.transfers.pending', title: '待医院签收转运单', columns, data: pendingOrders, emptyText: '暂无待签收转运单', rowActions });
 
-      if (inTransitPets.length > 0) {
+      if (availablePets.length > 0) {
         document.getElementById('btnCreateTransfer').addEventListener('click', async () => {
           const checked = Array.from(wrap.querySelectorAll('#transferPetList input:checked')).map(cb => cb.value);
-          if (checked.length === 0) { TNR_UI.toast('请选择至少一只宠物', 'warning'); return; }
+          if (checked.length === 0) { TNR_UI.toast('请选择至少一只动物', 'warning'); return; }
           const hospSel = document.getElementById('tr_hospital');
           const user = TNR_API.getCurrentUser();
           const res = await TNR_API.createTransfer({
@@ -1316,73 +1414,62 @@ const Shelter = {
         });
       }
 
-      wrap.querySelectorAll('[data-act]').forEach(btn => {
+      // 绑定单号点击详情 + 宠物编号点击照片 + 撤回
+      bindPetCodeClicks(wrap);
+      wrap.querySelectorAll('[data-act="withdraw"]').forEach(btn => {
         btn.addEventListener('click', () => {
           const rec = all.find(r => String(r.id) === String(btn.dataset.id));
           if (!rec) return;
-          if (btn.dataset.act === 'view') {
-            TNR_UI.drawer({ title: '转运单详情', body: TNR_UI.renderDescList([
-              { label: '转运单号', value: rec.ledgerNo || rec.id },
-              { label: '发出捕捉点', value: rec.fromShelterName },
-              { label: '接收医院', value: rec.toHospitalName },
-              { label: '宠物数量', value: rec.petCount },
-              { label: '宠物编号', value: (rec.petCodes || []).map(c => '<span class="pet-code-chip">' + c + '</span>').join(''), full: true },
-              { label: '状态', value: this.statusBadge(rec.status) },
-              { label: '驳回原因', value: rec.rejectReason || '—' },
-              { label: '备注', value: rec.note || '—', full: true },
-              { label: '创建时间', value: TNR_UI.formatDateTime(rec.createdAt) }
-            ]) });
-          }
+          TNR_UI.confirm('确定撤回转运单 <b>' + esc(rec.ledgerNo || rec.id) + '</b> 吗？<br><span style="color:var(--ink-muted);font-size:13px;">撤回后动物状态回退为待转运，可被选到其他转运单。</span>', '撤回确认').then(async ok => {
+            if (!ok) return;
+            const res = await TNR_API.withdrawTransfer(btn.dataset.id);
+            if (res && res.success !== false) {
+              TNR_UI.toast('转运单已撤回', 'success');
+              this._transfers = await TNR_API.getTransfers();
+              this.renderTransferTab('pending');
+            } else {
+              TNR_UI.toast('撤回失败：' + (res?.message || '未知错误'), 'danger');
+            }
+          });
         });
       });
     } else {
       const list = all.filter(t => t.status === tab);
       const columns = [
-        { title: '转运单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
+        { title: '转运单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
         { title: '接收医院', key: 'toHospitalName' },
         { title: '宠物数量', key: 'petCount', render: r => '<span class="badge badge-info">' + r.petCount + '</span>' },
-        { title: '宠物编号', render: r => (r.petCodes || []).map(c => '<span class="pet-code-chip">' + c + '</span>').join('') },
+        { title: '宠物编号', render: r => (r.petCodes || []).map(c => '<span class="pet-code-chip" data-pet-code="' + c + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + c + '</span>').join('') },
         { title: '状态', render: r => this.statusBadge(r.status) },
         { title: '创建时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) },
         { title: '签收时间', key: 'receivedAt', render: r => TNR_UI.formatDateTime(r.receivedAt) }
       ];
       const rowActions = (r) => {
-        let html = '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
+        let html = '';
         if (tab === 'rejected') html += '<button class="btn-link success" data-act="resend" data-id="' + r.id + '">重新下发</button>';
         return html;
       };
-      const tabLabel = { dispatched: '已下发', received: '已签收', rejected: '已驳回' }[tab];
-      TNR_UI.mountTable(wrap, { id: 'shelter.transfers.' + tab, title: tabLabel + '转运单', columns, data: list, emptyText: '暂无' + tabLabel + '转运单', rowActions });
+      const tabLabel = { dispatched: '已下发', received: '已签收', rejected: '已驳回', void: '已撤回' }[tab];
+      let html = '<div data-mt="shelter.transfers.' + tab + '"></div>';
+      wrap.innerHTML = html;
+      TNR_UI.mountTable('[data-mt="shelter.transfers.' + tab + '"]', { id: 'shelter.transfers.' + tab, title: tabLabel + '转运单', columns, data: list, emptyText: '暂无' + tabLabel + '转运单', rowActions });
 
-      wrap.querySelectorAll('[data-act]').forEach(btn => {
+      bindPetCodeClicks(wrap);
+      wrap.querySelectorAll('[data-act="resend"]').forEach(btn => {
         btn.addEventListener('click', async () => {
           const rec = all.find(r => String(r.id) === String(btn.dataset.id));
           if (!rec) return;
-          if (btn.dataset.act === 'view') {
-            TNR_UI.drawer({ title: '转运单详情', body: TNR_UI.renderDescList([
-              { label: '转运单号', value: rec.ledgerNo || rec.id },
-              { label: '发出捕捉点', value: rec.fromShelterName },
-              { label: '接收医院', value: rec.toHospitalName },
-              { label: '宠物数量', value: rec.petCount },
-              { label: '宠物编号', value: (rec.petCodes || []).map(c => '<span class="pet-code-chip">' + c + '</span>').join(''), full: true },
-              { label: '状态', value: this.statusBadge(rec.status) },
-              { label: '驳回原因', value: rec.rejectReason || '—' },
-              { label: '签收时间', value: rec.receivedAt || '—' },
-              { label: '创建时间', value: TNR_UI.formatDateTime(rec.createdAt) }
-            ]) });
-          } else if (btn.dataset.act === 'resend') {
-            TNR_UI.confirm('确认重新下发该转运单？宠物将重新进入待签收状态。', '重新下发').then(async ok => {
-              if (!ok) return;
-              const res = await TNR_API.resendTransfer(btn.dataset.id);
-              if (res && res.success !== false) {
-                TNR_UI.toast('重新下发成功：' + (res.data?.ledger_no || ''), 'success');
-                this._transfers = await TNR_API.getTransfers();
-                this.renderTransferTab(tab);
-              } else {
-                TNR_UI.toast('重新下发失败：' + (res?.message || '未知错误'), 'danger');
-              }
-            });
-          }
+          TNR_UI.confirm('确认重新下发该转运单？动物将重新进入待签收状态。', '重新下发').then(async ok => {
+            if (!ok) return;
+            const res = await TNR_API.resendTransfer(btn.dataset.id);
+            if (res && res.success !== false) {
+              TNR_UI.toast('重新下发成功：' + (res.data?.ledger_no || ''), 'success');
+              this._transfers = await TNR_API.getTransfers();
+              this.renderTransferTab(tab);
+            } else {
+              TNR_UI.toast('重新下发失败：' + (res?.message || '未知错误'), 'danger');
+            }
+          });
         });
       });
     }
@@ -1607,14 +1694,15 @@ const Shelter = {
     }
   },
 
-  /* ========== 7. 动物回收放养 ========== */
+  /* ========== 7. 动物去向 ========== */
   async render_release() {
     const el = document.getElementById('page-release');
     el.innerHTML = `
       <div class="tabs" id="relTabs">
-        <div class="tab-item active" data-tab="recovery">待回收</div>
-        <div class="tab-item" data-tab="pending">待放养</div>
-        <div class="tab-item" data-tab="released">已放养</div>
+        <div class="tab-item active" data-tab="recovery">回收</div>
+        <div class="tab-item" data-tab="release">放养</div>
+        <div class="tab-item" data-tab="adoption">领养</div>
+        <div class="tab-item" data-tab="death">死亡</div>
       </div>
       <div id="relContent"></div>
     `;
@@ -1627,6 +1715,8 @@ const Shelter = {
     });
     this._pets = await TNR_API.getPets();
     this._releases = await TNR_API.getReleases();
+    this._adoptions = await TNR_API.getAdoptions();
+    this._transfers = await TNR_API.getTransfers();
     this.renderRelTab('recovery');
   },
 
@@ -1634,29 +1724,51 @@ const Shelter = {
     const wrap = document.getElementById('relContent');
     const pets = this._pets || [];
     const releases = this._releases || [];
+    const adoptions = this._adoptions || [];
+    const transfers = this._transfers || [];
+    const esc = TNR_UI.escape.bind(TNR_UI);
+
+    // 点击宠物编号 → 弹出捕捉照片
+    const showPetPhoto = async (petCode) => {
+      const petList = pets.length ? pets : await TNR_API.getPets();
+      const pet = petList.find(p => p.code === petCode);
+      if (!pet) { TNR_UI.toast('未找到动物档案', 'warning'); return; }
+      const photo = pet.photoCapture || pet.photo_capture || '';
+      if (!photo) {
+        TNR_UI.drawer({ title: '捕捉照片 · ' + petCode, body: '<div class="empty-block"><div class="empty-block-icon">🐾</div>该动物暂无捕捉照片</div>' });
+        return;
+      }
+      TNR_UI.drawer({ title: '捕捉照片 · ' + petCode, body: '<img src="' + photo + '" data-zoom="' + photo + '" alt="' + petCode + '" style="max-width:100%;max-height:400px;object-fit:contain;border-radius:8px;border:1px solid var(--border-light);cursor:zoom-in;">' });
+      setTimeout(() => {
+        const img = document.querySelector('[data-zoom]');
+        if (img) img.addEventListener('click', () => this.photoZoom(img.dataset.zoom));
+      }, 50);
+    };
+
+    const bindPetCodes = (container) => {
+      container.querySelectorAll('[data-pet-code]').forEach(el => {
+        el.addEventListener('click', () => showPetPhoto(el.dataset.petCode));
+      });
+    };
 
     if (tab === 'recovery') {
-      // 待回收：列出可被回收（已绝育/已完成诊疗）的动物，点击"回收"直接创建放养记录
-      const recoverable = pets.filter(p => p.status === 'in_treatment' || p.status === 'pending_adopt');
-      const treatments = await TNR_API.getTreatments();
+      // 回收：列出待转运动物（与转运交接一样，有有效转运单的不能再选）
+      const pendingTransferCodes = new Set(
+        transfers.filter(t => t.status === 'pending')
+           .flatMap(t => (t.petCodes || []))
+      );
+      const recoverable = pets.filter(p => p.status === 'in_transit' && !pendingTransferCodes.has(p.code));
       let html = '<div data-mt="shelter.release.recovery"></div>';
       const columns = [
-        { title: '宠物编号', key: 'code', render: r => '<span class="pet-code-chip">' + r.code + '</span>' },
-        { title: '名称', key: 'name', render: r => r.name || '—' },
+        { title: '宠物编号', key: 'code', render: r => '<span class="pet-code-chip" data-pet-code="' + r.code + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + r.code + '</span>' },
         { title: '品种', render: r => (r.breed || '—') + ' / ' + (r.species || '') },
-        { title: '所属医院', render: r => {
-          const t = treatments.find(t => String(t.petId) === String(r.id) || String(t.pet_id) === String(r.id));
-          return t ? (t.hospitalName || t.hospital_name || '—') : (r.hospitalName || r.hospital_name || '—');
-        }},
         { title: '状态', render: r => TNR_UI.statusBadge(TNR_API.getPetStatusText(r.status), TNR_API.getPetStatusBadge(r.status).replace('badge-','')) },
-        { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-recover="' + r.id + '">回收并登记放养</button>' }
+        { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-recover="' + r.id + '">回收登记</button>' }
       ];
-      // 注意顺序：必须先 wrap.innerHTML = html 把 [data-mt] 容器插进 DOM，
-      // 再 mountTable —— 反过来的话选择器查不到元素，表格会静默不渲染。
-      // 本表已有独立的「操作」列（回收并登记放养按钮），不需要 rowActions。
       wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.release.recovery"]', { id: 'shelter.release.recovery', title: '可回收动物列表', columns, data: recoverable, emptyText: '暂无可回收动物（需先经医院诊疗）' });
+      TNR_UI.mountTable('[data-mt="shelter.release.recovery"]', { id: 'shelter.release.recovery', title: '待回收动物列表', columns, data: recoverable, emptyText: '暂无待回收动物' });
 
+      bindPetCodes(wrap);
       wrap.querySelectorAll('[data-recover]').forEach(btn => {
         btn.addEventListener('click', () => {
           const pet = pets.find(p => String(p.id) === String(btn.dataset.recover));
@@ -1665,22 +1777,35 @@ const Shelter = {
         });
       });
 
-    } else if (tab === 'pending') {
-      // 待放养：列出 status=pending 的放养记录，等待物业签字确认
+    } else if (tab === 'release') {
+      // 放养：诊疗后放回本小区的动物
+      // 子标签：待放养 / 已放养
       const pendingReleases = releases.filter(r => r.status === 'pending');
-      let html = '<div data-mt="shelter.release.pending"></div>';
-      const columns = [
-        { title: '放养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
-        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + TNR_UI.escape(r.petCode || r.pet_code) + '</span>' },
-        { title: '放养小区', key: 'communityName', render: r => TNR_UI.escape(r.communityName || r.community_name || '—') },
-        { title: '接收人', key: 'receiverName', render: r => TNR_UI.escape(r.receiverName || r.receiver_name || '—') },
-        { title: '联系电话', key: 'receiverPhone', render: r => TNR_UI.escape(r.receiverPhone || r.receiver_phone || '—') },
-        { title: '登记时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt || r.created_at) },
-        { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-confirm-release="' + r.id + '">确认放养</button><button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>' }
-      ];
+      const releasedReleases = releases.filter(r => r.status === 'released');
+      let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>待放养确认</div></div><div class="card-body" style="padding:0;"><div data-mt="shelter.release.pending"></div></div></div>';
+      html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>已放养记录</div></div><div class="card-body" style="padding:0;"><div data-mt="shelter.release.released"></div></div></div>';
       wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.release.pending"]', { id: 'shelter.release.pending', title: '待放养确认', columns, data: pendingReleases, emptyText: '暂无待放养记录' });
 
+      const pendingCols = [
+        { title: '放养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
+        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip" data-pet-code="' + esc(r.petCode || r.pet_code) + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + esc(r.petCode || r.pet_code) + '</span>' },
+        { title: '放养小区', key: 'communityName', render: r => esc(r.communityName || r.community_name || '—') },
+        { title: '接收人', key: 'receiverName', render: r => esc(r.receiverName || r.receiver_name || '—') },
+        { title: '联系电话', key: 'receiverPhone', render: r => esc(r.receiverPhone || r.receiver_phone || '—') },
+        { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-confirm-release="' + r.id + '">确认放养</button>' }
+      ];
+      TNR_UI.mountTable('[data-mt="shelter.release.pending"]', { id: 'shelter.release.pending', title: '待放养确认', columns: pendingCols, data: pendingReleases, emptyText: '暂无待放养记录' });
+
+      const releasedCols = [
+        { title: '放养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
+        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip" data-pet-code="' + esc(r.petCode || r.pet_code) + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + esc(r.petCode || r.pet_code) + '</span>' },
+        { title: '放养小区', key: 'communityName', render: r => esc(r.communityName || r.community_name || '—') },
+        { title: '接收人', key: 'receiverName', render: r => esc(r.receiverName || r.receiver_name || '—') },
+        { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt || r.released_at) }
+      ];
+      TNR_UI.mountTable('[data-mt="shelter.release.released"]', { id: 'shelter.release.released', title: '已放养记录', columns: releasedCols, data: releasedReleases, emptyText: '暂无放养记录' });
+
+      bindPetCodes(wrap);
       wrap.querySelectorAll('[data-confirm-release]').forEach(btn => {
         btn.addEventListener('click', () => this.showReleaseConfirmModal(btn.dataset.confirmRelease, releases));
       });
@@ -1688,9 +1813,9 @@ const Shelter = {
         btn.addEventListener('click', () => {
           const rec = releases.find(r => String(r.id) === String(btn.dataset.id));
           if (!rec) return;
-          TNR_UI.drawer({ title: '放养详情', body: TNR_UI.renderDescList([
+          TNR_UI.drawer({ title: '放养详情 · ' + esc(rec.ledgerNo || rec.id), body: TNR_UI.renderDescList([
             { label: '放养单号', value: rec.ledgerNo || rec.id },
-            { label: '宠物编号', value: '<span class="pet-code-chip">' + TNR_UI.escape(rec.petCode || rec.pet_code) + '</span>' },
+            { label: '宠物编号', value: '<span class="pet-code-chip">' + esc(rec.petCode || rec.pet_code) + '</span>' },
             { label: '放养小区', value: rec.communityName || rec.community_name || '—' },
             { label: '接收人', value: rec.receiverName || rec.receiver_name || '—' },
             { label: '联系电话', value: rec.receiverPhone || rec.receiver_phone || '—' },
@@ -1700,44 +1825,54 @@ const Shelter = {
         });
       });
 
-    } else if (tab === 'released') {
-      const released = releases.filter(r => r.status === 'released');
-      let html = '<div data-mt="shelter.release.released"></div>';
+    } else if (tab === 'adoption') {
+      // 领养：诊疗后进入领养大厅完成领养审核的动物
+      const adoptedPets = adoptions.filter(a => a.status === 'completed' || a.status === 'pending_claim');
+      let html = '<div data-mt="shelter.release.adoption"></div>';
       const columns = [
-        { title: '放养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
-        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + TNR_UI.escape(r.petCode || r.pet_code) + '</span>' },
-        { title: '放养小区', key: 'communityName', render: r => TNR_UI.escape(r.communityName || r.community_name || '—') },
-        { title: '接收人', key: 'receiverName', render: r => TNR_UI.escape(r.receiverName || r.receiver_name || '—') },
-        { title: '联系电话', key: 'receiverPhone', render: r => TNR_UI.escape(r.receiverPhone || r.receiver_phone || '—') },
-        { title: '状态', render: r => TNR_UI.statusBadge('已放养', 'success') },
-        { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt || r.released_at) }
+        { title: '领养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
+        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip" data-pet-code="' + esc(r.petCode || r.pet_code) + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + esc(r.petCode || r.pet_code) + '</span>' },
+        { title: '领养人', key: 'adopterName', render: r => esc(r.adopterName || r.adopter_name || '—') },
+        { title: '电话', key: 'adopterPhone', render: r => esc(r.adopterPhone || r.adopter_phone || '—') },
+        { title: '状态', render: r => this.statusBadge(r.status) },
+        { title: '领养时间', key: 'adoptedAt', render: r => TNR_UI.formatDateTime(r.adoptedAt || r.adopted_at) }
       ];
-      const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
-      // 与其他标签页保持一致：先插容器再 mountTable
       wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.release.released"]', { id: 'shelter.release.released', title: '放养记录', columns, data: released, emptyText: '暂无放养记录', rowActions });
-      wrap.querySelectorAll('[data-act]').forEach(btn => {
+      TNR_UI.mountTable('[data-mt="shelter.release.adoption"]', { id: 'shelter.release.adoption', title: '领养去向记录', columns, data: adoptedPets, emptyText: '暂无领养记录' });
+
+      bindPetCodes(wrap);
+      wrap.querySelectorAll('[data-act="view"]').forEach(btn => {
         btn.addEventListener('click', () => {
-          const rec = releases.find(r => String(r.id) === String(btn.dataset.id));
+          const rec = adoptions.find(r => String(r.id) === String(btn.dataset.id));
           if (!rec) return;
-          if (btn.dataset.act === 'view') {
-            TNR_UI.drawer({ title: '放养详情', body: TNR_UI.renderDescList([
-              { label: '放养单号', value: rec.ledgerNo || rec.id },
-              { label: '宠物编号', value: '<span class="pet-code-chip">' + TNR_UI.escape(rec.petCode || rec.pet_code) + '</span>' },
-              { label: '放养小区', value: rec.communityName || rec.community_name || '—' },
-              { label: '接收人', value: rec.receiverName || rec.receiver_name || '—' },
-              { label: '联系电话', value: rec.receiverPhone || rec.receiver_phone || '—' },
-              { label: '放养时间', value: TNR_UI.formatDateTime(rec.releasedAt || rec.released_at) },
-              { label: '备注', value: rec.note || '—', full: true },
-              { label: '操作员', value: rec.operatorName || rec.operator_name }
-            ]) });
-          }
+          TNR_UI.drawer({ title: '领养详情 · ' + esc(rec.ledgerNo || rec.id), body: TNR_UI.renderDescList([
+            { label: '领养单号', value: rec.ledgerNo || rec.id },
+            { label: '宠物编号', value: '<span class="pet-code-chip">' + esc(rec.petCode || rec.pet_code) + '</span>' },
+            { label: '领养人', value: rec.adopterName || rec.adopter_name || '—' },
+            { label: '电话', value: rec.adopterPhone || rec.adopter_phone || '—' },
+            { label: '医院', value: rec.hospitalName || rec.hospital_name || '—' },
+            { label: '状态', value: this.statusBadge(rec.status) },
+            { label: '领养时间', value: TNR_UI.formatDateTime(rec.adoptedAt || rec.adopted_at) }
+          ]) });
         });
       });
+
+    } else if (tab === 'death') {
+      // 死亡：已登记死亡的动物（后端状态 euthanized）
+      const deadPets = pets.filter(p => p.status === 'euthanized');
+      let html = '<div data-mt="shelter.release.death"></div>';
+      const columns = [
+        { title: '宠物编号', key: 'code', render: r => '<span class="pet-code-chip" data-pet-code="' + r.code + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + r.code + '</span>' },
+        { title: '品种', render: r => (r.breed || '—') + ' / ' + (r.species || '') },
+        { title: '状态', render: r => TNR_UI.statusBadge('已死亡', 'danger') },
+      ];
+      wrap.innerHTML = html;
+      TNR_UI.mountTable('[data-mt="shelter.release.death"]', { id: 'shelter.release.death', title: '死亡记录', columns, data: deadPets, emptyText: '暂无死亡记录' });
+      bindPetCodes(wrap);
     }
   },
 
-  /* 回收并登记放养 - 弹出表单收集接收人信息和电子签名 */
+  /* 回收登记 - 填写回收单（回收单号、回收人姓名、手机号、住址、签字、走失原因、时间） */
   async showRecoverModal(pet) {
     const communities = await TNR_API.getInstitutions('community');
     // 优先匹配宠物原捕捉小区
@@ -1753,25 +1888,23 @@ const Shelter = {
       el.innerHTML = `
         <div class="form-group"><label class="form-label">宠物编号</label><input class="form-input" value="${TNR_UI.escape(pet.code)}" readonly></div>
         <div class="form-row">
-          <div class="form-group"><label class="form-label">放养小区<span class="req">*</span></label>
-            <select class="form-select" id="rc_community">
-              ${(communities || []).map(c => '<option value="' + c.id + '" data-name="' + TNR_UI.escape(c.name) + '"' + (String(c.id) === defaultCommId ? ' selected' : '') + '>' + TNR_UI.escape(c.name) + '</option>').join('')}
-            </select>
-          </div>
-          <div class="form-group"><label class="form-label">接收人姓名<span class="req">*</span></label><input class="form-input" id="rc_receiverName" placeholder="物业接收人"></div>
+          <div class="form-group"><label class="form-label">回收单号</label><input class="form-input" id="rc_ledgerNo" value="系统自动生成（RET 前缀）" readonly style="background:var(--bg-subtle);color:var(--text-muted);"></div>
+          <div class="form-group"><label class="form-label">回收时间<span class="req">*</span></label><input type="datetime-local" class="form-input" id="rc_returnTime" value="${new Date().toISOString().slice(0,16)}"></div>
         </div>
         <div class="form-row">
-          <div class="form-group"><label class="form-label">接收人电话<span class="req">*</span></label><input class="form-input" id="rc_receiverPhone" placeholder="手机号"></div>
-          <div class="form-group"><label class="form-label">备注</label><input class="form-input" id="rc_note" placeholder="备注"></div>
+          <div class="form-group"><label class="form-label">回收人姓名<span class="req">*</span></label><input class="form-input" id="rc_ownerName" placeholder="主人姓名"></div>
+          <div class="form-group"><label class="form-label">联系电话<span class="req">*</span></label><input class="form-input" id="rc_ownerPhone" placeholder="手机号"></div>
         </div>
-        <div class="form-group"><label class="form-label">物业电子签名<span class="req">*</span></label>
+        <div class="form-group"><label class="form-label">住址<span class="req">*</span></label><input class="form-input" id="rc_ownerAddress" placeholder="详细住址"></div>
+        <div class="form-group"><label class="form-label">走失原因<span class="req">*</span></label><textarea class="form-textarea" id="rc_lostReason" placeholder="说明走失原因及找回经过"></textarea></div>
+        <div class="form-group"><label class="form-label">回收人电子签名<span class="req">*</span></label>
           <canvas class="signature-pad" id="rc_signature"></canvas>
           <button class="btn btn-secondary btn-sm mt-2" id="rcClearSig">清除签名</button>
         </div>
       `;
     };
     const { close } = TNR_UI.modal({
-      title: '回收并登记放养 · ' + pet.code,
+      title: '回收登记 · ' + pet.code,
       size: 'lg',
       body,
       actions: '<button class="btn btn-secondary" data-action="close">取消</button><button class="btn btn-success" id="btnSubmitRecover">确认回收</button>'
@@ -1782,30 +1915,32 @@ const Shelter = {
       document.getElementById('rcClearSig').addEventListener('click', () => sigPad.clear());
 
       document.getElementById('btnSubmitRecover').addEventListener('click', async () => {
-        const commSel = document.getElementById('rc_community');
-        const commName = commSel.options[commSel.selectedIndex].dataset.name;
-        const receiverName = document.getElementById('rc_receiverName').value.trim();
-        const receiverPhone = document.getElementById('rc_receiverPhone').value.trim();
-        if (!receiverName || !receiverPhone) { TNR_UI.toast('请填写接收人信息', 'warning'); return; }
-        if (sigPad.isEmpty()) { TNR_UI.toast('请完成物业电子签名', 'warning'); return; }
+        const ownerName = document.getElementById('rc_ownerName').value.trim();
+        const ownerPhone = document.getElementById('rc_ownerPhone').value.trim();
+        const ownerAddress = document.getElementById('rc_ownerAddress').value.trim();
+        const lostReason = document.getElementById('rc_lostReason').value.trim();
+        const returnTime = document.getElementById('rc_returnTime').value;
+        if (!ownerName || !ownerPhone) { TNR_UI.toast('请填写回收人信息', 'warning'); return; }
+        if (!ownerAddress) { TNR_UI.toast('请填写住址', 'warning'); return; }
+        if (!lostReason) { TNR_UI.toast('请填写走失原因', 'warning'); return; }
+        if (sigPad.isEmpty()) { TNR_UI.toast('请完成回收人电子签名', 'warning'); return; }
 
-        const res = await TNR_API.createRelease({
+        // 使用主人领回接口完成回收
+        const res = await TNR_API.ownerReturn(pet.id, {
           pet_id: pet.id,
-          pet_code: pet.code,
-          community_id: commSel.value,
-          community_name: commName,
-          receiver_name: receiverName,
-          receiver_phone: receiverPhone,
+          owner_name: ownerName,
+          owner_phone: ownerPhone,
+          reason: lostReason,
           signature: sigPad.getDataURL(),
-          note: document.getElementById('rc_note').value.trim()
+          owner_address: ownerAddress,
+          return_time: returnTime
         });
         if (res && res.success !== false) {
-          TNR_UI.toast('回收登记成功！等待物业确认放养', 'success');
+          const no = res.data && (res.data.ledgerNo || res.data.ledger_no);
+          TNR_UI.toast('回收登记成功' + (no ? '：' + no : '') + '，该动物已退回主人', 'success');
           close();
           this._pets = await TNR_API.getPets();
-          this._releases = await TNR_API.getReleases();
-          this.renderRelTab('pending');
-          document.querySelector('[data-tab="pending"]').click();
+          this.renderRelTab('recovery');
         } else {
           TNR_UI.toast('提交失败：' + (res?.message || '未知错误'), 'danger');
         }
@@ -1885,7 +2020,7 @@ const Shelter = {
             <div class="form-group"><label class="form-label">身份证号</label><input class="form-input" id="ad_idCard" placeholder="身份证号"></div>
           </div>
           <div class="form-row-3">
-            <div class="form-group"><label class="form-label">选择宠物<span class="req">*</span></label><select class="form-select" id="ad_pet">${adoptablePets.map(p => '<option value="' + p.id + '" data-code="' + p.code + '">' + p.code + '（' + TNR_UI.escape(p.name || '未命名') + '）</option>').join('')}</select></div>
+            <div class="form-group"><label class="form-label">选择宠物<span class="req">*</span></label><select class="form-select" id="ad_pet">${adoptablePets.map(p => '<option value="' + p.id + '" data-code="' + p.code + '">' + p.code + '</option>').join('')}</select></div>
             <div class="form-group"><label class="form-label">领养人地址</label><input class="form-input" id="ad_address" placeholder="居住地址"></div>
             <div class="form-group"><label class="form-label">资质情况</label><select class="form-select" id="ad_qualification"><option value="有稳定住所，有养宠经验">有稳定住所，有养宠经验</option><option value="有稳定住所，无养宠经验">有稳定住所，无养宠经验</option><option value="需进一步审核">需进一步审核</option></select></div>
           </div>
@@ -2220,123 +2355,6 @@ const Shelter = {
     });
   },
 
-  /* ========== 11. 安乐死备案 ========== */
-  async render_euthanasia() {
-    const el = document.getElementById('page-euthanasia');
-    el.innerHTML = `
-      <div class="tabs" id="eutTabs">
-        <div class="tab-item active" data-tab="body">尸体接收备案</div>
-        <div class="tab-item" data-tab="records">处置记录查询</div>
-      </div>
-      <div id="eutContent"></div>
-    `;
-    el.querySelectorAll('.tab-item').forEach(t => {
-      t.addEventListener('click', () => {
-        el.querySelectorAll('.tab-item').forEach(x => x.classList.remove('active'));
-        t.classList.add('active');
-        this.renderEutTab(t.dataset.tab);
-      });
-    });
-    this._euthanasia = await TNR_API.getEuthanasia();
-    this.renderEutTab('body');
-  },
-
-  async renderEutTab(tab) {
-    const wrap = document.getElementById('eutContent');
-    const records = this._euthanasia || [];
-
-    if (tab === 'body') {
-      const pending = records.filter(r => !r.bodyReceived);
-      const received = records.filter(r => r.bodyReceived);
-      let html = '<div data-mt="shelter.euth.bodyPending"></div>';
-      const columns = [
-        { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
-        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + r.petCode + '</span>' },
-        { title: '处置医院', key: 'hospitalName' },
-        { title: '原因', key: 'reason' },
-        { title: '病情', key: 'condition' },
-        { title: '处置时间', key: 'euthanizedAt', render: r => TNR_UI.formatDateTime(r.euthanizedAt) },
-        { title: '操作', render: r => '<button class="btn btn-primary btn-sm" data-receive="' + r.id + '">接收备案</button>' }
-      ];
-      html += '<div data-mt="shelter.euth.bodyReceived"></div>';
-
-      const cols2 = [
-        { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
-        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + r.petCode + '</span>' },
-        { title: '处置医院', key: 'hospitalName' },
-        { title: '原因', key: 'reason' },
-        { title: '处置时间', key: 'euthanizedAt', render: r => TNR_UI.formatDateTime(r.euthanizedAt) },
-        { title: '接收时间', key: 'bodyReceivedAt', render: r => TNR_UI.formatDateTime(r.bodyReceivedAt) },
-        { title: '接收人', key: 'bodyReceivedByName' }
-      ];
-      wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.euth.bodyPending"]', { id: 'shelter.euth.bodyPending', title: '待接收尸体', columns, data: pending, emptyText: '暂无待接收尸体' });
-      TNR_UI.mountTable('[data-mt="shelter.euth.bodyReceived"]', { id: 'shelter.euth.bodyReceived', title: '已接收备案', columns: cols2, data: received, emptyText: '暂无已接收记录' });
-
-      wrap.querySelectorAll('[data-receive]').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const rec = records.find(r => String(r.id) === String(btn.dataset.receive));
-          if (!rec) return;
-          const ok = await TNR_UI.confirm('确认接收宠物 <b>' + rec.petCode + '</b> 的尸体并备案？', '接收确认');
-          if (ok) {
-            const res = await TNR_API.receiveBody(rec.id);
-            if (res && res.success !== false) {
-              TNR_UI.toast('尸体接收备案成功', 'success');
-              this._euthanasia = await TNR_API.getEuthanasia();
-              this.renderEutTab('body');
-            } else {
-              TNR_UI.toast('操作失败：' + (res?.message || ''), 'danger');
-            }
-          }
-        });
-      });
-
-    } else if (tab === 'records') {
-      const filters = [
-        { key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号/医院/单号' }
-      ];
-      wrap.innerHTML = TNR_UI.renderFilterBar(filters) + '<div id="eutTableWrap"></div>';
-      const renderTable = () => {
-        const vals = TNR_UI.getFilterValues();
-        let list = records;
-        if (vals.keyword) {
-          const kw = vals.keyword;
-          list = list.filter(r => ((r.petCode || '') + (r.hospitalName || '') + (r.ledgerNo || '') + r.id).toLowerCase().includes(kw));
-        }
-        const columns = [
-          { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
-          { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + r.petCode + '</span>' },
-          { title: '处置医院', key: 'hospitalName' },
-          { title: '原因', key: 'reason' },
-          { title: '病情', key: 'condition' },
-          { title: '处置时间', key: 'euthanizedAt', render: r => TNR_UI.formatDateTime(r.euthanizedAt) },
-          { title: '尸体状态', render: r => r.bodyReceived ? TNR_UI.statusBadge('已接收', 'success') : TNR_UI.statusBadge('待接收', 'warning') },
-          { title: '操作', render: r => '<button class="btn-link" data-view="' + r.id + '">详情</button>' }
-        ];
-        TNR_UI.mountTable('eutTableWrap', { id: 'shelter.euth.records', title: '处置记录', columns, data: list, emptyText: '暂无处置记录' });
-        document.getElementById('eutTableWrap').querySelectorAll('[data-view]').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const rec = records.find(r => String(r.id) === String(btn.dataset.view));
-            if (!rec) return;
-            TNR_UI.drawer({ title: '安乐死备案详情', body: TNR_UI.renderDescList([
-              { label: '单号', value: rec.ledgerNo || rec.id },
-              { label: '宠物编号', value: '<span class="pet-code-chip">' + rec.petCode + '</span>' },
-              { label: '处置医院', value: rec.hospitalName },
-              { label: '处置时间', value: rec.euthanizedAt },
-              { label: '原因', value: rec.reason, full: true },
-              { label: '病情说明', value: rec.condition, full: true },
-              { label: '尸体接收', value: rec.bodyReceived ? '已接收' : '待接收' },
-              { label: '接收时间', value: rec.bodyReceivedAt || '—' },
-              { label: '接收人', value: rec.bodyReceivedByName || '—' }
-            ]) });
-          });
-        });
-      };
-      renderTable();
-      TNR_UI.bindFilter(renderTable);
-    }
-  },
-
   /* ========== 12. 全量台账 ========== */
   async render_ledger() {
     const el = document.getElementById('page-ledger');
@@ -2374,11 +2392,14 @@ const Shelter = {
     const wrap = document.getElementById('ledgerContent');
     let data = [], columns = [], title = '';
     const ld = this._ledgerData || {};
+    const esc = TNR_UI.escape.bind(TNR_UI);
+    // 单号可点击 → 弹出完整单据
+    const ledgerLink = (r) => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-ledger-view="' + tab + '" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>';
     if (tab === 'captures') {
       title = '捕捉台账';
       data = ld.captures || [];
       columns = [
-        { title: '台账单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
+        { title: '台账单号', key: 'ledgerNo', render: ledgerLink },
         { title: '小区', key: 'communityName' },
         { title: '物业', key: 'propertyName' },
         { title: '数量', key: 'petCount' },
@@ -2390,7 +2411,7 @@ const Shelter = {
       title = '转运台账';
       data = ld.transfers || [];
       columns = [
-        { title: '台账单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
+        { title: '台账单号', key: 'ledgerNo', render: ledgerLink },
         { title: '发出捕捉点', key: 'fromShelterName' },
         { title: '接收医院', key: 'toHospitalName' },
         { title: '数量', key: 'petCount' },
@@ -2401,12 +2422,12 @@ const Shelter = {
       title = '诊疗台账';
       data = ld.treatments || [];
       columns = [
-        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + r.petCode + '</span>' },
+        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip" data-ledger-view="treatments" data-id="' + r.id + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + esc(r.petCode) + '</span>' },
         { title: '医院', key: 'hospitalName' },
         { title: '绝育', render: r => r.items && r.items.sterilization ? TNR_UI.statusBadge('已绝育', 'success') : '—' },
         { title: '疫苗', render: r => r.items && r.items.vaccine ? TNR_UI.statusBadge('已接种', 'success') : '—' },
         { title: '驱虫', render: r => r.items && r.items.deworming ? TNR_UI.statusBadge('已驱虫', 'success') : '—' },
-        { title: '芯片', render: r => r.chip ? '<span class="chip-display">' + TNR_UI.escape(r.chip.chipNo || '') + '</span>' : '—' },
+        { title: '芯片', render: r => r.chip ? '<span class="chip-display">' + esc(r.chip.chipNo || '') + '</span>' : '—' },
         { title: '状态', render: r => this.statusBadge(r.status) },
         { title: '时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
@@ -2414,8 +2435,8 @@ const Shelter = {
       title = '放养台账';
       data = ld.releases || [];
       columns = [
-        { title: '台账单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
-        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + r.petCode + '</span>' },
+        { title: '台账单号', key: 'ledgerNo', render: ledgerLink },
+        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + esc(r.petCode) + '</span>' },
         { title: '放养小区', key: 'communityName' },
         { title: '接收人', key: 'receiverName' },
         { title: '状态', render: r => TNR_UI.statusBadge('已放养', 'success') },
@@ -2425,8 +2446,8 @@ const Shelter = {
       title = '领养台账';
       data = ld.adoptions || [];
       columns = [
-        { title: '台账单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
-        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + r.petCode + '</span>' },
+        { title: '台账单号', key: 'ledgerNo', render: ledgerLink },
+        { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + esc(r.petCode) + '</span>' },
         { title: '领养人', key: 'adopterName' },
         { title: '电话', key: 'adopterPhone' },
         { title: '医院', key: 'hospitalName' },
@@ -2438,7 +2459,7 @@ const Shelter = {
       data = ld.materials || [];
       const typeMap = { purchase: ['采购', 'success'], dispatch: ['下发', 'info'], receive: ['签收', 'cinnabar'], consume: ['消耗', 'warning'], adjustment: ['异动', 'danger'] };
       columns = [
-        { title: '台账单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || '') + '</span>' },
+        { title: '台账单号', key: 'ledgerNo', render: r => (r.ledgerNo ? '<span class="font-mono fs-sm" data-ledger-view="materials" data-id="' + r.id + '" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;">' + esc(r.ledgerNo) + '</span>' : '—') },
         { title: '类型', render: r => TNR_UI.statusBadge(typeMap[r.type] ? typeMap[r.type][0] : r.type, typeMap[r.type] ? typeMap[r.type][1] : 'default') },
         { title: '物料', key: 'materialName' },
         { title: '数量', render: r => r.quantity + ' ' + (r.unit || '') },
@@ -2463,6 +2484,13 @@ const Shelter = {
       </div>
     `;
     TNR_UI.mountTable('ledgerTableHolder', { id: 'shelter.ledger', title: title, columns, data, emptyText: '暂无台账数据' });
+    // 点击单号 → 弹出完整单据
+    wrap.querySelectorAll('[data-ledger-view]').forEach(el => {
+      el.addEventListener('click', () => {
+        const rec = data.find(r => String(r.id) === String(el.dataset.id));
+        if (rec) this.showLedgerDoc(el.dataset.ledgerView, rec);
+      });
+    });
     document.getElementById('btnExportLedger').addEventListener('click', () => {
       const csv = [];
       csv.push(columns.map(c => c.title).join(','));
@@ -2488,6 +2516,95 @@ const Shelter = {
       printWin.document.close();
       printWin.print();
     });
+  },
+
+  /* 台账单号点击 → 弹出该单的完整单据 */
+  showLedgerDoc(tab, rec) {
+    const esc = TNR_UI.escape.bind(TNR_UI);
+    const items = [];
+    let extra = '';
+    if (tab === 'captures') {
+      items.push(
+        { label: '捕捉单号', value: esc(rec.ledgerNo || rec.id) },
+        { label: '所在小区', value: esc(rec.communityName || '—') },
+        { label: '物业名称', value: esc(rec.propertyName || '—') },
+        { label: '详细地址', value: esc(rec.address || '—') },
+        { label: '定位地址', value: esc(rec.geoAddress || '—') },
+        { label: '经纬度', value: (rec.latitude != null && rec.longitude != null) ? (rec.latitude + ', ' + rec.longitude) : '—' },
+        { label: '物业交接人', value: esc(rec.contactPerson || '—') },
+        { label: '联系电话', value: esc(rec.contactPhone || '—') },
+        { label: '捕捉数量', value: (rec.petCount || 0) + ' 只' },
+        { label: '转运状态', value: this.transferStatusBadge(rec) },
+        { label: '操作员', value: esc(rec.operatorName || '—') },
+        { label: '登记时间', value: TNR_UI.formatDateTime(rec.createdAt) },
+        { label: '宠物编号', value: (rec.petCodes || []).map(c => '<span class="pet-code-chip">' + esc(c) + '</span>').join('') || '—', full: true }
+      );
+      if (rec.groupPhoto || rec.group_photo) {
+        extra += '<div class="desc-item desc-full"><div class="desc-label">整体合影</div><div class="desc-value"><img src="' + (rec.groupPhoto || rec.group_photo) + '" data-zoom="' + (rec.groupPhoto || rec.group_photo) + '" style="max-width:100%;max-height:260px;object-fit:contain;border-radius:6px;border:1px solid var(--border-light);cursor:zoom-in;"></div></div>';
+      }
+    } else if (tab === 'transfers') {
+      items.push(
+        { label: '转运单号', value: esc(rec.ledgerNo || rec.id) },
+        { label: '发出捕捉点', value: esc(rec.fromShelterName || '—') },
+        { label: '接收医院', value: esc(rec.toHospitalName || '—') },
+        { label: '动物数量', value: rec.petCount },
+        { label: '宠物编号', value: (rec.petCodes || []).map(c => '<span class="pet-code-chip">' + esc(c) + '</span>').join(''), full: true },
+        { label: '状态', value: this.statusBadge(rec.status) },
+        { label: '驳回原因', value: esc(rec.rejectReason || '—') },
+        { label: '备注', value: esc(rec.note || '—'), full: true },
+        { label: '签收时间', value: rec.receivedAt || '—' },
+        { label: '创建时间', value: TNR_UI.formatDateTime(rec.createdAt) }
+      );
+    } else if (tab === 'treatments') {
+      items.push(
+        { label: '宠物编号', value: '<span class="pet-code-chip">' + esc(rec.petCode) + '</span>' },
+        { label: '接收医院', value: esc(rec.hospitalName || '—') },
+        { label: '绝育', value: rec.items && rec.items.sterilization ? '是' : '否' },
+        { label: '疫苗', value: rec.items && rec.items.vaccine ? '是' : '否' },
+        { label: '驱虫', value: rec.items && rec.items.deworming ? '是' : '否' },
+        { label: '芯片号', value: rec.chip ? esc(rec.chip.chipNo || '—') : '—' },
+        { label: '状态', value: this.statusBadge(rec.status) },
+        { label: '操作员', value: esc(rec.operatorName || '—') },
+        { label: '登记时间', value: TNR_UI.formatDateTime(rec.createdAt) }
+      );
+    } else if (tab === 'releases') {
+      items.push(
+        { label: '放养单号', value: esc(rec.ledgerNo || rec.id) },
+        { label: '宠物编号', value: '<span class="pet-code-chip">' + esc(rec.petCode) + '</span>' },
+        { label: '放养小区', value: esc(rec.communityName || '—') },
+        { label: '接收人', value: esc(rec.receiverName || '—') },
+        { label: '联系电话', value: esc(rec.receiverPhone || '—') },
+        { label: '放养时间', value: TNR_UI.formatDateTime(rec.releasedAt) },
+        { label: '操作员', value: esc(rec.operatorName || '—') }
+      );
+    } else if (tab === 'adoptions') {
+      items.push(
+        { label: '领养单号', value: esc(rec.ledgerNo || rec.id) },
+        { label: '宠物编号', value: '<span class="pet-code-chip">' + esc(rec.petCode) + '</span>' },
+        { label: '领养人', value: esc(rec.adopterName || '—') },
+        { label: '联系电话', value: esc(rec.adopterPhone || '—') },
+        { label: '医院', value: esc(rec.hospitalName || '—') },
+        { label: '状态', value: this.statusBadge(rec.status) },
+        { label: '领养时间', value: TNR_UI.formatDateTime(rec.adoptedAt) }
+      );
+    } else if (tab === 'materials') {
+      const typeMap = { purchase: '采购', dispatch: '下发', receive: '签收', consume: '消耗', adjustment: '异动' };
+      items.push(
+        { label: '流水单号', value: esc(rec.ledgerNo || rec.id) },
+        { label: '类型', value: typeMap[rec.type] || esc(rec.type) },
+        { label: '物料', value: esc(rec.materialName || '—') },
+        { label: '数量', value: (rec.quantity || 0) + ' ' + (rec.unit || '') },
+        { label: '来源/去向', value: esc(rec.fromTo || '—') },
+        { label: '日期', value: esc(rec.date || '—') },
+        { label: '操作员', value: esc(rec.operatorName || '—') }
+      );
+    }
+    TNR_UI.drawer({ title: '单据详情', body: TNR_UI.renderDescList(items) + extra });
+    setTimeout(() => {
+      document.querySelectorAll('[data-zoom]').forEach(img => {
+        img.addEventListener('click', () => this.photoZoom(img.dataset.zoom));
+      });
+    }, 50);
   },
 
   /* ========== 13. 个人中心 ========== */
