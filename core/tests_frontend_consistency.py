@@ -692,3 +692,69 @@ class UndeclaredOptionIdentifierTest(SimpleTestCase):
             problems,
             '未声明的 mountTable 选项：\n  ' + '\n  '.join(problems)
         )
+
+
+class ModalMethodOuterScopeLeakTest(SimpleTestCase):
+    """弹窗/详情类方法体内不得引用「外层渲染函数的局部变量」。
+
+    第八轮 GUI 实测抓到两例，形态完全相同——把列表页的局部变量直接搬进
+    独立方法里用：
+
+      - `showCaptureEdit` 里用 `pets`（那是 `render_capture_list` 的局部变量）
+        → 弹窗渲染时 `ReferenceError: pets is not defined`，编辑窗根本打不开；
+      - 同一个方法里用 `wrap.querySelectorAll('[data-pet-photo]')`
+        → 保存时 `ReferenceError`，单只照片永远提交不上去。
+
+    要点：这两个名字在**文件别处都有声明**，所以「全文件搜索」查不出来，
+    必须按**方法边界**切分作用域。API 测试也覆盖不到（异常发生在浏览器里）。
+
+    只检查 `showXxx` 方法，且只认「选择器/数组方法」这两种用法
+    （`ident.querySelector*`、`ident.forEach|map|filter|find|length`），
+    这样 `'form-wrap'`、`flex-wrap:wrap` 这类字符串/CSS 不会误报。
+    """
+
+    # 列表页渲染函数的典型局部变量：弹窗方法里要用就必须自己声明
+    OUTER_LOCALS = (
+        'wrap', 'pets', 'all', 'list', 'records', 'releases', 'transfers',
+        'captures', 'districts', 'treatments', 'hospitals', 'communities',
+    )
+
+    MODAL_METHOD = re.compile(r'(?:async\s+)?(show[A-Z]\w*)\s*\(([^)]*)\)\s*\{')
+    DANGEROUS_USE = (
+        r'(?<![\w$.])({ident})\s*\.\s*'
+        r'(?:querySelector(?:All)?|forEach|map|filter|find|length)\b'
+    )
+
+    def test_modal_methods_do_not_leak_outer_locals(self):
+        problems = []
+        for name, rel in PORTALS.items():
+            source = strip_js_comments(read(rel))   # 等长替换，索引与行号不变
+            # 用**任意方法**作边界切分：只按 showXxx 切会让方法体越界，
+            # 把后续方法的内容吞进来，产生误报。
+            methods = list(METHOD_START.finditer(source))
+            bounds = [m.start() for m in methods] + [len(source)]
+            for i, m in enumerate(methods):
+                header = source[m.start():m.end()]
+                hit = self.MODAL_METHOD.search(header)
+                if not hit:
+                    continue
+                body = source[m.end() - 1:bounds[i + 1]]
+                params = hit.group(2)
+                line_no = source.count('\n', 0, m.start()) + 1
+                for ident in self.OUTER_LOCALS:
+                    pattern = re.compile(self.DANGEROUS_USE.format(ident=re.escape(ident)))
+                    if not pattern.search(body):
+                        continue
+                    # 形参同名也算「已声明」（如 showXxx(rec, releases)）
+                    if re.search(r'(?<![\w$.])' + re.escape(ident) + r'\b', params):
+                        continue
+                    if declares_name(body, ident):
+                        continue
+                    problems.append(
+                        f'{name}:{line_no} {hit.group(1)}() 用了外层变量 `{ident}`'
+                        '（本方法作用域内未声明 → 运行时 ReferenceError）')
+        self.assertFalse(
+            sorted(set(problems)),
+            '弹窗方法泄漏外层作用域变量：\n  ' + '\n  '.join(sorted(set(problems)))
+        )
+

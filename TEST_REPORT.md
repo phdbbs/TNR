@@ -15,11 +15,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **485 个用例，全部通过**（约 37 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **517 个用例，全部通过**（约 38 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
-| 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项） |
-| 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 |
+| 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造 |
+| 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -752,6 +752,134 @@ I006 地址=东津新区和谐路8号   C004 地址=东津新区和谐路6号
 #### 2.12.6 备份
 
 - 清理前备份：`db.sqlite3.bak-20260916-094505-before-cleanup`
+
+---
+
+## 二点十三、权限矩阵穷举 · 区县隔离 FieldError（2026-09-16 第八轮）
+
+前七轮的权限测试覆盖的是**代表性角色组合**，不是穷举。本轮补「全部路由 × 全部角色」
+的笛卡尔积矩阵（用临时库 + 不存在的 ID 探测，不误改数据）。
+
+### 2.13.1 发现的缺陷
+
+**`gov_district`（区县政府角色）访问两个接口直接 500（`FieldError`）**：
+
+| 接口 | 说明 |
+|---|---|
+| `/api/business/checkins/` | 回访打卡列表 |
+| `/api/business/hall-listings/` | 领养大厅上架列表 |
+
+**根因**：`CheckIn` 和 `AdoptionHallListing` 模型**本身没有 `district` 外键**，
+但 `get_district_filtered_queryset(model, user)` 原先直接 `model.objects.filter(district_id=…)`，
+对这些模型抛 `FieldError`。
+
+**为什么前七轮全部漏掉**：市级用户走 `return all()` 分支绕过了过滤逻辑，
+只有**区县角色**才走到 `filter(district_id=…)` 分支 —— 而前七轮主要用
+`gov_city` / `shelter` / `hospital` / `adopter` 角色，对 `gov_district` 的覆盖
+仅限于有针对性越权测试，没有用区县角色去访问**所有**列表接口。
+
+### 2.13.2 修复
+
+- `business/models.py`：两个模型声明类属性 `DISTRICT_LOOKUP = 'pet__district'`
+  （区县沿所属宠物派生，与 `supervision/views.py` 既有做法一致）
+- `business/services.py`：新增 `district_lookup_path(model)`，
+  `get_district_filtered_queryset()` 改为按 `f'{lookup}_id'` 过滤
+  （默认 `district`，有 `DISTRICT_LOOKUP` 时用声明值如 `pet__district_id`）
+- `get_scoped_object()` 间接受益（内部调用 `get_district_filtered_queryset`）
+- 新增 `business/tests/test_district_scope_regression.py`（6 个用例）：
+  区县角色不报错 + 数据按区县收敛 + 市级看全部
+
+### 2.13.3 验证结果
+
+- 全量测试 **491 通过**（485 + 6 新增）
+- 全库扫描确认：**0 个模型既无 `district` 字段、也无法间接到达**
+
+---
+
+## 二点十四、捕捉端 10 项需求改造 + 政府端一宠一档（2026-09-16 第九轮）
+
+用户一次性提出 10 条捕捉端改造需求（含政府端「一宠一档」）。
+
+### 2.14.1 需求落地清单
+
+| # | 需求 | 实现要点 |
+|---|---|---|
+| 1 | 看板「累计捕捉」改为**单据数/动物数双显** | `N 单 / M 只`；「单 / 只」单位小字、数字大字 |
+| 2 | 「转运情况」+「状态」两列合并为**「转运状态」** | 四态：`未转运` / `x/y 转运中` / `x/y 部分完成` / `完成` |
+| 3 | 列表去掉「详情」按钮，**点单号弹详情** | `ledgerNo` 列加 `data-capture-detail`；`rowActions` 只留编辑/删除 |
+| 4 | 详情中的**照片点击可放大** | 详情抽屉内图片加 `data-zoom`，绑定 `photoZoom()` |
+| 5 | 编辑时**单只动物照片缺失导致无法编辑** | 编辑弹窗补单只照片上传控件 + 后端 `pet_photo_<code>` 接收 |
+| 6 | 转运交接改选**「待转运宠物」** | 过滤掉已有活跃转运单的宠物；点编号弹该动物**捕捉时的单只照片** |
+| 7 | 转运单号可点弹详情 + 新增**「撤回」** | 新接口 `transfers/<pk>/withdraw/`；医院未签收可撤，宠物回待转运可重选 |
+| 8 | 「动物回收放养」→**「动物去向」**四标签 | 回收 / 放养 / 领养 / 死亡 |
+| 9 | 回收单表单字段 | 回收单号（系统生成）、回收人姓名、手机号、住址、签字、走失原因、时间 |
+| 10 | **去掉安乐死备案** | 导航项、页面、`render_euthanasia` 全删；`已安乐死` 文案统一为「已死亡」 |
+
+### 2.14.2 本轮发现的真实缺陷（6 处，均为前八轮未覆盖的形态）
+
+| # | 位置 | 根因 | 后果 |
+|---|---|---|---|
+| 1 | `Transfer.STATUS_CHOICES` | 撤回写入 `status='void'`，但 choices 里**没有 `void`** | 状态值超出枚举定义 |
+| 2 | `OwnerReturn` 模型 | 需求要求的「住址 / 时间」后端**根本没接收** | 用户填的数据被静默丢弃 |
+| 3 | `showCaptureEdit` | 方法内**没有定义 `wrap`**（它是 `render_capture_list` 的局部变量） | 保存时 `ReferenceError`，编辑中断 |
+| 4 | `showCaptureEdit` | 单只照片控件引用了**作用域外的 `pets`** | 弹窗渲染即崩，整体打不开 |
+| 5 | `shelter_base.html` | 侧栏「动物回收放养」/「安乐死备案」是**静态硬编码**，只改了 `portal.html` 的 JS `navGroups` | 改名后的「动物去向」**点不进去**，被删的「安乐死」仍显示 |
+| 6 | `gov_base.html` | `navMap` 有死键「全业务监管」，侧栏无此项 | 该页从侧栏**无法访问**（既有缺陷） |
+
+> **缺陷 5 的教训**：`base` 模板侧栏与 JS `navMap` 是**成对**的，改导航名必须两侧同时改。
+> 只改 JS → 页面点不进去；只改 base → 按钮指向不存在的页。已写入项目长期约定。
+
+### 2.14.3 后端补强
+
+- `services.capture_transfer_state()` / `capture_states_bulk()` 补 `received` / `settled`
+  字段 —— 否则前端「部分完成 / 完成」是**死代码**（`st.received` 恒为 0，永不触发）
+- `transfer_withdraw` 的裸查 `Transfer.objects.get(id=pk)` 改走 `get_scoped_object`（区县范围校验）
+- 迁移 `business/0013`：`OwnerReturn` 加 `owner_address` / `return_time`
+- 迁移 `business/0014`：`Pet.status` choices 文案 `已安乐死` → `已死亡`
+
+### 2.14.4 本轮新增测试（26 个）
+
+| 文件 | 数量 | 内容 |
+|---|---|---|
+| `business/tests/test_transfer_views.py` | +11 | 撤回权限 / 状态守卫 / 宠物状态回滚 |
+| `business/tests/test_capture_views.py` | +4 | 回收单住址与时间落库 |
+| `business/tests/test_services.py` | +9 | `capture_transfer_state` 四态统计 |
+| `core/tests_frontend_consistency.py` | +1 | `ModalMethodOuterScopeLeakTest`：弹窗方法内**不得引用外层作用域变量**（锁住缺陷 3 / 4 的通用形态） |
+
+**变异测试**：临时把 `const pets = full.pets || []` 改名为 `petsZZZ` 并把
+`document.querySelectorAll` 改成 `document.querySelectorAllZZZ`，新测试**精准报出**
+两个问题（含方法名与行号）；复原后全绿 —— 确认约束力真实有效。
+
+### 2.14.5 GUI 实测（Playwright + 独立临时库）
+
+用独立临时库 `gui_tnr.sqlite3`（不碰演示数据）逐条验证：
+
+| 验证项 | 结果 |
+|---|---|
+| 看板双显 | ✅ `2 单 / 5 只 累计捕捉` |
+| 转运状态列四态 | ✅ `未转运` / `1-2 部分完成` / `完成` 均可达 |
+| 点捕捉单号弹完整详情 | ✅ 抽屉含 18 个字段 |
+| 详情照片点击放大 | ✅ 端到端（临时库挂真实图片后验证） |
+| 编辑单只照片上传 | ✅ 控件渲染 → 上传 → 落库 `/media/photos/…` |
+| 转运撤回全链路 | ✅ 撤回后宠物回 `in_transit`，可重新选入其他转运单 |
+| 回收表单 | ✅ 4 标签齐全、7 字段齐全、生成 `RET-` 单号 |
+| 回收单落库 | ✅ 住址 / 时间 / 签名 / 区县（襄城区）全部正确，宠物状态 = `owner_returned` |
+| 「已死亡」文案 | ✅ 四端统一，无「安乐死」残留 |
+
+> **脚手架教训**：多处「功能失效」实为**探测脚本漏查 `drawer`**（只查了 `modal`）——
+> 产品功能正常，是探针不完整。**先分清产品缺陷与脚手架缺陷**。
+
+### 2.14.6 本轮验证结果
+
+- 全量测试 **517 通过**（491 + 26）
+- `manage.py check` 无问题；`makemigrations --check` = `No changes detected`
+- 迁移 `0013` / `0014` 已应用；演示库 8 个模型计数与预期一致
+- 四端内联 JS `node --check` 全通过
+- 清理：临时库 `gui_tnr.sqlite3`、占位图（已移到 `/tmp/gui_backup/`）
+
+### 2.14.7 本轮操作前后备份
+
+- 迁移前备份：`db.sqlite3.bak-20260916-235241-before-r9-migrate`
 
 ---
 

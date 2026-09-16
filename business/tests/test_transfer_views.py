@@ -1,6 +1,8 @@
-"""转运拆分下发/签收/驳回/重发视图测试。"""
+"""转运拆分下发/签收/驳回/重发/撤回视图测试。"""
 from business.models import Pet, Transfer
-from business.tests.base import BusinessTestBase, make_institution, make_pet
+from business.services import capture_transfer_state
+from business.tests.base import (BusinessTestBase, make_capture, make_institution,
+                                 make_pet)
 
 TRANSFER_URL = '/api/business/transfers/'
 
@@ -225,3 +227,124 @@ class TransferRejectResendTest(BusinessTestBase):
         transfer.save()
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/resend/'), status=403)
+
+
+class TransferWithdrawTest(BusinessTestBase):
+    """撤回：只要医院未签收即可撤回，宠物回退为待转运、捕捉单解锁。
+
+    需求背景：过去只能等医院驳回。撤回后该动物应重新出现在「待转运」列表中，
+    可被选进新的转运单。
+    """
+
+    def _make_pending(self, with_capture=False):
+        capture = make_capture(district=self.district_a, shelter=self.shelter_a) if with_capture else None
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       capture=capture, status='in_transit')
+        transfer = Transfer.objects.create(
+            from_shelter=self.shelter_a, to_hospital=self.hospital_a,
+            pet_codes=pet.code, pet_count=1, district=self.district_a,
+            capture=capture)
+        # 模拟「已下发转运单」后的宠物状态：归属医院、状态仍在途
+        pet.hospital = self.hospital_a
+        pet.save(update_fields=['hospital'])
+        return pet, transfer
+
+    def test_withdraw_success(self):
+        pet, transfer = self._make_pending()
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'))
+        self.assertEqual(body['data']['status'], 'void')
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'void')
+        self.assertEqual(transfer.get_status_display(), '已撤回')
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_transit')
+        self.assertIsNone(pet.hospital_id, '撤回后必须解除医院归属')
+
+    def test_withdraw_unlocks_capture(self):
+        """医院未签收撤回后，捕捉单应回到可编辑/可删除。"""
+        _, transfer = self._make_pending(with_capture=True)
+        capture = transfer.capture
+        state = capture_transfer_state(capture)
+        self.assertEqual(state['transferred'], 1)
+        self.assertFalse(state['can_edit'], '有在途转运单时不应可编辑')
+
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'))
+
+        state = capture_transfer_state(capture)
+        self.assertEqual(state['transferred'], 0, 'void 不得计入已转运')
+        self.assertTrue(state['can_edit'], '撤回后捕捉单应解锁可编辑')
+        self.assertTrue(state['can_delete'])
+
+    def test_withdrawn_pet_can_be_transferred_again(self):
+        pet, transfer = self._make_pending()
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'))
+
+        body = self.ok(self.post_json(f'{TRANSFER_URL}create/', {
+            'from_shelter_id': self.shelter_a.id,
+            'to_hospital_id': self.hospital_a.id,
+            'pet_codes': [pet.code],
+        }))
+        self.assertEqual(len(body['data']), 1, '撤回后的动物应可重新提交转运')
+        self.assertEqual(body['data'][0]['status'], 'pending')
+        pet.refresh_from_db()
+        self.assertEqual(pet.hospital_id, self.hospital_a.id)
+
+    def test_received_transfer_cannot_withdraw(self):
+        _, transfer = self._make_pending()
+        transfer.status = 'received'
+        transfer.save()
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'),
+                         message='不可撤回')
+
+    def test_withdraw_twice_rejected(self):
+        _, transfer = self._make_pending()
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'))
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'),
+                         message='不可撤回')
+
+    def test_same_district_other_shelter_cannot_withdraw(self):
+        """同区县的其他捕捉点不能撤回别人的转运单。"""
+        other = make_institution(type='shelter', district=self.district_a, name='甲区另一捕捉点')
+        other_user = self.shelter_user_a.__class__.objects.create_user(
+            username='shelter_a2_t', password='123456', role='shelter',
+            district=self.district_a, institution=other)
+        _, transfer = self._make_pending()
+        self.login_as(other_user)
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'),
+                         message='无权撤回')
+
+    def test_other_district_shelter_gets_404(self):
+        """跨区县一律 404（不暴露记录是否存在）。"""
+        _, transfer = self._make_pending()
+        self.login_as(self.shelter_user_b)  # 乙区
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'),
+                         status=404, message='不存在')
+
+    def test_other_district_gov_gets_404(self):
+        _, transfer = self._make_pending()
+        self.login_as(self.gov_b)  # 乙区监管
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'),
+                         status=404, message='不存在')
+
+    def test_same_district_gov_can_withdraw(self):
+        """本区县监管可代捕捉点撤回。"""
+        pet, transfer = self._make_pending()
+        self.login_as(self.gov_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'))
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_transit')
+
+    def test_hospital_cannot_withdraw(self):
+        _, transfer = self._make_pending()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'), status=403)
+
+    def test_adopter_cannot_withdraw(self):
+        _, transfer = self._make_pending()
+        self.login_as(self.adopter)
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'), status=403)

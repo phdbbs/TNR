@@ -1,9 +1,11 @@
 """捕捉登记与主人领回视图测试。"""
 import tempfile
+from datetime import timezone as dt_timezone
 from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
+from django.utils import timezone
 
 from business.models import Capture, OwnerReturn, Pet, Transfer
 from business.tests.base import (
@@ -275,6 +277,45 @@ class OwnerReturnTest(BusinessTestBase):
         record = OwnerReturn.objects.get(id=body['data']['id'])
         self.assertEqual(record.pet, pet)
         self.assertEqual(record.owner_name, '原主人')
+
+    def test_records_address_and_return_time(self):
+        """回收单要求采集住址与回收时间，两者必须落库（此前被静默丢弃）。"""
+        pet = make_pet(district=self.district_a)
+        body = self.ok(self._register(pet,
+                                      owner_address='甲区幸福路 12 号 3 单元 501',
+                                      return_time='2026-09-16T14:30'))
+        record = OwnerReturn.objects.get(id=body['data']['id'])
+        self.assertEqual(record.owner_address, '甲区幸福路 12 号 3 单元 501')
+        self.assertIsNotNone(record.return_time)
+        self.assertEqual(record.return_time.astimezone(dt_timezone.utc).strftime('%Y-%m-%dT%H:%M'),
+                         '2026-09-16T06:30')
+
+    def test_return_time_accepts_iso_with_seconds(self):
+        pet = make_pet(district=self.district_a)
+        body = self.ok(self._register(pet, return_time='2026-09-16T14:30:45'))
+        record = OwnerReturn.objects.get(id=body['data']['id'])
+        self.assertIsNotNone(record.return_time)
+
+    def test_return_time_blank_is_none(self):
+        """时间可留空，不应因空串而报错。"""
+        pet = make_pet(district=self.district_a)
+        body = self.ok(self._register(pet, return_time=''))
+        record = OwnerReturn.objects.get(id=body['data']['id'])
+        self.assertIsNone(record.return_time)
+
+    def test_return_time_garbage_is_none(self):
+        """非法时间不应 500，按未填写处理。"""
+        pet = make_pet(district=self.district_a)
+        body = self.ok(self._register(pet, return_time='不是时间'))
+        record = OwnerReturn.objects.get(id=body['data']['id'])
+        self.assertIsNone(record.return_time)
+
+    def test_return_time_is_aware(self):
+        """时间入库必须带时区，否则会写进 naive datetime。"""
+        pet = make_pet(district=self.district_a)
+        body = self.ok(self._register(pet, return_time='2026-09-16T14:30'))
+        record = OwnerReturn.objects.get(id=body['data']['id'])
+        self.assertTrue(timezone.is_aware(record.return_time))
 
     def test_missing_owner_name(self):
         pet = make_pet(district=self.district_a)
