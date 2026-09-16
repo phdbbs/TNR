@@ -165,6 +165,35 @@ class DispatchTest(BusinessTestBase):
         self.assertEqual(get_hospital_stock(material, self.hospital_a), 0,
                          '下发未签收前医院库存不应增加')
 
+    def test_dispatch_cross_district_hospital_rejected(self):
+        """只能下发到本区县医院。"""
+        material = self._material()
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}dispatch/', {
+            'material_id': material.id, 'hospital_id': self.hospital_b.id,
+            'quantity': 1,
+        }), message='只能下发到本区县医院')
+
+    def test_dispatch_cross_district_material_404(self):
+        material = make_material(district=self.district_b, shelter_stock=50)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}dispatch/', {
+            'material_id': material.id, 'hospital_id': self.hospital_a.id,
+            'quantity': 1,
+        }), status=404, message='无权访问')
+
+    def test_dispatch_chip_numbers_as_csv_string(self):
+        """chip_numbers 传逗号分隔字符串时不应被逐字符迭代。"""
+        material = self._material()
+        material.category = 'chip'
+        material.save()
+        used = make_chip(status='used')
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}dispatch/', {
+            'material_id': material.id, 'hospital_id': self.hospital_a.id,
+            'quantity': 1, 'chip_numbers': f'{used.number},',
+        }), message='已被使用')
+
 
 class MaterialReceiveTest(BusinessTestBase):
     def _dispatch(self, quantity=10):
@@ -241,6 +270,26 @@ class StockAdjustmentTest(BusinessTestBase):
         self.expect_fail(self.post_json(f'{URL}adjustment/',
                                  {'material_id': material.id, 'quantity': 0}),
                   message='异动数量必须大于0')
+
+    def test_hospital_adjustment_cannot_go_negative(self):
+        """医院侧库存由流水累加，异动必须自行校验余额，不能扣成负数。"""
+        material = make_material(district=self.district_a)
+        make_hospital_txn(material, self.hospital_a, 'receive', 3)
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 5, 'reason': '过期报废',
+        }), message='医院库存不足')
+        self.assertEqual(get_hospital_stock(material, self.hospital_a), 3)
+        self.assertFalse(MaterialTransaction.objects.filter(
+            material=material, type='adjustment').exists())
+
+    def test_adjustment_cross_district_material_404(self):
+        material = make_material(district=self.district_b, shelter_stock=10)
+        # 异动接口仅限医院/监管部门；用甲区监管操作乙区物料应被拒
+        self.login_as(self.gov_a)
+        self.expect_fail(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 1, 'reason': '损耗',
+        }), status=404, message='无权访问')
 
 
 class LedgerViewsTest(BusinessTestBase):

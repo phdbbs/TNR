@@ -46,8 +46,13 @@ const TNR_UI = {
         </div>
       `;
       document.body.appendChild(overlay);
-      overlay.querySelector('[data-action="cancel"]').onclick = () => { overlay.remove(); resolve(false); };
-      overlay.querySelector('[data-action="ok"]').onclick = () => { overlay.remove(); resolve(true); };
+      // 逐个绑定：querySelector 只命中第一个，同名按钮（页脚"取消"）会失效
+      overlay.querySelectorAll('[data-action="cancel"]').forEach(btn => {
+        btn.onclick = () => { overlay.remove(); resolve(false); };
+      });
+      overlay.querySelectorAll('[data-action="ok"]').forEach(btn => {
+        btn.onclick = () => { overlay.remove(); resolve(true); };
+      });
     });
   },
 
@@ -69,9 +74,18 @@ const TNR_UI = {
     `;
     document.body.appendChild(overlay);
 
-    const closeFn = () => overlay.remove();
-    overlay.querySelector('[data-action="close"]').onclick = closeFn;
+    let escHandler = null;
+    const closeFn = () => {
+      overlay.remove();
+      if (escHandler) { document.removeEventListener('keydown', escHandler); escHandler = null; }
+    };
+    // 关键修复：弹窗头部 × 与页脚「取消」都带 data-action="close"，
+    // 之前用 querySelector 只给第一个绑定，导致「取消」按钮点了没反应。
+    overlay.querySelectorAll('[data-action="close"]').forEach(btn => { btn.onclick = closeFn; });
     overlay.addEventListener('click', (e) => { if (e.target === overlay) closeFn(); });
+    // 键盘 Esc 关闭
+    escHandler = (e) => { if (e.key === 'Escape') closeFn(); };
+    document.addEventListener('keydown', escHandler);
 
     if (typeof body === 'function') {
       const bodyEl = overlay.querySelector('.modal-body');
@@ -99,9 +113,19 @@ const TNR_UI = {
     document.body.appendChild(overlay);
     document.body.appendChild(drawerEl);
 
-    const closeFn = () => { overlay.remove(); drawerEl.remove(); };
-    drawerEl.querySelector('[data-action="close"]').onclick = closeFn;
+    let escHandler = null;
+    const closeFn = () => {
+      overlay.remove();
+      drawerEl.remove();
+      if (escHandler) { document.removeEventListener('keydown', escHandler); escHandler = null; }
+    };
+    // 与 modal 保持一致：抽屉正文里若也放了「关闭/取消」按钮，需一并绑定，
+    // 否则只有页头 × 可关闭（正文按钮点了没反应）。
+    drawerEl.querySelectorAll('[data-action="close"]').forEach(btn => { btn.onclick = closeFn; });
     overlay.onclick = closeFn;
+    // 键盘 Esc 关闭
+    escHandler = (e) => { if (e.key === 'Escape') closeFn(); };
+    document.addEventListener('keydown', escHandler);
 
     const bodyEl = drawerEl.querySelector('.drawer-body');
     if (typeof body === 'string') bodyEl.innerHTML = body;

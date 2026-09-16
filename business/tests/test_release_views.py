@@ -53,7 +53,40 @@ class ReleaseCreateTest(BusinessTestBase):
     def test_create_unknown_pet(self):
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': 999999}),
-                  message='宠物不存在')
+                  status=404, message='无权访问')
+
+    def test_create_cross_district_404(self):
+        pet = make_pet(district=self.district_b, shelter=self.shelter_b,
+                       hospital=self.hospital_b, status='in_treatment')
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
+                  status=404, message='无权访问')
+
+    def test_create_deleted_pet_rejected(self):
+        pet = self._pet()
+        pet.is_deleted = True
+        pet.save(update_fields=['is_deleted'])
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
+                  status=404, message='无权访问')
+
+    def test_create_blocked_when_active_adoption(self):
+        """宠物有待领出的领养记录时不允许同时进入放养流程。"""
+        from business.models import Adoption
+        pet = self._pet()
+        Adoption.objects.create(pet=pet, pet_code=pet.code, adopter_name='领养人',
+                                adopter_phone='13800005000', status='pending_claim',
+                                ledger_no='REL-GUARD', district=self.district_a)
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
+                  message='未完结的领养记录')
+
+    def test_create_duplicate_pending_rejected(self):
+        pet = self._pet()
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id}))
+        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
+                  message='已有待放养记录')
 
 
 class ReleaseConfirmTest(BusinessTestBase):
@@ -92,6 +125,12 @@ class ReleaseConfirmTest(BusinessTestBase):
     def test_confirm_unknown_404(self):
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(f'{URL}999999/confirm/'), status=404)
+
+    def test_confirm_cross_district_404(self):
+        _, release = self._pending()
+        self.login_as(self.shelter_user_b)
+        self.expect_fail(self.post_json(f'{URL}{release.id}/confirm/', {}),
+                  status=404, message='无权访问')
 
     def test_hospital_cannot_confirm(self):
         """确认放养由小区/捕捉点侧完成，医院无权限。"""

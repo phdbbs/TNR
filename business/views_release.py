@@ -12,6 +12,7 @@ from business.models import Release, Pet, Capture
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
+    get_active_pet, get_scoped_object, pet_has_active_adoption,
 )
 from core.models import Institution
 
@@ -52,13 +53,21 @@ def release_create(request):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    try:
-        pet = Pet.objects.get(id=pet_id)
-    except Pet.DoesNotExist:
-        return json_fail('宠物不存在')
+    # 按区县范围取宠物，并排除已逻辑删除的档案
+    pet = get_active_pet(pet_id, user)
+    if pet is None:
+        return json_fail('宠物不存在或无权访问', status=404)
 
     if pet.status not in ('in_treatment', 'pending_adopt'):
-        return json_fail(f'宠物当前状态({pet.status})不可放养')
+        return json_fail(f'宠物当前状态({pet.get_status_display()})不可放养')
+
+    # 互斥校验：不能与未完结的领养流程同时占用同一只动物
+    if pet_has_active_adoption(pet):
+        return json_fail('该宠物已有未完结的领养记录，请先撤销领养后再办理放养')
+
+    # 防止重复创建待放养记录
+    if Release.objects.filter(pet=pet, status='pending').exists():
+        return json_fail('该宠物已有待放养记录，请勿重复创建')
 
     # 匹配原小区
     community_id = data.get('community_id')
@@ -108,14 +117,17 @@ def release_confirm(request, pk):
     }
     """
     data = parse_json_body(request)
+    user = request.user
 
-    try:
-        release = Release.objects.get(id=pk)
-    except Release.DoesNotExist:
-        return json_fail('放养记录不存在', status=404)
+    release = get_scoped_object(Release, pk, user)
+    if release is None:
+        return json_fail('放养记录不存在或无权访问', status=404)
 
     if release.status != 'pending':
-        return json_fail(f'当前状态({release.status})不可确认')
+        return json_fail(f'当前状态({release.get_status_display()})不可确认')
+
+    if release.pet_id and release.pet.is_deleted:
+        return json_fail('该宠物档案已作废，无法确认放养')
 
     release.receiver_name = data.get('receiver_name', release.receiver_name)
     release.receiver_phone = data.get('receiver_phone', release.receiver_phone)

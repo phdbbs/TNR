@@ -49,12 +49,13 @@ def _scope_filter(qs, request, field='district'):
 def dashboard_stats(request):
     """数据大屏聚合统计（按区县范围过滤）"""
     # 业务总量
-    capture_qs = _scope_filter(Capture.objects.all(), request)
+    # 已逻辑删除（作废）的捕捉单与宠物档案不计入统计
+    capture_qs = _scope_filter(Capture.objects.filter(is_deleted=False), request)
     treatment_qs = _scope_filter(Treatment.objects.all(), request)
     release_qs = _scope_filter(Release.objects.all(), request)
     adoption_qs = _scope_filter(Adoption.objects.all(), request)
     euthanasia_qs = _scope_filter(Euthanasia.objects.all(), request)
-    pet_qs = _scope_filter(Pet.objects.all(), request)
+    pet_qs = _scope_filter(Pet.objects.filter(is_deleted=False), request)
 
     # 机构数量（按类型）
     inst_qs = _scope_filter(Institution.objects.all(), request)
@@ -178,11 +179,14 @@ def institution_create(request):
 @role_required('gov_city', 'gov_district')
 @login_required
 def institution_edit(request, pk):
-    """编辑机构"""
-    try:
-        inst = Institution.objects.get(id=pk)
-    except Institution.DoesNotExist:
-        return json_fail('机构不存在', status=404)
+    """编辑机构
+
+    与 institution_list 保持一致的区县范围校验：
+    列表已按区县过滤，编辑若不做校验，区级管理员猜主键即可改他区机构。
+    """
+    inst = _scope_filter(Institution.objects.all(), request).filter(id=pk).first()
+    if inst is None:
+        return json_fail('机构不存在或无权访问', status=404)
 
     data = parse_json_body(request)
     update_fields = []
@@ -194,6 +198,9 @@ def institution_edit(request, pk):
         inst.type = data['type']
         update_fields.append('type')
     if data.get('district_id'):
+        scope = get_district_scope(request)
+        if scope is not None and str(data['district_id']) != str(scope):
+            return json_fail('无权将机构调整到其他区县')
         try:
             inst.district = District.objects.get(id=data['district_id'])
             update_fields.append('district')
@@ -222,11 +229,10 @@ def institution_edit(request, pk):
 @role_required('gov_city', 'gov_district')
 @login_required
 def institution_toggle_status(request, pk):
-    """切换机构启用/停用状态"""
-    try:
-        inst = Institution.objects.get(id=pk)
-    except Institution.DoesNotExist:
-        return json_fail('机构不存在', status=404)
+    """切换机构启用/停用状态（按区县范围校验）"""
+    inst = _scope_filter(Institution.objects.all(), request).filter(id=pk).first()
+    if inst is None:
+        return json_fail('机构不存在或无权访问', status=404)
 
     inst.status = 'inactive' if inst.status == 'active' else 'active'
     inst.save(update_fields=['status'])
@@ -528,11 +534,16 @@ def user_create(request):
 @role_required('gov_city', 'gov_district')
 @login_required
 def user_toggle_status(request, pk):
-    """切换用户启用/停用状态（带自锁保护）"""
-    try:
-        user = User.objects.get(id=pk)
-    except User.DoesNotExist:
-        return json_fail('用户不存在', status=404)
+    """切换用户启用/停用状态（带自锁保护 + 区县范围校验）"""
+    # 与 user_list 保持一致的区县范围：区级管理员只能操作本区账号，
+    # 否则可凭主键停用其他区县乃至市级管理员的账号。
+    qs = User.objects.all()
+    scope = get_district_scope(request)
+    if scope is not None:
+        qs = qs.filter(district_id=scope)
+    user = qs.filter(id=pk).first()
+    if user is None:
+        return json_fail('用户不存在或无权访问', status=404)
 
     # 停用方向的保护：防止管理员把自己或最后一个市级管理员锁在系统外
     if user.is_active:
@@ -807,7 +818,7 @@ def ledger_center(request):
 
     # 一宠一档（按宠物档案聚合全生命周期数据）
     if business_type == 'pet':
-        qs = _scope_filter(Pet.objects.all(), request)
+        qs = _scope_filter(Pet.objects.filter(is_deleted=False), request)
         qs = _date_filter(qs)
         for p in qs:
             capture = p.capture
@@ -899,7 +910,7 @@ def ledger_center(request):
 
     # 捕捉台账
     if business_type is None or business_type == 'capture':
-        qs = _scope_filter(Capture.objects.all(), request)
+        qs = _scope_filter(Capture.objects.filter(is_deleted=False), request)
         qs = _date_filter(qs)
         if institution_id:
             qs = qs.filter(shelter_id=institution_id)
@@ -913,16 +924,21 @@ def ledger_center(request):
                 'shelter_name': c.shelter_name,
                 'community_name': c.community_name,
                 'pet_count': c.pet_count,
+                'status': c.status,
                 'operator_name': c.operator_name,
                 'district_name': c.district.name if c.district else '',
                 'detail': {
                     'address': c.address,
+                    'geo_address': c.geo_address,
+                    'latitude': c.latitude,
+                    'longitude': c.longitude,
                     'property_name': c.property_name,
                     'contact_person': c.contact_person,
                     'contact_phone': c.contact_phone,
+                    'signature': c.signature,
                     'pet_codes': pet_codes,
                     'group_photo': c.group_photo.url if c.group_photo else '',
-                    'pets': [_pet_brief(p) for p in Pet.objects.filter(capture=c)],
+                    'pets': [_pet_brief(p) for p in Pet.objects.filter(capture=c, is_deleted=False)],
                 }
             })
 
@@ -949,7 +965,7 @@ def ledger_center(request):
                     'pet_codes': pet_codes,
                     'received_at': t.received_at.isoformat() if t.received_at else '',
                     'reject_reason': t.reject_reason,
-                    'pets': [_pet_brief(p) for p in Pet.objects.filter(code__in=pet_codes)],
+                    'pets': [_pet_brief(p) for p in Pet.objects.filter(code__in=pet_codes, is_deleted=False)],
                 }
             })
 

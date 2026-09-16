@@ -8,4 +8,5 @@ urlpatterns = [
     path('logout/', views.logout_view, name='logout'),
     path('', views.dashboard_redirect, name='dashboard_redirect'),
     path('api/me/', views.api_me, name='api_me'),
+    path('api/me/password/', views.api_change_password, name='api_change_password'),
 ]

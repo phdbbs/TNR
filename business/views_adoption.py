@@ -7,18 +7,21 @@ Task 9: 领养业务
 - 领养记录列表
 """
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
 from accounts.models import User
 from business.models import (
-    Adoption, AdoptionApplication, Pet, AdoptionHallListing, Message,
+    Adoption, AdoptionApplication, Pet, AdoptionHallListing, Message, Blacklist,
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
-    check_blacklist,
+    check_blacklist, get_active_pet, get_scoped_object,
+    pet_has_pending_release, pet_has_active_adoption,
 )
 
 
@@ -26,8 +29,16 @@ from business.services import (
 # 领养大厅（公开接口，无需登录）
 # ============================================
 def adoption_hall_list(request):
-    """领养大厅 - 公开列表（待领养宠物）"""
-    qs = AdoptionHallListing.objects.filter(is_active=True).select_related('pet')
+    """领养大厅 - 公开列表（待领养宠物）
+
+    只展示「上架中 + 宠物未逻辑删除 + 宠物仍处于可领养状态」的记录，
+    避免已领养/已作废的动物继续挂在大厅里。
+    """
+    qs = AdoptionHallListing.objects.filter(
+        is_active=True,
+        pet__is_deleted=False,
+        pet__status__in=('pending_adopt', 'in_treatment'),
+    ).select_related('pet')
 
     data = []
     for listing in qs:
@@ -40,7 +51,8 @@ def adoption_hall_list(request):
 def adoption_hall_detail(request, pk):
     """领养大厅 - 公开详情"""
     try:
-        listing = AdoptionHallListing.objects.get(id=pk, is_active=True)
+        listing = AdoptionHallListing.objects.select_related('pet').get(
+            id=pk, is_active=True, pet__is_deleted=False)
     except AdoptionHallListing.DoesNotExist:
         return json_fail('领养信息不存在', status=404)
 
@@ -73,12 +85,12 @@ def adoption_info_edit(request, pk):
         # 兼容 multipart/form-data 提交（照片上传）
         data = request.POST.dict()
 
-    try:
-        pet = Pet.objects.get(id=pk)
-    except Pet.DoesNotExist:
-        return json_fail('宠物不存在', status=404)
-
     user = request.user
+    # 按区县范围取宠物，并排除已逻辑删除的档案
+    pet = get_active_pet(pk, user)
+    if pet is None:
+        return json_fail('宠物不存在或无权访问', status=404)
+
     hospital = pet.hospital or user.institution
     if not hospital:
         return json_fail('缺少医院信息')
@@ -146,13 +158,19 @@ def adoption_register(request):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    try:
-        pet = Pet.objects.get(id=pet_id)
-    except Pet.DoesNotExist:
-        return json_fail('宠物不存在')
+    # 按区县范围取宠物，并排除已逻辑删除的档案
+    pet = get_active_pet(pet_id, user)
+    if pet is None:
+        return json_fail('宠物不存在或无权访问', status=404)
 
     if pet.status not in ('pending_adopt', 'in_treatment'):
-        return json_fail(f'宠物当前状态({pet.status})不可领养')
+        return json_fail(f'宠物当前状态({pet.get_status_display()})不可领养')
+
+    # 互斥校验：同一只动物不能被放养流程与领养流程同时占用
+    if pet_has_pending_release(pet):
+        return json_fail('该宠物已有待放养记录，请先完成或取消放养后再办理领养')
+    if pet_has_active_adoption(pet):
+        return json_fail('该宠物已有未完结的领养记录，请勿重复登记')
 
     adopter_name = data.get('adopter_name', '').strip()
     adopter_phone = data.get('adopter_phone', '').strip()
@@ -248,17 +266,19 @@ def adoption_confirm_claim(request, pk):
     data = parse_json_body(request)
     user = request.user
 
-    try:
-        adoption = Adoption.objects.get(id=pk)
-    except Adoption.DoesNotExist:
-        return json_fail('领养记录不存在', status=404)
+    adoption = get_scoped_object(Adoption, pk, user)
+    if adoption is None:
+        return json_fail('领养记录不存在或无权访问', status=404)
 
     if adoption.status != 'pending_claim':
-        return json_fail(f'当前领养状态({adoption.status})不可确认领出')
+        return json_fail(f'当前领养状态({adoption.get_status_display()})不可确认领出')
 
-    # 验证医院权限
-    if user.institution_id and adoption.hospital_id and user.institution_id != adoption.hospital_id:
+    # 医院仅能确认本机构受理的领养记录
+    if user.role == 'hospital' and adoption.hospital_id != user.institution_id:
         return json_fail('无权确认此领养记录')
+
+    if adoption.pet_id and adoption.pet.is_deleted:
+        return json_fail('该宠物档案已作废，无法确认领出')
 
     # 确认领出
     adoption.status = 'completed'
@@ -284,6 +304,90 @@ def adoption_confirm_claim(request, pk):
 
 
 @csrf_exempt
+@role_required('shelter', 'gov_city', 'gov_district')
+@login_required
+def adoption_reclaim(request, pk):
+    """违规收回：撤销领养 + 收回动物 + 记入黑名单（一个事务内完成）。
+
+    捕捉点/监管部门回访发现领养人违规（弃养、虐待等）时使用。
+    此前前端只写入了黑名单，动物状态与领养记录都没变，导致动物在系统里
+    仍归领养人所有、领养记录仍是「已完成」，既无法重新上架也无法再次领养。
+
+    请求体示例:
+    {
+        "reason": "回访发现弃养",
+        "relist": true          // 是否重新上架领养大厅，默认 true
+    }
+    """
+    data = parse_json_body(request)
+    user = request.user
+
+    adoption = get_scoped_object(Adoption, pk, user)
+    if adoption is None:
+        return json_fail('领养记录不存在或无权访问', status=404)
+
+    if adoption.status == 'cancelled':
+        return json_fail('该领养记录已撤销，请勿重复操作')
+
+    reason = (data.get('reason') or '').strip()
+    if not reason:
+        return json_fail('请填写收回原因')
+
+    pet = adoption.pet
+    if pet is None:
+        return json_fail('领养记录缺少宠物档案')
+
+    with transaction.atomic():
+        # 1. 撤销领养记录
+        adoption.status = 'cancelled'
+        adoption.save(update_fields=['status'])
+
+        # 2. 收回动物：回到「待领养」
+        pet.status = 'pending_adopt'
+        pet.save(update_fields=['status'])
+
+        # 3. 重新上架领养大厅（原记录已下架时需显式置回 is_active）
+        if data.get('relist', True) and not pet.is_deleted:
+            listing = AdoptionHallListing.objects.filter(pet=pet).first()
+            if listing:
+                listing.is_active = True
+                listing.save(update_fields=['is_active'])
+            else:
+                AdoptionHallListing.objects.create(
+                    pet=pet,
+                    hospital=pet.hospital,
+                    hospital_name=pet.hospital.name if pet.hospital else '',
+                    is_active=True,
+                    published_at=timezone.localdate(),
+                )
+
+        # 4. 记入黑名单（已存在则不重复插入，避免同一条违规产生多条记录）
+        if not check_blacklist(adoption.adopter_id_card, adoption.adopter_phone):
+            Blacklist.objects.create(
+                name=adoption.adopter_name or '未知领养人',
+                id_card=adoption.adopter_id_card,
+                phone=adoption.adopter_phone,
+                reason=reason,
+                operator=user,
+                operator_name=user.get_full_name() or user.username,
+                district_id=adoption.district_id,
+            )
+
+    if adoption.adopter:
+        Message.objects.create(
+            user=adoption.adopter,
+            type='system',
+            title='领养关系已撤销',
+            content=f'因「{reason}」，{adoption.pet_code} 的领养关系已被撤销，该动物已收回。',
+        )
+
+    return json_ok(
+        serialize_instance(adoption),
+        message='已收回动物、撤销领养并记入黑名单',
+    )
+
+
+@csrf_exempt
 @role_required('shelter', 'hospital', 'gov_city', 'gov_district')
 @login_required
 def adoption_list(request):
@@ -296,7 +400,13 @@ def adoption_list(request):
 
     keyword = request.GET.get('keyword', '').strip()
     if keyword:
-        qs = qs.filter(adopter_name__icontains=keyword) | qs.filter(pet_code__icontains=keyword)
+        # 单条 Q 组合，避免链式 | 产生重复行
+        qs = qs.filter(
+            Q(adopter_name__icontains=keyword)
+            | Q(adopter_phone__icontains=keyword)
+            | Q(pet_code__icontains=keyword)
+            | Q(ledger_no__icontains=keyword)
+        )
 
     data = [serialize_instance(a) for a in qs]
     return json_ok(data)
@@ -328,14 +438,22 @@ def adoption_apply(request):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    try:
-        pet = Pet.objects.get(id=pet_id)
-    except Pet.DoesNotExist:
-        return json_fail('宠物不存在')
+    # 领养人无区县归属，这里按「未作废」取档案即可（大厅本身是公开数据）
+    pet = Pet.objects.filter(id=pet_id, is_deleted=False).first()
+    if pet is None:
+        return json_fail('宠物不存在', status=404)
 
     # 仅待领养 / 待诊疗（已绝育可领养）宠物可申请
     if pet.status not in ('pending_adopt', 'in_treatment'):
         return json_fail(f'该宠物当前状态({pet.get_status_display()})不可申请领养')
+
+    # 必须仍在大厅上架，避免对已下架/未上架的动物提交申请
+    if not AdoptionHallListing.objects.filter(pet=pet, is_active=True).exists():
+        return json_fail('该宠物当前未在领养大厅上架，无法申请')
+
+    # 互斥校验：已有待放养记录的动物不接受领养申请
+    if pet_has_pending_release(pet):
+        return json_fail('该宠物已有待放养记录，暂不可申请领养')
 
     # 黑名单检查
     bl = check_blacklist(data.get('applicant_id_card', ''), data.get('applicant_phone', ''))
@@ -436,10 +554,18 @@ def adoption_application_review(request, pk):
     data = parse_json_body(request)
     user = request.user
 
-    try:
-        application = AdoptionApplication.objects.get(id=pk)
-    except AdoptionApplication.DoesNotExist:
-        return json_fail('申请不存在', status=404)
+    # 按角色/区县收敛可见范围（申请单本身无 district 字段，故按机构/宠物归属过滤）
+    qs = AdoptionApplication.objects.all()
+    if user.role == 'hospital':
+        qs = qs.filter(hospital_id=user.institution_id) if user.institution_id else qs.none()
+    elif user.role == 'gov_district':
+        qs = qs.filter(pet__district_id=user.district_id)
+    elif user.role == 'shelter':
+        qs = qs.filter(pet__shelter_id=user.institution_id)
+
+    application = qs.filter(id=pk).first()
+    if application is None:
+        return json_fail('申请不存在或无权访问', status=404)
 
     if application.status != 'pending':
         return json_fail(f'该申请已处理（{application.get_status_display()}）')
@@ -448,10 +574,17 @@ def adoption_application_review(request, pk):
     if action not in ('approve', 'reject'):
         return json_fail('无效的审核操作')
 
-    # 权限校验：医院仅能处理本机构申请
-    if user.role == 'hospital' and user.institution_id and application.hospital_id \
-            and user.institution_id != application.hospital_id:
-        return json_fail('无权处理此申请')
+    # 通过前复核宠物是否仍可领养，避免同一只动物被重复批准
+    if action == 'approve':
+        pet = application.pet
+        if pet is None or pet.is_deleted:
+            return json_fail('该宠物档案已作废，无法通过申请')
+        if pet.status not in ('pending_adopt', 'in_treatment'):
+            return json_fail(f'该宠物当前状态({pet.get_status_display()})已不可领养，无法通过申请')
+        if pet_has_active_adoption(pet):
+            return json_fail('该宠物已有未完结的领养记录，无法重复通过申请')
+        if pet_has_pending_release(pet):
+            return json_fail('该宠物已有待放养记录，无法通过领养申请')
 
     application.status = 'approved' if action == 'approve' else 'rejected'
     application.review_note = data.get('review_note', '')

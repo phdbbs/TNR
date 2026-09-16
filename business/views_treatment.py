@@ -7,6 +7,7 @@ Task 6: 诊疗与物料库存联动
 from datetime import datetime, date as date_type
 
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
@@ -16,6 +17,7 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
     adjust_stock, use_chip, get_hospital_stock,
+    get_active_pet, get_scoped_object,
 )
 
 
@@ -67,15 +69,15 @@ def treatment_create(request):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    try:
-        pet = Pet.objects.get(id=pet_id)
-    except Pet.DoesNotExist:
-        return json_fail('宠物不存在')
+    # 按区县范围取宠物，并排除已逻辑删除的档案
+    pet = get_active_pet(pet_id, user)
+    if pet is None:
+        return json_fail('宠物不存在或无权访问', status=404)
 
     if pet.status not in ('in_treatment', 'pending_adopt'):
-        return json_fail(f'宠物当前状态({pet.status})不可诊疗')
+        return json_fail(f'宠物当前状态({pet.get_status_display()})不可诊疗')
 
-    items = data.get('items', {})
+    items = data.get('items', {}) or {}
     hospital = pet.hospital or getattr(user, 'institution', None)
     if not hospital:
         return json_fail('缺少医院信息')
@@ -86,106 +88,121 @@ def treatment_create(request):
 
     status = data.get('status', 'in_progress')
 
-    treatment = Treatment.objects.create(
-        pet=pet,
-        pet_code=pet.code,
-        hospital=hospital,
-        hospital_name=hospital.name,
-        items_sterilization=items.get('sterilization', False),
-        items_vaccine=items.get('vaccine', False),
-        items_deworming=items.get('deworming', False),
-        items_chip=items.get('chip', False),
-        status=status,
-        operator=user,
-        operator_name=user.get_full_name() or user.username,
-        ledger_no=generate_ledger_no('TRE'),
-        district_id=district_id,
-    )
+    ster = data.get('sterilization', {}) or {}
+    vac = data.get('vaccine', {}) or {}
+    dew = data.get('deworming', {}) or {}
+    chip_data = data.get('chip', {}) or {}
 
-    # 绝育信息
-    ster = data.get('sterilization', {})
-    if ster:
-        treatment.sterilization_surgeon = ster.get('surgeon', '')
-        treatment.sterilization_diagnosis = ster.get('diagnosis', '')
-        treatment.sterilization_anesthesia = ster.get('anesthesia', '')
-        treatment.sterilization_procedure = ster.get('procedure', '')
-        treatment.sterilization_recovery = ster.get('recovery', '')
-        surgery_date = ster.get('surgery_date')
-        if surgery_date:
-            treatment.sterilization_surgery_date = _parse_date(surgery_date)
+    try:
+        # 注意不能写 `vac.get('quantity', 1) or 1`——那会把显式传入的 0 变成 1，
+        # 使「数量必须大于 0」的校验形同虚设。
+        vaccine_qty = int(vac.get('quantity', 1))
+        deworming_qty = int(dew.get('quantity', 1))
+    except (TypeError, ValueError):
+        return json_fail('疫苗/驱虫数量必须为整数')
+    if vaccine_qty <= 0 or deworming_qty <= 0:
+        return json_fail('疫苗/驱虫数量必须大于 0')
 
-    # 疫苗 - 消耗库存
-    vac = data.get('vaccine', {})
-    if items.get('vaccine') and vac:
-        treatment.vaccine_type = vac.get('type', '')
-        treatment.vaccine_batch_no = vac.get('batch_no', '')
-        vaccine_date = vac.get('date')
-        if vaccine_date:
-            treatment.vaccine_date = _parse_date(vaccine_date)
-        treatment.vaccine_quantity = int(vac.get('quantity', 1))
+    # ---- 第一步：把所有前置校验做完，任一不通过就整体拒绝，不产生任何副作用 ----
+    vaccine_material = None
+    if items.get('vaccine') and vac and vac.get('material_id'):
+        vaccine_material = Material.objects.filter(id=vac['material_id'], category='vaccine').first()
+        if vaccine_material is None:
+            return json_fail('疫苗物料不存在')
+        if get_hospital_stock(vaccine_material, hospital) < vaccine_qty:
+            return json_fail(f'疫苗库存不足（{vaccine_material.name}），请先补充库存')
 
-        material_id = vac.get('material_id')
-        if material_id:
-            try:
-                material = Material.objects.get(id=material_id, category='vaccine')
-                if get_hospital_stock(material, hospital) < treatment.vaccine_quantity:
-                    return json_fail(f'疫苗库存不足（{material.name}），请先补充库存')
+    deworming_material = None
+    if items.get('deworming') and dew and dew.get('material_id'):
+        deworming_material = Material.objects.filter(id=dew['material_id'], category='dewormer').first()
+        if deworming_material is None:
+            return json_fail('驱虫药物料不存在')
+        if get_hospital_stock(deworming_material, hospital) < deworming_qty:
+            return json_fail(f'驱虫药库存不足（{deworming_material.name}），请先补充库存')
+
+    chip_no = ''
+    if items.get('chip') and chip_data:
+        chip_no = (chip_data.get('chip_no') or '').strip()
+        if chip_no:
+            chip = Chip.objects.filter(number=chip_no).first()
+            if chip is None:
+                return json_fail(f'芯片 {chip_no} 不存在')
+            if chip.status == 'used':
+                return json_fail(f'芯片 {chip_no} 已被使用')
+
+    # ---- 第二步：校验全部通过后才落库；整体放进事务，避免「库存已扣但记录没存」 ----
+    with transaction.atomic():
+        treatment = Treatment.objects.create(
+            pet=pet,
+            pet_code=pet.code,
+            hospital=hospital,
+            hospital_name=hospital.name,
+            items_sterilization=items.get('sterilization', False),
+            items_vaccine=items.get('vaccine', False),
+            items_deworming=items.get('deworming', False),
+            items_chip=items.get('chip', False),
+            status=status,
+            operator=user,
+            operator_name=user.get_full_name() or user.username,
+            ledger_no=generate_ledger_no('TRE'),
+            district_id=district_id,
+        )
+
+        # 绝育信息
+        if ster:
+            treatment.sterilization_surgeon = ster.get('surgeon', '')
+            treatment.sterilization_diagnosis = ster.get('diagnosis', '')
+            treatment.sterilization_anesthesia = ster.get('anesthesia', '')
+            treatment.sterilization_procedure = ster.get('procedure', '')
+            treatment.sterilization_recovery = ster.get('recovery', '')
+            if ster.get('surgery_date'):
+                treatment.sterilization_surgery_date = _parse_date(ster['surgery_date'])
+
+        # 疫苗 - 消耗库存
+        if items.get('vaccine') and vac:
+            treatment.vaccine_type = vac.get('type', '')
+            treatment.vaccine_batch_no = vac.get('batch_no', '')
+            if vac.get('date'):
+                treatment.vaccine_date = _parse_date(vac['date'])
+            treatment.vaccine_quantity = vaccine_qty
+            if vaccine_material is not None:
                 adjust_stock(
-                    material=material,
+                    material=vaccine_material,
                     hospital=hospital,
-                    quantity=treatment.vaccine_quantity,
+                    quantity=vaccine_qty,
                     txn_type='consume',
                     operator=user,
                     operator_name=user.get_full_name() or user.username,
                     from_to='诊疗消耗',
                     note=f'{pet.code} 疫苗接种',
                 )
-            except Material.DoesNotExist:
-                pass
 
-    # 驱虫 - 消耗库存
-    dew = data.get('deworming', {})
-    if items.get('deworming') and dew:
-        treatment.deworming_type = dew.get('type', '')
-        treatment.deworming_batch_no = dew.get('batch_no', '')
-        dew_date = dew.get('date')
-        if dew_date:
-            treatment.deworming_date = _parse_date(dew_date)
-        treatment.deworming_quantity = int(dew.get('quantity', 1))
-
-        material_id = dew.get('material_id')
-        if material_id:
-            try:
-                material = Material.objects.get(id=material_id, category='dewormer')
-                if get_hospital_stock(material, hospital) < treatment.deworming_quantity:
-                    return json_fail(f'驱虫药库存不足（{material.name}），请先补充库存')
+        # 驱虫 - 消耗库存
+        if items.get('deworming') and dew:
+            treatment.deworming_type = dew.get('type', '')
+            treatment.deworming_batch_no = dew.get('batch_no', '')
+            if dew.get('date'):
+                treatment.deworming_date = _parse_date(dew['date'])
+            treatment.deworming_quantity = deworming_qty
+            if deworming_material is not None:
                 adjust_stock(
-                    material=material,
+                    material=deworming_material,
                     hospital=hospital,
-                    quantity=treatment.deworming_quantity,
+                    quantity=deworming_qty,
                     txn_type='consume',
                     operator=user,
                     operator_name=user.get_full_name() or user.username,
                     from_to='诊疗消耗',
                     note=f'{pet.code} 驱虫',
                 )
-            except Material.DoesNotExist:
-                pass
 
-    # 芯片 - 使用芯片并消耗库存
-    chip_data = data.get('chip', {})
-    if items.get('chip') and chip_data:
-        chip_no = chip_data.get('chip_no', '')
-        chip_date = chip_data.get('date')
-        if chip_date:
-            treatment.chip_date = _parse_date(chip_date)
-
-        if chip_no:
-            try:
+        # 芯片 - 绑定芯片并消耗芯片物料库存
+        if items.get('chip') and chip_data:
+            if chip_data.get('date'):
+                treatment.chip_date = _parse_date(chip_data['date'])
+            if chip_no:
                 use_chip(chip_no, pet)
                 treatment.chip_no = chip_no
-
-                # 消耗芯片物料库存
                 chip_material = Material.objects.filter(
                     category='chip', district_id=district_id
                 ).first()
@@ -200,16 +217,13 @@ def treatment_create(request):
                         from_to='诊疗消耗',
                         note=f'{pet.code} 芯片植入 {chip_no}',
                     )
-            except ValueError as e:
-                treatment.save()
-                return json_fail(str(e), data=serialize_instance(treatment))
 
-    treatment.save()
+        treatment.save()
 
-    # 更新宠物状态
-    if pet.status != 'in_treatment':
-        pet.status = 'in_treatment'
-        pet.save(update_fields=['status'])
+        # 更新宠物状态
+        if pet.status != 'in_treatment':
+            pet.status = 'in_treatment'
+            pet.save(update_fields=['status'])
 
     # 诊疗完成时调度5天自动转待领养
     if status == 'completed':
@@ -219,17 +233,30 @@ def treatment_create(request):
 
 
 @csrf_exempt
-@role_required('hospital', 'gov_city', 'gov_district')
+@role_required('hospital', 'shelter', 'gov_city', 'gov_district')
 @login_required
 def treatment_detail(request, pk):
-    """诊疗详情"""
-    try:
-        treatment = Treatment.objects.get(id=pk)
-    except Treatment.DoesNotExist:
-        return json_fail('诊疗记录不存在', status=404)
+    """诊疗详情
+
+    按区县范围取数：医院仅能查看本院记录，其余角色按所属区县过滤，
+    避免只凭主键即可跨区县读取他人诊疗数据。
+    """
+    user = request.user
+
+    if user.role == 'hospital':
+        if user.institution_id:
+            treatment = Treatment.objects.filter(id=pk, hospital_id=user.institution_id).first()
+        else:
+            treatment = None
+    else:
+        treatment = get_scoped_object(Treatment, pk, user)
+
+    if treatment is None:
+        return json_fail('诊疗记录不存在或无权访问', status=404)
 
     data = serialize_instance(treatment)
-    data['pet'] = serialize_instance(treatment.pet)
+    if treatment.pet_id:
+        data['pet'] = serialize_instance(treatment.pet)
     return json_ok(data)
 
 

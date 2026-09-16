@@ -7,6 +7,7 @@ Task 7: 物料供应链与双台账
 from datetime import datetime
 
 from django.contrib.auth.decorators import login_required
+from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
@@ -15,7 +16,7 @@ from business.models import Material, MaterialTransaction, Chip
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
-    adjust_stock, get_hospital_stock,
+    adjust_stock, get_hospital_stock, get_scoped_object,
 )
 from core.models import Institution
 
@@ -77,10 +78,8 @@ def purchase_create(request):
     material_id = data.get('material_id')
     material = None
     if material_id:
-        try:
-            material = Material.objects.get(id=material_id)
-        except Material.DoesNotExist:
-            material = None
+        # 按区县范围取物料，避免跨区县对他人物料做采购入库
+        material = get_scoped_object(Material, material_id, user)
 
     if material is None:
         # 前端直接以名称/类别新增物料（如采购入库表单未选择已有物料）
@@ -179,15 +178,18 @@ def dispatch_create(request):
     if not material_id or not hospital_id:
         return json_fail('缺少物料或医院信息')
 
-    try:
-        material = Material.objects.get(id=material_id)
-    except Material.DoesNotExist:
-        return json_fail('物料不存在')
+    # 按区县范围取物料，避免跨区县下发他人物料
+    material = get_scoped_object(Material, material_id, user)
+    if material is None:
+        return json_fail('物料不存在或无权访问', status=404)
 
-    try:
-        hospital = Institution.objects.get(id=hospital_id, type='hospital')
-    except Institution.DoesNotExist:
+    hospital = Institution.objects.filter(id=hospital_id, type='hospital').first()
+    if hospital is None:
         return json_fail('医院不存在')
+
+    # 只允许下发到本区县医院，避免跨区县串货导致台账对不上
+    if hospital.district_id != material.district_id:
+        return json_fail('只能下发到本区县医院')
 
     quantity = int(data.get('quantity', 0))
     if quantity <= 0:
@@ -198,6 +200,9 @@ def dispatch_create(request):
 
     # 检查芯片号是否可用
     chip_numbers = data.get('chip_numbers', [])
+    if isinstance(chip_numbers, str):
+        # 兼容逗号分隔字符串，避免被当成字符串逐字符迭代
+        chip_numbers = [c.strip() for c in chip_numbers.split(',') if c.strip()]
     if material.category == 'chip' and chip_numbers:
         unavailable = Chip.objects.filter(
             number__in=chip_numbers, status='used'
@@ -307,12 +312,15 @@ def stock_adjustment(request):
     if not material_id:
         return json_fail('缺少物料ID')
 
-    try:
-        material = Material.objects.get(id=material_id)
-    except Material.DoesNotExist:
-        return json_fail('物料不存在')
+    # 按区县范围取物料，避免跨区县调整他人物料
+    material = get_scoped_object(Material, material_id, user)
+    if material is None:
+        return json_fail('物料不存在或无权访问', status=404)
 
-    quantity = int(data.get('quantity', 0))
+    try:
+        quantity = int(data.get('quantity', 0))
+    except (TypeError, ValueError):
+        return json_fail('异动数量必须为整数')
     if quantity <= 0:
         return json_fail('异动数量必须大于0')
 
@@ -321,6 +329,11 @@ def stock_adjustment(request):
         hospital = user.institution
         if not hospital:
             return json_fail('缺少医院机构信息')
+        # 医院库存由流水累加得出，adjust_stock 对医院侧不做余额校验，
+        # 这里必须自己把关，否则异动可以把库存扣成负数。
+        current = get_hospital_stock(material, hospital)
+        if current < quantity:
+            return json_fail(f'医院库存不足（当前 {current}，需 {quantity}）')
 
     txn = None
     try:
@@ -376,8 +389,8 @@ def shelter_stock_ledger(request):
     user = request.user
     qs = get_district_filtered_queryset(MaterialTransaction, user)
 
-    # 捕捉点台账：所有 hospital=None 的流水 + dispatch 流水
-    qs = qs.filter(hospital__isnull=True) | qs.filter(type='dispatch')
+    # 捕捉点台账：所有 hospital=None 的流水 + dispatch 流水（单条 Q 组合，避免 | 破坏前置过滤）
+    qs = qs.filter(Q(hospital__isnull=True) | Q(type='dispatch'))
 
     material_id = request.GET.get('material_id')
     if material_id:

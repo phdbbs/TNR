@@ -106,6 +106,19 @@ class CheckInReviewTest(BusinessTestBase):
         self.expect_fail(self.post_json(f'{URL}999999/review/', {'status': 'approved'}),
                   status=404)
 
+    def test_cross_district_review_404(self):
+        """打卡记录无 district 字段，按所属宠物区县收敛范围。"""
+        pet = make_pet(district=self.district_b, status='adopted')
+        adopter = make_user(role='adopter')
+        checkin = CheckIn.objects.create(pet=pet, pet_code=pet.code,
+                                         adopter=adopter, month='2026-05')
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}{checkin.id}/review/',
+                                        {'status': 'approved'}),
+                         status=404, message='无权访问')
+        checkin.refresh_from_db()
+        self.assertEqual(checkin.status, 'pending')
+
     def test_adopter_cannot_review(self):
         checkin = self._checkin()
         self.login_as(checkin.adopter)

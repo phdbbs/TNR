@@ -26,17 +26,29 @@ def auto_promote_to_adoptable(force=False):
     count = 0
     for t in treatments:
         pet = t.pet
+        # 已作废的档案不再自动上架
+        if pet is None or pet.is_deleted:
+            continue
         if pet.status == 'in_treatment':
             pet.status = 'pending_adopt'
             pet.save(update_fields=['status'])
-            AdoptionHallListing.objects.get_or_create(
-                pet=pet,
-                defaults={
-                    'hospital': pet.hospital,
-                    'hospital_name': pet.hospital.name if pet.hospital else '',
-                    'is_active': True,
-                    'published_at': timezone.localdate(),
-                }
-            )
+            # 已存在上架记录时必须显式置回 is_active：
+            # 领养完成时记录会被下架，get_or_create 不会重新激活它，
+            # 会导致宠物已是「待领养」却不出现在领养大厅（幽灵待领养）。
+            listing = AdoptionHallListing.objects.filter(pet=pet).first()
+            if listing:
+                listing.is_active = True
+                if pet.hospital:
+                    listing.hospital = pet.hospital
+                    listing.hospital_name = pet.hospital.name
+                listing.save(update_fields=['is_active', 'hospital', 'hospital_name'])
+            else:
+                AdoptionHallListing.objects.create(
+                    pet=pet,
+                    hospital=pet.hospital,
+                    hospital_name=pet.hospital.name if pet.hospital else '',
+                    is_active=True,
+                    published_at=timezone.localdate(),
+                )
             count += 1
     return f'Promoted {count} pets to adoptable'

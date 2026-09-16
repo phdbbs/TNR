@@ -14,6 +14,7 @@ from business.models import Euthanasia, Pet
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
+    get_active_pet, get_scoped_object,
 )
 
 
@@ -56,10 +57,10 @@ def euthanasia_create(request):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    try:
-        pet = Pet.objects.get(id=pet_id)
-    except Pet.DoesNotExist:
-        return json_fail('宠物不存在')
+    # 按区县范围取宠物，并排除已逻辑删除的档案
+    pet = get_active_pet(pet_id, user)
+    if pet is None:
+        return json_fail('宠物不存在或无权访问', status=404)
 
     # 仅诊疗中/待领养的在院宠物可安乐死，防止误操作已领养、已放养等终态宠物
     if pet.status not in ('in_treatment', 'pending_adopt'):
@@ -121,10 +122,9 @@ def body_receive(request, pk):
     """
     data = parse_json_body(request)
 
-    try:
-        record = Euthanasia.objects.get(id=pk)
-    except Euthanasia.DoesNotExist:
-        return json_fail('安乐死记录不存在', status=404)
+    record = get_scoped_object(Euthanasia, pk, request.user)
+    if record is None:
+        return json_fail('安乐死记录不存在或无权访问', status=404)
 
     if record.body_received:
         return json_fail('遗体已被领取')

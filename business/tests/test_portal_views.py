@@ -116,6 +116,13 @@ class PortalApiTest(BusinessTestBase):
 
 
 class PetLifecycleTest(BusinessTestBase):
+    def _link_adopter(self, pet, ledger_no='ADP-LIFE-1'):
+        """把宠物关联到本测试领养人（溯源接口按角色收敛可见范围）。"""
+        return Adoption.objects.create(
+            pet=pet, pet_code=pet.code, adopter=self.adopter,
+            adopter_name='领养人', adopter_phone='13800009999',
+            status='completed', ledger_no=ledger_no, district=pet.district)
+
     def _full_history_pet(self):
         capture = make_capture(district=self.district_a, shelter=self.shelter_a,
                                community=self.community_a,
@@ -139,6 +146,7 @@ class PetLifecycleTest(BusinessTestBase):
 
     def test_lifecycle_events_ordered(self):
         pet = self._full_history_pet()
+        self._link_adopter(pet)
         self.login_as(self.adopter)
         body = self.ok(self.get_json(
             f'/api/business/pets/{pet.id}/lifecycle/'))
@@ -163,10 +171,34 @@ class PetLifecycleTest(BusinessTestBase):
                   status=404, message='宠物不存在')
 
     def test_lifecycle_minimal_pet_no_events(self):
+        """无任何业务记录的动物返回空事件列表。"""
         pet = make_pet(district=self.district_a)
-        self.login_as(self.adopter)
+        self.login_as(self.gov_city)
         body = self.ok(self.get_json(f'/api/business/pets/{pet.id}/lifecycle/'))
         self.assertEqual(body['data']['events'], [])
+
+    def test_lifecycle_adopter_sees_own_adoption_event(self):
+        pet = make_pet(district=self.district_a)
+        self._link_adopter(pet)
+        self.login_as(self.adopter)
+        body = self.ok(self.get_json(f'/api/business/pets/{pet.id}/lifecycle/'))
+        self.assertEqual([e['type'] for e in body['data']['events']], ['adoption'])
+
+    def test_lifecycle_other_peoples_pet_404(self):
+        """领养人不得查看与自己无关的动物档案（防止遍历主键）。"""
+        pet = make_pet(district=self.district_a)
+        self.login_as(self.adopter)
+        self.expect_fail(self.get_json(f'/api/business/pets/{pet.id}/lifecycle/'),
+                         status=404, message='无权访问')
+
+    def test_lifecycle_staff_scoped_by_district(self):
+        """区级监管只能看本区动物。"""
+        pet = make_pet(district=self.district_b)
+        self.login_as(self.gov_a)
+        self.expect_fail(self.get_json(f'/api/business/pets/{pet.id}/lifecycle/'),
+                         status=404, message='无权访问')
+        self.login_as(self.gov_b)
+        self.ok(self.get_json(f'/api/business/pets/{pet.id}/lifecycle/'))
 
     def test_lifecycle_requires_login(self):
         pet = make_pet(district=self.district_a)

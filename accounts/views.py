@@ -1,8 +1,13 @@
+import json
+
 from django.shortcuts import render, redirect
-from django.contrib.auth import authenticate, login, logout
-from django.contrib import messages
+from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.password_validation import validate_password
+from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 
 from accounts.models import User
 
@@ -72,3 +77,46 @@ def api_me(request):
             'is_superuser': u.is_superuser,
         }
     })
+
+
+@csrf_exempt
+@login_required
+def api_change_password(request):
+    """修改当前登录用户的密码。
+
+    POST JSON: {"old_password": "...", "new_password": "...", "confirm_password": "..."}
+    """
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'message': '仅支持 POST 请求'}, status=405)
+
+    try:
+        data = json.loads(request.body or b'{}')
+    except (ValueError, TypeError):
+        data = {}
+    if not data and request.POST:
+        data = request.POST.dict()
+
+    old_password = data.get('old_password', '')
+    new_password = data.get('new_password', '')
+    confirm_password = data.get('confirm_password', '')
+
+    if not old_password or not new_password:
+        return JsonResponse({'success': False, 'message': '请填写原密码与新密码'}, status=400)
+    if new_password != confirm_password:
+        return JsonResponse({'success': False, 'message': '两次输入的新密码不一致'}, status=400)
+    if not request.user.check_password(old_password):
+        return JsonResponse({'success': False, 'message': '原密码错误'}, status=400)
+    if new_password == old_password:
+        return JsonResponse({'success': False, 'message': '新密码不能与原密码相同'}, status=400)
+
+    try:
+        validate_password(new_password, request.user)
+    except ValidationError as e:
+        return JsonResponse({'success': False, 'message': '；'.join(e.messages)}, status=400)
+
+    request.user.set_password(new_password)
+    request.user.save(update_fields=['password'])
+    # 改密后保持当前会话有效，避免用户被立即登出
+    update_session_auth_hash(request, request.user)
+
+    return JsonResponse({'success': True, 'data': None, 'message': '密码修改成功'})

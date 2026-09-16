@@ -126,6 +126,73 @@ class ApiMeTest(ApiMixin, TestCase):
         self.assertEqual(data['institution_id'], self.institution.id)
 
 
+class ChangePasswordTest(ApiMixin, TestCase):
+    """修改密码接口：此前前端按钮点了没反应。"""
+    URL = '/api/me/password/'
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.district = make_district()
+        cls.institution = make_institution(type="shelter", district=cls.district)
+        cls.user = make_user("pwd_user", role="shelter",
+                             district=cls.district, institution=cls.institution)
+
+    def test_anonymous_redirected(self):
+        resp = self.client.post(self.URL, data='{}', content_type='application/json')
+        self.assertIn(resp.status_code, (302, 403))
+
+    def test_change_success_and_session_kept(self):
+        self.client.force_login(self.user)
+        body = self.ok(self.post_json(self.URL, {
+            'old_password': '123456',
+            'new_password': 'newPass2026',
+            'confirm_password': 'newPass2026',
+        }))
+        self.assertIn('成功', body['message'])
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('newPass2026'))
+        # 改密后会话仍有效，可直接访问门户
+        self.assertEqual(self.client.get('/api/me/').status_code, 200)
+
+    def test_wrong_old_password(self):
+        self.client.force_login(self.user)
+        self.expect_fail(self.post_json(self.URL, {
+            'old_password': 'wrong', 'new_password': 'newPass2026',
+            'confirm_password': 'newPass2026',
+        }), message='原密码错误')
+
+    def test_mismatched_confirm(self):
+        self.client.force_login(self.user)
+        self.expect_fail(self.post_json(self.URL, {
+            'old_password': '123456', 'new_password': 'newPass2026',
+            'confirm_password': 'otherPass2026',
+        }), message='两次输入的新密码不一致')
+
+    def test_same_as_old_rejected(self):
+        self.client.force_login(self.user)
+        self.expect_fail(self.post_json(self.URL, {
+            'old_password': '123456', 'new_password': '123456',
+            'confirm_password': '123456',
+        }), message='新密码不能与原密码相同')
+
+    def test_weak_password_rejected(self):
+        self.client.force_login(self.user)
+        resp = self.client.post(self.URL, data='{"old_password":"123456","new_password":"123","confirm_password":"123"}',
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('123456'), '弱密码不应生效')
+
+    def test_missing_fields(self):
+        self.client.force_login(self.user)
+        self.expect_fail(self.post_json(self.URL, {'old_password': ''}),
+                         message='请填写原密码与新密码')
+
+    def test_get_method_rejected(self):
+        self.client.force_login(self.user)
+        self.expect_fail(self.client.get(self.URL), status=405, message='仅支持 POST 请求')
+
+
 class UserModelTest(TestCase):
     def test_role_default_adopter(self):
         user = User.objects.create_user(username='default_role', password='x')
@@ -146,3 +213,109 @@ class UserModelTest(TestCase):
         district.delete()
         user.refresh_from_db()
         self.assertIsNone(user.district)
+
+
+class EnsureSuperuserCommandTest(TestCase):
+    """`manage.py ensure_superuser` —— 部署脚本依赖它保证有可登录的超级管理员。
+
+    回归背景：deploy.sh 原先把这段逻辑写成「若 username='admin' 不存在则创建
+    超级用户」，但前一步 seed_data 已经建了一个**非超级用户**的 admin，
+    于是分支恒为假、永不执行，而脚本结尾仍提示「超级管理员: admin / admin123456」，
+    运维照提示登录必然失败。下面的用例把正确的判定条件钉死。
+    """
+
+    def _run(self, *args):
+        from io import StringIO
+        from django.core.management import call_command
+        out = StringIO()
+        call_command('ensure_superuser', *args, stdout=out)
+        return out.getvalue()
+
+    def _credentials(self, output):
+        for line in output.splitlines():
+            if line.startswith('ADMIN_CREDENTIALS='):
+                return line[len('ADMIN_CREDENTIALS='):].split(' ', 1)
+        return None, None
+
+    def test_promotes_existing_non_superuser_admin(self):
+        """原缺陷场景：seed_data 建的 admin 是非超级用户，必须被提升。"""
+        User.objects.create_user(username='admin', password='123456', role='gov_city',
+                                 is_staff=True)
+        output = self._run()
+
+        admin = User.objects.get(username='admin')
+        self.assertTrue(admin.is_superuser)
+        self.assertTrue(admin.is_staff)
+        self.assertTrue(admin.is_active)
+        self.assertEqual(admin.status, 'active')
+        self.assertEqual(admin.role, 'gov_city', '不应改动原有业务角色')
+        username, password = self._credentials(output)
+        self.assertEqual(username, 'admin')
+        self.assertTrue(admin.check_password(password), '脚本提示的口令必须是真实生效的口令')
+
+    def test_creates_superuser_when_none_exists(self):
+        self.assertFalse(User.objects.filter(is_superuser=True).exists())
+        output = self._run()
+        username, password = self._credentials(output)
+        self.assertEqual(username, 'admin')
+        admin = User.objects.get(username='admin')
+        self.assertTrue(admin.is_superuser)
+        self.assertTrue(admin.check_password(password))
+
+    def test_skips_when_active_superuser_exists(self):
+        """判定条件必须是「是否已有启用的超级管理员」，而不是某个用户名是否存在。"""
+        boss = User.objects.create_superuser(username='boss', password='BossPass#2026')
+        output = self._run()
+
+        self.assertIn('ADMIN_RESULT=SKIP', output)
+        self.assertNotIn('ADMIN_CREDENTIALS=', output)
+        self.assertFalse(User.objects.filter(username='admin').exists(),
+                         '已有超级管理员时不应再新建账号')
+        boss.refresh_from_db()
+        self.assertTrue(boss.check_password('BossPass#2026'), '不得重置已有超管的口令')
+
+    def test_inactive_superuser_does_not_count(self):
+        """被停用的超级管理员不算「可用」，否则会部署出一个登不进去的系统。"""
+        User.objects.create_superuser(username='admin', password='OldPass#2026')
+        User.objects.filter(username='admin').update(is_active=False, status='inactive')
+
+        output = self._run()
+
+        admin = User.objects.get(username='admin')
+        self.assertTrue(admin.is_active, '必须把被停用的超管重新启用')
+        self.assertEqual(admin.status, 'active')
+        username, password = self._credentials(output)
+        self.assertTrue(admin.check_password(password))
+
+    def test_explicit_password_used(self):
+        output = self._run('--password', 'DeployPass#2026')
+        admin = User.objects.get(username='admin')
+        self.assertTrue(admin.check_password('DeployPass#2026'))
+        self.assertIn('DeployPass#2026', output)
+
+    def test_admin_password_env_var_used(self):
+        import os
+        os.environ['ADMIN_PASSWORD'] = 'EnvPass#2026'
+        try:
+            self._run()
+        finally:
+            os.environ.pop('ADMIN_PASSWORD', None)
+        self.assertTrue(User.objects.get(username='admin').check_password('EnvPass#2026'))
+
+    def test_generated_password_is_random_per_run(self):
+        first = self._credentials(self._run())[1]
+        User.objects.all().delete()
+        second = self._credentials(self._run())[1]
+        self.assertNotEqual(first, second)
+        self.assertGreaterEqual(len(first), 12)
+
+    def test_reset_password_flag_forces_reset(self):
+        boss = User.objects.create_superuser(username='admin', password='OldPass#2026')
+        output = self._run('--reset-password')
+        boss.refresh_from_db()
+        self.assertFalse(boss.check_password('OldPass#2026'))
+        self.assertIn('ADMIN_CREDENTIALS=', output)
+
+    def test_custom_username(self):
+        self._run('--username', 'superboss')
+        self.assertTrue(User.objects.get(username='superboss').is_superuser)

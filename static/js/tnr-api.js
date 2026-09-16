@@ -130,10 +130,13 @@ const TNR_API = {
   async getAdoptions() { return this._get('/api/business/adoptions/'); },
   async registerAdoption(data) { return this._post('/api/business/adoptions/register/', data); },
   async confirmAdoptionClaim(id, data) { return this._post(`/api/business/adoptions/${id}/confirm-claim/`, data || {}); },
+  async reclaimAdoption(id, data) { return this._post(`/api/business/adoptions/${id}/reclaim/`, data || {}); },
   async getCheckins() { return this._get('/api/business/checkins/'); },
   async reviewCheckin(id, data) { return this._post(`/api/business/checkins/${id}/review/`, data); },
   async getBlacklist() { return this._get('/api/business/blacklist/'); },
   async createBlacklist(data) { return this._post('/api/business/blacklist/create/', data); },
+  async updateBlacklist(id, data) { return this._post(`/api/business/blacklist/${id}/update/`, data); },
+  async deleteBlacklist(id) { return this._post(`/api/business/blacklist/${id}/delete/`, {}); },
   async checkBlacklist(idCard, phone) {
     const params = new URLSearchParams();
     if (idCard) params.set('id_card', idCard);

@@ -46,8 +46,13 @@ const TNR_UI = {
         </div>
       `;
       document.body.appendChild(overlay);
-      overlay.querySelector('[data-action="cancel"]').onclick = () => { overlay.remove(); resolve(false); };
-      overlay.querySelector('[data-action="ok"]').onclick = () => { overlay.remove(); resolve(true); };
+      // 逐个绑定：querySelector 只命中第一个，若存在多个同名按钮会漏绑
+      overlay.querySelectorAll('[data-action="cancel"]').forEach(btn => {
+        btn.onclick = () => { overlay.remove(); resolve(false); };
+      });
+      overlay.querySelectorAll('[data-action="ok"]').forEach(btn => {
+        btn.onclick = () => { overlay.remove(); resolve(true); };
+      });
     });
   },
 
@@ -100,7 +105,7 @@ const TNR_UI = {
     document.body.appendChild(drawerEl);
 
     const closeFn = () => { overlay.remove(); drawerEl.remove(); };
-    drawerEl.querySelector('[data-action="close"]').onclick = closeFn;
+    drawerEl.querySelectorAll('[data-action="close"]').forEach(btn => { btn.onclick = closeFn; });
     overlay.onclick = closeFn;
 
     const bodyEl = drawerEl.querySelector('.drawer-body');

@@ -2,6 +2,7 @@
 from accounts.models import User
 from business.models import (
     Adoption, AdoptionApplication, AdoptionHallListing, Message,
+    Blacklist, Release,
 )
 from business.tests.base import (
     BusinessTestBase, make_institution, make_pet,
@@ -150,9 +151,10 @@ class AdoptionConfirmClaimTest(BusinessTestBase):
 
     def test_confirm_wrong_hospital_rejected(self):
         _, _, adoption = self._pending_claim()
+        # 跨区县越权按约定返回 404（不暴露记录是否存在）
         self.login_as(self.hospital_user_b)
         self.expect_fail(self.post_json(f'/api/business/adoptions/{adoption.id}/confirm-claim/', {}),
-                  message='无权确认此领养记录')
+                  status=404, message='无权访问')
 
     def test_adopter_cannot_confirm(self):
         _, _, adoption = self._pending_claim()
@@ -165,8 +167,12 @@ class AdoptionApplyTest(BusinessTestBase):
     URL = '/api/business/adoptions/apply/'
 
     def _pet(self):
-        return make_pet(district=self.district_a, hospital=self.hospital_a,
-                        status='pending_adopt')
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='pending_adopt')
+        # 在线申请要求宠物仍处于大厅上架状态
+        AdoptionHallListing.objects.create(pet=pet, hospital=self.hospital_a,
+                                           is_active=True)
+        return pet
 
     def _payload(self, pet, **kw):
         payload = {'pet_id': pet.id, 'applicant_name': '李申请',
@@ -278,10 +284,11 @@ class AdoptionApplicationReviewTest(BusinessTestBase):
 
     def test_review_wrong_hospital(self):
         application = self._application()
+        # 跨区县越权按约定返回 404（不暴露记录是否存在）
         self.login_as(self.hospital_user_b)
         self.expect_fail(self.post_json(
             f'/api/business/adoptions/applications/{application.id}/review/',
-            {'action': 'approve'}), message='无权处理此申请')
+            {'action': 'approve'}), status=404, message='无权访问')
 
     def test_application_list_scoping(self):
         mine = self._application()
@@ -352,3 +359,170 @@ class AdoptionListTest(BusinessTestBase):
         self.assertEqual([a['id'] for a in data], [adoption.id])
         data = self.ok(self.get_json('/api/business/adoptions/?status=pending_claim'))['data']
         self.assertEqual(data, [])
+
+
+class AdoptionReclaimTest(BusinessTestBase):
+    """违规收回：撤销领养 + 收回动物 + 重新上架 + 记入黑名单。"""
+
+    URL = '/api/business/adoptions/{}/reclaim/'
+
+    def _completed_adoption(self):
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a, status='adopted')
+        adopter = User.objects.create_user(username='reclaim_adopter', password='x',
+                                           role='adopter', phone='13800008888')
+        listing = AdoptionHallListing.objects.create(pet=pet, is_active=False)
+        adoption = Adoption.objects.create(
+            pet=pet, pet_code=pet.code, adopter=adopter,
+            adopter_name='违规领养人', adopter_phone='13800008888',
+            adopter_id_card='110101199001019999',
+            hospital=self.hospital_a, status='completed',
+            ledger_no='ADP-T3', district=self.district_a)
+        return pet, adoption, listing
+
+    def test_reclaim_full_effects(self):
+        pet, adoption, listing = self._completed_adoption()
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(self.URL.format(adoption.id),
+                                      {'reason': '回访发现弃养'}))
+
+        adoption.refresh_from_db()
+        self.assertEqual(adoption.status, 'cancelled')
+
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'pending_adopt')
+
+        listing.refresh_from_db()
+        self.assertTrue(listing.is_active, '收回后应重新上架领养大厅')
+
+        self.assertTrue(
+            Blacklist.objects.filter(phone='13800008888', is_deleted=False).exists(),
+            '违规领养人应被记入黑名单')
+        bl = Blacklist.objects.get(phone='13800008888', is_deleted=False)
+        self.assertEqual(bl.reason, '回访发现弃养')
+        self.assertIn('收回动物', body['message'])
+
+    def test_reclaim_requires_reason(self):
+        _, adoption, _ = self._completed_adoption()
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(self.URL.format(adoption.id), {}),
+                         message='请填写收回原因')
+
+    def test_reclaim_twice_rejected(self):
+        _, adoption, _ = self._completed_adoption()
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(self.URL.format(adoption.id), {'reason': '弃养'}))
+        self.expect_fail(self.post_json(self.URL.format(adoption.id), {'reason': '弃养'}),
+                         message='请勿重复操作')
+
+    def test_reclaim_no_duplicate_blacklist(self):
+        """同一人已有黑名单记录时不再重复插入。"""
+        Blacklist.objects.create(name='违规领养人', phone='13800008888',
+                                 reason='历史违规', district=self.district_a)
+        _, adoption, _ = self._completed_adoption()
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(self.URL.format(adoption.id), {'reason': '再次违规'}))
+        self.assertEqual(
+            Blacklist.objects.filter(phone='13800008888', is_deleted=False).count(), 1)
+
+    def test_reclaim_cross_district_404(self):
+        _, adoption, _ = self._completed_adoption()
+        self.login_as(self.shelter_user_b)
+        self.expect_fail(self.post_json(self.URL.format(adoption.id), {'reason': '弃养'}),
+                         status=404, message='无权访问')
+
+    def test_hospital_cannot_reclaim(self):
+        _, adoption, _ = self._completed_adoption()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(self.URL.format(adoption.id), {'reason': '弃养'}),
+                         status=403)
+
+
+class AdoptionScopeGuardTest(BusinessTestBase):
+    """跨区县越权与逻辑删除宠物的防线。"""
+
+    def _pet_other_district(self):
+        return make_pet(district=self.district_b, shelter=self.shelter_b,
+                        hospital=self.hospital_b, status='pending_adopt')
+
+    def test_register_cross_district_404(self):
+        pet = self._pet_other_district()
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json('/api/business/adoptions/register/', {
+            'pet_id': pet.id, 'adopter_name': '甲', 'adopter_phone': '13800000010',
+        }), status=404, message='无权访问')
+
+    def test_edit_info_cross_district_404(self):
+        pet = self._pet_other_district()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(
+            f'/api/business/adoptions/{pet.id}/edit-info/', {'intro': 'x'}),
+            status=404, message='无权访问')
+
+    def test_register_deleted_pet_rejected(self):
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a, status='pending_adopt',
+                       is_deleted=True)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json('/api/business/adoptions/register/', {
+            'pet_id': pet.id, 'adopter_name': '甲', 'adopter_phone': '13800000011',
+        }), status=404, message='无权访问')
+
+    def test_register_blocked_when_pending_release(self):
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a, status='pending_adopt')
+        Release.objects.create(pet=pet, pet_code=pet.code, community=self.community_a,
+                               community_name=self.community_a.name, status='pending',
+                               district=self.district_a)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json('/api/business/adoptions/register/', {
+            'pet_id': pet.id, 'adopter_name': '甲', 'adopter_phone': '13800000012',
+        }), message='待放养')
+
+    def test_register_blocked_when_already_pending_claim(self):
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a, status='pending_adopt')
+        Adoption.objects.create(pet=pet, pet_code=pet.code, adopter_name='前任',
+                                adopter_phone='13800000013', status='pending_claim',
+                                ledger_no='ADP-T9', district=self.district_a)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json('/api/business/adoptions/register/', {
+            'pet_id': pet.id, 'adopter_name': '甲', 'adopter_phone': '13800000014',
+        }), message='未完结的领养记录')
+
+    def test_hall_hides_deleted_and_adopted_pets(self):
+        ok_pet = make_pet(district=self.district_a, status='pending_adopt')
+        AdoptionHallListing.objects.create(pet=ok_pet, is_active=True)
+        dead_pet = make_pet(district=self.district_a, status='pending_adopt',
+                            is_deleted=True)
+        AdoptionHallListing.objects.create(pet=dead_pet, is_active=True)
+        done_pet = make_pet(district=self.district_a, status='adopted')
+        AdoptionHallListing.objects.create(pet=done_pet, is_active=True)
+
+        data = self.client.get(HALL_URL).json()['data']
+        self.assertEqual([d['pet']['id'] for d in data], [ok_pet.id])
+
+    def test_apply_requires_active_listing(self):
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='pending_adopt')
+        self.login_as(self.adopter)
+        self.expect_fail(self.post_json('/api/business/adoptions/apply/', {
+            'pet_id': pet.id, 'applicant_name': '李', 'applicant_phone': '13700000001',
+        }), message='未在领养大厅上架')
+
+    def test_approve_rejected_when_pet_taken(self):
+        """宠物已被领出时，审核通过应被拦截，避免重复批准。"""
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='pending_claim')
+        applicant = User.objects.create_user(username='guard_app', password='x',
+                                             role='adopter')
+        application = AdoptionApplication.objects.create(
+            pet=pet, pet_code=pet.code, applicant=applicant,
+            applicant_name='申请者', applicant_phone='13900000001',
+            hospital=self.hospital_a, status='pending')
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(
+            f'/api/business/adoptions/applications/{application.id}/review/',
+            {'action': 'approve'}), message='已不可领养')
+        application.refresh_from_db()
+        self.assertEqual(application.status, 'pending')

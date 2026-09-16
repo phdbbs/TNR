@@ -22,6 +22,8 @@ urlpatterns = [
     path('geocode/ip/', views_capture.geocode_ip, name='geocode_ip'),
     path('captures/create/', views_capture.capture_create, name='capture_create'),
     path('captures/<int:pk>/', views_capture.capture_detail, name='capture_detail'),
+    path('captures/<int:pk>/update/', views_capture.capture_update, name='capture_update'),
+    path('captures/<int:pk>/delete/', views_capture.capture_delete, name='capture_delete'),
     path('captures/<int:pk>/owner-return/', views_capture.owner_return_create, name='owner_return_create'),
     path('owner-returns/', views_capture.owner_return_list, name='owner_return_list'),
 
@@ -69,6 +71,7 @@ urlpatterns = [
     path('adoptions/<int:pk>/edit-info/', views_adoption.adoption_info_edit, name='adoption_info_edit'),
     path('adoptions/register/', views_adoption.adoption_register, name='adoption_register'),
     path('adoptions/<int:pk>/confirm-claim/', views_adoption.adoption_confirm_claim, name='adoption_confirm_claim'),
+    path('adoptions/<int:pk>/reclaim/', views_adoption.adoption_reclaim, name='adoption_reclaim'),
     # 在线领养申请
     path('adoptions/apply/', views_adoption.adoption_apply, name='adoption_apply'),
     path('adoptions/my-applications/', views_adoption.my_applications, name='my_applications'),
@@ -84,6 +87,8 @@ urlpatterns = [
     path('blacklist/', views_checkin.blacklist_list, name='blacklist_list'),
     path('blacklist/create/', views_checkin.blacklist_create, name='blacklist_create'),
     path('blacklist/check/', views_checkin.blacklist_check, name='blacklist_check'),
+    path('blacklist/<int:pk>/update/', views_checkin.blacklist_update, name='blacklist_update'),
+    path('blacklist/<int:pk>/delete/', views_checkin.blacklist_delete, name='blacklist_delete'),
 
     # ============================================
     # Task 11: 安乐死处置

@@ -147,6 +147,31 @@ class InstitutionApiTest(SupervisionBase):
         self.expect_fail(self.post_json(f'{API}/institutions/999999/edit/', {}),
                          status=404)
 
+    def test_edit_other_district_404(self):
+        """区级管理员不得编辑其他区县的机构（与 institution_list 范围一致）。"""
+        self.client.force_login(self.gov_a)
+        self.expect_fail(self.post_json(f'{API}/institutions/{self.hospital_b.id}/edit/',
+                                        {'name': '越权改名'}),
+                         status=404, message='无权访问')
+        self.hospital_b.refresh_from_db()
+        self.assertNotEqual(self.hospital_b.name, '越权改名')
+
+    def test_toggle_other_district_404(self):
+        self.client.force_login(self.gov_a)
+        self.expect_fail(self.post_json(f'{API}/institutions/{self.hospital_b.id}/toggle/'),
+                         status=404, message='无权访问')
+        self.hospital_b.refresh_from_db()
+        self.assertEqual(self.hospital_b.status, 'active')
+
+    def test_edit_cannot_move_institution_to_other_district(self):
+        """区级管理员不得把机构调整到其他区县。"""
+        self.client.force_login(self.gov_a)
+        self.expect_fail(self.post_json(
+            f'{API}/institutions/{self.hospital_a.id}/edit/',
+            {'district_id': self.district_b.id}), message='无权将机构调整到其他区县')
+        self.hospital_a.refresh_from_db()
+        self.assertEqual(self.hospital_a.district_id, self.district_a.id)
+
 
 class DistrictApiTest(SupervisionBase):
     def test_create_only_gov_city(self):
@@ -296,19 +321,45 @@ class UserApiTest(SupervisionBase):
         self.expect_fail(self.post_json(f'{API}/users/{target.id}/toggle/'),
                          message='超级管理员账号不可停用')
 
-    def test_district_admin_cannot_deactivate_last_city_admin(self):
-        """至少保留一个启用中的市级管理员（防止锁死系统）"""
-        city_admin2 = make_user(role='gov_city', district=self.city)
+    def test_district_admin_cannot_toggle_city_admin(self):
+        """区级管理员不得操作市级管理员账号（越权提权）。
+
+        与 user_list 的区县过滤保持一致：列表里看不到的账号，写接口也不能操作。
+        """
         self.client.force_login(self.gov_a)
-        # 两个市级管理员时可停用其一
-        self.ok(self.post_json(f'{API}/users/{self.gov_city.id}/toggle/'))
+        self.expect_fail(self.post_json(f'{API}/users/{self.gov_city.id}/toggle/'),
+                         status=404, message='无权访问')
         self.gov_city.refresh_from_db()
-        self.assertFalse(self.gov_city.is_active)
-        # 再停用最后一个市级管理员应被拒绝
-        self.expect_fail(self.post_json(f'{API}/users/{city_admin2.id}/toggle/'),
-                         message='至少需保留一个启用中的市级管理员')
-        city_admin2.refresh_from_db()
-        self.assertTrue(city_admin2.is_active)
+        self.assertTrue(self.gov_city.is_active)
+
+    def test_district_admin_cannot_toggle_other_district_user(self):
+        """区级管理员不得操作其他区县的账号。"""
+        target = make_user(role='shelter', district=self.district_b)
+        self.client.force_login(self.gov_a)
+        self.expect_fail(self.post_json(f'{API}/users/{target.id}/toggle/'),
+                         status=404, message='无权访问')
+        target.refresh_from_db()
+        self.assertTrue(target.is_active)
+
+    def test_district_admin_can_toggle_own_district_user(self):
+        target = make_user(role='shelter', district=self.district_a)
+        self.client.force_login(self.gov_a)
+        self.ok(self.post_json(f'{API}/users/{target.id}/toggle/'))
+        target.refresh_from_db()
+        self.assertFalse(target.is_active)
+
+    def test_city_admin_can_toggle_other_city_admin(self):
+        """市级管理员之间仍可互相停用（兜底逻辑不过度拦截）。
+
+        说明：「至少保留一个启用中的市级管理员」兜底在收紧区县范围后，
+        已无法从区级管理员路径触达（他们看不到也操作不了市级账号），
+        现仅作为市级管理员互相操作时的最后一道防线保留。
+        """
+        target = make_user(role='gov_city', district=self.city)
+        self.client.force_login(self.gov_city)
+        self.ok(self.post_json(f'{API}/users/{target.id}/toggle/'))
+        target.refresh_from_db()
+        self.assertFalse(target.is_active)
 
     def test_district_rename_propagates(self):
         """区县改名后所有引用处联动展示新名称（外键实时读取，无名称快照）"""

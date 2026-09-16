@@ -62,3 +62,27 @@ class AutoPromoteTest(BusinessTestBase):
         auto_promote_to_adoptable()
         auto_promote_to_adoptable()
         self.assertEqual(AdoptionHallListing.objects.filter(pet=pet).count(), 1)
+
+    def test_reactivates_existing_inactive_listing(self):
+        """领养完成时上架记录会被下架，宠物回到待领养后必须重新上架。
+
+        原实现用 get_or_create，命中已存在的下架记录时不会置回 is_active，
+        导致宠物状态是「待领养」却不出现在领养大厅。
+        """
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='in_treatment')
+        listing = AdoptionHallListing.objects.create(
+            pet=pet, hospital=self.hospital_a, is_active=False)
+        _completed_treatment(pet, days_ago=6)
+        auto_promote_to_adoptable()
+        listing.refresh_from_db()
+        self.assertTrue(listing.is_active, '已下架的上架记录应被重新激活')
+
+    def test_deleted_pet_not_promoted(self):
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='in_treatment', is_deleted=True)
+        _completed_treatment(pet, days_ago=6)
+        auto_promote_to_adoptable()
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_treatment')
+        self.assertFalse(AdoptionHallListing.objects.filter(pet=pet).exists())

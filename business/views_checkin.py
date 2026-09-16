@@ -3,7 +3,11 @@ Task 10: 回访打卡与黑名单
 - 回访打卡列表/创建/审核
 - 黑名单列表/创建/检查
 """
+from datetime import datetime
+
 from django.contrib.auth.decorators import login_required
+from django.db.models import Q
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
@@ -12,6 +16,16 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     get_district_filtered_queryset, check_blacklist,
 )
+
+
+def _parse_date(value):
+    """宽松解析 YYYY-MM-DD，非法值返回 None。"""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return None
 
 
 # ============================================
@@ -63,9 +77,9 @@ def checkin_create(request):
         return json_fail('缺少宠物ID')
 
     try:
-        pet = Pet.objects.get(id=pet_id)
+        pet = Pet.objects.get(id=pet_id, is_deleted=False)
     except Pet.DoesNotExist:
-        return json_fail('宠物不存在')
+        return json_fail('宠物不存在或档案已作废')
 
     # 验证该宠物属于当前领养人
     if pet.adoptions.filter(adopter=user).exists() is False:
@@ -112,11 +126,23 @@ def checkin_review(request, pk):
     }
     """
     data = parse_json_body(request)
+    user = request.user
 
-    try:
-        checkin = CheckIn.objects.get(id=pk)
-    except CheckIn.DoesNotExist:
-        return json_fail('打卡记录不存在', status=404)
+    # 打卡记录本身无 district 字段，按所属宠物的区县收敛可见范围，
+    # 避免只凭主键即可跨区县审核他人的回访打卡。
+    qs = CheckIn.objects.select_related('pet')
+    if user.role == 'gov_city':
+        pass
+    elif getattr(getattr(user, 'district', None), 'is_city', False):
+        pass
+    elif user.district_id:
+        qs = qs.filter(pet__district_id=user.district_id)
+    else:
+        qs = qs.none()
+
+    checkin = qs.filter(id=pk).first()
+    if checkin is None:
+        return json_fail('打卡记录不存在或无权访问', status=404)
 
     if checkin.status != 'pending':
         return json_fail(f'该打卡已审核（{checkin.get_status_display()}），不可重复审核')
@@ -139,12 +165,21 @@ def checkin_review(request, pk):
 @role_required('shelter', 'gov_city', 'gov_district')
 @login_required
 def blacklist_list(request):
-    """黑名单列表"""
+    """黑名单列表（默认不含已移出记录）"""
     qs = get_district_filtered_queryset(Blacklist, request.user)
+
+    if request.GET.get('include_deleted') not in ('1', 'true', 'True'):
+        qs = qs.filter(is_deleted=False)
 
     keyword = request.GET.get('keyword', '').strip()
     if keyword:
-        qs = qs.filter(name__icontains=keyword) | qs.filter(phone__icontains=keyword) | qs.filter(id_card__icontains=keyword)
+        # 用 Q 组合，避免多次 filter 相或产生重复行
+        qs = qs.filter(
+            Q(name__icontains=keyword)
+            | Q(phone__icontains=keyword)
+            | Q(id_card__icontains=keyword)
+            | Q(reason__icontains=keyword)
+        )
 
     data = [serialize_instance(b) for b in qs]
     return json_ok(data)
@@ -180,28 +215,76 @@ def blacklist_create(request):
     if not district_id:
         return json_fail('缺少区县信息')
 
-    # 解析违规日期
-    violation_date = None
-    date_str = data.get('violation_date')
-    if date_str:
-        from datetime import datetime
-        try:
-            violation_date = datetime.strptime(str(date_str)[:10], '%Y-%m-%d').date()
-        except (ValueError, TypeError):
-            violation_date = None
-
     bl = Blacklist.objects.create(
         name=name,
         id_card=data.get('id_card', ''),
         phone=data.get('phone', ''),
         reason=reason,
-        violation_date=violation_date,
+        violation_date=_parse_date(data.get('violation_date')),
         operator=user,
         operator_name=user.get_full_name() or user.username,
         district_id=district_id,
     )
 
     return json_ok(serialize_instance(bl), message='已添加至黑名单')
+
+
+@csrf_exempt
+@role_required('shelter', 'gov_city', 'gov_district')
+@login_required
+def blacklist_update(request, pk):
+    """编辑黑名单记录。"""
+    if request.method != 'POST':
+        return json_fail('仅支持 POST 请求', status=405)
+
+    bl = get_district_filtered_queryset(Blacklist, request.user).filter(id=pk).first()
+    if bl is None:
+        return json_fail('黑名单记录不存在', status=404)
+    if bl.is_deleted:
+        return json_fail('该记录已移出黑名单，不可编辑')
+
+    data = parse_json_body(request)
+    if not data and request.POST:
+        data = request.POST.dict()
+
+    for field, label in (('name', '姓名'), ('phone', '电话'), ('reason', '拉黑原因')):
+        if field in data and not (data.get(field) or '').strip():
+            return json_fail(f'{label}不能为空')
+
+    changed = []
+    for field in ('name', 'phone', 'id_card', 'reason'):
+        if field in data:
+            setattr(bl, field, (data.get(field) or '').strip())
+            changed.append(field)
+    if 'violation_date' in data:
+        bl.violation_date = _parse_date(data.get('violation_date'))
+        changed.append('violation_date')
+
+    if changed:
+        bl.save(update_fields=changed)
+
+    return json_ok(serialize_instance(bl), message='黑名单记录已更新')
+
+
+@csrf_exempt
+@role_required('shelter', 'gov_city', 'gov_district')
+@login_required
+def blacklist_delete(request, pk):
+    """移出黑名单（逻辑删除，数据库记录保留）。"""
+    if request.method != 'POST':
+        return json_fail('仅支持 POST 请求', status=405)
+
+    bl = get_district_filtered_queryset(Blacklist, request.user).filter(id=pk).first()
+    if bl is None:
+        return json_fail('黑名单记录不存在', status=404)
+    if bl.is_deleted:
+        return json_fail('该记录已移出黑名单，请勿重复操作')
+
+    bl.is_deleted = True
+    bl.deleted_at = timezone.now()
+    bl.save(update_fields=['is_deleted', 'deleted_at'])
+
+    return json_ok(serialize_instance(bl), message='已移出黑名单')
 
 
 @csrf_exempt

@@ -12,6 +12,7 @@ from business.models import Transfer, Pet, Capture
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
+    recalc_capture_status,
 )
 from core.models import Institution
 
@@ -113,12 +114,13 @@ def transfer_create(request):
             continue
 
         # 优先使用 pet_ids（数字ID），否则用 pet_codes（字符串编号）
+        # is_deleted=False：已作废（逻辑删除）的宠物不参与转运
         pet_ids = [pid for pid in item.get('pet_ids', []) if pid not in assigned_pet_ids]
         pet_codes = item.get('pet_codes', [])
         if pet_ids:
-            pets = list(Pet.objects.filter(id__in=pet_ids, status='in_transit'))
+            pets = list(Pet.objects.filter(id__in=pet_ids, status='in_transit', is_deleted=False))
         elif pet_codes:
-            pets = list(Pet.objects.filter(code__in=pet_codes, status='in_transit'))
+            pets = list(Pet.objects.filter(code__in=pet_codes, status='in_transit', is_deleted=False))
         else:
             continue
 
@@ -129,6 +131,10 @@ def transfer_create(request):
         assigned_pet_ids.update(p.id for p in pets)
 
         pet_code_list = [p.code for p in pets]
+        # 未显式指定捕捉单时，按宠物归属回填，保证捕捉单状态可被准确推导
+        if capture is None:
+            capture = next((p.capture for p in pets if p.capture_id), None)
+
         transfer = Transfer.objects.create(
             capture=capture,
             from_shelter=shelter,
@@ -150,6 +156,12 @@ def transfer_create(request):
             pet.save(update_fields=['hospital'])
 
         created.append(serialize_instance(transfer))
+
+    # 转运单提交后重算相关捕捉单状态（待转运 / 部分转运 / 已完成）
+    for cap in {t['capture'] for t in created if t.get('capture')}:
+        capture_obj = Capture.objects.filter(id=cap).first()
+        if capture_obj:
+            recalc_capture_status(capture_obj)
 
     return json_ok(created, message=f'创建 {len(created)} 条转运记录')
 
@@ -179,6 +191,9 @@ def transfer_receive(request, pk):
     pet_codes = [c.strip() for c in transfer.pet_codes.split(',') if c.strip()]
     Pet.objects.filter(code__in=pet_codes).update(status='in_treatment')
 
+    if transfer.capture_id:
+        recalc_capture_status(transfer.capture)
+
     return json_ok(serialize_instance(transfer), message='签收成功')
 
 
@@ -205,9 +220,14 @@ def transfer_reject(request, pk):
     transfer.reject_reason = data.get('reason', '')
     transfer.save(update_fields=['status', 'reject_reason'])
 
-    # 宠物状态回退为 in_transit
+    # 医院退回：宠物回退为在途，并解除医院归属，
+    # 使其真正回到「未转运」状态（可被领回、可编辑/删除捕捉单）
     pet_codes = [c.strip() for c in transfer.pet_codes.split(',') if c.strip()]
-    Pet.objects.filter(code__in=pet_codes).update(status='in_transit')
+    Pet.objects.filter(code__in=pet_codes).update(status='in_transit', hospital=None)
+
+    # 若该捕捉单还存在其它未退回的转运单，则保持已转运，不重复回退
+    if transfer.capture_id:
+        recalc_capture_status(transfer.capture)
 
     return json_ok(serialize_instance(transfer), message='已驳回')
 
@@ -232,11 +252,15 @@ def transfer_resend(request, pk):
     user = request.user
     if user.role == 'shelter' and user.institution_id and user.institution_id != transfer.from_shelter_id:
         return json_fail('无权重新下发此转运记录')
+    # 区级监管仅能处理本区县的转运单
+    # （医院侧不做区县过滤：宠物可能跨区县转运，医院看的是「发给本院」的单子）
+    if user.role == 'gov_district' and user.district_id and transfer.district_id != user.district_id:
+        return json_fail('转运记录不存在或无权访问', status=404)
 
     pet_codes = [c.strip() for c in transfer.pet_codes.split(',') if c.strip()]
-    pets = Pet.objects.filter(code__in=pet_codes)
+    pets = Pet.objects.filter(code__in=pet_codes, is_deleted=False)
     if not pets.exists():
-        return json_fail('原转运单关联的宠物不存在，无法重新下发')
+        return json_fail('原转运单关联的宠物不存在或已作废，无法重新下发')
 
     district_id = transfer.district_id or getattr(user, 'district_id', None)
     new_transfer = Transfer.objects.create(
@@ -259,5 +283,8 @@ def transfer_resend(request, pk):
         pet.hospital = transfer.to_hospital
         pet.status = 'in_transit'
         pet.save(update_fields=['hospital', 'status'])
+
+    if new_transfer.capture_id:
+        recalc_capture_status(new_transfer.capture)
 
     return json_ok(serialize_instance(new_transfer), message='重新下发成功')

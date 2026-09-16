@@ -75,6 +75,35 @@ class TreatmentCreateTest(BusinessTestBase):
         self.assertFalse(MaterialTransaction.objects.filter(
             material=material, hospital=self.hospital_a, type='consume').exists())
 
+    def test_out_of_stock_leaves_no_treatment_record(self):
+        """库存不足被拒时不应留下孤立的诊疗记录（原实现先建记录再校验）。"""
+        pet = self._pet()
+        material = make_material(category='vaccine', district=self.district_a)
+        self.expect_fail(self._create(pet, {
+            'items': {'vaccine': True},
+            'vaccine': {'material_id': material.id, 'quantity': 1},
+        }), message='疫苗库存不足')
+        self.assertEqual(Treatment.objects.filter(pet=pet).count(), 0)
+
+    def test_partial_failure_does_not_deduct_stock(self):
+        """前一项库存充足、后一项不足时，前一项的库存也不能被扣掉。"""
+        pet = self._pet()
+        vaccine = make_material(category='vaccine', district=self.district_a)
+        dewormer = make_material(category='dewormer', district=self.district_a)
+        make_hospital_txn(vaccine, self.hospital_a, 'receive', 10)
+        # 驱虫药库存为 0，必然失败
+        self.expect_fail(self._create(pet, {
+            'items': {'vaccine': True, 'deworming': True},
+            'vaccine': {'material_id': vaccine.id, 'quantity': 2},
+            'deworming': {'material_id': dewormer.id, 'quantity': 1},
+        }), message='驱虫药库存不足')
+
+        self.assertEqual(get_hospital_stock(vaccine, self.hospital_a), 10,
+                         '整单被拒时疫苗库存不应被扣减')
+        self.assertEqual(Treatment.objects.filter(pet=pet).count(), 0)
+        self.assertFalse(MaterialTransaction.objects.filter(
+            type='consume').exists())
+
     def test_deworming_consumes_stock(self):
         pet = self._pet()
         material = make_material(category='dewormer', district=self.district_a)
@@ -139,7 +168,29 @@ class TreatmentCreateTest(BusinessTestBase):
     def test_unknown_pet(self):
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': 999999}),
-                  message='宠物不存在')
+                  status=404, message='无权访问')
+
+    def test_cross_district_pet_404(self):
+        pet = make_pet(district=self.district_b, hospital=self.hospital_b,
+                       status='in_treatment')
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
+                  status=404, message='无权访问')
+
+    def test_deleted_pet_rejected(self):
+        pet = self._pet(is_deleted=True)
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
+                  status=404, message='无权访问')
+
+    def test_invalid_quantity_rejected(self):
+        pet = self._pet()
+        material = make_material(category='vaccine', district=self.district_a)
+        make_hospital_txn(material, self.hospital_a, 'receive', 10)
+        self.expect_fail(self._create(pet, {
+            'items': {'vaccine': True},
+            'vaccine': {'material_id': material.id, 'quantity': 0},
+        }), message='必须大于 0')
 
     def test_shelter_cannot_create(self):
         pet = self._pet()
@@ -193,3 +244,35 @@ class TreatmentDetailTest(BusinessTestBase):
     def test_unknown_404(self):
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.get_json(f'{URL}999999/'), status=404, message='诊疗记录不存在')
+
+    def test_other_hospital_404(self):
+        """本院之外的诊疗记录不可读取（原实现无任何权限校验）。"""
+        pet = make_pet(district=self.district_b, hospital=self.hospital_b,
+                       status='in_treatment')
+        treatment = Treatment.objects.create(pet=pet, pet_code=pet.code,
+                                             hospital=self.hospital_b,
+                                             district=self.district_b)
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.get_json(f'{URL}{treatment.id}/'),
+                         status=404, message='无权访问')
+
+    def test_district_gov_scoped(self):
+        """区级监管只能看本区诊疗记录。"""
+        pet = make_pet(district=self.district_b, hospital=self.hospital_b,
+                       status='in_treatment')
+        treatment = Treatment.objects.create(pet=pet, pet_code=pet.code,
+                                             hospital=self.hospital_b,
+                                             district=self.district_b)
+        self.login_as(self.gov_a)
+        self.expect_fail(self.get_json(f'{URL}{treatment.id}/'),
+                         status=404, message='无权访问')
+
+    def test_city_gov_can_read_any(self):
+        pet = make_pet(district=self.district_b, hospital=self.hospital_b,
+                       status='in_treatment')
+        treatment = Treatment.objects.create(pet=pet, pet_code=pet.code,
+                                             hospital=self.hospital_b,
+                                             district=self.district_b)
+        self.login_as(self.gov_city)
+        body = self.ok(self.get_json(f'{URL}{treatment.id}/'))
+        self.assertEqual(body['data']['id'], treatment.id)

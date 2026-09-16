@@ -1,7 +1,7 @@
 """全生命周期端到端集成测试：捕捉 → 转运 → 签收 → 诊疗（含库存与芯片）→
 自动转待领养 → 领养大厅 → 在线申请与线下登记 → 确认领出 / 放养闭环。"""
 from business.models import (
-    Adoption, AdoptionApplication, AdoptionHallListing, Message, Pet, Release,
+    Adoption, AdoptionApplication, AdoptionHallListing, Capture, Message, Pet, Release,
 )
 from business.services import get_hospital_stock
 from business.tests.base import BusinessTestBase, make_pet
@@ -59,13 +59,16 @@ class FullLifecycleTest(BusinessTestBase):
         # 1. 捕捉点批量登记 2 只猫
         self._login(self.shelter_user_a)
         body = self.ok(self.post_json(f'{API}/captures/create/', {
+            'property_name': '集成测试物业',
             'community_id': self.community_a.id,
             'community_name': self.community_a.name,
             'address': '集成测试地址', 'pet_count': 2, 'species': '猫',
+            'contact_person': '物业李四', 'contact_phone': '13800005678',
         }))
         pet_codes = body['data']['pet_codes']
         capture_id = body['data']['capture']['id']
         self.assertEqual(Pet.objects.filter(code__in=pet_codes).count(), 2)
+        self.assertEqual(Capture.objects.get(id=capture_id).status, 'pending')
 
         # 2. 转运至甲区医院
         body = self.ok(self.post_json(f'{API}/transfers/create/', {

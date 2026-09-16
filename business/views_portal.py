@@ -4,6 +4,7 @@
 import json
 
 from django.contrib.auth.decorators import login_required
+from django.db.models import Q
 from django.utils import timezone
 from django.shortcuts import render
 from django.views.decorators.cache import never_cache
@@ -16,7 +17,7 @@ from business.models import (
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
-    get_district_filtered_queryset,
+    get_district_filtered_queryset, get_scoped_object,
 )
 
 
@@ -114,11 +115,11 @@ def hospital_pets(request):
     if user.role == 'hospital':
         # 医院只看分配给自己的宠物（不按区县过滤，因为转运可能跨区县）
         if user.institution_id:
-            qs = Pet.objects.filter(hospital_id=user.institution_id)
+            qs = Pet.objects.filter(hospital_id=user.institution_id, is_deleted=False)
         else:
             qs = Pet.objects.none()
     else:
-        qs = get_district_filtered_queryset(Pet, user)
+        qs = get_district_filtered_queryset(Pet, user).filter(is_deleted=False)
 
     status = request.GET.get('status')
     if status:
@@ -266,11 +267,23 @@ def pet_lifecycle(request, pet_id):
     """返回指定宠物的全生命周期溯源记录。
 
     按时间顺序返回：捕捉、转运、诊疗、放养、领养、安乐死记录。
+    按角色收敛可见范围：领养人仅限自己领养/申请过的动物，医院含本院在治动物，
+    其余角色按所属区县过滤，避免只凭主键即可遍历全量动物档案。
     """
-    try:
-        pet = Pet.objects.get(id=pet_id)
-    except Pet.DoesNotExist:
-        return json_fail('宠物不存在', status=404)
+    user = request.user
+    if user.role == 'adopter':
+        pet = Pet.objects.filter(id=pet_id).filter(
+            Q(adoptions__adopter=user) | Q(adoption_applications__applicant=user)
+        ).distinct().first()
+    elif user.role == 'hospital':
+        pet = Pet.objects.filter(id=pet_id).filter(
+            Q(hospital_id=user.institution_id) | Q(district_id=user.district_id)
+        ).first()
+    else:
+        pet = get_scoped_object(Pet, pet_id, user)
+
+    if pet is None:
+        return json_fail('宠物不存在或无权访问', status=404)
 
     events = []
 

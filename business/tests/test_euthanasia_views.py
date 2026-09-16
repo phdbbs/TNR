@@ -61,6 +61,20 @@ class EuthanasiaCreateTest(BusinessTestBase):
         data = self.ok(self.get_json(URL))['data']
         self.assertEqual({e['hospital_id'] for e in data}, {self.hospital_a.id})
 
+    def test_cross_district_pet_404(self):
+        pet = make_pet(district=self.district_b, hospital=self.hospital_b,
+                       status='in_treatment')
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'reason': 'x'}),
+                         status=404, message='无权访问')
+
+    def test_deleted_pet_rejected(self):
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='in_treatment', is_deleted=True)
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'reason': 'x'}),
+                         status=404, message='无权访问')
+
 
 class BodyReceiveTest(BusinessTestBase):
     def _record(self):
@@ -96,3 +110,9 @@ class BodyReceiveTest(BusinessTestBase):
         record = self._record()
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json(f'{URL}{record.id}/body-receive/', {}), status=403)
+
+    def test_receive_cross_district_404(self):
+        record = self._record()
+        self.login_as(self.shelter_user_b)
+        self.expect_fail(self.post_json(f'{URL}{record.id}/body-receive/', {}),
+                         status=404, message='无权访问')
