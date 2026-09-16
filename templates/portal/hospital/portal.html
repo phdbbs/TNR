@@ -1008,8 +1008,8 @@ const Hospital = {
       c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无台账记录</div></div>';
       return;
     }
-    const typeMap = {'purchase': '采购入库', 'dispatch': '捕捉点下发', 'consume': '诊疗消耗', 'adjustment': '库存异动'};
-    const typeBadge = {'purchase': 'badge-success', 'dispatch': 'badge-info', 'consume': 'badge-warning', 'adjustment': 'badge-danger'};
+    const typeMap = {'purchase': '采购入库', 'dispatch': '捕捉点下发', 'receive': '签收入库', 'consume': '诊疗消耗', 'adjustment': '库存异动'};
+    const typeBadge = {'purchase': 'badge-success', 'dispatch': 'badge-info', 'receive': 'badge-cinnabar', 'consume': 'badge-warning', 'adjustment': 'badge-danger'};
     const rows = data.map(t => {
       const sign = (t.type === 'consume' || t.type === 'adjustment') ? '-' : '+';
       return {
@@ -1528,8 +1528,8 @@ const Hospital = {
     } else if (tab === 'material') {
       const data = txns.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无物料台账</div></div>'; return; }
-      const typeMap = {'purchase': '采购入库', 'dispatch': '捕捉点下发', 'consume': '诊疗消耗', 'adjustment': '库存异动'};
-      const typeBadge = {'purchase': 'badge-success', 'dispatch': 'badge-info', 'consume': 'badge-warning', 'adjustment': 'badge-danger'};
+      const typeMap = {'purchase': '采购入库', 'dispatch': '捕捉点下发', 'receive': '签收入库', 'consume': '诊疗消耗', 'adjustment': '库存异动'};
+      const typeBadge = {'purchase': 'badge-success', 'dispatch': 'badge-info', 'receive': 'badge-cinnabar', 'consume': 'badge-warning', 'adjustment': 'badge-danger'};
       const rows = data.map(t => {
         const sign = (t.type === 'consume' || t.type === 'adjustment') ? '-' : '+';
         return {

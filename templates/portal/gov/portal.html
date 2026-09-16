@@ -1021,7 +1021,11 @@ const GovPortal = {
         { key: 'pet_count', title: '数量', width: '70px' },
         { key: 'district_id', title: '区县', render: districtRender },
         { key: 'created_at', title: '时间', width: '140px', render: r => TNR_UI.formatDateTime(r.created_at) },
-        { key: 'status', title: '状态', render: () => `<span class="badge badge-success">已完成</span>` }
+        { key: 'status', title: '状态', render: r => {
+          const m = { pending: { t: '待转运', b: 'badge-warning' }, partial: { t: '部分转运', b: 'badge-info' }, completed: { t: '已完成', b: 'badge-success' }, void: { t: '已作废', b: 'badge-default' } };
+          const s = m[r.status] || { t: r.status || '—', b: 'badge-default' };
+          return `<span class="badge ${s.b}">${s.t}</span>`;
+        } }
       ];
     } else if (type === 'transfer') {
       data = sup.transfers || [];
@@ -1287,7 +1291,7 @@ const GovPortal = {
 
       const hospitals = (await TNR_API.getInstitutions('hospital')).filter(h => h.status === 'active');
 
-      const txnTypeMap = { purchase: { text: '采购入库', badge: 'badge-success' }, dispatch: { text: '下发出库', badge: 'badge-info' }, consume: { text: '消耗', badge: 'badge-cinnabar' }, adjustment: { text: '调整', badge: 'badge-default' } };
+      const txnTypeMap = { purchase: { text: '采购入库', badge: 'badge-success' }, dispatch: { text: '下发出库', badge: 'badge-info' }, receive: { text: '签收入库', badge: 'badge-cinnabar' }, consume: { text: '消耗', badge: 'badge-cinnabar' }, adjustment: { text: '调整', badge: 'badge-default' } };
 
       const recentTxns = [...txns].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)).slice(0, 10);
 
@@ -1644,11 +1648,15 @@ const GovPortal = {
         { label: '单据号', value: r.ledger_no },
         { label: '捕捉点', value: r.shelter_name },
         { label: '来源地点', value: r.community_name || '—' },
+        { label: '物业名称', value: d.property_name || '—' },
         { label: '详细地址', value: d.address || '—' },
+        { label: '定位地址', value: d.geo_address || '—' },
+        { label: '经纬度', value: (d.latitude != null && d.longitude != null) ? (d.latitude + ', ' + d.longitude) : '—' },
         { label: '物业交接人', value: d.contact_person || '—' },
         { label: '联系电话', value: d.contact_phone || '—' },
         { label: '动物数量', value: r.pet_count },
         { label: '宠物编号', value: (d.pet_codes || []).join('、') || '—' },
+        { label: '状态', value: ({ pending: '待转运', partial: '部分转运', completed: '已完成', void: '已作废' })[r.status] || r.status || '—' },
         { label: '操作人', value: r.operator_name || '—' },
         { label: '区县', value: r.district_name || '—' },
         { label: '日期', value: TNR_UI.formatDateTime(r.date) },
@@ -1664,7 +1672,7 @@ const GovPortal = {
         { label: '接收医院', value: r.to_hospital_name },
         { label: '动物数量', value: r.pet_count },
         { label: '宠物编号', value: (d.pet_codes || []).join('、') || '—' },
-        { label: '状态', value: r.status || '—' },
+        { label: '状态', value: ({ pending: '待接收', received: '已接收', rejected: '已驳回' })[r.status] || r.status || '—' },
         { label: '接收时间', value: d.received_at ? TNR_UI.formatDateTime(d.received_at) : '—' },
         { label: '驳回原因', value: d.reject_reason || '—' },
         { label: '操作人', value: r.operator_name || '—' },
