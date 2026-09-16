@@ -4,9 +4,22 @@ __pycache__/
 *.pyc
 db.sqlite3
 db.sqlite3-journal
+db.sqlite3.bak-*
 .env
 media/
 staticfiles/
+
+# 本地项目记忆/会话数据（deploy.sh 也会显式排除）
+.workbuddy-ai/
+
+# 运行期产物
+server.log
+*.log
+
+# 生成物 / 发布包 / IDE 与工具状态（不推送至仓库）
+.trae-html-share-packages/
+tnr-release-*.tar.gz
+.mimosa/
 
 # 本地调试/测试脚本（不推送至仓库）
 tnr_debug*.py
