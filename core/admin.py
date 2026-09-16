@@ -12,7 +12,7 @@ class DistrictAdmin(admin.ModelAdmin):
 
 @admin.register(Institution)
 class InstitutionAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name', 'type', 'district', 'contact', 'phone', 'status')
+    list_display = ('id', 'code', 'name', 'type', 'district', 'contact', 'phone', 'status')
     list_filter = ('type', 'status', 'district')
-    search_fields = ('name', 'address', 'contact', 'phone')
+    search_fields = ('code', 'name', 'address', 'contact', 'phone')
     ordering = ('id',)

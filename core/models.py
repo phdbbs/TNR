@@ -23,6 +23,11 @@ class Institution(models.Model):
         ('hospital', '医院'),
         ('community', '小区'),
     ]
+    # 稳定业务编号（I001/C001…），与 District.code 保持同一套约定。
+    # 种子数据必须按 code 幂等匹配：机构名是会被人在界面上改的展示字段，
+    # 早期按 name 做 get_or_create 去重，区县/机构被改名后每次部署都会
+    # 重复插入一套同名机构（live 库里已出现孤儿重复数据）。
+    code = models.CharField('机构编号', max_length=20, unique=True, null=True, blank=True)
     name = models.CharField('机构名称', max_length=100)
     type = models.CharField('机构类型', max_length=20, choices=TYPE_CHOICES)
     district = models.ForeignKey(District, on_delete=models.PROTECT, related_name='institutions', verbose_name='所属区县')

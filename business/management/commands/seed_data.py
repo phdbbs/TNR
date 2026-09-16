@@ -80,20 +80,24 @@ class Command(BaseCommand):
     # ============================================
     def _seed_districts(self):
         self.stdout.write('创建区县...')
+        # code 是稳定主键，name 只是展示名：改名后重跑不会重复创建。
+        # 名称与项目实际（襄阳市）保持一致，避免出现「北京区县名 + 襄阳业务数据」的错配。
         data = [
             ('D000', '全市（市级）', 'CITY', True),
-            ('D001', '朝阳区', 'CY', False),
-            ('D002', '海淀区', 'HD', False),
-            ('D003', '西城区', 'XC', False),
-            ('D004', '东城区', 'DC', False),
+            ('D001', '襄城区', 'CY', False),
+            ('D002', '樊城区', 'HD', False),
+            ('D003', '东津新区', 'XC', False),
+            ('D004', '襄州区', 'DC', False),
         ]
         districts = {}
         for code_id, name, code, is_city in data:
-            d, _ = District.objects.get_or_create(
+            d, created = District.objects.get_or_create(
                 code=code,
                 defaults={'name': name, 'is_city': is_city, 'status': 'active'}
             )
             districts[code_id] = d
+            if not created and d.name != name:
+                self.stdout.write(f'  区县 {code} 保留现有名称「{d.name}」（种子名称为「{name}」）')
         return districts
 
     # ============================================
@@ -102,25 +106,28 @@ class Command(BaseCommand):
     def _seed_institutions(self, districts):
         self.stdout.write('创建机构...')
         data = [
-            # 捕捉点（捕捉点）
-            ('I001', '朝阳区流浪动物捕捉点', 'shelter', 'D001', '朝阳区建国路88号', '王主任', '13800001001'),
-            ('I002', '海淀区流浪动物捕捉点', 'shelter', 'D002', '海淀区中关村大街15号', '李主任', '13800001002'),
+            # (code, 名称, 类型, 区县, 地址, 联系人, 电话)
+            # 捕捉点
+            ('I001', '襄城流浪动物捕捉点', 'shelter', 'D001', '襄城区檀溪路88号', '王主任', '13800001001'),
+            ('I002', '樊城流浪动物捕捉点', 'shelter', 'D002', '樊城区长虹路15号', '李主任', '13800001002'),
             # 医院
-            ('I003', '爱心宠物医院', 'hospital', 'D001', '朝阳区三里屯路12号', '赵医生', '13800002001'),
-            ('I004', '瑞鹏宠物医院', 'hospital', 'D001', '朝阳区望京SOHO旁', '钱医生', '13800002002'),
-            ('I005', '芭比堂动物医院', 'hospital', 'D002', '海淀区五道口', '孙医生', '13800002003'),
-            ('I006', '宠安宠物诊所', 'hospital', 'D003', '西城区西单', '周医生', '13800002004'),
+            ('I003', '爱心宠物医院', 'hospital', 'D001', '襄城区鼓楼路12号', '赵医生', '13800002001'),
+            ('I004', '瑞鹏宠物医院', 'hospital', 'D001', '襄城区人民广场旁', '钱医生', '13800002002'),
+            ('I005', '芭比堂动物医院', 'hospital', 'D002', '樊城区解放路', '孙医生', '13800002003'),
+            ('I006', '宠安宠物诊所', 'hospital', 'D003', '东津新区和谐路8号', '周医生', '13800002004'),
             # 小区
-            ('C001', '阳光花园小区', 'community', 'D001', '朝阳区阳光花园', '张物业', '13800003001'),
-            ('C002', '翠湖天地小区', 'community', 'D001', '朝阳区翠湖天地', '刘物业', '13800003002'),
-            ('C003', '中关村南区', 'community', 'D002', '海淀区中关村南区', '陈物业', '13800003003'),
-            ('C004', '西单美居', 'community', 'D003', '西城区西单北大街', '杨物业', '13800003004'),
+            ('C001', '阳光花园小区', 'community', 'D001', '襄城区阳光花园', '张物业', '13800003001'),
+            ('C002', '翠湖天地小区', 'community', 'D001', '襄城区翠湖天地', '刘物业', '13800003002'),
+            ('C003', '樊城幸福里小区', 'community', 'D002', '樊城区幸福路12号', '陈物业', '13800003003'),
+            ('C004', '开发区和谐家园', 'community', 'D003', '东津新区和谐路6号', '杨物业', '13800003004'),
         ]
         institutions = {}
-        for inst_id, name, inst_type, district_code, address, contact, phone in data:
+        for code_id, name, inst_type, district_code, address, contact, phone in data:
+            # 按 code 幂等：机构名是可在界面上修改的展示字段，不能作为去重键
             inst, _ = Institution.objects.get_or_create(
-                name=name,
+                code=code_id,
                 defaults={
+                    'name': name,
                     'type': inst_type,
                     'district': districts[district_code],
                     'address': address,
@@ -129,7 +136,7 @@ class Command(BaseCommand):
                     'status': 'active',
                 }
             )
-            institutions[inst_id] = inst
+            institutions[code_id] = inst
         return institutions
 
     # ============================================
@@ -140,17 +147,20 @@ class Command(BaseCommand):
         data = [
             # (username, name, role, district_code, inst_id, phone)
             ('admin', '市级管理员', 'gov_city', 'D000', None, '13800000001'),
-            ('cy_gov', '朝阳区政府管理员', 'gov_district', 'D001', None, '13800000002'),
-            ('hd_gov', '海淀区政府管理员', 'gov_district', 'D002', None, '13800000003'),
-            ('cy_shelter', '朝阳捕捉点操作员', 'shelter', 'D000', 'I001', '13800000004'),
-            ('hd_shelter', '海淀捕捉点操作员', 'shelter', 'D000', 'I002', '13800000005'),
+            ('cy_gov', '襄城区政府管理员', 'gov_district', 'D001', None, '13800000002'),
+            ('hd_gov', '樊城区政府管理员', 'gov_district', 'D002', None, '13800000003'),
+            ('cy_shelter', '襄城捕捉点操作员', 'shelter', 'D000', 'I001', '13800000004'),
+            ('hd_shelter', '樊城捕捉点操作员', 'shelter', 'D000', 'I002', '13800000005'),
             ('aixin_hosp', '爱心宠物医院', 'hospital', 'D001', 'I003', '13800000006'),
             ('ruipeng_hosp', '瑞鹏宠物医院', 'hospital', 'D001', 'I004', '13800000007'),
             ('babitang_hosp', '芭比堂动物医院', 'hospital', 'D002', 'I005', '13800000008'),
             ('adopter1', '王领养', 'adopter', None, None, '13800000009'),
         ]
         users = {}
+        repaired = []
         for username, name, role, district_code, inst_id, phone in data:
+            district = districts[district_code] if district_code else None
+            institution = institutions[inst_id] if inst_id else None
             user, created = User.objects.get_or_create(
                 username=username,
                 defaults={
@@ -160,15 +170,51 @@ class Command(BaseCommand):
                     'is_staff': role in ('gov_city', 'gov_district'),
                 }
             )
-            if created:
-                user.set_password('123456')
+
+            # DEMO_ACCOUNTS.md 承诺「每次部署/调试启动后演示账号都可用」。
+            # 原实现只在 created 分支写属性，账号一旦被人为停用或改了归属，
+            # 重跑 seed_data 完全修不回来（现场就出现过 aixin_hosp、hd_shelter
+            # 被停用后无法登录，而部署流程看起来是"成功"的）。
+            # 因此这里对已存在账号也做一次校准。
+            changed = []
+            if user.role != role:
+                user.role = role
+                changed.append('role')
+            if user.phone != phone:
+                user.phone = phone
+                changed.append('phone')
+            if user.district_id != (district.id if district else None):
+                user.district = district
+                changed.append('district')
+            if user.institution_id != (institution.id if institution else None):
+                user.institution = institution
+                changed.append('institution')
+            if user.first_name != name:
                 user.first_name = name
-                if district_code:
-                    user.district = districts[district_code]
-                if inst_id:
-                    user.institution = institutions[inst_id]
+                changed.append('first_name')
+            want_staff = role in ('gov_city', 'gov_district')
+            if user.is_staff != want_staff:
+                user.is_staff = want_staff
+                changed.append('is_staff')
+            if not user.is_active or user.status != 'active':
+                user.is_active = True
+                user.status = 'active'
+                changed.append('is_active')
+            if created:
+                # 密码只在新建时设置。已存在账号的密码不自动重置——
+                # 生产环境里静默覆盖人为修改过的凭据是危险的，
+                # 改密按 DEMO_ACCOUNTS.md 的手工流程处理。
+                user.set_password('123456')
+                changed.append('password')
+            if changed:
                 user.save()
+                if not created:
+                    repaired.append(f'{username}({"/".join(changed)})')
             users[username] = user
+
+        if repaired:
+            self.stdout.write(self.style.WARNING(
+                f'  已校准 {len(repaired)} 个演示账号：' + '、'.join(repaired)))
         return users
 
     # ============================================
@@ -213,10 +259,14 @@ class Command(BaseCommand):
     def _seed_chips(self):
         self.stdout.write('创建芯片（500个）...')
         chips = {}
+        # 号段 1000010001-1000010500，共 10 位。
+        # 注意补零宽度是 3 位（{i:03d}）：写成 {i:04d} 会得到 11 位的
+        # 10000100001，与宠物档案里的 chip_no（1000010001）对不上，
+        # 医院登记「芯片植入」时会报「芯片不存在」。
         existing = set(Chip.objects.values_list('number', flat=True))
         to_create = []
         for i in range(1, 501):
-            number = f'1000010{i:04d}'
+            number = f'1000010{i:03d}'
             if number not in existing:
                 to_create.append(Chip(number=number))
         if to_create:
@@ -224,7 +274,7 @@ class Command(BaseCommand):
 
         # 标记前15个为已使用
         for i in range(1, 16):
-            number = f'1000010{i:04d}'
+            number = f'1000010{i:03d}'
             chip = Chip.objects.get(number=number)
             chip.status = 'used'
             chip.used_at = date(2025, 1, 20)
@@ -232,7 +282,7 @@ class Command(BaseCommand):
             chips[i] = chip
         # 其余芯片
         for i in range(16, 501):
-            number = f'1000010{i:04d}'
+            number = f'1000010{i:03d}'
             chips[i] = Chip.objects.get(number=number)
         return chips
 
@@ -243,11 +293,11 @@ class Command(BaseCommand):
         self.stdout.write('创建捕捉记录...')
         captures = {}
         data = [
-            ('CAP001', 'D001', 'I001', '朝阳区流浪动物捕捉点', 'C001', '阳光花园小区',
-             '朝阳区阳光花园3栋', '阳光物业', '张物业', '13800003001',
+            ('CAP001', 'D001', 'I001', '襄城流浪动物捕捉点', 'C001', '阳光花园小区',
+             '襄城区阳光花园3栋', '阳光物业', '张物业', '13800003001',
              3, 'TNR2501001,TNR2501002,TNR2501003', 'CAP-2025-0010-001', 'cy_shelter'),
-            ('CAP002', 'D002', 'I002', '海淀区流浪动物捕捉点', 'C003', '中关村南区',
-             '海淀区中关村南区5栋', '中关物业', '陈物业', '13800003003',
+            ('CAP002', 'D002', 'I002', '樊城流浪动物捕捉点', 'C003', '樊城幸福里小区',
+             '樊城区幸福路12号5栋', '幸福物业', '陈物业', '13800003003',
              2, 'TNR2502004,TNR2502005', 'CAP-2025-0115-001', 'hd_shelter'),
         ]
         for cap_id, dist_code, shelter_id, shelter_name, comm_id, comm_name, address, prop, contact, phone, pet_count, pet_codes, ledger_no, operator in data:
@@ -270,6 +320,20 @@ class Command(BaseCommand):
                     'operator_name': users[operator].get_full_name() or users[operator].username,
                 }
             )
+            # shelter_name / community_name 是机构名的冗余副本。get_or_create 只在
+            # 新建时应用 defaults，机构后来改名后副本会一直停在旧值（现场 CAP001、
+            # CAP002 的 shelter_name 至今仍是北京时期的「朝阳区/海淀区流浪动物捕捉点」）。
+            # 种子捕捉单以机构当前名为准做一次同步，保证演示数据自洽。
+            stale = []
+            if cap.shelter and cap.shelter_name != cap.shelter.name:
+                cap.shelter_name = cap.shelter.name
+                stale.append('shelter_name')
+            if cap.community and cap.community_name != cap.community.name:
+                cap.community_name = cap.community.name
+                stale.append('community_name')
+            if stale:
+                cap.save(update_fields=stale)
+                self.stdout.write(f'  捕捉单 {cap.ledger_no} 同步机构名称：{"/".join(stale)}')
             captures[cap_id] = cap
         return captures
 
@@ -341,13 +405,13 @@ class Command(BaseCommand):
     def _seed_transfers(self, districts, institutions, users, captures):
         self.stdout.write('创建转运记录...')
         data = [
-            ('TRF001', 'CAP001', 'I001', '朝阳区流浪动物捕捉点', 'I003', '爱心宠物医院',
+            ('TRF001', 'CAP001', 'I001', '襄城流浪动物捕捉点', 'I003', '爱心宠物医院',
              'TNR2501001,TNR2501002,TNR2501003', 3, 'received', date(2025, 1, 12),
              '', 'TRF-2025-0111-001', 'D001', 'cy_shelter'),
-            ('TRF002', 'CAP002', 'I002', '海淀区流浪动物捕捉点', 'I005', '芭比堂动物医院',
+            ('TRF002', 'CAP002', 'I002', '樊城流浪动物捕捉点', 'I005', '芭比堂动物医院',
              'TNR2502004', 1, 'received', date(2025, 1, 16),
              '', 'TRF-2025-0115-001', 'D002', 'hd_shelter'),
-            ('TRF003', 'CAP002', 'I002', '海淀区流浪动物捕捉点', 'I005', '芭比堂动物医院',
+            ('TRF003', 'CAP002', 'I002', '樊城流浪动物捕捉点', 'I005', '芭比堂动物医院',
              'TNR2502005', 1, 'pending', None,
              '', 'TRF-2025-0118-001', 'D002', 'hd_shelter'),
         ]
@@ -458,7 +522,7 @@ class Command(BaseCommand):
              '', '诊疗消耗', 'I003', 'CON-2025-0113-001', date(2025, 1, 13),
              'D001', 'aixin_hosp', 'PET001,PET002疫苗接种'),
             ('MTX003R', 'receive', 'MAT001', '狂犬疫苗', 55, '支', 'B20250101',
-             '', '朝阳区流浪动物捕捉点', 'I003', 'RVC-2025-0110-001', date(2025, 1, 10),
+             '', '襄城流浪动物捕捉点', 'I003', 'RVC-2025-0110-001', date(2025, 1, 10),
              'D001', 'aixin_hosp', '签收下发物料（原单号：DIS-2025-0108-001）'),
             ('MTX004', 'purchase', 'MAT004', '宠物芯片', 500, '个', 'C20250101',
              '信码科技', '信码科技', None, 'PUR-2025-0103-001', date(2025, 1, 3),
@@ -470,7 +534,7 @@ class Command(BaseCommand):
              '', '诊疗消耗', 'I003', 'CON-2025-0115-001', date(2025, 1, 15),
              'D001', 'aixin_hosp', 'PET001,PET002,PET003芯片植入'),
             ('MTX006R', 'receive', 'MAT004', '宠物芯片', 210, '个', 'C20250101',
-             '', '朝阳区流浪动物捕捉点', 'I003', 'RVC-2025-0107-001', date(2025, 1, 7),
+             '', '襄城流浪动物捕捉点', 'I003', 'RVC-2025-0107-001', date(2025, 1, 7),
              'D001', 'aixin_hosp', '签收下发物料（原单号：DIS-2025-0107-001）'),
         ]
         for row in data:
@@ -533,7 +597,7 @@ class Command(BaseCommand):
         self.stdout.write('创建领养记录...')
         data = [
             ('ADP001', 'PET001', 'TNR2501001',
-             '王领养', '13800000009', '110105****1234', '朝阳区某某小区',
+             '王领养', '13800000009', '420602****1234', '襄城区某某小区',
              '有稳定住所，有养宠经验', '已签署', '线下已签',
              'I003', '爱心宠物医院', 'completed', date(2025, 2, 1),
              'ADP-2025-0128-001', 'D001', 'cy_shelter'),
@@ -643,7 +707,7 @@ class Command(BaseCommand):
             ('EUT001', 'PET006', 'TNR2501006', 'I004', '瑞鹏宠物医院',
              '严重外伤感染，无法救治', '后腿骨折感染，多处伤口化脓',
              date(2025, 1, 20), True, date(2025, 1, 21),
-             'cy_shelter', '朝阳捕捉点操作员',
+             'cy_shelter', '襄城捕捉点操作员',
              'EUT-2025-0120-001', 'D001', 'ruipeng_hosp'),
         ]
         for row in data:
