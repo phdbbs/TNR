@@ -407,11 +407,29 @@ def check_blacklist(id_card, phone):
 # ============================================
 # 区县数据隔离
 # ============================================
+def district_lookup_path(model):
+    """返回该模型用于区县隔离的查询路径（默认 `district`）。
+
+    绝大多数模型自带 `district` 外键，按 `district_id` 过滤即可。
+    少数模型本身没有该字段，区县需要沿外键派生——它们用类属性
+    `DISTRICT_LOOKUP` 声明路径（如 `CheckIn` / `AdoptionHallListing`
+    的 `'pet__district'`，区县随所属宠物走）。
+
+    没有这个兜底时，这类模型会被直接 `filter(district_id=...)` 打穿：
+    对「所属区县为具体区县」的用户（区县政府）抛 `FieldError` → 接口 500，
+    而对市级用户反而正常——所以只测市级账号是发现不了的。
+    """
+    return getattr(model, 'DISTRICT_LOOKUP', 'district')
+
+
 def get_district_filtered_queryset(model, user):
     """根据用户角色返回区县过滤后的 QuerySet。
 
     - gov_city 或所属区县为市级 (is_city=True): 返回全部数据
     - 其他角色: 仅返回所属区县数据
+
+    区县过滤路径由 `district_lookup_path()` 决定：模型可用
+    `DISTRICT_LOOKUP` 声明派生路径，默认按自身的 `district` 过滤。
 
     :param model: 模型类
     :param user: 已登录的 User 对象
@@ -427,7 +445,8 @@ def get_district_filtered_queryset(model, user):
 
     district_id = getattr(user, 'district_id', None)
     if district_id:
-        return model.objects.filter(district_id=district_id)
+        lookup = district_lookup_path(model)
+        return model.objects.filter(**{f'{lookup}_id': district_id})
     return model.objects.none()
 
 

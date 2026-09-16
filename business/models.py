@@ -427,6 +427,11 @@ class AdoptionApplication(models.Model):
 # 领养后回访打卡
 # ============================================
 class CheckIn(models.Model):
+    # 本模型没有 district 字段：回访打卡随领养走，区县**由所属宠物派生**。
+    # get_district_filtered_queryset() 会读这个属性来决定过滤路径，
+    # 缺少它时该函数会直接 filter(district_id=...) 而抛 FieldError。
+    DISTRICT_LOOKUP = 'pet__district'
+
     STATUS_CHOICES = [
         ('pending', '待审核'),
         ('approved', '已通过'),
@@ -538,6 +543,9 @@ class Message(models.Model):
 # 领养大厅上架
 # ============================================
 class AdoptionHallListing(models.Model):
+    # 与 CheckIn 同理：上架记录本身没有 district 字段，区县由所属宠物派生。
+    DISTRICT_LOOKUP = 'pet__district'
+
     pet = models.OneToOneField('business.Pet', on_delete=models.CASCADE, related_name='hall_listing', verbose_name='宠物')
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='hall_listings', verbose_name='医院')
     hospital_name = models.CharField('医院名称', max_length=100, blank=True, default='')
