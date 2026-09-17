@@ -29,3 +29,8 @@ tnr_test*.py
 tnr_check_db.py
 gui-test-screenshots/
 gui-test-scripts/
+
+# 一次性改造脚本（第十一轮批量移除 mountTable 的 title/actions 选项），不入库。
+# 只忽略这个具体文件、不忽略整个 scripts/ 目录 —— 整目录忽略会让以后正常加入的
+# 脚本被静默吞掉（git status 里不出现），排查起来很费劲。
+scripts/strip_mounttable_titles.py
