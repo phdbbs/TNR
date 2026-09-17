@@ -113,8 +113,9 @@ const TNR_API = {
   async createTransfer(data) { return this._post('/api/business/transfers/create/', data); },
   async receiveTransfer(id) { return this._post(`/api/business/transfers/${id}/receive/`, {}); },
   async rejectTransfer(id, reason) { return this._post(`/api/business/transfers/${id}/reject/`, {reason}); },
-  async resendTransfer(id) { return this._post(`/api/business/transfers/${id}/resend/`, {}); },
   async withdrawTransfer(id) { return this._post(`/api/business/transfers/${id}/withdraw/`, {}); },
+  // 注：resendTransfer（重新下发）已移除 —— 被驳回的动物会自动回到「待转运」备选框，
+  // 由操作员重新勾选后下发新单；旧的「重新下发」可对同一单反复下发，已废弃。
   async getTreatments() { return this._get('/api/business/treatments/'); },
   async createTreatment(data) { return this._post('/api/business/treatments/create/', data); },
   async getMaterials() { return this._get('/api/business/materials/'); },
@@ -129,6 +130,13 @@ const TNR_API = {
   async createRelease(data) { return this._post('/api/business/releases/create/', data); },
   async confirmRelease(id, data) { return this._post(`/api/business/releases/${id}/confirm/`, data); },
   async getAdoptions() { return this._get('/api/business/adoptions/'); },
+  /* 领养人在线提交的申请单（待审核）。与 Adoption（线下领养登记）是两张表：
+     Adoption.status 只有 pending_claim/completed/cancelled，没有 pending，
+     所以「待审核」必须看 AdoptionApplication。 */
+  async getAdoptionApplications(status) {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this._get('/api/business/adoptions/applications/' + qs);
+  },
   async registerAdoption(data) { return this._post('/api/business/adoptions/register/', data); },
   async confirmAdoptionClaim(id, data) { return this._post(`/api/business/adoptions/${id}/confirm-claim/`, data || {}); },
   async reclaimAdoption(id, data) { return this._post(`/api/business/adoptions/${id}/reclaim/`, data || {}); },
@@ -158,6 +166,8 @@ const TNR_API = {
     return this._get(url);
   },
   async getHallListings() { return this._get('/api/business/hall-listings/'); },
+  // 一宠一档：动物档案台账（每只动物一行，含全生命周期聚合数据）
+  async getPetArchive() { return this._get('/api/business/pets/archive/'); },
   async getPetLifecycle(petId) { return this._get(`/api/business/pets/${petId}/lifecycle/`); },
   async editAdoptionInfo(petId, data) { return this._post(`/api/business/adoptions/${petId}/edit-info/`, data); },
   async uploadPetPhoto(petId, photoField, file) {
@@ -219,6 +229,14 @@ const TNR_API = {
   getPetStatusText(status) {
     const map = {'in_transit':'在途','in_treatment':'待诊疗/诊疗中','pending_adopt':'待领养','pending_claim':'待领出','adopted':'已领养','released':'已放养','euthanized':'已死亡','owner_returned':'主人领回'};
     return map[status] || status;
+  },
+  // 一宠一档：把动物的物种/品种/性别拼成一行可读文案（如「猫 · 中华田园犬 · 公」）。
+  // 转运/回收/诊疗/领养/放养/死亡各环节共用，保证全流程展示口径一致。
+  petAttrText(pet, sep) {
+    if (!pet) return '—';
+    const parts = [pet.species, pet.breed, pet.gender]
+      .filter(v => v && String(v).trim());
+    return parts.length ? parts.join(sep || ' · ') : '—';
   },
   getPetStatusBadge(status) {
     const map = {'in_transit':'badge-warning','in_treatment':'badge-info','pending_adopt':'badge-cinnabar','pending_claim':'badge-cinnabar','adopted':'badge-success','released':'badge-success','euthanized':'badge-danger','owner_returned':'badge-default'};

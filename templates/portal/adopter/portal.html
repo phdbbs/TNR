@@ -658,7 +658,7 @@
 {% endblock %}
 
 {% block extra_js %}
-<script src="{% static 'js/tnr-api.js' %}"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260918c"></script>
 <script>
 /* ============================================
    领养人端 H5 门户 - 应用逻辑（对接 Django API）
@@ -1036,7 +1036,14 @@ async function showPetDetail(listingId) {
 function openApplyForm(listingId) {
   const item = hallCache.find(l => String(l.id) === String(listingId));
   const pet = (item && item.pet) ? item.pet : null;
-  activeApplyPet = { listingId, petId: item ? item.pet_id || item.pet || listingId : null, petName: pet ? pet.name : '', petCode: pet ? pet.code : '' };
+  /* `adoption_hall_list` 返回的 `pet` 是**嵌套的宠物对象**，列表项里根本没有 `pet_id`
+     字段。原实现写的是 `item.pet_id || item.pet || listingId`：`pet_id` 缺失时
+     直接退到**整个对象**，于是请求体里的 `pet_id` 是个 JSON 对象 ——
+     后端 `Pet.objects.filter(id={...})` 抛 TypeError 500，前端只拿到 HTML 错误页，
+     `TNR_API._handle` 解析 JSON 失败 → 界面提示「服务器返回格式错误」。
+     也就是说**在线领养申请从来就没成功过**，而且报错信息完全指不到原因。 */
+  const petId = (pet && pet.id) || (item && (item.pet_id || item.petId)) || null;
+  activeApplyPet = { listingId, petId, petName: pet ? pet.name : '', petCode: pet ? pet.code : '' };
 
   const user = getCurrentUser();
   const content = document.getElementById('applyFormContent');
@@ -1269,6 +1276,15 @@ async function showLifecycle(adoptionId) {
         desc = `领养人：${TNR_UI.escape(ev.adopter_name || '—')}<br>医院：${TNR_UI.escape(ev.hospital_name || '—')}`;
       } else if (ev.type === 'euthanasia') {
         desc = `医院：${TNR_UI.escape(ev.hospital_name || '—')}<br>原因：${TNR_UI.escape(ev.reason || '—')}`;
+      } else if (ev.type === 'owner_return') {
+        desc = `领回单号：${TNR_UI.escape(ev.ledger_no || '—')}<br>领回人：${TNR_UI.escape(ev.owner_name || '—')}`
+          + (ev.owner_phone ? `<br>联系电话：${TNR_UI.escape(ev.owner_phone)}` : '')
+          + (ev.owner_address ? `<br>住址：${TNR_UI.escape(ev.owner_address)}` : '')
+          + `<br>原因：${TNR_UI.escape(ev.reason || '—')}<br>操作人：${TNR_UI.escape(ev.operator_name || '—')}`;
+        if (ev.signature && ev.signature.startsWith('data:image')) {
+          desc += `<div style="margin-top:8px;"><div style="font-size:12px;color:var(--ink-muted);margin-bottom:4px;">领回人电子签名</div>`
+            + `<img src="${ev.signature}" style="max-width:240px;max-height:100px;background:#fff;border:1px solid var(--border-light);border-radius:6px;padding:4px;"></div>`;
+        }
       }
       html += `<div class="timeline-item done">
         <div class="timeline-time">${TNR_UI.escape(dateStr)}</div>

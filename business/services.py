@@ -19,6 +19,7 @@ from business.models import (
     Pet, Material, MaterialTransaction, Chip, Blacklist, Transfer,
     Release, Adoption,
 )
+from core.models import District, Institution
 
 
 # ============================================
@@ -212,7 +213,10 @@ def generate_pet_codes(count, year=None):
     :param year: 指定年份，默认取当前年份
     :return: 编号字符串列表
     """
-    today = timezone.now()
+    # 必须用 localdate() 而不是 now()：now() 是 UTC，北京时间 00:00–08:00 这段
+    # 生成的编号会退回前一天（9/18 凌晨生成出 TNR260917xxx），与界面显示的
+    # 本地日期对不上。项目 TIME_ZONE=Asia/Shanghai、USE_TZ=True。
+    today = timezone.localdate()
     yy = str(year if year else today.year)[-2:]
     mmdd = today.strftime('%m%d')
     prefix = f'TNR{yy}{mmdd}'
@@ -245,8 +249,8 @@ def generate_ledger_no(prefix):
     :param prefix: 前缀，如 CAP/TRF/TRE 等
     :return: 台账编号字符串
     """
-    today = timezone.now()
-    date_str = today.strftime('%y%m%d')
+    # 同 generate_pet_codes：用本地日期，否则凌晨生成的单号会退到前一天
+    date_str = timezone.localdate().strftime('%y%m%d')
     rand = f'{random.randint(0, 9999):04d}'
     return f'{prefix}-{date_str}-{rand}'
 
@@ -481,6 +485,236 @@ def pet_has_active_adoption(pet):
 
 
 # ============================================
+# 一宠一档：动物档案聚合
+# ============================================
+# 各阶段照片字段 → 展示标签。顺序即照片墙的展示顺序。
+PET_PHOTO_LABELS = (
+    ('photo_capture', '捕捉照片'),
+    ('photo_group', '整体合影'),
+    ('photo_before', '术前'),
+    ('photo_after', '术后'),
+    ('photo_treatment', '诊疗'),
+)
+
+
+def pet_brief(pet):
+    """动物档案简要信息（含全部阶段照片 URL）。
+
+    捕捉端「一宠一档」台账、政府端「一宠一档」以及各业务详情里的
+    「动物明细」都复用它，避免各端字段口径不一致（例如一端有品种、
+    另一端没有，或一端漏掉捕捉照片）。
+    """
+    if pet is None:
+        return None
+    return {
+        'id': pet.id,
+        'code': pet.code,
+        'name': pet.name,
+        'species': pet.species,
+        'breed': pet.breed,
+        'gender': pet.gender,
+        'age': pet.age,
+        'color': pet.color,
+        'weight': pet.weight,
+        'chip_no': pet.chip_no,
+        'status': pet.status,
+        'status_display': pet.get_status_display(),
+        'district_id': pet.district_id,
+        'district_name': pet.district.name if pet.district_id else '',
+        'shelter_name': pet.shelter.name if pet.shelter_id else '',
+        'hospital_name': pet.hospital.name if pet.hospital_id else '',
+        'photo_capture': pet.photo_capture.url if pet.photo_capture else '',
+        'photo_group': pet.photo_group.url if pet.photo_group else '',
+        'photo_before': pet.photo_before.url if pet.photo_before else '',
+        'photo_after': pet.photo_after.url if pet.photo_after else '',
+        'photo_treatment': pet.photo_treatment.url if pet.photo_treatment else '',
+    }
+
+
+def pet_photo_list(pet):
+    """动物的全部阶段照片（只返回确实有图的），供前端渲染照片墙并点击放大。"""
+    if pet is None:
+        return []
+    photos = []
+    for field, label in PET_PHOTO_LABELS:
+        f = getattr(pet, field, None)
+        if f:
+            photos.append({'field': field, 'label': label, 'url': f.url})
+    return photos
+
+
+def _first_matching(related, **match):
+    """在关联集合里取「最新一条」匹配记录。
+
+    各业务模型的 Meta.ordering 都是 ``['-id']``（新→旧），因此首个匹配项
+    即最新一条。刻意用 Python 过滤而不是 ``related.filter(...)``：关联被
+    ``prefetch_related`` 预取后，再调 ``.filter()`` 会绕过缓存另发一次查询，
+    列表页会退化成 N+1。
+    """
+    for obj in related:
+        if all(getattr(obj, k, None) == v for k, v in match.items()):
+            return obj
+    return None
+
+
+def _pet_outbound(pet):
+    """按动物当前状态推导「去向」：放养 / 领养 / 死亡 / 主人领回。
+
+    :return: (发生时间 ISO 串, 去向原因, 送达单位/接收人)
+    """
+    if pet.status == 'released':
+        rel = _first_matching(pet.releases.all(), status='released')
+        if rel:
+            return (rel.released_at.isoformat() if rel.released_at else '',
+                    '放养', rel.community_name or '')
+    elif pet.status == 'adopted':
+        ad = _first_matching(pet.adoptions.all(), status='completed')
+        if ad:
+            unit = (ad.adopter_name or '') + (f'（{ad.hospital_name}确认）' if ad.hospital_name else '')
+            return (ad.adopted_at.isoformat() if ad.adopted_at else '', '领养', unit)
+    elif pet.status == 'euthanized':
+        eu = _first_matching(pet.euthanasia_records.all())
+        if eu:
+            return (eu.euthanized_at.isoformat() if eu.euthanized_at else '',
+                    '死亡', eu.hospital_name or '')
+    elif pet.status == 'owner_returned':
+        orr = _first_matching(pet.owner_returns.all())
+        if orr:
+            return (orr.created_at.isoformat() if orr.created_at else '',
+                    '主人领回', orr.owner_name or '')
+    return '', '', ''
+
+
+def _to_camel_key(snake):
+    """snake_case → camelCase（与 ``serialize_instance`` 同一套规则）。"""
+    parts = str(snake).split('_')
+    if len(parts) == 1:
+        return parts[0]
+    return parts[0] + ''.join(p.title() for p in parts[1:])
+
+
+def with_camel_keys(data):
+    """给字典补一份 camelCase 别名，让两种命名都能取到值。
+
+    本项目约定「序列化结果同时产出 snake_case 与 camelCase 两套键」
+    （见 ``serialize_instance``）。``pet_archive_records`` 是手工聚合、不走
+    ``serialize_instance``，所以必须在这里显式补齐——政府端读 snake_case、
+    捕捉端读 camelCase，缺哪一套哪一端就静默出问题：前端读 ``r.ledgerNo``
+    拿到 undefined 时，**编号列整列空白、编号点不开档案，且不报任何错**。
+    """
+    out = dict(data)
+    for key, value in data.items():
+        camel = _to_camel_key(key)
+        if camel != key and camel not in out:
+            out[camel] = value
+    return out
+
+
+def pet_archive_records(pets):
+    """把动物档案聚合为「一宠一档」台账行。
+
+    一行 = 一只动物。字段覆盖：档案编号（一宠一档）、猫/狗、品种、公/母、
+    芯片号、当前状态、进站（捕捉）信息、去向（放养/领养/死亡/主人领回）、
+    绝育情况、诊疗/驱虫/免疫明细，以及全部阶段照片。
+
+    捕捉端「全量台账 → 一宠一档」与政府端「台账中心 → 一宠一档」共用本函数，
+    两端因此天然同源，不会出现一端有出库原因、另一端没有的漂移。
+
+    调用方请带上 ``select_related('district', 'shelter', 'hospital', 'capture')``
+    与 ``prefetch_related('treatments', 'releases', 'adoptions',
+    'euthanasia_records', 'owner_returns')``，否则每只动物会多出若干次查询。
+    """
+    records = []
+    for pet in pets:
+        capture = pet.capture if pet.capture_id else None
+        outbound_at, outbound_reason, delivery_unit = _pet_outbound(pet)
+
+        sterilized, sterilized_at = False, ''
+        treatment_records, deworm_records, vaccine_records = [], [], []
+        # 用 sorted() 而非 .order_by()：后者会绕过 prefetch 缓存重新查库
+        for t in sorted(pet.treatments.all(), key=lambda x: x.id):
+            items = []
+            if t.items_sterilization:
+                items.append('绝育')
+            if t.items_vaccine:
+                items.append('疫苗')
+            if t.items_deworming:
+                items.append('驱虫')
+            if t.items_chip:
+                items.append('芯片')
+            doctor = t.sterilization_surgeon or t.operator_name or ''
+            hospital = (t.hospital.name if t.hospital_id else '') or t.hospital_name or ''
+            trt_date = t.sterilization_surgery_date or (t.created_at.date() if t.created_at else None)
+            treatment_records.append({
+                'ledger_no': t.ledger_no or f'TRE-{t.id:06d}',
+                'hospital': hospital,
+                'doctor': doctor,
+                'items': '、'.join(items) or '—',
+                'date': trt_date.isoformat() if trt_date else '',
+                'status': t.get_status_display(),
+            })
+            if t.items_sterilization and not sterilized:
+                sterilized = True
+                sterilized_at = t.sterilization_surgery_date.isoformat() if t.sterilization_surgery_date else ''
+            if t.items_deworming:
+                deworm_records.append({
+                    'drug': t.deworming_type or '',
+                    'date': t.deworming_date.isoformat() if t.deworming_date else '',
+                    'hospital': hospital, 'doctor': doctor,
+                })
+            if t.items_vaccine:
+                vaccine_records.append({
+                    'drug': t.vaccine_type or '',
+                    'date': t.vaccine_date.isoformat() if t.vaccine_date else '',
+                    'hospital': hospital, 'doctor': doctor,
+                })
+
+        photos = pet_photo_list(pet)
+        detail = with_camel_keys({
+            'pet': pet_brief(pet),
+            'photos': photos,
+            'treatment_records': treatment_records,
+            'deworm_records': deworm_records,
+            'vaccine_records': vaccine_records,
+        })
+        records.append(with_camel_keys({
+            'business_type': 'pet',
+            'ledger_no': pet.code,
+            'id': pet.id,
+            'date': pet.created_at.isoformat() if pet.created_at else '',
+            'name': pet.name,
+            'species': pet.species,
+            'breed': pet.breed,
+            'gender': pet.gender,
+            'age': pet.age,
+            'color': pet.color,
+            'chip_no': pet.chip_no,
+            'status': pet.status,
+            'status_display': pet.get_status_display(),
+            'district_name': pet.district.name if pet.district_id else '',
+            'shelter_name': pet.shelter.name if pet.shelter_id else '',
+            'hospital_name': pet.hospital.name if pet.hospital_id else '',
+            'intake_at': capture.created_at.isoformat() if capture and capture.created_at else '',
+            'intake_from': ((capture.community_name if capture else '') or (capture.address if capture else '') or ''),
+            'intake_ledger_no': capture.ledger_no if capture else '',
+            'intake_property_name': capture.property_name if capture else '',
+            'intake_contact': ((capture.contact_person or '') if capture else '') + (
+                ' / ' + capture.contact_phone if capture and capture.contact_phone else ''),
+            'outbound_at': outbound_at,
+            'outbound_reason': outbound_reason,
+            'delivery_unit': delivery_unit,
+            'sterilized': sterilized,
+            'sterilized_at': sterilized_at,
+            'treatment_records': treatment_records,
+            'deworm_records': deworm_records,
+            'vaccine_records': vaccine_records,
+            'photos': photos,
+            'detail': detail,
+        }))
+    return records
+
+
+# ============================================
 # 捕捉单转运状态推导
 # ============================================
 # 已提交给医院、尚未被退回的转运单状态（含待签收与已签收）
@@ -490,6 +724,32 @@ ACTIVE_TRANSFER_STATUSES = ('pending', 'received')
 def _split_codes(raw):
     """逗号分隔编号字符串 → 去空列表。"""
     return [c.strip() for c in (raw or '').split(',') if c.strip()]
+
+
+def busy_transfer_codes(codes, district_id=None):
+    """返回其中**已被未结转运单占用**的动物编号。
+
+    未结 = ``ACTIVE_TRANSFER_STATUSES``（pending 已下发待签收 / received 已签收）。
+    ``rejected``（医院驳回）与 ``void``（捕捉点撤回）**不占位**——
+    被驳回的动物必须能重新被选进「待转运」列表，这正是取消「重新下发」后
+    依赖的路径：宠物退回 → 状态回 in_transit → 自动出现在待转运备选框。
+
+    用于 `transfer_create` 的预校验：同一只动物不能同时挂在多张未结单据上，
+    否则医院会收到重复单、捕捉单状态推导也会跟着错乱。
+    """
+    codes = {c for c in (codes or []) if c}
+    if not codes:
+        return set()
+    probe = Q()
+    for code in codes:
+        probe |= Q(pet_codes__contains=code)
+    qs = Transfer.objects.filter(probe, status__in=ACTIVE_TRANSFER_STATUSES)
+    if district_id:
+        qs = qs.filter(district_id=district_id)
+    busy = set()
+    for t in qs:
+        busy |= set(_split_codes(t.pet_codes)) & codes
+    return busy
 
 
 def capture_transfers(capture):
@@ -667,3 +927,146 @@ def get_district_scope(request):
             return None
         return user.district_id
     return None
+
+
+def resolve_district_scope(user, anchor, submitted):
+    """解析并校验业务记录的归属区县。
+
+    :param user: 当前操作员
+    :param anchor: 承载「最可能的正确区县」的对象
+        （捕捉单/转运单用**机构**，主人领回/诊疗/放养/领养/安乐死用**宠物**）
+    :param submitted: 前端显式提交的 district_id（可为 None）
+    :return: (District 实例, 错误信息)；成功时错误信息为 None
+
+    规则：
+    1. 解析顺序：显式提交 → anchor 所在区县 → 操作员所属区县。
+       **anchor 的区县比操作员区县更贴近事实**：现场把两个捕捉点操作员都挂在
+       「全市（市级）」下，若以操作员区县为准，登记出来的捕捉单/转运单/黑名单
+       会全部落到市级，本区县政府在区县隔离下**看不到本区数据**。
+    2. 必须是具体区县，不能是「全市（市级）」。
+    3. 非市级操作员只能归属到自己的区县。
+
+    这个函数原本只写在 `views_capture` 里，导致转运单与黑名单各自散落一份
+    「`data.get('district_id') or user.district_id`」的写法——前端并不提交
+    `district_id`，于是它们全部落到市级。统一提到服务层，新增落库点一律走它。
+    """
+    if submitted:
+        district = District.objects.filter(pk=submitted).first()
+        if district is None:
+            return None, '归属区县不存在'
+    else:
+        district = getattr(anchor, 'district', None) or getattr(user, 'district', None)
+    if district is None:
+        return None, '缺少区县信息'
+
+    if district.is_city:
+        return None, '归属区县不能是市级，请选择具体区县'
+
+    user_district = getattr(user, 'district', None)
+    if user_district and not user_district.is_city and district.id != user_district.id:
+        return None, '无权将记录归属到其他区县'
+    return district, None
+
+
+# ============================================
+# 上传图片校验
+# ============================================
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024          # 单张图片上限 10MB
+ALLOWED_IMAGE_FORMATS = {'JPEG', 'JPG', 'PNG', 'GIF', 'WEBP', 'BMP', 'TIFF'}
+
+
+def validate_image_upload(f, label='图片'):
+    """校验上传文件**确实是图片**，返回错误信息（None 表示通过）。
+
+    为什么必须自己校验：Django 的 ``ImageField`` 只在走 ModelForm 时才校验，
+    **直接赋值不做任何检查**。而各上传接口都是
+
+        capture.group_photo = request.FILES['group_photo']
+
+    于是把 ``.txt``（或把任意文件改名成 ``.png``）原样写进 ``media/``：
+    前端 ``<img src>`` 直接裂图，数据库里也看不出任何异常，事后无从追溯。
+
+    文件扩展名与 ``Content-Type`` 都由客户端提供、可随意伪造，所以这里
+    **按内容**校验（Pillow 实际解码），不信任文件名。
+
+    校验过程会把文件指针移动，结束时复位，调用方仍可正常保存。
+    """
+    if f is None:
+        return None
+    size = getattr(f, 'size', 0) or 0
+    if size > MAX_UPLOAD_BYTES:
+        return (f'{label}大小 {size / 1024 / 1024:.1f}MB 超过 '
+                f'{MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限，请压缩后再上传')
+    fmt = ''
+    try:
+        from PIL import Image
+        f.seek(0)
+        img = Image.open(f)
+        img.verify()                      # 真正解码一遍，非图片会抛异常
+        fmt = (img.format or '').upper()
+    except Exception:
+        return f'{label}不是有效的图片文件，请上传 JPG / PNG 等格式的图片'
+    finally:
+        try:
+            f.seek(0)
+        except Exception:
+            pass
+    if fmt and fmt not in ALLOWED_IMAGE_FORMATS:
+        return f'{label}格式（{fmt}）不支持，请上传 JPG / PNG 等格式的图片'
+    return None
+
+
+def validate_uploaded_images(files, labels=None):
+    """批量校验 ``request.FILES`` 中的图片，返回第一个错误信息（None 表示全通过）。
+
+    各接口一律在**写库之前**调用它，与「先校验完再进事务」的两段式约定一致：
+    否则第 N 张图片非法时，前面已经写进去的照片会留下半成品。
+    """
+    labels = labels or {}
+    for key, f in (files or {}).items():
+        err = validate_image_upload(f, labels.get(key, '图片'))
+        if err:
+            return err
+    return None
+
+
+def resolve_community(district, community_id=None, community_name=None):
+    """把「小区」解析成 ``Institution(type='community')``，解析不到返回 None。
+
+    为什么需要它：捕捉登记的「所在小区」是**自由文本**（前端刻意用输入框 + 模糊
+    搜索，不做下拉枚举），后端只把它写进 ``Capture.community_name``，
+    **从不回填 ``Capture.community`` 外键**。而放养只认外键 ——
+    ``release_create`` 里是 ``community = pet.capture.community``，外键为空就直接
+    返回「无法匹配原小区，请指定 community_id」，可界面上根本没有指定小区的入口。
+    结果就是**放养流程在界面上永远走不通**，而且不报错，页面看起来像「还没数据」；
+    只有绕过界面直接调接口传 community_id 才能成功。
+
+    解析顺序（命中即返回）：
+      1. 显式传入的 ``community_id``（必须确实是 ``type='community'``）
+      2. 同区县下名称**完全相同**的机构
+      3. 同区县下名称**互相包含**的机构（对应前端的模糊搜索语义）
+
+    刻意**不自动新建**机构：错别字会凭空造出一堆小区档案，而小区属于机构主数据，
+    应当由管理员在政府端维护。
+    """
+    if community_id:
+        inst = Institution.objects.filter(id=community_id, type='community').first()
+        # 显式传入的也必须落在同一区县：否则可以把动物「放养」到别区的小区，
+        # 而 Release 的区县取自宠物 → 记录会挂在本区、小区却在别区。
+        if inst and (district is None or inst.district_id == district.id
+                     or inst.district_id is None):
+            return inst
+
+    name = (community_name or '').strip()
+    if not name:
+        return None
+
+    base = Institution.objects.filter(type='community')
+    if district is not None:
+        base = base.filter(Q(district=district) | Q(district__isnull=True))
+
+    exact = base.filter(name=name).first()
+    if exact:
+        return exact
+    # 模糊：用户可能只填「阳光花园」，而机构档案是「阳光花园小区」
+    return base.filter(name__icontains=name).first()

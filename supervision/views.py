@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.decorators import login_required
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum, Count, Q, Prefetch
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
@@ -19,7 +19,7 @@ from business.models import (
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
-    get_district_scope,
+    get_district_scope, pet_brief, pet_archive_records,
 )
 from core.models import District, Institution
 from .models import SystemConfig
@@ -122,6 +122,26 @@ def institution_list(request):
 # ============================================
 # 3. 创建机构
 # ============================================
+def _next_institution_code(inst_type):
+    """按 `I###` / `C###` 约定生成下一个机构编号。
+
+    机构编号（`Institution.code`）是**稳定业务键**：去重、引用、种子脚本的
+    幂等匹配都靠它，机构名只是展示字段。但 `institution_create` 此前根本不写
+    `code` —— 界面上新建的机构编号列永远是空的，而且与 seed 建的那批机构
+    不在同一套编号体系里，后续「按 code 匹配」的脚本会把它们当成新机构重复插入。
+
+    前缀与 seed_data 保持一致：小区用 `C`，捕捉点/医院用 `I`。
+    """
+    prefix = 'C' if inst_type == 'community' else 'I'
+    max_no = 0
+    for code in Institution.objects.filter(
+            code__startswith=prefix).values_list('code', flat=True):
+        suffix = (code or '')[len(prefix):]
+        if suffix.isdigit():
+            max_no = max(max_no, int(suffix))
+    return f'{prefix}{max_no + 1:03d}'
+
+
 @csrf_exempt
 @role_required('gov_city', 'gov_district')
 @login_required
@@ -161,6 +181,7 @@ def institution_create(request):
         return json_fail('联系电话格式不正确')
 
     inst = Institution.objects.create(
+        code=_next_institution_code(inst_type),
         name=name,
         type=inst_type,
         district=district,
@@ -585,23 +606,13 @@ def _treatment_items(t):
 
 
 def _pet_brief(pet):
-    """宠物简要信息（含照片）"""
-    if not pet:
-        return None
-    return {
-        'id': pet.id,
-        'code': pet.code,
-        'name': pet.name,
-        'species': pet.species,
-        'breed': pet.breed,
-        'gender': pet.gender,
-        'color': pet.color,
-        'status': pet.status,
-        'photo_group': pet.photo_group.url if pet.photo_group else '',
-        'photo_before': pet.photo_before.url if pet.photo_before else '',
-        'photo_after': pet.photo_after.url if pet.photo_after else '',
-        'photo_treatment': pet.photo_treatment.url if pet.photo_treatment else '',
-    }
+    """宠物简要信息（含全部阶段照片）。
+
+    实际实现已下沉到 ``business.services.pet_brief``，供捕捉端「一宠一档」、
+    政府端「一宠一档」共用，避免两端字段口径漂移。这里保留原函数名，
+    因为本模块多处调用它。
+    """
+    return pet_brief(pet)
 
 
 @csrf_exempt
@@ -617,7 +628,11 @@ def business_supervision(request):
     result = {}
 
     if business_type is None or business_type == 'capture':
-        qs = _scope_filter(Capture.objects.all(), request)
+        # prefetch 逐只动物：详情里要展示「单只信息 + 各自照片」，
+        # 不做预取会变成每张捕捉单一次查询（N+1）。
+        qs = _scope_filter(Capture.objects.all(), request).prefetch_related(
+            Prefetch('pet_set', queryset=Pet.objects.filter(is_deleted=False)
+                     .select_related('district', 'shelter', 'hospital')))
         captures = []
         for c in qs:
             item = serialize_instance(c)
@@ -628,19 +643,37 @@ def business_supervision(request):
             else:
                 item['pet_codes'] = []
             item['group_photo'] = c.group_photo.url if c.group_photo else ''
+            # 逐只动物明细（编号/类别/品种/性别/芯片/状态 + 各阶段照片），
+            # 与捕捉端「一宠一档」、政府端「台账中心」共用 pet_brief，字段口径一致。
+            item['pets'] = [_pet_brief(p) for p in c.pet_set.all()]
             captures.append(item)
         result['captures'] = captures
 
     if business_type is None or business_type == 'transfer':
         qs = _scope_filter(Transfer.objects.all(), request)
+        transfers_raw = list(qs)
+        # 转运单按编号关联宠物，先把全部编号一次性捞出来，避免逐单查库
+        all_pet_codes = set()
+        for t in transfers_raw:
+            all_pet_codes.update(
+                p.strip() for p in (t.pet_codes or '').split(',') if p.strip())
+        pet_by_code = {}
+        if all_pet_codes:
+            for p in Pet.objects.filter(
+                code__in=all_pet_codes, is_deleted=False
+            ).select_related('district', 'shelter', 'hospital'):
+                pet_by_code[p.code] = p
+
         transfers = []
-        for t in qs:
+        for t in transfers_raw:
             item = serialize_instance(t)
             item['district_name'] = t.district.name if t.district else ''
             if item.get('pet_codes') and isinstance(item['pet_codes'], str):
                 item['pet_codes'] = [p.strip() for p in item['pet_codes'].split(',') if p.strip()]
             else:
                 item['pet_codes'] = []
+            item['pets'] = [_pet_brief(pet_by_code[c]) for c in item['pet_codes']
+                            if c in pet_by_code]
             transfers.append(item)
         result['transfers'] = transfers
 
@@ -817,96 +850,14 @@ def ledger_center(request):
         return qs
 
     # 一宠一档（按宠物档案聚合全生命周期数据）
+    # 聚合逻辑下沉到 business.services.pet_archive_records，与捕捉端
+    # 「全量台账 → 一宠一档」共用同一份实现，两端字段/口径天然一致。
     if business_type == 'pet':
         qs = _scope_filter(Pet.objects.filter(is_deleted=False), request)
         qs = _date_filter(qs)
-        for p in qs:
-            capture = p.capture
-            # 出库信息：按当前状态从对应业务记录推导
-            outbound_at, outbound_reason, delivery_unit = '', '', ''
-            if p.status == 'released':
-                rel = p.releases.filter(status='released').order_by('-id').first()
-                if rel:
-                    outbound_at = rel.released_at.isoformat() if rel.released_at else ''
-                    outbound_reason = '放养'
-                    delivery_unit = rel.community_name or ''
-            elif p.status == 'adopted':
-                ad = p.adoptions.filter(status='completed').order_by('-id').first()
-                if ad:
-                    outbound_at = ad.adopted_at.isoformat() if ad.adopted_at else ''
-                    outbound_reason = '领养'
-                    delivery_unit = ((ad.adopter_name or '') + (f'（{ad.hospital_name}确认）' if ad.hospital_name else ''))
-            elif p.status == 'euthanized':
-                eu = p.euthanasia_records.order_by('-id').first()
-                if eu:
-                    outbound_at = eu.euthanized_at.isoformat() if eu.euthanized_at else ''
-                    outbound_reason = '死亡'
-                    delivery_unit = eu.hospital_name or ''
-            elif p.status == 'owner_returned':
-                orr = p.owner_returns.order_by('-id').first()
-                if orr:
-                    outbound_at = orr.created_at.isoformat() if orr.created_at else ''
-                    outbound_reason = '主人领回'
-                    delivery_unit = orr.owner_name or ''
-            # 绝育 / 诊疗记录（医院/医师） / 驱虫 / 免疫记录（聚合该宠物全部诊疗）
-            sterilized, sterilized_at = False, ''
-            treatment_records, deworm_records, vaccine_records = [], [], []
-            for t in p.treatments.all().order_by('id'):
-                items = []
-                if t.items_sterilization: items.append('绝育')
-                if t.items_vaccine: items.append('疫苗')
-                if t.items_deworming: items.append('驱虫')
-                if t.items_chip: items.append('芯片')
-                doctor = t.sterilization_surgeon or t.operator_name or ''
-                hospital = (t.hospital.name if t.hospital_id else '') or t.hospital_name or ''
-                treatment_records.append({
-                    'ledger_no': f'TRE-{t.id:06d}',
-                    'hospital': hospital,
-                    'doctor': doctor,
-                    'items': '、'.join(items) or '—',
-                    'date': (t.sterilization_surgery_date or t.created_at.date()).isoformat() if (t.sterilization_surgery_date or t.created_at) else '',
-                    'status': t.get_status_display(),
-                })
-                if t.items_sterilization and not sterilized:
-                    sterilized = True
-                    sterilized_at = t.sterilization_surgery_date.isoformat() if t.sterilization_surgery_date else ''
-                if t.items_deworming:
-                    deworm_records.append({'drug': t.deworming_type or '', 'date': t.deworming_date.isoformat() if t.deworming_date else '',
-                                           'hospital': hospital, 'doctor': doctor})
-                if t.items_vaccine:
-                    vaccine_records.append({'drug': t.vaccine_type or '', 'date': t.vaccine_date.isoformat() if t.vaccine_date else '',
-                                            'hospital': hospital, 'doctor': doctor})
-            records.append({
-                'business_type': 'pet',
-                'ledger_no': p.code,
-                'id': p.id,
-                'date': p.created_at.isoformat() if p.created_at else '',
-                'species': p.species,
-                'breed': p.breed,
-                'gender': p.gender,
-                'age': p.age,
-                'chip_no': p.chip_no,
-                'status': p.status,
-                'status_display': p.get_status_display(),
-                'district_name': p.district.name if p.district else '',
-                'intake_at': capture.created_at.isoformat() if capture and capture.created_at else '',
-                'intake_from': ((capture.community_name if capture else '') or (capture.address if capture else '') or ''),
-                'intake_ledger_no': capture.ledger_no if capture else '',
-                'outbound_at': outbound_at,
-                'outbound_reason': outbound_reason,
-                'delivery_unit': delivery_unit,
-                'sterilized': sterilized,
-                'sterilized_at': sterilized_at,
-                'treatment_records': treatment_records,
-                'deworm_records': deworm_records,
-                'vaccine_records': vaccine_records,
-                'detail': {
-                    'pet': _pet_brief(p),
-                    'treatment_records': treatment_records,
-                    'deworm_records': deworm_records,
-                    'vaccine_records': vaccine_records,
-                },
-            })
+        qs = qs.select_related('district', 'shelter', 'hospital', 'capture').prefetch_related(
+            'treatments', 'releases', 'adoptions', 'euthanasia_records', 'owner_returns')
+        records.extend(pet_archive_records(qs))
 
     # 捕捉台账
     if business_type is None or business_type == 'capture':
@@ -965,6 +916,7 @@ def ledger_center(request):
                     'pet_codes': pet_codes,
                     'received_at': t.received_at.isoformat() if t.received_at else '',
                     'reject_reason': t.reject_reason,
+                    'note': t.note,
                     'pets': [_pet_brief(p) for p in Pet.objects.filter(code__in=pet_codes, is_deleted=False)],
                 }
             })

@@ -34,7 +34,7 @@ urlpatterns = [
     path('transfers/create/', views_transfer.transfer_create, name='transfer_create'),
     path('transfers/<int:pk>/receive/', views_transfer.transfer_receive, name='transfer_receive'),
     path('transfers/<int:pk>/reject/', views_transfer.transfer_reject, name='transfer_reject'),
-    path('transfers/<int:pk>/resend/', views_transfer.transfer_resend, name='transfer_resend'),
+    # 注：transfers/<pk>/resend/（重新下发）已移除 —— 见 views_transfer.transfer_resend 处说明
     path('transfers/<int:pk>/withdraw/', views_transfer.transfer_withdraw, name='transfer_withdraw'),
 
     # ============================================
@@ -109,6 +109,8 @@ urlpatterns = [
     # 门户配套接口（医院端）
     # ============================================
     path('pets/', views_portal.hospital_pets, name='hospital_pets'),
+    # 一宠一档：动物档案台账（捕捉端「全量台账」与政府端「一宠一档」同源）
+    path('pets/archive/', views_portal.pet_archive, name='pet_archive'),
     path('hall-listings/', views_portal.hospital_hall_listings, name='hospital_hall_listings'),
 
     # ============================================

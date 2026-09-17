@@ -105,6 +105,27 @@ class InstitutionApiTest(SupervisionBase):
         }))
         self.assertEqual(body['data']['type'], 'hospital')
 
+    def test_create_assigns_institution_code(self):
+        """新建机构必须拿到 `I###` / `C###` 编号。
+
+        机构编号是**稳定业务键**（去重、引用、种子脚本幂等匹配都靠它）；
+        创建接口此前不写 `code`，界面上「机构编号」列永远是空的，也让界面
+        建的机构与 seed 建的那批不在同一套编号体系里。
+        """
+        self.client.force_login(self.gov_a)
+        hospital = self.ok(self.post_json(f'{API}/institutions/create/', {
+            'name': '编号测试医院', 'type': 'hospital',
+            'district_id': self.district_a.id,
+        }))['data']
+        self.assertRegex(hospital['code'], r'^I\d{3}$')
+
+        community = self.ok(self.post_json(f'{API}/institutions/create/', {
+            'name': '编号测试小区', 'type': 'community',
+            'district_id': self.district_a.id,
+        }))['data']
+        self.assertRegex(community['code'], r'^C\d{3}$')
+        self.assertNotEqual(hospital['code'], community['code'])
+
     def test_create_hospital_on_city_district_rejected(self):
         self.client.force_login(self.gov_city)
         self.expect_fail(self.post_json(f'{API}/institutions/create/', {

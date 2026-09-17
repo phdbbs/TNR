@@ -13,8 +13,8 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
     get_active_pet, get_scoped_object, pet_has_active_adoption,
+    resolve_community,
 )
-from core.models import Institution
 
 
 @csrf_exempt
@@ -36,13 +36,14 @@ def release_list(request):
 @role_required('shelter', 'hospital', 'gov_city', 'gov_district')
 @login_required
 def release_create(request):
-    """创建放养记录（从医院回收，匹配原小区）
+    """创建放养记录（放回原捕捉小区）
 
     请求体示例:
     {
         "pet_id": 1,
-        "community_id": 5,       // 可选，不传则从捕捉记录匹配
-        "receiver_name": "张物业",
+        "community_name": "阳光花园小区",   // 可选，不传则取捕捉单登记的小区名
+        "community_id": 5,                 // 可选，显式指定小区机构（同区县）
+        "receiver_name": "张物业",          // 可选，确认放养时再填
         "receiver_phone": "13800003001"
     }
     """
@@ -70,17 +71,32 @@ def release_create(request):
         return json_fail('该宠物已有待放养记录，请勿重复创建')
 
     # 匹配原小区
-    community_id = data.get('community_id')
-    community = None
-    if community_id:
-        community = Institution.objects.filter(id=community_id, type='community').first()
+    #
+    # 「小区」在本项目里是**手填文本**（政府端已取消小区管理页签，捕捉登记也是
+    # 输入框 + 模糊搜索，不做枚举），所以匹配不到机构档案是**正常情况**，
+    # 不能因此拒绝放养。原实现只认 `Capture.community` 外键：
+    #   1. 捕捉登记从不回填该外键 → 历史数据全是 None；
+    #   2. 界面上也没有指定小区的入口。
+    # 于是「发起放养」永远返回「无法匹配原小区，请指定 community_id」，
+    # 整个放养流程在界面上不可达，而且不报错，页面看起来只是「还没有数据」。
+    #
+    # 现在：小区名以**捕捉单登记的文本**为准（可显式覆盖），
+    # 能匹配到机构档案就顺带回填外键（`Release.community` 本身 nullable）。
+    capture = pet.capture
+    community_name = (data.get('community_name') or '').strip()
+    if not community_name and capture is not None:
+        community_name = (capture.community_name or '').strip()
 
-    if not community and pet.capture:
-        # 从捕捉记录匹配原小区
-        community = pet.capture.community
+    community = resolve_community(
+        pet.district,
+        data.get('community_id') or (capture.community_id if capture else None),
+        community_name,
+    )
+    if community and not community_name:
+        community_name = community.name
 
-    if not community:
-        return json_fail('无法匹配原小区，请指定 community_id')
+    if not community_name:
+        return json_fail('无法匹配原小区，请在捕捉单中补充小区名称')
 
     district_id = pet.district_id or getattr(user, 'district_id', None)
     if not district_id:
@@ -90,7 +106,7 @@ def release_create(request):
         pet=pet,
         pet_code=pet.code,
         community=community,
-        community_name=community.name,
+        community_name=community_name,
         receiver_name=data.get('receiver_name', ''),
         receiver_phone=data.get('receiver_phone', ''),
         status='pending',

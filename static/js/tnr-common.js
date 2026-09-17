@@ -25,6 +25,33 @@ const TNR_UI = {
     }, duration);
   },
 
+  /* === 写接口结果断言 ===
+   *
+   * `TNR_API._post` / `_get` **不会抛异常** —— 它们只把响应体原样返回
+   * （`_post` 是 `return res.json()`）。所以下面这种写法里的 catch 是**死代码**：
+   *
+   *     try {
+   *       await TNR_API.createUser({...});
+   *       TNR_UI.toast('账号创建成功', 'success');   // ← 服务端拒绝时照样弹
+   *     } catch (e) { TNR_UI.toast(e.message, 'danger'); }
+   *
+   * 本项目的业务错误一律以 **HTTP 200 + `{success:false, message}`** 返回
+   * （`json_fail`），越权才用 404。因此服务端每一次拒绝（用户名已存在、
+   * 库存不足、无权操作、跨区县…）界面上都会弹绿色「成功」，用户以为存上了，
+   * 实际什么都没写 —— 比直接报错更糟。
+   *
+   * 所有写操作拿到响应后必须过一遍本函数，把失败转成异常交给 catch：
+   *
+   *     const res = await TNR_API.createUser({...});
+   *     TNR_UI.assertOk(res, '创建失败');
+   *
+   * 读接口（列表/详情）不适用：失败时静默降级成空列表比整页崩掉更可接受。
+   */
+  assertOk(res, fallback = '操作失败') {
+    if (res && res.success === false) throw new Error(res.message || fallback);
+    return res;
+  },
+
   // === 确认对话框 ===
   confirm(message, title = '确认操作') {
     return new Promise((resolve) => {
@@ -165,6 +192,16 @@ const TNR_UI = {
   // ============================================
   _tableState: {},   // 运行态：page / sortKey / sortDir（filter 重渲染时保留排序）
   _dtDrag: null,     // 列宽拖拽中的临时状态
+  _delegatedTags: new WeakMap(),   // 容器 -> Set(委托标识)，防重复绑定
+
+  /* 统一解析「容器」参数：支持 id 字符串 / CSS 选择器 / Element */
+  _resolveEl(target) {
+    if (!target) return null;
+    if (typeof target !== 'string') return target;
+    const isSelector = target.startsWith('#') || target.startsWith('.')
+      || target.startsWith('[') || target.includes(' ');
+    return isSelector ? document.querySelector(target) : document.getElementById(target);
+  },
 
   _pref(key, value) {
     // localStorage 读写（JSON），失败静默降级为无记忆
@@ -196,11 +233,7 @@ const TNR_UI = {
    *                        emptyText, title, pageSize, pageSizes, wrap:'card'|'plain', actions }
    */
   mountTable(target, opts) {
-    let el = target;
-    if (typeof target === 'string') {
-      el = (/^[\\#[\.\[]/.test(target) || target.includes(' '))
-        ? document.querySelector(target) : document.getElementById(target);
-    }
+    const el = this._resolveEl(target);
     if (!el) return;
     // 外层容器若带 table-wrapper（overflow-x:auto）会剪裁 sticky 表头，剥离之
     if (el.classList && el.classList.contains('table-wrapper')) el.classList.remove('table-wrapper');
@@ -389,6 +422,56 @@ const TNR_UI = {
     document.addEventListener('touchend', up);
   },
 
+  // === 数量步进控件（PC/移动端统一） ===
+  /**
+   * 给数量输入框附加显式 −/+ 按钮。
+   *
+   * 移动端浏览器**不显示** `<input type="number">` 的原生上下箭头（iOS/Android
+   * 平台行为，CSS 无法强制显示），导致手机端只能靠键盘输入，与 PC 端「可上下选择」
+   * 体验不一致。这里统一改成两端都有的显式按钮，并由 CSS 隐藏 PC 端原生箭头，
+   * 避免同屏出现「原生箭头 + 自定义按钮」两套控件。
+   *
+   * 幂等：同一输入框重复调用只绑定一次（`data-qty-bound` 标记）。
+   *
+   * @param {string|Element} target 输入框元素或 id
+   * @param {object} opts { min, max, onChange(nextValue) }
+   *        min/max 缺省时读 input 的 min/max 属性；onChange 缺省派发 input 事件
+   */
+  bindQtyStepper(target, opts = {}) {
+    const input = this._resolveEl(target);
+    if (!input || input.dataset.qtyBound) return null;
+    input.dataset.qtyBound = '1';
+
+    const min = opts.min != null ? opts.min : (parseInt(input.min, 10) || 1);
+    const max = opts.max != null ? opts.max : (parseInt(input.max, 10) || 9999);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'qty-stepper';
+    input.parentNode.insertBefore(wrap, input);
+
+    const makeBtn = (text, delta, label) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn btn-secondary btn-sm qty-step-btn';
+      b.textContent = text;
+      b.setAttribute('aria-label', label);
+      b.addEventListener('click', () => {
+        const cur = parseInt(input.value, 10);
+        const next = Math.min(max, Math.max(min, (isNaN(cur) ? min : cur) + delta));
+        if (next === (isNaN(cur) ? min : cur)) return;
+        input.value = next;
+        if (typeof opts.onChange === 'function') opts.onChange(next);
+        else input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      return b;
+    };
+
+    wrap.appendChild(makeBtn('−', -1, '减少数量'));
+    wrap.appendChild(input);
+    wrap.appendChild(makeBtn('+', 1, '增加数量'));
+    return wrap;
+  },
+
   // === 渲染分页 ===
   renderPagination({ total, current, pageSize = 10 }) {
     const totalPages = Math.ceil(total / pageSize);
@@ -492,6 +575,27 @@ const TNR_UI = {
     const d = new Date(date);
     if (isNaN(d)) return date;
     return this.formatDate(date) + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  },
+
+  /** 今天（本地）YYYY-MM-DD，用作表单日期默认值。
+   *
+   * **不要用 `new Date().toISOString().substr(0,10)`** —— toISOString() 返回
+   * **UTC**，北京时间 00:00–08:00 会退到前一天，表单默认日期就是错的。
+   * 与后端 `generate_pet_codes` 曾用 `timezone.now()` 是同一类坑。
+   */
+  todayStr() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  },
+
+  /** 当前本地日期时间 `YYYY-MM-DDTHH:mm`，用于 `<input type="datetime-local">` 默认值。
+   *  同样不能用 toISOString()（UTC，会差 8 小时且可能跨天）。
+   */
+  nowLocalStr() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return this.todayStr() + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
   },
 
   // === 生成单据编号 ===
@@ -599,23 +703,28 @@ const TNR_UI = {
   },
 
   // === 实时搜索过滤（输入防抖 200ms；回车立即提交） ===
-  bindFilter(tableRender) {
+  /* scope 可选：限定到某个容器。
+     不传时退回 document，保持与既有调用兼容。
+     传容器可以避免「A 页面的筛选条件被 B 页面的表格读到」——各 portal 的
+     .page-view 都常驻 DOM，全局查询会把所有页面的筛选值混在一起。 */
+  bindFilter(tableRender, scope) {
+    const root = this._resolveEl(scope) || document;
     // 标准「搜索 / 重置」按钮
-    document.querySelectorAll('[data-fb="search"]').forEach(btn => {
+    root.querySelectorAll('[data-fb="search"]').forEach(btn => {
       const fresh = btn.cloneNode(true);
       btn.parentNode.replaceChild(fresh, btn);
       fresh.addEventListener('click', (e) => { e.preventDefault(); tableRender(); });
     });
-    document.querySelectorAll('[data-fb="reset"]').forEach(btn => {
+    root.querySelectorAll('[data-fb="reset"]').forEach(btn => {
       const fresh = btn.cloneNode(true);
       btn.parentNode.replaceChild(fresh, btn);
       fresh.addEventListener('click', (e) => {
         e.preventDefault();
-        document.querySelectorAll('[data-filter]').forEach(i => { i.value = ''; });
+        root.querySelectorAll('[data-filter]').forEach(i => { i.value = ''; });
         tableRender();
       });
     });
-    document.querySelectorAll('[data-filter]').forEach(input => {
+    root.querySelectorAll('[data-filter]').forEach(input => {
       let timer = null;
       const isText = (input.type || '') === 'text' || input.tagName === 'INPUT' && input.type !== 'checkbox';
       input.addEventListener('input', () => {
@@ -637,9 +746,10 @@ const TNR_UI = {
     });
   },
 
-  getFilterValues() {
+  getFilterValues(scope) {
+    const root = this._resolveEl(scope) || document;
     const vals = {};
-    document.querySelectorAll('[data-filter]').forEach(input => {
+    root.querySelectorAll('[data-filter]').forEach(input => {
       vals[input.dataset.filter] = input.value.trim().toLowerCase();
     });
     return vals;
@@ -783,5 +893,62 @@ const TNR_UI = {
   escape(str) {
     if (str == null) return '';
     return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  },
+
+  /* 照片放大查看：点击图片弹出全屏遮罩，点击遮罩关闭。
+     各端共用（一宠一档档案里的捕捉/术前/术后/诊疗照片都走它）。 */
+  photoZoom(url) {
+    if (!url) return;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;cursor:zoom-out;';
+    overlay.innerHTML = '<img src="' + url + '" style="max-width:92vw;max-height:92vh;object-fit:contain;border-radius:8px;">';
+    overlay.addEventListener('click', () => overlay.remove());
+    document.body.appendChild(overlay);
+  },
+
+  // ============================================
+  // 事件委托：行内按钮 / 图片点击的统一入口
+  // ============================================
+  /* mountTable 在「点表头排序 / 翻页 / 改每页条数」时会整体重建 tbody
+     （内部再次调用 mountTable → el.innerHTML = html），此前直接绑在行元素上的
+     监听器随旧节点一起被丢弃 —— 表现为「点单号/编号/按钮没反应，且控制台不报错」。
+     因此行内可点元素一律「绑在稳定容器上 + 事件委托」，容器不随重渲染消失。
+     @param {string|Element} container 稳定容器（通常是 mountTable 的 target）
+     @param {Object} handlers { 'data-act': (value, el, e) => {} }，key 为属性名
+     @param {string} [tag] 同一容器挂多组委托时用于区分（省略则按属性名组合）
+     @returns {Element|null} 解析后的容器 */
+  delegateClick(container, handlers, tag) {
+    const el = this._resolveEl(container);
+    if (!el || typeof el.addEventListener !== 'function') return null;
+    const keys = Object.keys(handlers || {});
+    if (!keys.length) return el;
+    const key = tag || keys.join('|');
+    let tags = this._delegatedTags.get(el);
+    if (!tags) { tags = new Set(); this._delegatedTags.set(el, tags); }
+    if (tags.has(key)) return el;   // 同一容器同一组委托只绑一次
+    tags.add(key);
+    el.addEventListener('click', (e) => {
+      const t = e.target;
+      if (!t || typeof t.closest !== 'function') return;
+      for (const attr of keys) {
+        const node = t.closest('[' + attr + ']');
+        if (node && el.contains(node)) {
+          // 命中即消费：不再匹配本组的其它属性，并中断冒泡，
+          // 避免外层容器上的委托对同一次点击再触发一遍动作。
+          e.stopPropagation();
+          handlers[attr](node.getAttribute(attr), node, e);
+          return;
+        }
+      }
+    });
+    return el;
+  },
+
+  /* 给容器内所有 [data-zoom] 图片绑定「点击放大」。
+     走事件委托，因此重渲染出来的新图片无需重新绑定。 */
+  bindPhotoZoom(container) {
+    return this.delegateClick(container || document, {
+      'data-zoom': (url) => this.photoZoom(url)
+    }, 'PhotoZoom');
   }
 };

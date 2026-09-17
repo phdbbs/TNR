@@ -3,9 +3,11 @@ Task 4: 捕捉登记与主人领回
 - 捕捉登记列表/详情/创建/编辑/逻辑删除
 - 主人领回登记
 """
+import re
 from datetime import datetime
 
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -17,7 +19,8 @@ from business.services import (
     generate_pet_codes, generate_ledger_no, get_district_scope,
     get_district_filtered_queryset, check_blacklist, amap_regeo,
     amap_ip_location, capture_transfer_state, capture_states_bulk,
-    recalc_capture_status, get_active_pet,
+    recalc_capture_status, get_active_pet, validate_uploaded_images,
+    resolve_district_scope, resolve_community,
 )
 from core.models import District, Institution
 
@@ -26,6 +29,126 @@ from core.models import District, Institution
 CAPTURE_LIST_EXCLUDE = ('signature',)
 PET_LIST_EXCLUDE = ('photo_capture', 'photo_group', 'photo_before',
                     'photo_after', 'photo_treatment')
+
+# 逐只登记时的物种/性别合法取值（与 Pet.SPECIES_CHOICES / GENDER_CHOICES 对齐）
+PET_SPECIES = ('猫', '狗')
+PET_GENDERS = ('公', '母')
+
+# 逐只属性字段的四个前缀。探测时必须四个都认——只认 pet_species_
+# 会让「只改性别/品种/昵称」的提交整批静默失效（改了没反应，也不报错）。
+PET_ATTR_PREFIXES = ('pet_species_', 'pet_gender_', 'pet_breed_', 'pet_name_')
+
+# 宠物档案编号格式：TNR + YY(2位) + MMDD(4位) + SSS(3位序号)
+PET_CODE_RE = re.compile(r'^TNR\d{9}$')
+
+
+def _to_pet_id(v):
+    """把表单键里的宠物主键解析为 int；非数字键返回 None（不做 500）。
+
+    伪造或串味的键（``pet_species_abc``）直接扔给 ``filter(id=...)``
+    会抛 ValueError 变成 500，这里先挡掉。
+    """
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_pet_attrs(data, key, partial=False):
+    """解析单只动物的物种 / 性别 / 品种 / 昵称（逐只登记）。
+
+    表单字段命名：``pet_species_<key>`` / ``pet_gender_<key>`` /
+    ``pet_breed_<key>`` / ``pet_name_<key>``，与单只照片 ``pet_photo_<key>``
+    同一套规则（新增时 key 是宠物编号，编辑时 key 是宠物 id）。
+
+    :param partial: True 时只解析**显式提供**的字段，缺失的字段不出现在
+        结果里（表示「不改这一项」）。编辑场景必须用 partial——否则客户端
+        只改性别时，物种会被缺省值「猫」悄悄覆盖掉。
+    :return: (属性 dict, 错误信息)；成功时错误信息为 None
+
+    取值规则：新增时缺省/空串 → 物种先回退整批字段 ``species``、再回退
+    「猫」（兼容旧客户端）；性别回退空串（模型 ``blank=True``，允许未知）。
+    **显式传入的非法值直接报错，不静默降级** —— 静默兜底会把用户填的
+    「犬」悄悄存成「猫」，事后没有任何痕迹可查。
+    """
+    if partial:
+        attrs = {}
+        if ('pet_species_' + key) in data:
+            species = (data.get('pet_species_' + key) or '').strip()
+            if species not in PET_SPECIES:
+                return None, f'物种「{species}」无效，只能是猫或狗'
+            attrs['species'] = species
+        if ('pet_gender_' + key) in data:
+            gender = (data.get('pet_gender_' + key) or '').strip()
+            if gender and gender not in PET_GENDERS:
+                return None, f'性别「{gender}」无效，只能是公或母'
+            attrs['gender'] = gender
+        for field in ('breed', 'name'):
+            field_key = f'pet_{field}_{key}'
+            if field_key in data:
+                attrs[field] = (data.get(field_key) or '').strip()[:50]
+        return attrs, None
+
+    species = ((data.get('pet_species_' + key) or '').strip()
+               or (data.get('species') or '').strip() or '猫')
+    if species not in PET_SPECIES:
+        return None, f'物种「{species}」无效，只能是猫或狗'
+    gender = (data.get('pet_gender_' + key) or '').strip()
+    if gender and gender not in PET_GENDERS:
+        return None, f'性别「{gender}」无效，只能是公或母'
+    return {
+        'species': species,
+        'gender': gender,
+        'breed': (data.get('pet_breed_' + key) or '').strip()[:50],
+        'name': (data.get('pet_name_' + key) or '').strip()[:50],
+    }, None
+
+
+def _submitted_pet_codes(request, data, pet_count):
+    """读取前端「预览后提交」的宠物编号。
+
+    新增捕捉页先调 ``codes-preview`` 拿到本批编号并逐只展示，用户再按编号
+    填写物种/性别/品种/昵称与单只照片（字段名 ``pet_species_<编号>`` 等）。
+    如果服务端在提交时**自己重新生成**一套编号，两套编号一旦不一致，
+    逐只属性与照片会**全部静默落空**——物种回退成「猫」、照片直接丢弃，
+    界面上没有任何报错，事后也无法追溯。所以提交时优先沿用前端已展示的编号。
+
+    编号被占用/数量对不上/格式非法时**直接报错**，不悄悄换一套新编号：
+    换了新编号等于把用户刚填的属性全丢掉，且用户完全看不出来。
+
+    :return: (编号列表, 错误信息)；前端未提交编号时返回 (None, None)，
+        由服务端按 ``generate_pet_codes`` 生成（兼容老客户端与脚本调用）
+    """
+    codes = []
+    # multipart/form-data 下同名键是重复字段，必须用 getlist；
+    # parse_json_body 路径下 data 是 dict，值可能是 list 或逗号串
+    if hasattr(request.POST, 'getlist'):
+        codes = [c.strip() for c in request.POST.getlist('pet_codes') if c and c.strip()]
+    if not codes:
+        raw = data.get('pet_codes')
+        if isinstance(raw, (list, tuple)):
+            codes = [str(c).strip() for c in raw if str(c).strip()]
+        elif raw:
+            codes = [c.strip() for c in str(raw).split(',') if c.strip()]
+    if not codes:
+        return None, None
+
+    if len(codes) != pet_count:
+        return None, (f'提交的宠物编号有 {len(codes)} 个，与捕捉数量 {pet_count} '
+                      '不一致，请重新生成编号后再提交')
+    if len(set(codes)) != len(codes):
+        return None, '提交的宠物编号存在重复，请重新生成编号后再提交'
+    for code in codes:
+        if not PET_CODE_RE.match(code):
+            return None, f'宠物编号「{code}」格式不正确，请重新生成编号后再提交'
+
+    # 编号是 unique 的，被占用时必须拦下——否则落库时 IntegrityError 变 500。
+    # 逻辑删除的档案仍占用编号，所以这里刻意不过滤 is_deleted。
+    taken = sorted(Pet.objects.filter(code__in=codes).values_list('code', flat=True))
+    if taken:
+        return None, (f'宠物编号 {"、".join(taken)} 已被占用，'
+                      '请重新生成编号后再提交')
+    return codes, None
 
 
 def _to_float(v):
@@ -71,35 +194,10 @@ def _get_capture_for_user(pk, user):
 def _resolve_district_scope(user, anchor, submitted):
     """解析并校验业务记录的归属区县。
 
-    :param user: 当前操作员
-    :param anchor: 承载「最可能的正确区县」的对象（捕捉单用捕捉点，主人领回用宠物）
-    :param submitted: 前端显式提交的 district_id（可为 None）
-    :return: (District 实例, 错误信息)；成功时错误信息为 None
-
-    规则：
-    1. 解析顺序：显式提交 → anchor 所在区县 → 操作员所属区县。
-       anchor 的区县比操作员区县更贴近事实——现场把两个捕捉点操作员都挂在
-       「全市（市级）」下，若以操作员区县为准，登记出来的捕捉单会全部落到市级，
-       导致本区县政府在区县隔离下看不到本区数据。
-    2. 必须是具体区县，不能是「全市（市级）」。
-    3. 非市级操作员只能归属到自己的区县。
+    实现已提到 `services.resolve_district_scope`（转运单、黑名单等落库点也要用），
+    这里保留同名薄封装，避免改动本模块内既有的三处调用点。
     """
-    if submitted:
-        district = District.objects.filter(pk=submitted).first()
-        if district is None:
-            return None, '归属区县不存在'
-    else:
-        district = getattr(anchor, 'district', None) or getattr(user, 'district', None)
-    if district is None:
-        return None, '缺少区县信息'
-
-    if district.is_city:
-        return None, '归属区县不能是市级，请选择具体区县'
-
-    user_district = getattr(user, 'district', None)
-    if user_district and not user_district.is_city and district.id != user_district.id:
-        return None, '无权将记录归属到其他区县'
-    return district, None
+    return resolve_district_scope(user, anchor, submitted)
 
 
 @csrf_exempt
@@ -292,50 +390,84 @@ def capture_create(request):
     geo_address = (data.get('geo_address') or '').strip()
     address = (data.get('address') or '').strip() or geo_address
 
-    # 批量生成宠物编号
-    pet_codes = generate_pet_codes(pet_count)
+    # 批量生成宠物编号：优先沿用前端预览后提交的编号，保证逐只属性/照片
+    # 的字段名（pet_species_<编号> 等）与最终落库的编号一致
+    pet_codes, code_err = _submitted_pet_codes(request, data, pet_count)
+    if code_err:
+        return json_fail(code_err)
+    if pet_codes is None:
+        pet_codes = generate_pet_codes(pet_count)
 
-    capture = Capture.objects.create(
-        district=district,
-        shelter=shelter,
-        shelter_name=shelter.name,
-        community_id=data.get('community_id') or None,
-        community_name=community_name,
-        address=address,
-        latitude=_to_float(data.get('latitude')),
-        longitude=_to_float(data.get('longitude')),
-        geo_address=geo_address,
-        property_name=property_name,
-        contact_person=contact_person,
-        contact_phone=contact_phone,
-        pet_count=pet_count,
-        pet_codes=','.join(pet_codes),
-        signature=data.get('signature', ''),
-        status='pending',  # 新建捕捉单尚未转运，状态由转运情况自动推导
-        operator=request.user,
-        operator_name=request.user.get_full_name() or request.user.username,
-        ledger_no=generate_ledger_no('CAP'),
-    )
-
-    # 处理合照上传
-    if request.FILES.get('group_photo'):
-        capture.group_photo = request.FILES['group_photo']
-        capture.save(update_fields=['group_photo'])
-
-    # 批量创建宠物档案；单只照片按编号一一对应写入 pet.photo_capture
+    # 逐只动物的物种/性别/品种/昵称：**先全部校验通过，再进事务落库**。
+    # 校验必须放在写库之前——否则第 N 只属性非法时会留下一张只建了一半的
+    # 捕捉单（孤儿单据 + 编号被占用，且宠物数量对不上）。
+    pet_attrs = []
     for code in pet_codes:
-        pet = Pet.objects.create(
-            code=code,
-            species=data.get('species', '猫'),
-            status='in_transit',
+        parsed, err = _parse_pet_attrs(data, code)
+        if err:
+            return json_fail(f'动物 {code}：{err}')
+        pet_attrs.append(parsed)
+
+    # 上传图片的内容校验：ImageField 直接赋值不校验，非图片文件会被原样存进
+    # media/（前端裂图、库里无痕迹）。放在事务之前，非法时整批拒绝。
+    photo_labels = {'group_photo': '整体合影'}
+    for code in pet_codes:
+        photo_labels['pet_photo_' + code] = f'动物 {code} 的捕捉照片'
+    photo_err = validate_uploaded_images(request.FILES, photo_labels)
+    if photo_err:
+        return json_fail(photo_err)
+
+    with transaction.atomic():
+        # 小区外键回填：前端「所在小区」是自由文本（不做下拉枚举），这里按名称
+        # 匹配已有的小区机构。不回填的话 `Capture.community` 永远是 None，
+        # 后续「放养」只认这个外键 → 放养流程在界面上完全走不通。
+        community = resolve_community(
+            district, data.get('community_id'), community_name)
+
+        capture = Capture.objects.create(
             district=district,
-            capture=capture,
             shelter=shelter,
+            shelter_name=shelter.name,
+            community=community,
+            community_name=community_name,
+            address=address,
+            latitude=_to_float(data.get('latitude')),
+            longitude=_to_float(data.get('longitude')),
+            geo_address=geo_address,
+            property_name=property_name,
+            contact_person=contact_person,
+            contact_phone=contact_phone,
+            pet_count=pet_count,
+            pet_codes=','.join(pet_codes),
+            signature=data.get('signature', ''),
+            status='pending',  # 新建捕捉单尚未转运，状态由转运情况自动推导
+            operator=request.user,
+            operator_name=request.user.get_full_name() or request.user.username,
+            ledger_no=generate_ledger_no('CAP'),
         )
-        photo = request.FILES.get('pet_photo_' + code)
-        if photo:
-            pet.photo_capture = photo
-            pet.save(update_fields=['photo_capture'])
+
+        # 处理合照上传
+        if request.FILES.get('group_photo'):
+            capture.group_photo = request.FILES['group_photo']
+            capture.save(update_fields=['group_photo'])
+
+        # 批量创建宠物档案；单只照片按编号一一对应写入 pet.photo_capture
+        for code, attr in zip(pet_codes, pet_attrs):
+            pet = Pet.objects.create(
+                code=code,
+                name=attr['name'],
+                species=attr['species'],
+                breed=attr['breed'],
+                gender=attr['gender'],
+                status='in_transit',
+                district=district,
+                capture=capture,
+                shelter=shelter,
+            )
+            photo = request.FILES.get('pet_photo_' + code)
+            if photo:
+                pet.photo_capture = photo
+                pet.save(update_fields=['photo_capture'])
 
     return json_ok({
         'capture': serialize_instance(capture),
@@ -423,6 +555,24 @@ def capture_update(request, pk):
         capture.signature = data['signature']
         changed.append('signature')
 
+    # 小区改名后要重新解析外键：否则改完名字外键仍指向旧小区，
+    # 放养时会把动物放回**改名前的那个小区**（或外键仍为空而彻底无法放养）。
+    if 'community_name' in data or 'district_id' in data:
+        community = resolve_community(
+            capture.district, data.get('community_id'), capture.community_name)
+        if capture.community_id != (community.id if community else None):
+            capture.community = community
+            changed.append('community')
+
+    # 图片内容校验：与创建一致，非图片文件必须在写库之前拦下
+    photo_labels = {'group_photo': '整体合影'}
+    for key in request.FILES:
+        if key.startswith('pet_photo_'):
+            photo_labels[key] = '单只捕捉照片'
+    photo_err = validate_uploaded_images(request.FILES, photo_labels)
+    if photo_err:
+        return json_fail(photo_err)
+
     if request.FILES.get('group_photo'):
         capture.group_photo = request.FILES['group_photo']
         changed.append('group_photo')
@@ -434,14 +584,46 @@ def capture_update(request, pk):
     if 'district_id' in changed:
         Pet.objects.filter(capture=capture).update(district_id=capture.district_id)
 
-    # 单只照片更新：按 pet_photo_<pet_id> 匹配
+    # 逐只动物的物种/性别/品种/昵称更新：按 pet_<字段>_<pet_id> 匹配。
+    # partial=True：只改显式提交的字段，避免「只改性别」把物种重置成默认的猫。
+    # 四个前缀都要探测——只认 pet_species_ 会让「只改性别/品种/昵称」的
+    # 提交整批静默失效（用户改了没反应，也不报错）。
+    # 与创建时同一套两段式约定：先把所有取值校验完，再逐只落库。
+    pet_updates = {}
+    for key in data:
+        prefix = next((p for p in PET_ATTR_PREFIXES if key.startswith(p)), None)
+        if prefix is None:
+            continue
+        raw_id = key[len(prefix):]
+        pet_id = _to_pet_id(raw_id)
+        if pet_id is None:
+            continue          # 非法主键，忽略（不做 500）
+        parsed, err = _parse_pet_attrs(data, raw_id, partial=True)
+        if err:
+            return json_fail(err)
+        pet_updates[pet_id] = parsed
+
+    # 单只照片更新：按 pet_photo_<pet_id> 匹配。
+    # 放在属性校验之后：属性非法时整批拒绝，不留下「已经换过照片」的半成品。
     for key, f in request.FILES.items():
         if key.startswith('pet_photo_'):
-            pet_id = key[len('pet_photo_'):]
+            pet_id = _to_pet_id(key[len('pet_photo_'):])
+            if pet_id is None:
+                continue
             pet = Pet.objects.filter(id=pet_id, capture=capture).first()
             if pet:
                 pet.photo_capture = f
                 pet.save(update_fields=['photo_capture'])
+
+    for pet_id, attrs in pet_updates.items():
+        pet = Pet.objects.filter(id=pet_id, capture=capture).first()
+        if pet is None or not attrs:
+            continue
+        changed_pet = [f for f in attrs if getattr(pet, f) != attrs[f]]
+        if changed_pet:
+            for f in changed_pet:
+                setattr(pet, f, attrs[f])
+            pet.save(update_fields=changed_pet)
 
     result = serialize_instance(capture)
     result['transferState'] = state
@@ -498,18 +680,72 @@ def capture_delete(request, pk):
 @role_required('shelter', 'gov_city', 'gov_district')
 @login_required
 def owner_return_list(request):
-    """主人领回记录列表"""
-    qs = get_district_filtered_queryset(OwnerReturn, request.user)
+    """主人领回记录列表（回收记录）。
 
+    支持筛选：keyword（综合）、start_date/end_date（回收时间）、
+    owner_address（住址）、owner_name（回收人）、owner_phone（电话）、
+    pet_breed（品种）。
+    """
+    qs = get_district_filtered_queryset(OwnerReturn, request.user)
+    qs = qs.select_related('pet')
+
+    # 时间范围（按 return_time，无值则退到 created_at）
+    start_date = request.GET.get('start_date', '').strip()
+    end_date = request.GET.get('end_date', '').strip()
+    if start_date:
+        qs = qs.filter(
+            Q(return_time__date__gte=start_date)
+            | Q(return_time__isnull=True, created_at__date__gte=start_date)
+        )
+    if end_date:
+        qs = qs.filter(
+            Q(return_time__date__lte=end_date)
+            | Q(return_time__isnull=True, created_at__date__lte=end_date)
+        )
+
+    # 各字段独立筛选
+    owner_address = request.GET.get('owner_address', '').strip()
+    if owner_address:
+        qs = qs.filter(owner_address__icontains=owner_address)
+
+    owner_name = request.GET.get('owner_name', '').strip()
+    if owner_name:
+        qs = qs.filter(owner_name__icontains=owner_name)
+
+    owner_phone = request.GET.get('owner_phone', '').strip()
+    if owner_phone:
+        qs = qs.filter(owner_phone__icontains=owner_phone)
+
+    pet_breed = request.GET.get('pet_breed', '').strip()
+    if pet_breed:
+        qs = qs.filter(pet__breed__icontains=pet_breed)
+
+    # 综合关键词
     keyword = request.GET.get('keyword', '').strip()
     if keyword:
         qs = qs.filter(
             Q(pet_code__icontains=keyword)
             | Q(owner_name__icontains=keyword)
             | Q(owner_phone__icontains=keyword)
+            | Q(owner_address__icontains=keyword)
+            | Q(pet__breed__icontains=keyword)
         )
 
-    data = [serialize_instance(r) for r in qs]
+    qs = qs.order_by('-return_time', '-id')
+
+    # 序列化并补充宠物信息（照片、品种等供前端详情抽屉使用）
+    data = []
+    for r in qs:
+        item = serialize_instance(r, exclude=('signature',))
+        pet = r.pet
+        if pet:
+            item['petBreed'] = pet.breed or ''
+            item['petSpecies'] = pet.species or ''
+            item['petGender'] = pet.gender or ''
+            item['petPhotoCapture'] = pet.photo_capture.url if pet.photo_capture and pet.photo_capture.name else ''
+            item['petPhotoGroup'] = pet.photo_group.url if pet.photo_group and pet.photo_group.name else ''
+            item['captureId'] = pet.capture_id
+        data.append(item)
     return json_ok(data)
 
 

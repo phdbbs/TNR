@@ -55,6 +55,8 @@
   <div class="page-view" id="page-institutions"></div>
   <!-- 3. 账号权限管理 -->
   <div class="page-view" id="page-accounts"></div>
+  <!-- 4. 全业务监管 -->
+  <div class="page-view" id="page-supervision"></div>
 
   <!-- 5. 物料全局监管 -->
   <div class="page-view" id="page-material"></div>
@@ -68,7 +70,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260918c"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -84,7 +86,8 @@ const GovPortal = {
     'dashboard': '数据总览大屏',
     'institutions': '机构基础管理',
     'accounts': '账号权限管理',
-        'material': '物料全局监管',
+    'supervision': '全业务监管',
+    'material': '物料全局监管',
     'ledger': '全局台账中心',
     'settings': '系统配置'
   },
@@ -519,9 +522,11 @@ const GovPortal = {
       <button class="btn-link danger" data-del-dist="${r.id}">删除</button>
     `) : (() => '');
     TNR_UI.mountTable('distTableWrapper', { id: 'gov.districts', title: '区县列表', columns, data, rowActions, emptyText: '暂无区县数据' });
-    document.querySelectorAll('[data-edit-dist]').forEach(b => b.addEventListener('click', () => this.showDistrictModal(b.dataset.editDist)));
-    document.querySelectorAll('[data-toggle-dist]').forEach(b => b.addEventListener('click', () => this.toggleDistrictStatus(b.dataset.toggleDist)));
-    document.querySelectorAll('[data-del-dist]').forEach(b => b.addEventListener('click', () => this.deleteDistrict(b.dataset.delDist)));
+    TNR_UI.delegateClick('distTableWrapper', {
+      'data-edit-dist': (id) => this.showDistrictModal(id),
+      'data-toggle-dist': (id) => this.toggleDistrictStatus(id),
+      'data-del-dist': (id) => this.deleteDistrict(id)
+    });
   },
 
   async deleteDistrict(id) {
@@ -533,6 +538,7 @@ const GovPortal = {
     if (!ok) return;
     try {
       const res = await TNR_API.deleteDistrict(id);
+      TNR_UI.assertOk(res, '区县删除失败');
       TNR_UI.toast(res.message || '区县删除成功', 'success');
       await this.renderDistrictsTable();
     } catch (e) {
@@ -580,10 +586,10 @@ const GovPortal = {
       const payload = { name, code, is_city };
       try {
         if (dist) {
-          await TNR_API.editDistrict(dist.id, payload);
+          TNR_UI.assertOk(await TNR_API.editDistrict(dist.id, payload), '区县更新失败');
           TNR_UI.toast('区县更新成功', 'success');
         } else {
-          await TNR_API.createDistrict(payload);
+          TNR_UI.assertOk(await TNR_API.createDistrict(payload), '区县创建失败');
           TNR_UI.toast('区县创建成功', 'success');
         }
         m.close();
@@ -597,6 +603,7 @@ const GovPortal = {
   async toggleDistrictStatus(id) {
     try {
       const res = await TNR_API.toggleDistrict(id);
+      TNR_UI.assertOk(res, '操作失败');
       TNR_UI.toast(res.message || '操作成功', 'success');
       await this.renderDistrictsTable();
     } catch (e) {
@@ -623,6 +630,9 @@ const GovPortal = {
     const columns = [
       { key: 'id', title: '编号', width: '90px' },
       { key: 'name', title: '名称', render: r => TNR_UI.escape(r.name) },
+      // 机构编号（I001/C001…）是**稳定业务键**：去重、引用、种子脚本幂等匹配都靠它，
+      // 机构名只是展示字段（会被人在界面上改）。与区县列表一致地把它显示出来。
+      { key: 'code', title: '机构编号', render: r => TNR_UI.escape(r.code || '—') },
       { key: 'district_id', title: '区县', render: r => TNR_UI.escape(districtMap[r.district_id] || r.district_name || '—') },
       { key: 'address', title: '地址', render: r => TNR_UI.escape(r.address || '—') },
       { key: 'contact', title: '联系人', render: r => TNR_UI.escape(r.contact || '—') },
@@ -634,8 +644,10 @@ const GovPortal = {
       <button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>
     `;
     TNR_UI.mountTable('instTableWrapper', { id: 'gov.institutions', title: '机构列表', columns, data, rowActions, emptyText: '暂无机构数据' });
-    document.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => this.showInstitutionModal(b.dataset.edit)));
-    document.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => this.toggleInstitutionStatus(b.dataset.toggle)));
+    TNR_UI.delegateClick('instTableWrapper', {
+      'data-edit': (id) => this.showInstitutionModal(id),
+      'data-toggle': (id) => this.toggleInstitutionStatus(id)
+    });
   },
 
   async showInstitutionModal(id) {
@@ -705,10 +717,10 @@ const GovPortal = {
       };
       try {
         if (inst) {
-          await TNR_API.editInstitution(inst.id, payload);
+          TNR_UI.assertOk(await TNR_API.editInstitution(inst.id, payload), '机构更新失败');
           TNR_UI.toast('机构更新成功', 'success');
         } else {
-          await TNR_API.createInstitution(payload);
+          TNR_UI.assertOk(await TNR_API.createInstitution(payload), '机构创建失败');
           TNR_UI.toast('机构创建成功', 'success');
         }
         m.close();
@@ -722,6 +734,7 @@ const GovPortal = {
   async toggleInstitutionStatus(id) {
     try {
       const res = await TNR_API.toggleInstitution(id);
+      TNR_UI.assertOk(res, '操作失败');
       TNR_UI.toast(res.message || '操作成功', 'success');
       await this.renderInstitutionsTable();
     } catch (e) {
@@ -776,7 +789,9 @@ const GovPortal = {
       ? '<span style="font-size:var(--fs-xs);color:var(--ink-light);">当前账号</span>'
       : `<button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>`;
     TNR_UI.mountTable('acctTableWrapper', { id: 'gov.accounts', title: '账号列表', columns, data, rowActions, emptyText: '暂无账号' });
-    document.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => this.toggleAccountStatus(b.dataset.toggle)));
+    TNR_UI.delegateClick('acctTableWrapper', {
+      'data-toggle': (id) => this.toggleAccountStatus(id)
+    });
   },
 
   renderRolePermissions() {
@@ -942,10 +957,10 @@ const GovPortal = {
       }
 
       try {
-        await TNR_API.createUser({
+        TNR_UI.assertOk(await TNR_API.createUser({
           username, password: password || '123456', name, role,
           district_id: districtId, institution_id: institutionId, phone
-        });
+        }), '账号创建失败');
         TNR_UI.toast('账号创建成功', 'success');
         m.close();
         await this.renderAccountsTable();
@@ -958,6 +973,7 @@ const GovPortal = {
   async toggleAccountStatus(id) {
     try {
       const res = await TNR_API.toggleUser(id);
+      TNR_UI.assertOk(res, '操作失败');
       TNR_UI.toast(res.message || '操作成功', 'success');
       await this.renderAccountsTable();
     } catch (e) {
@@ -1110,36 +1126,63 @@ const GovPortal = {
     }
 
     const rowActions = r => `<button class="btn-link" data-detail="${r.id}">详情</button>`;
-    TNR_UI.mountTable('supTableWrapper', { id: 'gov.supervision.' + this.state.supTab, title: '业务监管', columns, data, rowActions, emptyText: '暂无监管数据' });
-    document.querySelectorAll('[data-detail]').forEach(b => b.addEventListener('click', () => this.showSupervisionDetail(type, b.dataset.detail)));
+    TNR_UI.mountTable('supTableWrapper', { id: 'gov.supervision.' + this.supState.tab, title: '业务监管', columns, data, rowActions, emptyText: '暂无监管数据' });
+    TNR_UI.delegateClick('supTableWrapper', {
+      'data-detail': (id) => this.showSupervisionDetail(type, id)
+    });
   },
 
   /* 渲染宠物照片网格 */
   renderPetPhotos(pet, label) {
     if (!pet) return '';
-    const photos = [];
-    if (pet.photo_group) photos.push({ url: pet.photo_group, label: '合照' });
-    if (pet.photo_before) photos.push({ url: pet.photo_before, label: '术前' });
-    if (pet.photo_after) photos.push({ url: pet.photo_after, label: '术后' });
-    if (pet.photo_treatment) photos.push({ url: pet.photo_treatment, label: '诊疗' });
+    const photos = this.petPhotosOf(pet);
     if (!photos.length) return '';
-    return `<div class="mt-4"><h4 class="font-display mb-3">${label || '动物照片'}</h4><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:var(--sp-3);">` +
-      photos.map(p => `<div><img src="${p.url}" alt="${p.label}" style="width:100%;height:120px;object-fit:cover;border-radius:var(--r-md);border:1px solid var(--border-light);"><div class="fs-xs text-muted text-center mt-1">${p.label}</div></div>`).join('') +
+    return `<div class="mt-4"><h4 class="font-display mb-3">${label || '动物照片'}（点击可放大）</h4><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:var(--sp-3);">` +
+      photos.map(p => `<div><img src="${p.url}" alt="${p.label}" data-zoom="${p.url}" style="width:100%;height:120px;object-fit:cover;border-radius:var(--r-md);border:1px solid var(--border-light);cursor:zoom-in;"><div class="fs-xs text-muted text-center mt-1">${p.label}</div></div>`).join('') +
       `</div></div>`;
   },
 
+  /* 单只动物的全部阶段照片（只返回确实有图的），标签与后端 PET_PHOTO_LABELS 一致 */
+  petPhotosOf(pet) {
+    if (!pet) return [];
+    const map = [
+      ['photo_capture', '捕捉'], ['photo_group', '合照'], ['photo_before', '术前'],
+      ['photo_after', '术后'], ['photo_treatment', '诊疗'],
+    ];
+    return map.filter(([f]) => pet[f]).map(([f, label]) => ({ url: pet[f], label }));
+  },
+
+  /* 逐只动物明细：编号/昵称/类别/品种/性别/芯片/状态 + 该只的全部照片。
+     政府端「台账中心」与「业务监管」的单据详情共用，避免两处字段口径漂移。 */
   renderPetsList(pets) {
     if (!pets || !pets.length) return '';
+    const esc = v => TNR_UI.escape(v || '');
+    const dash = v => (v === null || v === undefined || v === '') ? '—' : v;
     return `<div class="mt-4"><h4 class="font-display mb-3">动物明细（${pets.length}只）</h4>` +
-      pets.map(p => `
-        <div style="padding:var(--sp-3);border:1px solid var(--border-light);border-radius:var(--r-md);margin-bottom:var(--sp-2);display:flex;gap:var(--sp-3);">
-          ${p.photo_group ? `<img src="${p.photo_group}" style="width:80px;height:80px;object-fit:cover;border-radius:var(--r-sm);">` : '<div style="width:80px;height:80px;background:var(--rice-warm);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;color:var(--ink-light);font-size:24px;">🐾</div>'}
-          <div style="flex:1;">
-            <div><strong>${TNR_UI.escape(p.code)}</strong>${p.name ? ' · ' + TNR_UI.escape(p.name) : ''}</div>
-            <div class="fs-sm text-muted">${TNR_UI.escape(p.species || '')} ${TNR_UI.escape(p.breed || '')} ${TNR_UI.escape(p.gender || '')} ${TNR_UI.escape(p.color || '')}</div>
+      pets.map(p => {
+        const photos = this.petPhotosOf(p);
+        const attrs = [p.species, p.breed, p.gender, p.color]
+          .filter(Boolean).map(esc).join(' · ') || '—';
+        return `
+        <div style="padding:var(--sp-3);border:1px solid var(--border-light);border-radius:var(--r-md);margin-bottom:var(--sp-2);">
+          <div style="display:flex;gap:var(--sp-3);align-items:flex-start;">
+            ${photos.length
+              ? `<img src="${photos[0].url}" data-zoom="${photos[0].url}" style="width:80px;height:80px;object-fit:cover;border-radius:var(--r-sm);cursor:zoom-in;flex:0 0 auto;">`
+              : '<div style="width:80px;height:80px;background:var(--rice-warm);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;color:var(--ink-light);font-size:24px;flex:0 0 auto;">🐾</div>'}
+            <div style="flex:1;min-width:0;">
+              <div><strong>${esc(p.code)}</strong>${p.name ? ' · ' + esc(p.name) : ''}
+                ${p.status_display ? '<span class="badge badge-default" style="margin-left:6px;">' + esc(p.status_display) + '</span>' : ''}</div>
+              <div class="fs-sm text-muted">${attrs}</div>
+              <div class="fs-sm text-muted">芯片号：${esc(dash(p.chip_no))}${p.hospital_name ? ' · 所属医院：' + esc(p.hospital_name) : ''}</div>
+            </div>
           </div>
-        </div>
-      `).join('') + `</div>`;
+          ${photos.length > 1
+            ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:var(--sp-2);margin-top:var(--sp-2);">`
+              + photos.map(ph => `<div><img src="${ph.url}" data-zoom="${ph.url}" style="width:100%;height:72px;object-fit:cover;border-radius:var(--r-sm);border:1px solid var(--border-light);cursor:zoom-in;"><div class="fs-xs text-muted text-center mt-1">${ph.label}</div></div>`).join('')
+              + `</div>`
+            : ''}
+        </div>`;
+      }).join('') + `</div>`;
   },
 
   async showSupervisionDetail(type, id) {
@@ -1173,6 +1216,8 @@ const GovPortal = {
       if (record.group_photo) {
         extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">合照</h4><img src="${record.group_photo}" style="max-width:100%;border-radius:var(--r-md);border:1px solid var(--border-light);"></div>`;
       }
+      // 逐只动物明细 + 各自照片（此前只有合影，看不到单只信息与照片）
+      if (record.pets && record.pets.length) extraHtml += this.renderPetsList(record.pets);
     } else if (type === 'transfer') {
       items = [
         { label: '单据号', value: record.ledger_no },
@@ -1184,8 +1229,11 @@ const GovPortal = {
         { label: '区县', value: record.district_name || '—' },
         { label: '创建时间', value: TNR_UI.formatDateTime(record.created_at) },
         { label: '接收时间', value: TNR_UI.formatDateTime(record.received_at) },
-        { label: '驳回原因', value: record.reject_reason || '—' }
+        { label: '驳回原因', value: record.reject_reason || '—' },
+        { label: '备注', value: record.note || '—', full: true }
       ];
+      // 转运单同样要能看到逐只动物的信息与照片
+      if (record.pets && record.pets.length) extraHtml += this.renderPetsList(record.pets);
     } else if (type === 'treatment') {
       const ti = record.items || {};
       const td = record.treatment_detail || {};
@@ -1409,6 +1457,12 @@ const GovPortal = {
     el.querySelectorAll('[data-ledger-tab]').forEach(tab => {
       tab.addEventListener('click', () => { this.ledgerState.tab = tab.dataset.ledgerTab; this.render_ledger(); });
     });
+    // 行内点击统一走事件委托（绑在稳定的页面容器上，只绑一次）。
+    // mountTable 在排序 / 改每页条数 / 翻页时会整体重建 tbody，直接绑在行元素上的
+    // 监听器会连同旧节点一起被丢掉——表现为「点单号打不开详情」，且不报任何错。
+    TNR_UI.delegateClick(el, {
+      'data-ledger-detail': (id) => this.showLedgerDetail(this._ledgerRecords || [], id)
+    }, 'LedgerRows');
     await this.renderLedgerContent();
   },
 
@@ -1602,9 +1656,8 @@ const GovPortal = {
 
     TNR_UI.mountTable('ledgerTableWrapper', { id: 'gov.ledger.' + tab, title: (typeLabelMap[tab] || '') + '台账', columns, data: records, emptyText: '暂无台账数据' });
 
-    document.querySelectorAll('[data-ledger-detail]').forEach(b => {
-      b.addEventListener('click', () => this.showLedgerDetail(records, b.dataset.ledgerDetail));
-    });
+    // 当前页签的行数据，供「点单号弹详情」的事件委托取用（见 render_ledger）
+    this._ledgerRecords = records;
   },
 
   /* 台账详情抽屉 */
@@ -1683,6 +1736,7 @@ const GovPortal = {
         { label: '状态', value: ({ pending: '待接收', received: '已接收', rejected: '已驳回', void: '已撤回' })[r.status] || r.status || '—' },
         { label: '接收时间', value: d.received_at ? TNR_UI.formatDateTime(d.received_at) : '—' },
         { label: '驳回原因', value: d.reject_reason || '—' },
+        { label: '备注', value: d.note || '—', full: true },
         { label: '操作人', value: r.operator_name || '—' },
         { label: '区县', value: r.district_name || '—' },
         { label: '日期', value: TNR_UI.formatDateTime(r.date) },
@@ -1782,6 +1836,8 @@ const GovPortal = {
       title: '台账详情 · ' + ({ pet: '一宠一档', capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放养', adoption: '领养', material: '物料', euthanasia: '安乐死' }[tab] || tab),
       body: bodyEl => { bodyEl.innerHTML = TNR_UI.renderDescList(items) + extraHtml; }
     });
+    // 各阶段照片点击放大（与捕捉端「一宠一档」档案同一套交互）
+    setTimeout(() => TNR_UI.bindPhotoZoom(document), 60);
   },
 
   /* ========== 7. 系统配置 ========== */
@@ -1858,7 +1914,7 @@ const GovPortal = {
           payload[input.dataset.prefixKey] = input.value.trim();
         });
         try {
-          await TNR_API.updateSystemConfig(payload);
+          TNR_UI.assertOk(await TNR_API.updateSystemConfig(payload), '保存失败');
           TNR_UI.toast('编号规则已保存', 'success');
         } catch (e) {
           TNR_UI.toast(e.message || '保存失败', 'danger');

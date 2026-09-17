@@ -30,6 +30,65 @@ def _env_list(name, default=()):
     return [v.strip() for v in raw.split(',') if v.strip()] or list(default)
 
 
+def _local_ips():
+    """收集本机**所有**非回环 IPv4 地址（用于局域网联调）。
+
+    局域网内其他设备访问的是本机**真实 IP**（如 192.168.x.x），而把
+    ``0.0.0.0`` 写进 ALLOWED_HOSTS 是无效的——0.0.0.0 是**监听**地址，
+    永远不会作为 HTTP Host 头出现，于是 Django 一律返回 400。
+
+    必须枚举**全部网卡**而不能只取默认路由出口：多网卡机器（Wi-Fi +
+    有线 + VPN/虚拟网卡）上，同事设备可能走的是另一个网段，只放通出口
+    IP 会漏掉真实访问来源。
+
+    DEBUG 模式下自动附加这些 IP，换 Wi-Fi / IP 变了无需改 .env。
+    生产环境（DEBUG=False）不启用，仍要求显式配置，避免 Host 头放开。
+    """
+    import re
+    import socket
+    import subprocess
+
+    ips = set()
+
+    def _add(addr):
+        addr = (addr or '').strip()
+        # 只要 IPv4，排除回环/链路本地/未指定地址
+        if not addr or addr.startswith(('127.', '169.254.', '0.')):
+            return
+        if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', addr):
+            ips.add(addr)
+
+    # 1) 主机名解析
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            _add(info[4][0])
+    except OSError:
+        pass
+
+    # 2) 默认路由出口（SOCK_DGRAM + connect 不真实发包）
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('10.255.255.255', 1))
+        _add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+
+    # 3) 枚举全部网卡：优先 macOS 的 ifconfig，回退 Linux 的 ip
+    for cmd in (['ifconfig'], ['ip', '-4', 'addr']):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        # ifconfig: "inet 192.168.0.37 netmask ..."；ip: "inet 192.168.0.37/24 ..."
+        for m in re.finditer(r'\binet\s+(\d{1,3}(?:\.\d{1,3}){3})', out):
+            _add(m.group(1))
+        if ips:
+            break
+
+    return sorted(ips)
+
+
 # ============================================
 # 基础安全配置
 # ============================================
@@ -62,6 +121,12 @@ if not ALLOWED_HOSTS:
             '未配置 ALLOWED_HOSTS。生产环境必须显式列出可访问的域名/IP，'
             '例如 ALLOWED_HOSTS=example.com,127.0.0.1'
         )
+
+# 开发模式自动放通本机局域网 IP：ALLIED_HOSTS 里写 0.0.0.0 并不能让
+# 192.168.x.x 通过校验（Host 头是真实 IP），局域网联调会一律 400。
+# 仅 DEBUG 生效；生产环境仍按 .env 显式配置，不放宽。
+if DEBUG:
+    ALLOWED_HOSTS = list(dict.fromkeys(ALLOWED_HOSTS + _local_ips()))
 
 
 # Application definition

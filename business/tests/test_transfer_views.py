@@ -1,6 +1,6 @@
-"""转运拆分下发/签收/驳回/重发/撤回视图测试。"""
+"""转运拆分下发/签收/驳回/撤回视图测试。"""
 from business.models import Pet, Transfer
-from business.services import capture_transfer_state
+from business.services import busy_transfer_codes, capture_transfer_state
 from business.tests.base import (BusinessTestBase, make_capture, make_institution,
                                  make_pet)
 
@@ -81,6 +81,37 @@ class TransferCreateTest(BusinessTestBase):
         self.assertEqual(len(body['data']), 0, '非在途宠物不应生成转运单')
         treated.refresh_from_db()
         self.assertEqual(treated.status, 'in_treatment')
+
+    def test_note_persisted(self):
+        """备注必须真的落库。
+
+        `transfer_create` 的接口文档一直声明接受 ``note``、前端「新建转运单」
+        也确实提交它，但模型没有这一列 → 用户填的备注被静默丢弃，
+        详情抽屉里的「备注」永远是 `—`。
+        """
+        pet = self._make_transit_pets(1)[0]
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{TRANSFER_URL}create/', {
+            'from_shelter_id': self.shelter_a.id,
+            'to_hospital_id': self.hospital_a.id,
+            'pet_codes': [pet.code],
+            'note': '车厢已消毒，请在 18:00 前接收',
+        }))
+        transfer = Transfer.objects.get(id=body['data'][0]['id'])
+        self.assertEqual(transfer.note, '车厢已消毒，请在 18:00 前接收')
+        # 序列化要同时给两套键，前端读的是 camelCase
+        self.assertEqual(body['data'][0]['note'], transfer.note)
+
+    def test_note_defaults_to_empty(self):
+        """不传备注时落空串，不能是 NULL（详情里要显示 `—` 而不是报错）。"""
+        pet = self._make_transit_pets(1)[0]
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{TRANSFER_URL}create/', {
+            'from_shelter_id': self.shelter_a.id,
+            'to_hospital_id': self.hospital_a.id,
+            'pet_codes': [pet.code],
+        }))
+        self.assertEqual(Transfer.objects.get(id=body['data'][0]['id']).note, '')
 
     def test_missing_items_rejected(self):
         self.login_as(self.shelter_user_a)
@@ -173,7 +204,8 @@ class TransferReceiveTest(BusinessTestBase):
         self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/'), status=403)
 
 
-class TransferRejectResendTest(BusinessTestBase):
+class TransferRejectAndReassignGuardTest(BusinessTestBase):
+    """驳回回退 + 「不可重复下发 / 不可跨区下发」守卫。"""
     def _make_pending(self):
         pet = make_pet(district=self.district_a, shelter=self.shelter_a)
         transfer = Transfer.objects.create(
@@ -192,41 +224,71 @@ class TransferRejectResendTest(BusinessTestBase):
         transfer.refresh_from_db()
         self.assertEqual(transfer.reject_reason, '容量不足')
 
-    def test_resend_creates_new_transfer(self):
+    def test_rejected_pet_returns_to_pending_pool(self):
+        """被驳回的动物必须自动回到「待转运」备选框。
+
+        备选框的口径是「在途 且 未被**未结**转运单占用」，
+        所以驳回后宠物要满足：状态回 in_transit、解除医院归属、
+        且不再被任何未结单据占位。
+        """
         pet, transfer = self._make_pending()
         self.login_as(self.hospital_user_a)
-        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/reject/', {'reason': 'x'}))
-        self.login_as(self.shelter_user_a)
-        body = self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/resend/'))
-        new_id = body['data']['id']
-        self.assertNotEqual(new_id, transfer.id)
-        new_transfer = Transfer.objects.get(id=new_id)
-        self.assertEqual(new_transfer.status, 'pending')
-        self.assertEqual(new_transfer.to_hospital, self.hospital_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/reject/', {'reason': '容量不足'}))
+
         pet.refresh_from_db()
-        self.assertEqual(pet.hospital, self.hospital_a)
         self.assertEqual(pet.status, 'in_transit')
-
-    def test_resend_pending_rejected(self):
-        _, transfer = self._make_pending()
+        self.assertIsNone(pet.hospital, '驳回后应解除医院归属')
+        # rejected 不占位 —— 这正是「取消重新下发」后依赖的路径
+        self.assertFalse(busy_transfer_codes([pet.code]))
+        # 因此它可以被重新选进一张新单
         self.login_as(self.shelter_user_a)
-        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/resend/'),
-                  message='不可重新下发')
+        self.ok(self.post_json(f'{TRANSFER_URL}create/', {
+            'from_shelter_id': self.shelter_a.id,
+            'to_hospital_id': self.hospital_a.id,
+            'pet_codes': [pet.code],
+            'pet_count': 1,
+        }))
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_transit')
+        self.assertEqual(pet.hospital, self.hospital_a)
 
-    def test_resend_by_other_shelter_rejected(self):
+    def test_cannot_reassign_pet_already_in_open_transfer(self):
+        """已在未结转运单里的动物不能再下发 —— 防止同一动物挂多张未结单。
+
+        旧版「重新下发」没有这层校验，同一张被驳回的单可以反复下发，
+        同一只动物就同时挂在了多张 pending 单上。
+        """
+        pet, transfer = self._make_pending()   # 已有一张 pending 单占着这只动物
+        self.assertTrue(busy_transfer_codes([pet.code]))
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}create/', {
+            'from_shelter_id': self.shelter_a.id,
+            'to_hospital_id': self.hospital_a.id,
+            'pet_codes': [pet.code],
+            'pet_count': 1,
+        }), message='不能重复下发')
+        self.assertEqual(Transfer.objects.filter(status='pending').count(), 1)
+
+    def test_cannot_transfer_pet_of_other_district(self):
+        """跨区县下发必须被拦下（原来裸查 code__in，猜到编号就能跨区下发）。"""
+        other = make_pet(district=self.district_b, shelter=self.shelter_b)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}create/', {
+            'from_shelter_id': self.shelter_a.id,
+            'to_hospital_id': self.hospital_a.id,
+            'pet_codes': [other.code],
+            'pet_count': 1,
+        }), message='不属于本区县')
+
+    def test_resend_endpoint_removed(self):
+        """「重新下发」接口已下线，不能再对同一张被驳回的单反复下发。"""
         _, transfer = self._make_pending()
         transfer.status = 'rejected'
         transfer.save()
-        self.login_as(self.shelter_user_b)
-        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/resend/'),
-                  message='无权重新下发')
-
-    def test_hospital_cannot_resend(self):
-        _, transfer = self._make_pending()
-        transfer.status = 'rejected'
-        transfer.save()
-        self.login_as(self.hospital_user_a)
-        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/resend/'), status=403)
+        self.login_as(self.shelter_user_a)
+        res = self.client.post(f'{TRANSFER_URL}{transfer.id}/resend/', {})
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(Transfer.objects.count(), 1, '不应新建任何转运单')
 
 
 class TransferWithdrawTest(BusinessTestBase):

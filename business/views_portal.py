@@ -13,11 +13,12 @@ from django.views.decorators.csrf import csrf_exempt
 from accounts.decorators import role_required
 from business.models import (
     Pet, AdoptionHallListing, Adoption, Message,
-    Capture, Transfer, Treatment, Release, Euthanasia,
+    Capture, Transfer, Treatment, Release, Euthanasia, OwnerReturn,
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     get_district_filtered_queryset, get_scoped_object,
+    pet_archive_records, pet_brief, pet_photo_list,
 )
 
 
@@ -118,6 +119,19 @@ def hospital_pets(request):
             qs = Pet.objects.filter(hospital_id=user.institution_id, is_deleted=False)
         else:
             qs = Pet.objects.none()
+    elif user.role == 'shelter':
+        # 捕捉点只看**本机构所在区县**的宠物，与 ``transfer_create`` 的归属区县口径
+        # 对齐（转运单的 anchor 是捕捉点机构 → 机构所在区县）。
+        #
+        # 不能按 ``user.district`` 过滤：现场把捕捉点操作员都挂在「全市（市级）」下，
+        # 那样会返回**全市**宠物，备选框里混进其他区县的动物，用户点了「下发」必然
+        # 被后端的跨区县校验拦下（"以下动物不属于本区县，无法转运"）——
+        # 备选框里出现永远选不中的选项，比空列表更糟。
+        inst = user.institution
+        if inst is not None and inst.district_id:
+            qs = Pet.objects.filter(district_id=inst.district_id, is_deleted=False)
+        else:
+            qs = Pet.objects.none()
     else:
         qs = get_district_filtered_queryset(Pet, user).filter(is_deleted=False)
 
@@ -127,6 +141,43 @@ def hospital_pets(request):
 
     data = [serialize_instance(p) for p in qs]
     return json_ok(data)
+
+
+@csrf_exempt
+@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
+def pet_archive(request):
+    """一宠一档：动物档案台账（每只动物一行，聚合全生命周期数据）。
+
+    GET /api/business/pets/archive/[?status=..&keyword=..]
+
+    捕捉端「全量台账 → 一宠一档」用它渲染列表；点击编号后再调
+    ``pets/<id>/lifecycle/`` 拉各阶段明细与照片。
+
+    聚合逻辑与政府端「台账中心 → 一宠一档」共用
+    ``business.services.pet_archive_records``，两端字段与口径完全一致，
+    不会出现「一端有出库原因、另一端没有」的漂移。
+    """
+    qs = get_district_filtered_queryset(Pet, request.user).filter(is_deleted=False)
+
+    status = request.GET.get('status')
+    if status:
+        qs = qs.filter(status=status)
+
+    keyword = (request.GET.get('keyword') or '').strip()
+    if keyword:
+        # 必须写成单个 Q()：qs.filter(a) | qs.filter(b) 会丢掉前面的
+        # 区县隔离过滤，并产生重复行
+        qs = qs.filter(
+            Q(code__icontains=keyword)
+            | Q(name__icontains=keyword)
+            | Q(breed__icontains=keyword)
+            | Q(chip_no__icontains=keyword)
+        )
+
+    qs = qs.select_related('district', 'shelter', 'hospital', 'capture').prefetch_related(
+        'treatments', 'releases', 'adoptions', 'euthanasia_records', 'owner_returns')
+    return json_ok(pet_archive_records(qs))
 
 
 @csrf_exempt
@@ -260,6 +311,12 @@ def mark_message_read(request, pk):
 # ============================================
 # 宠物全生命周期溯源（领养人端）
 # ============================================
+def _stage_photos(pet, *fields):
+    """取动物的指定阶段照片（只返回确实有图的），供时间线内嵌展示。"""
+    wanted = set(fields)
+    return [p for p in pet_photo_list(pet) if p['field'] in wanted]
+
+
 @csrf_exempt
 @role_required('adopter', 'gov_city', 'gov_district', 'shelter', 'hospital')
 @login_required
@@ -290,6 +347,10 @@ def pet_lifecycle(request, pet_id):
     # 捕捉记录
     if pet.capture:
         cap = pet.capture
+        capture_photos = _stage_photos(pet, 'photo_capture')
+        if cap.group_photo:
+            capture_photos.append(
+                {'field': 'group_photo', 'label': '整体合影', 'url': cap.group_photo.url})
         events.append({
             'type': 'capture',
             'type_display': '捕捉登记',
@@ -298,7 +359,11 @@ def pet_lifecycle(request, pet_id):
             'shelter_name': cap.shelter_name,
             'community_name': cap.community_name,
             'address': cap.address,
+            'property_name': cap.property_name,
+            'contact_person': cap.contact_person,
+            'contact_phone': cap.contact_phone,
             'operator_name': cap.operator_name,
+            'photos': capture_photos,
         })
 
     # 转运记录
@@ -334,6 +399,7 @@ def pet_lifecycle(request, pet_id):
             'chip_no': t.chip_no,
             'status': t.status,
             'operator_name': t.operator_name,
+            'photos': _stage_photos(pet, 'photo_before', 'photo_after', 'photo_treatment'),
         })
 
     # 放养记录
@@ -377,10 +443,35 @@ def pet_lifecycle(request, pet_id):
             'operator_name': e.operator_name,
         })
 
+    # 主人领回（回收）记录
+    # 每只动物只可能有一条 OwnerReturn（owner_returned 状态互斥），但保留循环以兼容历史数据
+    owner_returns = OwnerReturn.objects.filter(pet=pet).order_by('created_at')
+    for r in owner_returns:
+        events.append({
+            'type': 'owner_return',
+            'type_display': '回收登记',
+            'date': r.return_time.isoformat() if r.return_time else (timezone.localdate(r.created_at).isoformat() if r.created_at else ''),
+            'ledger_no': r.ledger_no,
+            'owner_name': r.owner_name,
+            'owner_phone': r.owner_phone,
+            'owner_id_card': r.owner_id_card,
+            'owner_address': r.owner_address,
+            'reason': r.reason,
+            # 签字是 base64 data URL，前端 <img> 直接展示即可
+            'signature': r.signature or '',
+            'operator_name': r.operator_name,
+            'created_at': r.created_at.isoformat() if r.created_at else '',
+        })
+
     # 按日期排序（空日期排最后）
     events.sort(key=lambda x: x.get('date') or '', reverse=False)
 
     return json_ok({
         'pet': serialize_instance(pet),
+        # pet_brief / photos 为「一宠一档」详情抽屉补充：统一的中文字段标签 +
+        # 按阶段排好序的照片列表（前端据此渲染照片墙并点击放大）。
+        # 保留原有 pet/events 结构，领养人端的时间线不受影响。
+        'pet_brief': pet_brief(pet),
+        'photos': pet_photo_list(pet),
         'events': events,
     })

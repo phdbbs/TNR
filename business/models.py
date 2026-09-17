@@ -164,6 +164,9 @@ class Transfer(models.Model):
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
     received_at = models.DateField('签收日期', null=True, blank=True)
     reject_reason = models.TextField('驳回原因', blank=True, default='')
+    # 备注：前端「新建转运单」一直有这个输入框、接口文档也声明接受 note，
+    # 但模型缺这一列 → 用户填的备注被静默丢弃、详情抽屉的「备注」恒为 `—`。
+    note = models.TextField('备注', blank=True, default='')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='transfers', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')

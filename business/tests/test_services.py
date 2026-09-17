@@ -1,10 +1,11 @@
 """服务层单元测试：编号生成、芯片管理、库存、黑名单、区县隔离、序列化。"""
 import json as json_lib
+import os
 import re
 from datetime import date
 from unittest import mock
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from business.models import Material, MaterialTransaction, Pet
 from business.services import (
@@ -381,3 +382,127 @@ class CaptureTransferStateTest(BusinessTestBase):
         self.assertEqual(bulk[cap_b.id]['received'], 0)
         self.assertEqual(bulk[cap_b.id]['settled'], 0)
         self.assertEqual(bulk[cap_b.id]['total'], 1)
+
+
+# ---------------------------------------------------------------------------
+# 本地日期守卫
+# ---------------------------------------------------------------------------
+
+ROOT_DIR = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+
+# 生产代码（刻意不含 tests/ 与 migrations/ —— 测试里可以任意构造时间）
+LOCAL_DATE_FILES = (
+    'business/services.py',
+    'business/tasks.py',
+    'business/views_checkin.py',
+    'business/views_capture.py',
+    'business/views_portal.py',
+    'business/views_transfer.py',
+    'business/views_material.py',
+    'business/views_adoption.py',
+    'business/views_release.py',
+    'business/views_euthanasia.py',
+    'supervision/views.py',
+)
+
+
+def _read_source(rel):
+    with open(os.path.join(ROOT_DIR, rel), encoding='utf-8') as f:
+        return f.read()
+
+
+def _function_source(source, name):
+    """按缩进切出顶层函数体（含 def 行与内部注释）。"""
+    m = re.search(r'^def\s+' + re.escape(name) + r'\s*\(', source, re.M)
+    if m is None:
+        raise AssertionError(f'未找到函数 {name}()，测试本身需要同步更新')
+    lines = source[m.start():].split('\n')
+    body = [lines[0]]
+    for line in lines[1:]:
+        if line.strip() and not line.startswith((' ', '\t')):
+            break
+        body.append(line)
+    return '\n'.join(body)
+
+
+class LocalDateUsageTest(SimpleTestCase):
+    """后端不得把 `timezone.now()`（UTC）当作日期来用。
+
+    真实案例：9/18 凌晨生成捕捉单，编号仍是 `TNR260917xxx`、单号仍是
+    `RET-260917-xxxx`。根因是 `generate_pet_codes()` / `generate_ledger_no()`
+    用 `timezone.now()` 取日期——`timezone.now()` 返回 **UTC**，
+    项目 `TIME_ZONE='Asia/Shanghai'`，北京时间 00:00–08:00 这段 UTC 还停在前一天。
+
+    `business/views_checkin.py` 的默认月份同理：月初凌晨会把月份记成上一个月。
+
+    这与前端 `toISOString()` 截日期是**同一类坑**（见 `core/tests_frontend_consistency.py`
+    的 `LocalDateDefaultTest`）。判据：
+    - 取日期字符串 / 生成编号 / 判定今天或本月 → `timezone.localdate()`
+    - 存时间戳、算时间差、比 `created_at` → `timezone.now()`
+    """
+
+    # 形态一：timezone.now() 直接接日期方法
+    UTC_AS_DATE = re.compile(
+        r'timezone\.now\(\)\s*\.\s*(?:strftime|date|isoformat)\s*\(')
+    # 形态二（历史缺陷的真实形态）：先赋值给变量，再用该变量取日期
+    NOW_ASSIGN = re.compile(r'\b(\w+)\s*=\s*timezone\.now\(\)')
+
+    def _scan(self, rel):
+        source = _read_source(rel)
+        problems = []
+        for m in self.UTC_AS_DATE.finditer(source):
+            problems.append(
+                f'{rel}:{source[:m.start()].count(chr(10)) + 1} '
+                'timezone.now().strftime/date 直接取日期')
+        for m in self.NOW_ASSIGN.finditer(source):
+            var = m.group(1)
+            use = re.search(
+                r'\b' + re.escape(var) + r'\s*\.\s*(?:strftime|date|isoformat)\s*\(',
+                source[m.end():])
+            if use:
+                problems.append(
+                    f'{rel}:{source[:m.start()].count(chr(10)) + 1} '
+                    f'{var} = timezone.now() 之后又用 {var}.strftime/date 取日期')
+        return problems
+
+    def test_no_utc_now_used_as_date(self):
+        problems = []
+        for rel in LOCAL_DATE_FILES:
+            problems.extend(self._scan(rel))
+        self.assertFalse(
+            problems,
+            '以下位置把 UTC 当本地日期用 —— 北京时间 00:00–08:00 会得到前一天：\n  '
+            + '\n  '.join(problems)
+            + '\n请改用 timezone.localdate()。')
+
+    def test_number_generators_use_local_date(self):
+        """编号/单号生成器必须用 localdate()，这是最容易被改回去的地方。"""
+        source = _read_source('business/services.py')
+        for fn in ('generate_pet_codes', 'generate_ledger_no'):
+            body = _function_source(source, fn)
+            self.assertNotIn(
+                'timezone.now()', body,
+                f'{fn}() 不应使用 timezone.now()（UTC）——凌晨生成的编号会退到前一天')
+            self.assertIn(
+                'timezone.localdate()', body,
+                f'{fn}() 应使用 timezone.localdate() 取本地日期')
+
+    def test_checkin_default_month_uses_local_date(self):
+        """报修默认月份同理：月初凌晨用 UTC 会记成上一个月。"""
+        body = _function_source(_read_source('business/views_checkin.py'),
+                                _month_function_name())
+        self.assertNotIn('timezone.now()', body,
+                         '默认月份不应使用 timezone.now()（UTC）')
+        self.assertIn('timezone.localdate()', body,
+                      '默认月份应使用 timezone.localdate()')
+
+
+def _month_function_name():
+    """定位 `views_checkin.py` 里使用 localdate() 的那个函数名。"""
+    source = _read_source('business/views_checkin.py')
+    for m in re.finditer(r'^def\s+(\w+)\s*\(', source, re.M):
+        body = _function_source(source, m.group(1))
+        if 'localdate()' in body and 'strftime' in body:
+            return m.group(1)
+    raise AssertionError('未找到取默认月份的函数，测试本身需要同步更新')

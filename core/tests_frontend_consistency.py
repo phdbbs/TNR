@@ -758,3 +758,510 @@ class ModalMethodOuterScopeLeakTest(SimpleTestCase):
             '弹窗方法泄漏外层作用域变量：\n  ' + '\n  '.join(sorted(set(problems)))
         )
 
+
+# ---------------------------------------------------------------------------
+# 行内事件绑定：必须走事件委托
+# ---------------------------------------------------------------------------
+#
+# `TNR_UI.mountTable` 在「点表头排序 / 翻页 / 改每页条数」时会整体重建 tbody
+# （内部再次调用 `mountTable` → `el.innerHTML = html`）。此前各端普遍写成
+#
+#     TNR_UI.mountTable('xxxWrap', {...});
+#     document.querySelectorAll('[data-act]').forEach(b => {
+#       b.addEventListener('click', () => this.doSomething(b.dataset.act));
+#     });
+#
+# 监听器直接绑在**行元素**上，随旧节点一起被丢弃 —— 表现是「点单号/编号/按钮
+# 没反应，且控制台不报任何错」。本轮把四端共 33 处这类绑定全部改为
+#
+#     TNR_UI.delegateClick('xxxWrap', { 'data-act': (v, el) => ... });
+#
+# 绑在**不会随重渲染消失的容器**上。下面两个用例锁死这个约定。
+# ---------------------------------------------------------------------------
+
+class RowActionEventDelegationTest(SimpleTestCase):
+    """行内可点元素一律走 `TNR_UI.delegateClick`，不得直接绑在行元素上。
+
+    判定方式：若某个方法内出现过 `mountTable`，那么该方法内**任何**
+    `querySelectorAll('...')` + `addEventListener` 都视为行内绑定 —— 因为
+    mountTable 会重建它渲染出来的整棵子树，绑在其中的监听器都可能丢失。
+
+    确实不需要委托的场景（绑定目标不在任何会被重建的容器内），在该行或
+    前 400 字符内标注 `direct-bind-ok` 即可豁免。
+    """
+
+    BIND = re.compile(
+        r"querySelectorAll\(\s*'([^']+)'\s*\)[\s\S]{0,220}?addEventListener", re.M)
+    MOUNT = re.compile(r'mountTable\s*\(')
+    METHOD_NAME = re.compile(
+        r'(?m)^  (?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{')
+    EXEMPT = 'direct-bind-ok'
+
+    @staticmethod
+    def _method_of(text, pos):
+        name = '?'
+        for m in RowActionEventDelegationTest.METHOD_NAME.finditer(text):
+            if m.start() < pos:
+                name = m.group(1)
+            else:
+                break
+        return name
+
+    def test_no_direct_row_binding_inside_mounttable_methods(self):
+        problems = []
+        for name, rel in PORTALS.items():
+            source = strip_js_comments(read(rel))   # 等长替换，索引与行号不变
+            mounts = [m.start() for m in self.MOUNT.finditer(source)]
+            if not mounts:
+                continue
+            for m in self.BIND.finditer(source):
+                pos = m.start()
+                fn = self._method_of(source, pos)
+                if not any(self._method_of(source, p) == fn for p in mounts):
+                    continue          # 该方法不渲染表格，不属于本约定管辖
+                if self.EXEMPT in source[max(0, pos - 400):pos]:
+                    continue
+                line_no = source.count('\n', 0, pos) + 1
+                problems.append(
+                    f'{name}:{line_no} {fn}() 里 querySelectorAll(\'{m.group(1)}\') '
+                    '直接绑了监听器；mountTable 重建 tbody 后它会失效'
+                    '（点按钮没反应且不报错），请改用 TNR_UI.delegateClick(稳定容器, {...})')
+        self.assertFalse(
+            problems,
+            '行内绑定未走事件委托：\n  ' + '\n  '.join(problems)
+        )
+
+    def test_delegate_click_helper_exists_and_dedups(self):
+        """委托助手必须存在，且按「容器 + 标识」去重，重复调用不会叠加监听器。"""
+        source = read('static/js/tnr-common.js')
+        self.assertIn('delegateClick(container, handlers, tag)', source,
+                      'TNR_UI.delegateClick 不见了，各端的行内委托会全部失效')
+        self.assertIn('_delegatedTags: new WeakMap()', source,
+                      'delegateClick 的去重表不见了：重复调用会叠加多份监听器，'
+                      '一次点击触发多次动作')
+
+    def test_bind_photo_zoom_is_delegated(self):
+        """照片放大同样必须走委托，否则重渲染出来的新图片点不开。"""
+        source = read('static/js/tnr-common.js')
+        body = re.search(r'bindPhotoZoom\(container\)\s*\{([\s\S]{0,500}?)\n  \}', source)
+        self.assertIsNotNone(body, '未找到 bindPhotoZoom 实现')
+        self.assertIn('delegateClick', body.group(1),
+                      'bindPhotoZoom 必须基于事件委托实现；'
+                      '若退回「遍历元素逐个绑定」，mountTable 重渲染后的图片将无法点击放大')
+
+
+# ---------------------------------------------------------------------------
+# 门户对象自洽性：侧栏导航 → 页面容器 → 顶栏标题
+# ---------------------------------------------------------------------------
+#
+# 第十轮 GUI 实测抓到的形态（政府端「全业务监管」）：
+#
+#   - 侧栏 `gov_base.html` 里有「全业务监管」这个导航项；
+#   - `GovPortal.navMap` 也把它映射到 `'supervision'`；
+#   - 但 `{% block content %}` 里**根本没有 `#page-supervision` 容器**。
+#
+# 点进去时 `render_supervision()` 第一行 `document.getElementById(...)`
+# 返回 null → `.innerHTML` 抛 TypeError。异常发生在点击回调里，页面停在原处、
+# **不报任何可见错误**，用户只会觉得「点了没反应」——静态语法检查、
+# 模板渲染、API 测试全都覆盖不到。同一函数里还有一处 `this.state.supTab`
+# （`GovPortal` 根本没有 `state` 属性）会在表格渲染时再抛一次。
+# ---------------------------------------------------------------------------
+
+BASE_TEMPLATES = {
+    'shelter': 'templates/portal/shelter_base.html',
+    'hospital': 'templates/portal/hospital_base.html',
+    'gov': 'templates/portal/gov_base.html',
+    'adopter': 'templates/portal/adopter_base.html',
+}
+
+# 各端门户对象名（adopter 端是散落的全局函数，没有统一对象）
+PORTAL_OBJECTS = {
+    'shelter': 'Shelter',
+    'hospital': 'Hospital',
+    'gov': 'GovPortal',
+}
+
+NAV_LABEL = re.compile(r'<span class="nav-item-label">([^<]+)</span>')
+NAV_DATA_ATTR = re.compile(r'data-nav="([^"]+)"')
+PAGE_CONTAINER = re.compile(r'id="page-([A-Za-z0-9_-]+)"')
+NAV_MAP_ENTRY = re.compile(r"'([^']+)'\s*:\s*'([^']+)'")
+
+
+def portal_object_body(source, var_name):
+    """返回 `const <var_name> = { ... };` 的完整文本。
+
+    结束位置取**列 0 的 `};`**，而不是靠配平花括号：JS 里的正则字面量
+    （如 `replace(/\\d{3}/g, '')`）会让朴素的括号计数失步，从而把整个
+    对象体截断或越界。
+    """
+    m = re.search(r'(?m)^(?:const|let|var)\s+' + re.escape(var_name) + r'\s*=\s*\{', source)
+    if not m:
+        return None
+    end = re.search(r'(?m)^\};', source[m.end():])
+    if not end:
+        return None
+    return source[m.start():m.end() + end.end()]
+
+
+def property_literal(source, prop):
+    """返回 `prop: { ... }` 的 `{...}` 文本（用于对象内的属性字面量，如 titles）。"""
+    m = re.search(r'(?m)^\s*' + re.escape(prop) + r'\s*:\s*\{', source)
+    if not m:
+        return None
+    return brace_body(source, m.end() - 1)
+
+
+class SidebarNavTargetTest(SimpleTestCase):
+    """侧栏上的每个导航项都必须指向真实存在的页面容器。
+
+    三种实现方式都要覆盖：`navMap` 标签映射（shelter/gov）、
+    侧栏 `data-nav` 属性（hospital）。
+    """
+
+    def test_nav_targets_have_page_containers(self):
+        problems = []
+        checked = 0
+        for name, rel in PORTALS.items():
+            source = read(rel)
+            containers = set(PAGE_CONTAINER.findall(source))
+            nav_map = find_object_literal(source, 'navMap')
+            if nav_map:
+                for label, page in NAV_MAP_ENTRY.findall(nav_map):
+                    checked += 1
+                    if page not in containers:
+                        problems.append(
+                            f'{name}: 侧栏「{label}」→ {page}，但源码里没有 '
+                            f'id="page-{page}" 容器（点进去抛 TypeError，页面无任何提示）')
+            for page in NAV_DATA_ATTR.findall(read(BASE_TEMPLATES[name])):
+                checked += 1
+                if page not in containers:
+                    problems.append(
+                        f'{name}: 侧栏 data-nav="{page}" 没有对应的 id="page-{page}" 容器')
+        self.assertGreater(checked, 0, '没有解析到任何导航映射，测试本身可能已失效')
+        self.assertFalse(
+            problems,
+            '侧栏导航指向了不存在的页面容器：\n  ' + '\n  '.join(problems))
+
+    def test_sidebar_labels_and_navmap_are_in_sync(self):
+        """侧栏标签 ↔ navMap 必须双向一致。
+
+        只改一侧的两种后果：侧栏多了标签 → 点击无反应；navMap 多了条目 →
+        该页面在界面上**点不进去**（功能不可达）。
+        """
+        problems = []
+        checked = 0
+        for name, rel in PORTALS.items():
+            nav_map = find_object_literal(read(rel), 'navMap')
+            if not nav_map:
+                continue          # 该端不用 navMap 做导航
+            checked += 1
+            mapped = {label for label, _ in NAV_MAP_ENTRY.findall(nav_map)}
+            labels = {t.strip() for t in NAV_LABEL.findall(read(BASE_TEMPLATES[name]))}
+            self.assertTrue(labels, f'{name}: 侧栏里没有解析到任何 nav-item-label')
+            self.assertFalse(
+                labels - mapped,
+                f'{name}: 侧栏有 {sorted(labels - mapped)}，但 navMap 没有对应去向 → 点击无反应')
+            self.assertFalse(
+                mapped - labels,
+                f'{name}: navMap 里的 {sorted(mapped - labels)} 在侧栏上找不到入口 → 该页面点不进去')
+        self.assertGreater(checked, 0, '没有找到任何 navMap，测试本身可能已失效')
+
+    def test_titles_map_covers_every_nav_target(self):
+        """顶栏标题映射必须覆盖全部导航目标，否则顶栏标题是空白。"""
+        problems = []
+        for name, rel in PORTALS.items():
+            source = read(rel)
+            titles = property_literal(source, 'titles')
+            if not titles:
+                continue
+            keys = object_keys(titles)
+            targets = set()
+            nav_map = find_object_literal(source, 'navMap')
+            if nav_map:
+                targets |= {page for _, page in NAV_MAP_ENTRY.findall(nav_map)}
+            targets |= set(NAV_DATA_ATTR.findall(read(BASE_TEMPLATES[name])))
+            missing = sorted(targets - keys)
+            if missing:
+                problems.append(f'{name}: titles 缺少 {missing}（顶栏标题会显示为空）')
+        self.assertFalse(problems, '顶栏标题映射不完整：\n  ' + '\n  '.join(problems))
+
+
+class UndeclaredInstancePropertyTest(SimpleTestCase):
+    """门户对象里 `this.<name>` 读取的属性必须存在，否则运行时 TypeError。
+
+    「声明」的三种合法来源：
+      1. 对象字面量的键（`state: {...}`、`titles: {...}`）；
+      2. 对象字面量的方法（`render_xxx() {...}`）；
+      3. **运行期赋值**（`this._captureRows = list;`）——这是本项目里
+         「渲染时把数据挂到实例上供委托闭包实时读取」的常规写法，不算缺陷。
+
+    只读、既没声明也没赋值的名字才是缺陷。真实案例：`GovPortal` 里写了
+    `this.state.supTab`，但整个对象没有 `state` 属性 —— 表格渲染时
+    `Cannot read properties of undefined (reading 'supTab')`，标签页空白。
+    """
+
+    def test_this_properties_are_declared_or_assigned(self):
+        problems = []
+        checked = 0
+        for name, var in PORTAL_OBJECTS.items():
+            source = strip_js_comments(read(PORTALS[name]))   # 等长替换，行号不变
+            body = portal_object_body(source, var)
+            self.assertIsNotNone(body, f'{name}: 未找到门户对象 {var}')
+            checked += 1
+            methods = set(re.findall(
+                r'(?m)^  (?:async\s+)?([A-Za-z_$][\w$]*)\s*\(', body))
+            declared = object_keys(body) | methods
+            assigned = set(re.findall(r'\bthis\.([A-Za-z_$][\w$]*)\s*=[^=]', body))
+            for prop in sorted(set(re.findall(r'\bthis\.([A-Za-z_$][\w$]*)', body))):
+                if prop in declared or prop in assigned:
+                    continue
+                line_no = source.count('\n', 0, body.find('this.' + prop)) + 1
+                problems.append(
+                    f'{name}:{line_no} {var} 里用了 `this.{prop}`，'
+                    '但它既不是对象的键/方法，也没有被赋值 → 运行时 TypeError')
+        self.assertGreater(checked, 0, '没有找到任何门户对象，测试本身可能已失效')
+        self.assertFalse(
+            problems,
+            '门户对象引用了未声明的属性：\n  ' + '\n  '.join(problems))
+
+
+# ============================================================
+# 写接口失败可见性：`try { ... } catch` 的 catch 不能是死代码
+# ============================================================
+
+RAW_BACKED_CALL = re.compile(r'await\s+TNR_API\.(?!post\b|get\b)(\w+)\s*\(')
+# 注意：`res && res.message` **不算**成功判定 —— 它只是「有消息就用消息」，
+# 服务端返回 `{success:false, message:'用户名已存在'}` 时同样会走进「成功」分支。
+SUCCESS_CHECK = re.compile(
+    r'assertOk|res\.success|res\.ok|success\s*===|success\s*!==|\bjson\.success')
+# toast 文案里可能带括号（`toast(res.message || '已保存', 'success')`），
+# 所以只匹配结尾的 `'success')`，不要试图用 `[^)]*` 吃掉整个参数列表。
+SUCCESS_TOAST = re.compile(r"'success'\s*\)")
+
+
+def raw_backed_methods():
+    """返回 `TNR_API` 里**不会抛异常**的具名方法（实现走 `_post` / `_get`）。
+
+    只有通用的 `TNR_API.post()` / `TNR_API.get()` 走 `_handle`（失败即抛）。
+    「catch 能不能被触发」完全取决于这个区分，所以从源码解析而不是手写清单 ——
+    手写清单会在新增接口时悄悄失效。
+    """
+    source = read('static/js/tnr-api.js')
+    return {m.group(1) for m in re.finditer(
+        r'async\s+(\w+)\s*\([^)]*\)\s*\{\s*return\s+this\.(_post|_get)\b', source)}
+
+
+class WriteFailureVisibilityTest(SimpleTestCase):
+    """写接口失败时界面必须报错，不能弹绿色「成功」。
+
+    `TNR_API._post` / `_get` **不抛异常**（把响应体原样返回），而本项目的业务
+    错误一律是 **HTTP 200 + `{success:false, message}`**（`json_fail`；
+    只有越权才用 404）。于是下面这种写法里的 catch 永远不执行：
+
+        try {
+          await TNR_API.createUser({...});            // 不抛
+          TNR_UI.toast('账号创建成功', 'success');     // ← 服务端拒绝时照样弹
+        } catch (e) { TNR_UI.toast(e.message, 'danger'); }
+
+    真实案例：政府端重复创建同名账号，服务端返回「用户名已存在」，
+    界面却弹绿色「账号创建成功」并**关闭弹窗** —— 用户以为存上了，
+    实际什么都没写。这类「谎报成功」比直接报错更糟：用户不会去核对。
+
+    修法：拿到响应后过一遍 `TNR_UI.assertOk(res, '创建失败')`，把失败转成异常。
+    """
+
+    def test_try_catch_around_raw_api_checks_success(self):
+        raw = raw_backed_methods()
+        self.assertIn('createUser', raw,
+                      '没能从 tnr-api.js 解析出 _post 驱动的接口，测试本身可能已失效')
+        problems = []
+        for name, rel in PORTALS.items():
+            lines = strip_js_comments(read(rel)).split('\n')
+            for i, line in enumerate(lines, 1):
+                if 'try {' not in line:
+                    continue
+                # 取 try → catch 之间的块（找不到 catch 就取到窗口末尾）
+                block = []
+                for j in range(i, min(i + 60, len(lines))):
+                    if re.search(r'\bcatch\b', lines[j]):
+                        block = lines[i - 1:j]
+                        break
+                body = '\n'.join(block)
+                calls = sorted(set(RAW_BACKED_CALL.findall(body)))
+                if not calls or not SUCCESS_TOAST.search(body):
+                    continue
+                if SUCCESS_CHECK.search(body):
+                    continue
+                problems.append(
+                    f'{name}:{i} try 块调用了 {", ".join(calls)}'
+                    '（走 _post，失败不抛异常），块内却直接弹「成功」且没有任何'
+                    '成功判定 —— catch 是死代码，服务端拒绝时界面会谎报成功')
+        self.assertFalse(
+            problems,
+            '写接口的失败被界面吞掉了：\n  ' + '\n  '.join(problems))
+
+    def test_assert_ok_helper_exists_and_throws(self):
+        """`TNR_UI.assertOk` 必须存在，且 `success === false` 时抛异常。"""
+        source = strip_js_comments(read('static/js/tnr-common.js'))
+        self.assertIn('assertOk(', source,
+                      'TNR_UI 缺少 assertOk —— 写接口的失败判定没有统一入口')
+        self.assertRegex(
+            source,
+            r'assertOk\s*\([^)]*\)\s*\{[^}]*success\s*===\s*false[^}]*throw',
+            'assertOk 必须在 success === false 时抛异常，'
+            '否则调用方的 catch 仍然是死代码')
+
+
+# ============================================================
+# 业务流程闭环：每个业务环节都必须有界面入口
+# ============================================================
+
+# 业务环节 → 界面里的调用特征（具名方法名，或直接写 URL 片段）。
+#
+# 这张表是**人工维护**的，价值在于：后端接口写好了但界面没接，流程就是死的，
+# 而机器扫描「API 方法有没有被调用」误报太多 —— 很多页面直接走
+# `TNR_API.post(url, ...)` / `TNR_API._postForm(url, fd)`，根本不经过具名方法。
+#
+# 真实案例：`/api/business/releases/create/` 一直存在，两端门户却都没调用，
+# 「动物去向 → 放养」里的「待放养确认」列表永远是空的 ——
+# **整个放养流程在界面上不可达**（只能靠直接调接口或脚本造数据）。
+FLOW_ENTRY_POINTS = {
+    '捕捉登记': '/api/business/captures/create/',
+    '主人领回（回收）': 'ownerReturn(',
+    '转运下发': 'createTransfer(',
+    '转运签收': 'receiveTransfer(',
+    '转运驳回': 'rejectTransfer(',
+    # 「转运重新下发」已移除：它会把被驳回的单再复制成一张 pending 单，
+    # 原单永远停在 rejected，于是同一单可反复下发、同一动物挂在多张未结单上。
+    # 现在被驳回的动物自动回到「待转运」备选框，由操作员重新勾选下发新单。
+    '转运撤回': 'withdrawTransfer(',
+    '诊疗登记': 'createTreatment(',
+    '物料采购入库': 'purchaseMaterial(',
+    '物料下发': 'dispatchMaterial(',
+    '物料签收': 'receiveMaterial(',
+    '物料库存异动': 'adjustStock(',
+    '放养发起': 'createRelease(',
+    '放养确认': 'confirmRelease(',
+    '领养登记': 'registerAdoption(',
+    '领养资料编辑/上下架': 'editAdoptionInfo(',
+    '领养确认领出': 'confirmAdoptionClaim(',
+    '领养撤销': 'reclaimAdoption(',
+    '死亡登记': 'createEuthanasia(',
+    '遗体移交（捕捉点领取）': 'receiveBody(',
+    '黑名单登记': 'createBlacklist(',
+    '黑名单解除': 'deleteBlacklist(',
+    '回访打卡审核': 'reviewCheckin(',
+}
+
+
+class BusinessFlowEntryPointTest(SimpleTestCase):
+    """每个业务环节都必须能在界面上点到，不能只有接口没有入口。
+
+    接口存在、界面没接 = 流程死掉，而且**不会报错** —— 页面只是永远空着，
+    看起来像「还没有数据」。靠人工走查很容易漏（放养流程就这样漏了很久）。
+    """
+
+    def test_every_flow_has_a_ui_entry(self):
+        corpus = '\n'.join(read(rel) for rel in PORTALS.values())
+        missing = [name for name, token in FLOW_ENTRY_POINTS.items()
+                   if token not in corpus]
+        self.assertFalse(
+            missing,
+            '以下业务环节在所有门户模板里都找不到调用入口（流程不可达）：\n  '
+            + '\n  '.join(missing))
+
+
+
+
+
+# ============================================================
+# 页签 id 一致性：JS 里 `renderXxxTab('id')` 的 id 必须真实存在
+# ============================================================
+
+TAB_CONTAINER = re.compile(r'id="(\w+Tabs)"')
+TAB_ITEM = re.compile(r'data-tab="([\w-]+)"')
+TAB_CALL = re.compile(r"render(\w+)Tab\('([\w-]+)'\)")
+
+
+class TabIdConsistencyTest(SimpleTestCase):
+    """`renderXxxTab('id')` 引用的页签 id 必须真实存在于对应的 `#xxxTabs` 容器里。
+
+    真实案例：捕捉端 `showReleaseConfirmModal` 在「确认放养成功」之后调的是
+    `this.renderRelTab('released')`，而 `#relTabs` 里的 id 是 **`release`**
+    —— `released` 是放养记录的**状态**，不是页签名。`renderRelTab` 没有匹配分支，
+    紧接着的 `document.querySelector('[data-tab="released"]').click()` 直接对
+    null 取属性，抛**未捕获 TypeError**：界面上提示「放养确认成功」，但列表不刷新、
+    停留在旧状态，控制台里才看得到报错。用户会以为操作没生效而反复重试。
+
+    这类拼写错误没有任何静态约束（模板里没有 `released` 这个页签，JS 里也没有
+    任何地方引用它），只能靠本用例兜住。
+    """
+
+    def test_tab_ids_used_in_js_exist_in_markup(self):
+        problems = []
+        for name, rel in PORTALS.items():
+            source = read(rel)
+            body = strip_js_comments(source)   # 注释里提到旧 id 不算引用
+            for m in TAB_CONTAINER.finditer(source):
+                container = m.group(1)              # 例如 relTabs
+                prefix = container[:-len('Tabs')]   # rel
+                # 页签容器后面紧跟的是内容容器 `<div id="...">`，以此作为边界
+                seg = source[m.end():]
+                nxt = seg.find('<div id=')
+                if nxt >= 0:
+                    seg = seg[:nxt]
+                ids = set(TAB_ITEM.findall(seg))
+                if not ids:
+                    continue
+                for call in TAB_CALL.finditer(body):
+                    if call.group(1).lower() != prefix.lower():
+                        continue
+                    if call.group(2) not in ids:
+                        problems.append(
+                            f'{name}: render{call.group(1)}Tab("{call.group(2)}") '
+                            f'不在 #{container} 的页签里（实际有 {sorted(ids)}）')
+        self.assertFalse(
+            problems,
+            '以下页签 id 在 JS 里被引用但模板里并不存在 —— '
+            '切换页签会静默失败（渲染无分支）或抛 TypeError：\n  '
+            + '\n  '.join(problems))
+
+
+class LocalDateDefaultTest(SimpleTestCase):
+    """表单日期默认值必须取**本地时间**，不能用 `toISOString()`（UTC）。
+
+    真实案例：医院端的接种/用药/植入/手术/处置日期、捕捉端「回收时间」
+    此前都用 `new Date().toISOString().substr(0, 10)` 作默认值。
+    `toISOString()` 返回 **UTC**，北京时间 00:00–08:00 这段 UTC 还停在前一天
+    —— 9/18 凌晨打开表单，默认日期显示 9/17；`datetime-local` 更会整体差 8 小时。
+
+    这与后端 `generate_pet_codes()` 曾用 `timezone.now()` 取日期是**同一类坑**
+    （那边表现为编号 `TNR260917xxx`），正确做法是 `TNR_UI.todayStr()` /
+    `TNR_UI.nowLocalStr()`。
+    """
+
+    # toISOString() 后紧跟日期截取 → 说明是拿它当「今天」用
+    ISO_DATE_CUT = re.compile(
+        r'toISOString\(\)\s*\.\s*(?:substr|substring|slice)\s*\(\s*0\s*,')
+    UTC_GETTER = re.compile(r'\bgetUTC(?:FullYear|Month|Date|Hours|Minutes)\s*\(')
+
+    def test_no_utc_based_date_defaults(self):
+        problems = []
+        for rel in FRONTEND_FILES:
+            # 剔除注释再扫：正确写法的注释里会举反例（`toISOString().substr(0,10)`），
+            # 不剥离会把「说明为什么不能这么写」的注释本身判成违规。
+            source = strip_js_comments(read(rel))
+            for m in self.ISO_DATE_CUT.finditer(source):
+                line = source[:m.start()].count('\n') + 1
+                problems.append(
+                    f'{rel}:{line} 用 toISOString() 截日期当默认值'
+                    '（UTC，凌晨 00:00–08:00 会退回前一天）')
+            for m in self.UTC_GETTER.finditer(source):
+                line = source[:m.start()].count('\n') + 1
+                problems.append(
+                    f'{rel}:{line} 用 getUTC*() 取日期分量（应改用本地方法）')
+        self.assertFalse(
+            problems,
+            '以下位置把 UTC 当本地时间用 —— 北京时间 00:00–08:00 会得到前一天：\n  '
+            + '\n  '.join(problems)
+            + '\n请改用 TNR_UI.todayStr() / TNR_UI.nowLocalStr()。')

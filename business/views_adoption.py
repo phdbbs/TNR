@@ -22,6 +22,7 @@ from business.services import (
     generate_ledger_no, get_district_filtered_queryset,
     check_blacklist, get_active_pet, get_scoped_object,
     pet_has_pending_release, pet_has_active_adoption,
+    validate_uploaded_images,
 )
 
 
@@ -95,36 +96,50 @@ def adoption_info_edit(request, pk):
     if not hospital:
         return json_fail('缺少医院信息')
 
-    listing, created = AdoptionHallListing.objects.get_or_create(
-        pet=pet,
-        defaults={
-            'hospital': hospital,
-            'hospital_name': hospital.name,
-        }
-    )
+    # 照片校验必须在**任何落库之前**。
+    # 原实现是先 `listing.save()` 再校验照片，于是上传一张假图片（.txt 改名 .png）时：
+    # 接口返回「不是有效的图片文件」→ 界面弹红色失败提示，但 listing 已经写进库了，
+    # 简介/性格/健康状况其实**已经改掉**。用户看到「失败」又去重试，
+    # 每次重试都在改数据 —— 界面说的和实际发生的不是一回事。
+    photo_err = validate_uploaded_images(request.FILES, {
+        'photo_group': '整体合照',
+        'photo_before': '捕捉前照片',
+        'photo_after': '捕捉后照片',
+        'photo_treatment': '诊疗后照片',
+    })
+    if photo_err:
+        return json_fail(photo_err)
 
-    if 'intro' in data:
-        listing.intro = data['intro']
-    if 'personality' in data:
-        listing.personality = data['personality']
-    if 'body_condition' in data:
-        listing.body_condition = data['body_condition']
-    if 'flow_doc' in data:
-        listing.flow_doc = data['flow_doc']
-    if 'is_active' in data:
-        listing.is_active = bool(data['is_active'])
+    with transaction.atomic():
+        listing, created = AdoptionHallListing.objects.get_or_create(
+            pet=pet,
+            defaults={
+                'hospital': hospital,
+                'hospital_name': hospital.name,
+            }
+        )
 
-    if created or not listing.published_at:
-        from django.utils import timezone
-        listing.published_at = timezone.localdate()
+        if 'intro' in data:
+            listing.intro = data['intro']
+        if 'personality' in data:
+            listing.personality = data['personality']
+        if 'body_condition' in data:
+            listing.body_condition = data['body_condition']
+        if 'flow_doc' in data:
+            listing.flow_doc = data['flow_doc']
+        if 'is_active' in data:
+            listing.is_active = bool(data['is_active'])
 
-    listing.save()
+        if created or not listing.published_at:
+            listing.published_at = timezone.localdate()
 
-    # 处理照片上传
-    for photo_field in ('photo_group', 'photo_before', 'photo_after', 'photo_treatment'):
-        if request.FILES.get(photo_field):
-            setattr(pet, photo_field, request.FILES[photo_field])
-    pet.save()
+        listing.save()
+
+        for photo_field in ('photo_group', 'photo_before', 'photo_after',
+                            'photo_treatment'):
+            if request.FILES.get(photo_field):
+                setattr(pet, photo_field, request.FILES[photo_field])
+        pet.save()
 
     return json_ok(serialize_instance(listing), message='领养信息已更新')
 

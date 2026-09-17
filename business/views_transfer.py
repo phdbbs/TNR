@@ -12,7 +12,8 @@ from business.models import Transfer, Pet, Capture
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
-    recalc_capture_status, get_scoped_object,
+    resolve_district_scope, recalc_capture_status, get_scoped_object,
+    busy_transfer_codes,
 )
 from core.models import Institution
 
@@ -82,9 +83,14 @@ def transfer_create(request):
     except Institution.DoesNotExist:
         return json_fail('捕捉点不存在')
 
-    district_id = data.get('district_id') or getattr(user, 'district_id', None)
-    if not district_id:
-        return json_fail('缺少区县信息')
+    # 归属区县以**发出捕捉点**为准，不能取操作员所属区县：
+    # 现场两个捕捉点操作员都挂在「全市（市级）」下，而前端并不提交 district_id，
+    # 取操作员区县会让转运单全部落到市级 —— 本区县政府在区县隔离下看不到本区
+    # 转运单（捕捉单当初就是这么错的）。
+    district, err = resolve_district_scope(user, shelter, data.get('district_id'))
+    if err:
+        return json_fail(err)
+    district_id = district.id
 
     capture_id = data.get('capture_id')
     capture = Capture.objects.filter(id=capture_id).first() if capture_id else None
@@ -100,6 +106,29 @@ def transfer_create(request):
         if not to_hospital_id or not pet_codes_raw:
             return json_fail('缺少转运明细（items 或 to_hospital_id+pet_codes）')
         items = [{'hospital_id': to_hospital_id, 'pet_codes': pet_codes_raw}]
+
+    # 预校验（两段式：先全部校验完，再落库）：
+    # 1) 已在**未结**转运单里的动物不能再下发 —— 否则同一只动物会同时挂在多张
+    #    未结单据上（医院收到重复单、捕捉单状态推导跟着乱）。旧版「重新下发」
+    #    没有这层校验，同一张被驳回的单可以反复下发，就是这么乱起来的。
+    #    rejected / void 不占位，所以被驳回的动物仍能重新被选进来安排转运。
+    # 2) 只能转运本区县的动物（原来裸查 code__in，猜到编号就能跨区县下发）。
+    requested_codes = set()
+    for item in items:
+        requested_codes |= {c for c in (item.get('pet_codes') or []) if c}
+
+    if requested_codes:
+        busy = busy_transfer_codes(requested_codes, district_id)
+        if busy:
+            return json_fail(
+                '以下动物已在未结的转运单中，不能重复下发：' + '、'.join(sorted(busy))
+                + '。如需改派，请先在「转运明细」里撤回原单。')
+
+        foreign = sorted(Pet.objects.filter(
+            code__in=requested_codes, is_deleted=False
+        ).exclude(district_id=district_id).values_list('code', flat=True))
+        if foreign:
+            return json_fail('以下动物不属于本区县，无法转运：' + '、'.join(foreign))
 
     created = []
     assigned_pet_ids = set()  # 防止同一宠物被拆分进多家医院
@@ -144,6 +173,9 @@ def transfer_create(request):
             pet_codes=','.join(pet_code_list),
             pet_count=len(pet_code_list),
             status='pending',
+            # 备注：前端表单一直提交 note（接口文档也声明接受），此前模型没有这一列，
+            # 用户填的内容被静默丢弃。拆分场景允许每个 item 各自带备注。
+            note=item.get('note') or data.get('note', '') or '',
             operator=user,
             operator_name=user.get_full_name() or user.username,
             ledger_no=generate_ledger_no('TRF'),
@@ -232,62 +264,14 @@ def transfer_reject(request, pk):
     return json_ok(serialize_instance(transfer), message='已驳回')
 
 
-@csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
-@login_required
-def transfer_resend(request, pk):
-    """重新下发被驳回的转运单。
-
-    以原转运单的宠物/医院重建一张待签收转运单，并将宠物状态回退为在途、
-    重新绑定医院，供医院再次签收或驳回。
-    """
-    try:
-        transfer = Transfer.objects.get(id=pk)
-    except Transfer.DoesNotExist:
-        return json_fail('转运记录不存在', status=404)
-
-    if transfer.status != 'rejected':
-        return json_fail(f'当前状态({transfer.status})不可重新下发')
-
-    user = request.user
-    if user.role == 'shelter' and user.institution_id and user.institution_id != transfer.from_shelter_id:
-        return json_fail('无权重新下发此转运记录')
-    # 区级监管仅能处理本区县的转运单
-    # （医院侧不做区县过滤：宠物可能跨区县转运，医院看的是「发给本院」的单子）
-    if user.role == 'gov_district' and user.district_id and transfer.district_id != user.district_id:
-        return json_fail('转运记录不存在或无权访问', status=404)
-
-    pet_codes = [c.strip() for c in transfer.pet_codes.split(',') if c.strip()]
-    pets = Pet.objects.filter(code__in=pet_codes, is_deleted=False)
-    if not pets.exists():
-        return json_fail('原转运单关联的宠物不存在或已作废，无法重新下发')
-
-    district_id = transfer.district_id or getattr(user, 'district_id', None)
-    new_transfer = Transfer.objects.create(
-        capture=transfer.capture,
-        from_shelter=transfer.from_shelter,
-        from_shelter_name=transfer.from_shelter_name,
-        to_hospital=transfer.to_hospital,
-        to_hospital_name=transfer.to_hospital_name,
-        pet_codes=','.join(pet_codes),
-        pet_count=len(pet_codes),
-        status='pending',
-        operator=user,
-        operator_name=user.get_full_name() or user.username,
-        ledger_no=generate_ledger_no('TRF'),
-        district_id=district_id or transfer.district_id,
-    )
-
-    # 重新绑定医院，宠物状态保持/回退为在途
-    for pet in pets:
-        pet.hospital = transfer.to_hospital
-        pet.status = 'in_transit'
-        pet.save(update_fields=['hospital', 'status'])
-
-    if new_transfer.capture_id:
-        recalc_capture_status(new_transfer.capture)
-
-    return json_ok(serialize_instance(new_transfer), message='重新下发成功')
+# 说明：「重新下发被驳回的转运单」（transfer_resend）已**移除**。
+# 原因：原实现把被驳回的单据再复制成一张新的 pending 单，而原单永远停留在
+# rejected —— 于是同一张被驳回的单可以反复下发，同一只动物会同时挂在多张
+# 未结单据上（医院收到重复单、捕捉单状态推导跟着错乱）。
+# 现在改为：医院驳回时宠物已经回退为 in_transit + 解除医院归属（见
+# transfer_reject），这些动物**自动回到「待转运」的备选框**，
+# 由操作员重新勾选、按需改派医院，再下发一张新单即可。
+# 「同一动物不能挂在多张未结单上」由 transfer_create 的预校验兜底。
 
 
 @csrf_exempt

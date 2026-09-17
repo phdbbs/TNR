@@ -9,8 +9,8 @@ from django.utils import timezone
 
 from business.models import Capture, OwnerReturn, Pet, Transfer
 from business.tests.base import (
-    BusinessTestBase, make_capture, make_district, make_institution,
-    make_pet, make_user,
+    BusinessTestBase, make_capture, make_district, make_image_file,
+    make_institution, make_pet, make_user,
 )
 from core.models import Institution
 
@@ -209,7 +209,7 @@ class CaptureCreateTest(BusinessTestBase):
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_group_photo_upload(self):
         self.login_as(self.shelter_user_a)
-        upload = SimpleUploadedFile('photo.jpg', b'fakeimage', content_type='image/jpeg')
+        upload = make_image_file('photo.png')
         resp = self.client.post(
             f'{CAPTURES_URL}create/',
             data={**{k: str(v) for k, v in self._payload().items()}, 'group_photo': upload},
@@ -614,7 +614,7 @@ class CaptureDetailTest(BusinessTestBase):
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_detail_contains_all_form_fields(self):
         self.login_as(self.shelter_user_a)
-        upload = SimpleUploadedFile('group.jpg', b'fakeimage', content_type='image/jpeg')
+        upload = make_image_file('group.png')
         resp = self.client.post(f'{CAPTURES_URL}create/', data={
             'property_name': '详情物业', 'community_name': '详情小区',
             'address': '详情路9号', 'geo_address': '甲区详情路9号',

@@ -17,6 +17,23 @@ SEQ = {"district": 0, "institution": 0, "user": 0, "pet": 0, "material": 0,
        "chip": 0, "capture": 0}
 
 
+def make_image_file(name='photo.png', w=8, h=8, color=(200, 120, 80)):
+    """返回一个**内容真实**的图片上传文件。
+
+    不要用 `SimpleUploadedFile('x.png', b'fakeimage')`：上传接口现在会按**内容**
+    校验（`services.validate_image_upload` 用 Pillow 实际解码，不信任扩展名），
+    假字节会被正确拒绝，用例会以「不是有效的图片文件」失败。夹具必须给真图。
+    """
+    import io
+
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new('RGB', (w, h), color).save(buf, 'PNG')
+    return SimpleUploadedFile(name, buf.getvalue(), content_type='image/png')
+
+
 def _next(key, fmt):
     SEQ[key] += 1
     return fmt.format(SEQ[key])

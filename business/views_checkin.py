@@ -15,6 +15,7 @@ from business.models import CheckIn, Blacklist, Pet
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     get_district_filtered_queryset, check_blacklist,
+    validate_image_upload, resolve_district_scope,
 )
 
 
@@ -88,12 +89,18 @@ def checkin_create(request):
     month = data.get('month', '').strip()
     if not month:
         from django.utils import timezone
-        month = timezone.now().strftime('%Y-%m')
+        # 用 localdate()：now() 是 UTC，月初凌晨会把月份记成上一个月
+        month = timezone.localdate().strftime('%Y-%m')
 
     # 检查是否已打卡
     exists = CheckIn.objects.filter(pet=pet, month=month, adopter=user).exists()
     if exists:
         return json_fail(f'{month} 已打卡，请勿重复提交')
+
+    # 图片内容校验放在创建之前：非法时不要留下一条「没有照片」的打卡记录
+    photo_err = validate_image_upload(request.FILES.get('photo'), '打卡照片')
+    if photo_err:
+        return json_fail(photo_err)
 
     checkin = CheckIn.objects.create(
         pet=pet,
@@ -211,9 +218,14 @@ def blacklist_create(request):
     if not reason:
         return json_fail('拉黑原因不能为空')
 
-    district_id = data.get('district_id') or getattr(user, 'district_id', None)
-    if not district_id:
-        return json_fail('缺少区县信息')
+    # 归属区县以**操作员所属机构（捕捉点）**为准，不能直接取 user.district_id：
+    # 两个捕捉点操作员都挂在「全市（市级）」下，而前端不提交 district_id，
+    # 直接取操作员区县会让黑名单记录全部落到市级，本区县政府看不到。
+    anchor = getattr(user, 'institution', None)
+    district, err = resolve_district_scope(user, anchor, data.get('district_id'))
+    if err:
+        return json_fail(err)
+    district_id = district.id
 
     bl = Blacklist.objects.create(
         name=name,
