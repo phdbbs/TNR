@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260918c"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260918d"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -565,7 +565,7 @@ const Shelter = {
         html += '<button class="btn-link danger" data-act="del" data-id="' + r.id + '"' + (locked ? tip + dis : '') + '>删除</button>';
         return html;
       };
-      TNR_UI.mountTable('captureTableWrap', { id: 'shelter.captures', title: '捕捉记录', columns, data: list, emptyText: '暂无捕捉记录', rowActions });
+      TNR_UI.mountTable('captureTableWrap', { id: 'shelter.captures', columns, data: list, emptyText: '暂无捕捉记录', rowActions });
       const wrap = document.getElementById('captureTableWrap');
       // 行内按钮统一走事件委托（绑在稳定容器上）。renderTable 会被筛选反复调用、
       // 每次都重建 tbody，直接绑在行元素上的监听器会随旧节点丢失。
@@ -1449,7 +1449,7 @@ const Shelter = {
         { title: '时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
-      TNR_UI.mountTable('returnTableWrap', { id: 'shelter.ownerReturns', title: '主人领回记录', columns, data: filtered, emptyText: '暂无主人领回记录', rowActions });
+      TNR_UI.mountTable('returnTableWrap', { id: 'shelter.ownerReturns', columns, data: filtered, emptyText: '暂无主人领回记录', rowActions });
       // 行内按钮走事件委托（renderTable 会被筛选反复调用并重建 tbody）
       TNR_UI.delegateClick('returnTableWrap', {
         'data-act': (act, node) => {
@@ -1658,7 +1658,7 @@ const Shelter = {
       const rowActions = (r) => '<button class="btn-link warning" data-act="withdraw" data-id="' + r.id + '">撤回</button>';
 
       wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.transfers.pending"]', { id: 'shelter.transfers.pending', title: '已下发 · 待医院签收的转运单', columns, data: pendingOrders, emptyText: '暂无已下发待签收的转运单', rowActions });
+      TNR_UI.mountTable('[data-mt="shelter.transfers.pending"]', { id: 'shelter.transfers.pending', columns, data: pendingOrders, emptyText: '暂无已下发待签收的转运单', rowActions });
 
       if (availablePets.length > 0) {
         document.getElementById('btnCreateTransfer').addEventListener('click', async () => {
@@ -1738,7 +1738,6 @@ const Shelter = {
         if (v.end_date) rows = rows.filter(r => (r.createdAt || '').slice(0, 10) <= v.end_date);
         TNR_UI.mountTable('[data-mt="shelter.transfers.detail"]', {
           id: 'shelter.transfers.detail',
-          title: '转运明细（全部转运单据）',
           columns, data: rows, emptyText: '没有符合条件的转运单据', rowActions
         });
       };
@@ -1831,7 +1830,7 @@ const Shelter = {
         { title: '有效期', key: 'expiryDate', render: r => r.expiryDate || '—' }
       ];
       wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.material.stock"]', { id: 'shelter.material.stock', title: '捕捉点库存台账', columns, data: materials, emptyText: '暂无库存数据' });
+      TNR_UI.mountTable('[data-mt="shelter.material.stock"]', { id: 'shelter.material.stock', columns, data: materials, emptyText: '暂无库存数据' });
 
     } else if (tab === 'purchase') {
       let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>采购入库登记</div></div><div class="card-body">';
@@ -1854,7 +1853,7 @@ const Shelter = {
       const txns = (this._matTxns || []).filter(t => t.type === 'purchase');
       html += '<div data-mt="shelter.material.purchase"></div>';
       wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.material.purchase"]', { id: 'shelter.material.purchase', title: '采购入库记录', columns: [
+      TNR_UI.mountTable('[data-mt="shelter.material.purchase"]', { id: 'shelter.material.purchase', columns: [
           { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || '') + '</span>' },
           { title: '物料', key: 'materialName' },
           { title: '数量', render: r => r.quantity + ' ' + (r.unit || '') },
@@ -1915,7 +1914,7 @@ const Shelter = {
       const txns = (this._matTxns || []).filter(t => t.type === 'dispatch');
       html += '<div data-mt="shelter.material.outbound"></div>';
       wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.material.outbound"]', { id: 'shelter.material.outbound', title: '下发出库记录', columns: [
+      TNR_UI.mountTable('[data-mt="shelter.material.outbound"]', { id: 'shelter.material.outbound', columns: [
           { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || '') + '</span>' },
           { title: '物料', key: 'materialName' },
           { title: '数量', render: r => r.quantity + ' ' + (r.unit || '') },
@@ -1993,7 +1992,7 @@ const Shelter = {
           { title: '操作员', key: 'operatorName' },
           { title: '备注', key: 'note' }
         ];
-        TNR_UI.mountTable('flowTableWrap', { id: 'shelter.material.flow', title: '物资流向记录', columns, data: list, emptyText: '暂无流向记录' });
+        TNR_UI.mountTable('flowTableWrap', { id: 'shelter.material.flow', columns, data: list, emptyText: '暂无流向记录' });
       };
       renderFlow();
       TNR_UI.bindFilter(renderFlow);
@@ -2095,7 +2094,7 @@ const Shelter = {
         { title: '状态', render: r => TNR_UI.statusBadge(TNR_API.getPetStatusText(r.status), TNR_API.getPetStatusBadge(r.status).replace('badge-','')) },
         { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-recover="' + r.id + '">回收登记</button>' }
       ];
-      TNR_UI.mountTable('[data-mt="shelter.release.recovery"]', { id: 'shelter.release.recovery', title: '待回收动物列表', columns, data: recoverable, emptyText: '暂无待回收动物' });
+      TNR_UI.mountTable('[data-mt="shelter.release.recovery"]', { id: 'shelter.release.recovery', columns, data: recoverable, emptyText: '暂无待回收动物' });
 
       // 2) 回收记录列表（筛选栏 + 表格 + 分页）
       const returnFilters = [
@@ -2157,7 +2156,6 @@ const Shelter = {
         const returnRowActions = (r) => '<button class="btn-link" data-owner-return-id="' + r.id + '">详情</button>';
         TNR_UI.mountTable('[data-mt="shelter.release.return-records"]', {
           id: 'shelter.release.returnRecords',
-          title: '回收记录列表',
           columns: returnColumns,
           data: filtered,
           emptyText: '暂无回收记录',
@@ -2228,7 +2226,7 @@ const Shelter = {
         { title: '联系电话', key: 'receiverPhone', render: r => esc(r.receiverPhone || r.receiver_phone || '—') },
         { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-confirm-release="' + r.id + '">确认放养</button>' }
       ];
-      TNR_UI.mountTable('[data-mt="shelter.release.pending"]', { id: 'shelter.release.pending', title: '待放养确认', columns: pendingCols, data: pendingReleases, emptyText: '暂无待放养记录' });
+      TNR_UI.mountTable('[data-mt="shelter.release.pending"]', { id: 'shelter.release.pending', columns: pendingCols, data: pendingReleases, emptyText: '暂无待放养记录' });
 
       const releasedCols = [
         { title: '放养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
@@ -2238,7 +2236,7 @@ const Shelter = {
         { title: '接收人', key: 'receiverName', render: r => esc(r.receiverName || r.receiver_name || '—') },
         { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt || r.released_at) }
       ];
-      TNR_UI.mountTable('[data-mt="shelter.release.released"]', { id: 'shelter.release.released', title: '已放养记录', columns: releasedCols, data: releasedReleases, emptyText: '暂无放养记录' });
+      TNR_UI.mountTable('[data-mt="shelter.release.released"]', { id: 'shelter.release.released', columns: releasedCols, data: releasedReleases, emptyText: '暂无放养记录' });
 
       /* 换动物时带出该动物捕捉单登记的小区名（可改） */
       const syncRelCommunity = () => {
@@ -2283,7 +2281,7 @@ const Shelter = {
         { title: '领养时间', key: 'adoptedAt', render: r => TNR_UI.formatDateTime(r.adoptedAt || r.adopted_at) }
       ];
       wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.release.adoption"]', { id: 'shelter.release.adoption', title: '领养去向记录', columns, data: adoptedPets, emptyText: '暂无领养记录' });
+      TNR_UI.mountTable('[data-mt="shelter.release.adoption"]', { id: 'shelter.release.adoption', columns, data: adoptedPets, emptyText: '暂无领养记录' });
 
     } else if (tab === 'death') {
       /* 死亡：已登记死亡的动物 + **遗体移交**。
@@ -2316,7 +2314,7 @@ const Shelter = {
           } }
       ];
       wrap.innerHTML = html;
-      TNR_UI.mountTable('[data-mt="shelter.release.death"]', { id: 'shelter.release.death', title: '死亡记录与遗体移交', columns, data: deadPets, emptyText: '暂无死亡记录' });
+      TNR_UI.mountTable('[data-mt="shelter.release.death"]', { id: 'shelter.release.death', columns, data: deadPets, emptyText: '暂无死亡记录' });
     }
   },
 
@@ -2597,7 +2595,7 @@ const Shelter = {
         { title: '领养时间', key: 'adoptedAt', render: r => TNR_UI.formatDateTime(r.adoptedAt) }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
-      TNR_UI.mountTable('adoptionTableWrap', { id: 'shelter.adoption', title: '领养记录', columns, data: list, emptyText: '暂无领养记录', rowActions });
+      TNR_UI.mountTable('adoptionTableWrap', { id: 'shelter.adoption', columns, data: list, emptyText: '暂无领养记录', rowActions });
       // 行内按钮走事件委托（mountTable 排序/翻页会重建 tbody，行内监听器会丢）
       TNR_UI.delegateClick('adoptionTableWrap', {
         'data-act': (act, node) => {
@@ -2696,7 +2694,7 @@ const Shelter = {
         if (r.status === 'pending') return '<button class="btn-link success" data-act="approve" data-id="' + r.id + '">通过</button><button class="btn-link danger" data-act="reject" data-id="' + r.id + '">驳回</button>';
         return '<button class="btn-link" data-act="view" data-id="' + r.id + '">详情</button>';
       };
-      TNR_UI.mountTable('checkinTableWrap', { id: 'shelter.checkin', title: '回访打卡记录', columns, data: list, emptyText: '暂无打卡记录', rowActions });
+      TNR_UI.mountTable('checkinTableWrap', { id: 'shelter.checkin', columns, data: list, emptyText: '暂无打卡记录', rowActions });
       // 行内按钮走事件委托（mountTable 排序/翻页会重建 tbody，行内监听器会丢）
       TNR_UI.delegateClick('checkinTableWrap', {
         'data-act': async (act, node) => {
@@ -2779,7 +2777,7 @@ const Shelter = {
         { title: '登记时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
       const rowActions = (r) => '<button class="btn-link" data-act="edit" data-id="' + r.id + '">编辑</button><button class="btn-link danger" data-act="del" data-id="' + r.id + '">删除</button>';
-      TNR_UI.mountTable('blackTableWrap', { id: 'shelter.blacklist', title: '黑名单', columns, data: list, emptyText: '暂无黑名单记录', rowActions });
+      TNR_UI.mountTable('blackTableWrap', { id: 'shelter.blacklist', columns, data: list, emptyText: '暂无黑名单记录', rowActions });
       // 行内按钮走事件委托（renderTable 会被筛选/保存回调反复调用并重建 tbody）。
       // list 每次渲染都会重算，故挂到实例上由委托实时读取。
       this._blacklistRows = list;
@@ -3083,7 +3081,7 @@ const Shelter = {
         </div>
       </div>
     `;
-    TNR_UI.mountTable('ledgerTableHolder', { id: 'shelter.ledger', title: title, columns, data, emptyText: '暂无台账数据' });
+    TNR_UI.mountTable('ledgerTableHolder', { id: 'shelter.ledger', columns, data, emptyText: '暂无台账数据' });
     // 当前页签的行数据，供「行内点击」的事件委托取用（见 render_ledger）
     this._ledgerRows = data;
     document.getElementById('btnExportLedger').addEventListener('click', () => {

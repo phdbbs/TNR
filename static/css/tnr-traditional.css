@@ -1566,7 +1566,6 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
 .std-page-title { font-family: var(--font-display, serif); font-size: 20px; font-weight: 700; color: var(--ink-text); }
 .std-page-desc { font-size: var(--fs-xs, 12px); color: var(--ink-light); margin-top: 4px; }
 .std-page-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
-.std-card-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
 
 /* --- 标准表格：可排序列头 / 列宽拖拽 --- */
 .data-table th.dt-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
@@ -1616,13 +1615,20 @@ body .page-view .filter-bar {
   box-shadow: 0 2px 8px rgba(28, 28, 28, 0.06);
   margin-bottom: 10px;
 }
-body .dt-card .card-header {
+/* 表头冻结：表头钉在列表自身滚动区的顶部。
+   `.table-wrapper` 的高度由 `TNR_UI._fitTableHeight()` 按视口算出来（max-height），
+   这样它才是真正的纵向滚动容器，`position: sticky` 才会生效 —— 详见该方法的注释。
+   列表卡里已不再渲染 card-header（汇总标题已移除），原先钉在 top:100px 的规则随之作废。 */
+body .dt-card .table-wrapper {
+  overflow: auto;   /* 保留横向滚动（宽表）；纵向由 max-height 触发 */
+}
+body .dt-card .data-table.dt-table thead th {
   position: sticky;
-  top: 100px;
-  z-index: 20;
-  background: var(--white);
-  border-bottom: 1px solid var(--border-light);
-  border-radius: var(--r-md, 8px) var(--r-md, 8px) 0 0;
+  top: 0;
+  z-index: 3;
+  /* border-collapse: separate 下，sticky 表头的下边框会随内容一起滚走，
+     用 inset 阴影补一条分隔线，滚动过程中始终可见 */
+  box-shadow: inset 0 -1px 0 var(--border-ink);
 }
 
 /* 内容区自身滚动：顶栏（含页面标题）固定，sticky 头部相对内容区生效。
@@ -1666,8 +1672,8 @@ body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(
 /* --- 移动端适配（捕捉点端 / 医院端高频手机操作） --- */
 @media (max-width: 768px) {
   .std-page-head { flex-direction: column; align-items: stretch; }
-  .std-page-actions, .std-card-actions { width: 100%; }
-  .std-page-actions .btn, .std-card-actions .btn { flex: 1; }
+  .std-page-actions { width: 100%; }
+  .std-page-actions .btn { flex: 1; }
   .filter-bar { flex-direction: column; align-items: stretch; }
   .filter-item, .filter-item .form-input, .filter-item .form-select { width: 100%; min-width: 0; }
   .filter-actions { display: flex; width: 100%; }
@@ -1690,10 +1696,10 @@ body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(
   .pagination { justify-content: center; }
 }
 
-/* 移动端：筛选条/表格标题不锁定（堆叠换行会占满屏幕），仅顶栏与标签锁定 */
+/* 移动端：筛选条不锁定（堆叠换行会占满屏幕），仅顶栏与标签锁定。
+   表头仍锁定 —— 它钉在列表自身的滚动区里，与页面级 sticky 无关。 */
 @media (max-width: 768px) {
-  body .page-view .filter-bar,
-  body .dt-card .card-header { position: static; }
+  body .page-view .filter-bar { position: static; }
 }
 
 /* ============================================

@@ -228,9 +228,14 @@ const TNR_UI = {
 
   /**
    * 标准表格挂载：客户端分页（默认 10 条/页）+ 点击列头排序 + 列宽拖拽（localStorage 记忆）。
+   *
+   * **列表上方不再有汇总标题**：早期这里会渲染「捕捉记录（12）」这类带数量的标题头，
+   * 位于表头正上方。它既与页面/外层卡片的分区标题重复，又与「表头冻结」争抢 sticky 层级，
+   * 现已整块移除。需要分区标题时由调用方自备外层 `card-header`（不带数量）。
+   *
    * @param {string|Element} target 容器元素或 id
    * @param {object} opts { id, columns:[{key,title,render,width,sortable,align}], data, rowActions,
-   *                        emptyText, title, pageSize, pageSizes, wrap:'card'|'plain', actions }
+   *                        emptyText, pageSize, pageSizes, wrap:'card'|'plain' }
    */
   mountTable(target, opts) {
     const el = this._resolveEl(target);
@@ -276,11 +281,11 @@ const TNR_UI = {
 
     let html = '';
     if (opts.wrap !== 'plain') {
-      html += '<div class="card dt-card"><div class="card-body" style="padding:0;">';
-      if (opts.title) {
-        html += `<div class="card-header"><div class="card-title"><span class="card-title-bar"></span>${esc(opts.title)}${total ? `（${total}）` : ''}</div>${opts.actions ? `<div class="std-card-actions">${opts.actions}</div>` : ''}</div>`;
-      }
-      html += '<div class="table-wrapper">';
+      // 列表卡**不再渲染标题头**。此前这里是：
+      //   `<div class="card-header">…${title}${total ? `（${total}）` : ''}…</div>`
+      // 即「捕捉记录（12）」这类带数量的汇总文字，正好压在表头上方 —— 需求要求列表
+      // 上方不出现汇总数据，且该 header 也占用了 sticky 层级（top:100px），与表头冻结冲突。
+      html += '<div class="card dt-card"><div class="card-body" style="padding:0;"><div class="table-wrapper">';
     }
 
     if (total === 0) {
@@ -346,6 +351,13 @@ const TNR_UI = {
 
     el.innerHTML = html;
 
+    // 让「列表内容区」成为唯一纵向滚动区（筛选条 / 表头固定）——必须在入 DOM 之后，
+    // 否则量不到真实位置。窗口尺寸变化时统一重算（见 _bindTableFit）。
+    // 去重：mountTable 在排序/翻页时会重入，同一个容器不能反复入列。
+    if (!this._dtHosts.includes(el)) this._dtHosts.push(el);
+    this._bindTableFit();
+    this._fitTableHeight(el);
+
     // ---- 事件绑定 ----
     // 排序
     el.querySelectorAll('.dt-sortable').forEach(th => {
@@ -381,6 +393,129 @@ const TNR_UI = {
       handle.addEventListener('mousedown', (e) => this._startColResize(e, handle, el, opts, id, prefs));
       handle.addEventListener('touchstart', (e) => this._startColResize(e, handle, el, opts, id, prefs), { passive: true });
     });
+  },
+
+  /* ============================================
+     列表冻结：筛选条 + 表头固定，只有行区域滚动
+     ============================================ */
+  _dtHosts: [],        // 已挂载的列表容器（窗口尺寸变化时统一重算高度）
+  _dtFitBound: false,  // resize 监听只绑一次
+
+  /* 为什么需要给 `.table-wrapper` 一个 max-height：
+   *
+   * `thead th` 上本来就写了 `position: sticky`，但**一直没生效**，两个原因叠加：
+   *   1. 同文件后段 `.data-table thead th { position: relative; }` 覆盖了它
+   *      （为列宽拖拽手柄 `.dt-colresizer` 提供定位祖先而加，同选择器、后者胜）；
+   *   2. 外层 `.table-wrapper` 带 `overflow-x: auto` —— 只要一个轴不是 visible，
+   *      另一个轴的 visible 就会被计算成 auto，于是 wrapper 成了滚动容器。
+   *      它由内容撑开、永远不滚，sticky 表头便彻底失效。
+   *
+   * 表现就是用户看到的那样：滚轮下滑时筛选条钉住了，表头却跟着内容上移，
+   * 最后钻到筛选条底下被遮住。
+   *
+   * 修法：保留 wrapper 的横向滚动能力（宽表仍要能左右拖），给它一个**按视口算出来的
+   * max-height**，让它真的成为纵向滚动容器，表头 sticky 随即生效。max-height 只封顶
+   * 不拉伸，所以短列表的观感与改动前完全一致。
+   */
+  _fitTableHeight(el) {
+    if (!el || !el.querySelector) return;
+    const wrap = el.querySelector('.table-wrapper');
+    if (!wrap) return;                                   // wrap:'plain' 无卡片，不参与
+    const scroller = el.closest('.portal-content') || document.scrollingElement;
+    if (!scroller) return;
+
+    const viewportH = scroller.clientHeight || window.innerHeight;
+    const pager = el.querySelector('.dt-pagination');
+    const pagerH = pager ? pager.offsetHeight : 0;
+    const card = el.querySelector('.dt-card') || el;
+
+    // 页面本身不滚动 → 不存在「表头被筛选条压住」的场景，保持列表自然高度，
+    // 不要为了凑公式把它压小。
+    //
+    // 判定必须用「**解除限制后**会不会溢出」，不能直接看当前 scrollHeight：
+    // 一旦限了高，scrollHeight 就变小了，下次再判会得出「不溢出」→ 清掉限制 →
+    // 又溢出 → 再限高…… 来回振荡。这里用「wrapper 内容高 − 当前高」把
+    // 限高造成的差值补回去，判定就与当前是否限高无关，稳定收敛。
+    const unclampDelta = Math.max(0, wrap.scrollHeight - wrap.clientHeight);
+    if (scroller.scrollHeight + unclampDelta <= scroller.clientHeight + 1) {
+      wrap.style.maxHeight = '';
+      return;
+    }
+
+    const GAP = 16;        // 卡片下沿与视口底部的呼吸位
+    // 下限取「表头 + 1 行」的实测高度，而不是写死 200px ——
+    // 写死会在一部分页面上白白多留几十像素，把表头顶回筛选条底下（实测抓到过）。
+    const thH = (el.querySelector('.dt-table thead') || {}).offsetHeight || 44;
+    const rowH = (el.querySelector('.dt-table tbody tr') || {}).offsetHeight || 44;
+    const MIN = thH + rowH;
+
+    // 卡片下方的留白 / 内容（容器 padding、页面里排在列表之后的其它卡片）。
+    // 页面滚到底时，这些部分会占据视口底部，必须一并扣掉。
+    // 注意与 max-height 无循环依赖：改 max-height 时 scrollHeight 与 cardBottom
+    // 同步增减，差值（本值）恒定。
+    const sRect = scroller.getBoundingClientRect();
+    const cardBottom = card.getBoundingClientRect().bottom - sRect.top + (scroller.scrollTop || 0);
+    const tail = Math.max(0, scroller.scrollHeight - cardBottom);
+
+    // 固定头部（标签页 top:0 / 筛选条 top:46）永久占据视口顶部，同样扣掉。
+    // 于是：页面滚到底时列表恰好铺满剩余视口 —— 表头正好停在筛选条下沿，
+    // 既不会被遮住，分页条也不会被顶出屏幕。
+    const reserved = this._pinnedHeight(wrap, scroller);
+    const target = viewportH - reserved - pagerH - tail - GAP;
+    wrap.style.maxHeight = Math.max(MIN, Math.round(target)) + 'px';
+  },
+
+  /* 统计「表格上方、且自身固定（sticky/fixed）」的元素占用的视口上沿高度。
+     取值是 `top + offsetHeight` 的**最大值**而非累加 —— 这些元素是叠着钉的
+     （标签页 top:0/h:46、筛选条 top:46/h:54），取最大下沿才是真正被占掉的高度。
+
+     只遍历 wrap 之前的节点（按文档序），命中 sticky 即停止下钻，避免父子重复累加；
+     高度为 0 的节点（隐藏的其它 .page-view）直接跳过，省掉无谓的 getComputedStyle。 */
+  _pinnedHeight(wrap, root) {
+    let maxEdge = 0;
+    const walk = (node) => {
+      if (!node || node.nodeType !== 1 || !node.offsetHeight) return;
+      const cs = getComputedStyle(node);
+      if (cs.position === 'sticky' || cs.position === 'fixed') {
+        maxEdge = Math.max(maxEdge, (parseFloat(cs.top) || 0) + node.offsetHeight);
+        return;
+      }
+      for (const child of node.children) walk(child);
+    };
+    let node = wrap;
+    while (node && node !== root && node.parentElement) {
+      let sib = node.previousElementSibling;
+      while (sib) { walk(sib); sib = sib.previousElementSibling; }
+      node = node.parentElement;
+    }
+    return maxEdge;
+  },
+
+  /* 尺寸/布局变化时重算所有列表高度（去抖 120ms）。只在第一次 mountTable 时绑一次，
+     避免监听器随每次重渲染堆积。
+
+     `childList` 观察是必需的，不是保险：列表之外的内容（表单卡、说明卡、其它列表）
+     常常在 `mountTable` **之后**才渲染完，只在 mount 时算一次会拿到偏小的「卡片下方留白」，
+     把列表留得过高 —— 实测在「账号权限管理」上算出 199px，而真实值只有 137px，
+     页面滚到底时表头正好被筛选条压住 40px。
+     只观察 childList（**不含 attributes**），所以本方法自己写 max-height 不会反过来
+     触发它，不会自激。 */
+  _bindTableFit() {
+    if (this._dtFitBound) return;
+    this._dtFitBound = true;
+    let timer = null;
+    const run = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        // 容器可能已被 innerHTML 覆盖（旧页面的 tableWrap 被换掉），过滤掉脱离文档的
+        this._dtHosts = this._dtHosts.filter(h => h && document.contains(h));
+        this._dtHosts.forEach(h => this._fitTableHeight(h));
+      }, 120);
+    };
+    window.addEventListener('resize', run);
+    window.addEventListener('orientationchange', run);
+    const scope = document.querySelector('.portal-content') || document.body;
+    if (scope) new MutationObserver(run).observe(scope, { childList: true, subtree: true });
   },
 
   _startColResize(e, handle, el, opts, id, prefs) {

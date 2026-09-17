@@ -70,7 +70,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260918c"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260918d"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -521,7 +521,7 @@ const GovPortal = {
       <button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle-dist="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>
       <button class="btn-link danger" data-del-dist="${r.id}">删除</button>
     `) : (() => '');
-    TNR_UI.mountTable('distTableWrapper', { id: 'gov.districts', title: '区县列表', columns, data, rowActions, emptyText: '暂无区县数据' });
+    TNR_UI.mountTable('distTableWrapper', { id: 'gov.districts', columns, data, rowActions, emptyText: '暂无区县数据' });
     TNR_UI.delegateClick('distTableWrapper', {
       'data-edit-dist': (id) => this.showDistrictModal(id),
       'data-toggle-dist': (id) => this.toggleDistrictStatus(id),
@@ -643,7 +643,7 @@ const GovPortal = {
       <button class="btn-link" data-edit="${r.id}">编辑</button>
       <button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>
     `;
-    TNR_UI.mountTable('instTableWrapper', { id: 'gov.institutions', title: '机构列表', columns, data, rowActions, emptyText: '暂无机构数据' });
+    TNR_UI.mountTable('instTableWrapper', { id: 'gov.institutions', columns, data, rowActions, emptyText: '暂无机构数据' });
     TNR_UI.delegateClick('instTableWrapper', {
       'data-edit': (id) => this.showInstitutionModal(id),
       'data-toggle': (id) => this.toggleInstitutionStatus(id)
@@ -788,7 +788,7 @@ const GovPortal = {
     const rowActions = r => r.id === selfId
       ? '<span style="font-size:var(--fs-xs);color:var(--ink-light);">当前账号</span>'
       : `<button class="btn-link ${r.status === 'active' ? 'danger' : 'success'}" data-toggle="${r.id}">${r.status === 'active' ? '停用' : '启用'}</button>`;
-    TNR_UI.mountTable('acctTableWrapper', { id: 'gov.accounts', title: '账号列表', columns, data, rowActions, emptyText: '暂无账号' });
+    TNR_UI.mountTable('acctTableWrapper', { id: 'gov.accounts', columns, data, rowActions, emptyText: '暂无账号' });
     TNR_UI.delegateClick('acctTableWrapper', {
       'data-toggle': (id) => this.toggleAccountStatus(id)
     });
@@ -1126,7 +1126,7 @@ const GovPortal = {
     }
 
     const rowActions = r => `<button class="btn-link" data-detail="${r.id}">详情</button>`;
-    TNR_UI.mountTable('supTableWrapper', { id: 'gov.supervision.' + this.supState.tab, title: '业务监管', columns, data, rowActions, emptyText: '暂无监管数据' });
+    TNR_UI.mountTable('supTableWrapper', { id: 'gov.supervision.' + this.supState.tab, columns, data, rowActions, emptyText: '暂无监管数据' });
     TNR_UI.delegateClick('supTableWrapper', {
       'data-detail': (id) => this.showSupervisionDetail(type, id)
     });
@@ -1654,7 +1654,7 @@ const GovPortal = {
       };
     }
 
-    TNR_UI.mountTable('ledgerTableWrapper', { id: 'gov.ledger.' + tab, title: (typeLabelMap[tab] || '') + '台账', columns, data: records, emptyText: '暂无台账数据' });
+    TNR_UI.mountTable('ledgerTableWrapper', { id: 'gov.ledger.' + tab, columns, data: records, emptyText: '暂无台账数据' });
 
     // 当前页签的行数据，供「点单号弹详情」的事件委托取用（见 render_ledger）
     this._ledgerRecords = records;

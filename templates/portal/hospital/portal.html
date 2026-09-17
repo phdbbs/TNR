@@ -67,7 +67,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260918c"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260918d"></script>
 <script>
 /* ====================================================
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
@@ -357,7 +357,7 @@ const Hospital = {
       };
     });
 
-    TNR_UI.mountTable(c, { id: 'hospital.receive', title: '动物交接', columns: [
+    TNR_UI.mountTable(c, { id: 'hospital.receive', columns: [
         { title: '交接单号', key: '_ledger', sortable: false },
         { title: '宠物信息', key: 'petInfo', sortable: false },
         { title: '来源捕捉点', key: 'from_shelter_name' },
@@ -762,7 +762,7 @@ const Hospital = {
         };
       });
 
-      TNR_UI.mountTable(c, { id: 'hospital.treatments', title: '诊疗记录', columns: [
+      TNR_UI.mountTable(c, { id: 'hospital.treatments', columns: [
           { title: '宠物编号', key: 'pet_code' },
           { title: '诊疗项目', key: '_items', sortable: false },
           { title: '医院', key: 'hospital_name' },
@@ -901,7 +901,7 @@ const Hospital = {
         _actions: '<button class="btn btn-success btn-sm" data-mreceive="' + t.id + '">确认入库</button>',
       };
     });
-    TNR_UI.mountTable(c, { id: 'hospital.material.pending', title: '待接收物料', columns: [
+    TNR_UI.mountTable(c, { id: 'hospital.material.pending', columns: [
         { title: '物料名称', key: '_mat', sortable: false },
         { title: '数量', key: '_qty', sortable: false },
         { title: '批号', key: 'batch_no' },
@@ -970,7 +970,7 @@ const Hospital = {
       '<div class="card mt-5"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>异动记录</div></div><div class="card-body-flush">' + adjHtml + '</div></div>';
 
     if (adj.length > 0) {
-      TNR_UI.mountTable('hospitalAdjTable', { id: 'hospital.material.adjustment', title: '异动记录', columns: [
+      TNR_UI.mountTable('hospitalAdjTable', { id: 'hospital.material.adjustment', columns: [
           { title: '物料', key: 'material_name' },
           { title: '原因', key: 'note' },
           { title: '数量', key: '_qty', sortable: false },
@@ -1026,7 +1026,7 @@ const Hospital = {
         date: t.date,
       };
     });
-    TNR_UI.mountTable(c, { id: 'hospital.material.ledger', title: '物料台账', columns: [
+    TNR_UI.mountTable(c, { id: 'hospital.material.ledger', columns: [
         { title: '单据编号', key: 'ledger_no' },
         { title: '类型', key: '_type', sortable: false },
         { title: '物料', key: 'material_name' },
@@ -1112,7 +1112,7 @@ const Hospital = {
 
       if (pets.length === 0 && pendingClaims.length === 0) {
         page.innerHTML = applHtml + '<div class="empty-state"><div class="empty-state-icon">🐾</div><div class="empty-state-text">暂无待领养动物</div><div class="empty-state-desc">诊疗完成5天后，动物状态将自动变更为「待领养」</div></div>';
-        if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', title: '待审核领养申请', actions: '<span class="badge badge-cinnabar">' + pendingAppls.length + ' 条待处理</span>', columns: [
+        if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', columns: [
             { title: '宠物编号', key: '_pet', sortable: false },
             { title: '申请人', key: 'applicant_name' },
             { title: '电话', key: 'applicant_phone' },
@@ -1125,7 +1125,7 @@ const Hospital = {
 
       if (pets.length === 0) {
         page.innerHTML = claimsHtml + applHtml + '<div class="empty-state"><div class="empty-state-icon">🐾</div><div class="empty-state-text">暂无待领养动物</div><div class="empty-state-desc">诊疗完成5天后，动物状态将自动变更为「待领养」</div></div>';
-        if (pendingClaims.length > 0) TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', title: '待领出确认', actions: '<span class="badge badge-cinnabar">' + pendingClaims.length + ' 条待处理</span>', columns: [
+        if (pendingClaims.length > 0) TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', columns: [
             { title: '领养单号', key: 'ledger_no' },
             { title: '宠物编号', key: '_pet', sortable: false },
             { title: '领养人', key: 'adopter_name' },
@@ -1133,7 +1133,7 @@ const Hospital = {
             { title: '登记时间', key: 'created_at' },
             { title: '操作', key: '_actions', sortable: false },
           ], data: claimRows, emptyText: '暂无记录' });
-        if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', title: '待审核领养申请', actions: '<span class="badge badge-cinnabar">' + pendingAppls.length + ' 条待处理</span>', columns: [
+        if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', columns: [
             { title: '宠物编号', key: '_pet', sortable: false },
             { title: '申请人', key: 'applicant_name' },
             { title: '电话', key: 'applicant_phone' },
@@ -1179,7 +1179,7 @@ const Hospital = {
       }).join('');
 
       page.innerHTML = claimsHtml + applHtml + html;
-      if (pendingClaims.length > 0) TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', title: '待领出确认', actions: '<span class="badge badge-cinnabar">' + pendingClaims.length + ' 条待处理</span>', columns: [
+      if (pendingClaims.length > 0) TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', columns: [
           { title: '领养单号', key: 'ledger_no' },
           { title: '宠物编号', key: '_pet', sortable: false },
           { title: '领养人', key: 'adopter_name' },
@@ -1187,7 +1187,7 @@ const Hospital = {
           { title: '登记时间', key: 'created_at' },
           { title: '操作', key: '_actions', sortable: false },
         ], data: claimRows, emptyText: '暂无记录' });
-      if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', title: '待审核领养申请', actions: '<span class="badge badge-cinnabar">' + pendingAppls.length + ' 条待处理</span>', columns: [
+      if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', columns: [
           { title: '宠物编号', key: '_pet', sortable: false },
           { title: '申请人', key: 'applicant_name' },
           { title: '电话', key: 'applicant_phone' },
@@ -1358,7 +1358,7 @@ const Hospital = {
           operator_name: e.operator_name || '',
           _actions: '<button class="btn-link" data-view-euth="' + e.id + '">详情</button>',
         }));
-        TNR_UI.mountTable('hospitalEuthTable', { id: 'hospital.euthanasia', title: '安乐死处置记录', columns: [
+        TNR_UI.mountTable('hospitalEuthTable', { id: 'hospital.euthanasia', columns: [
             { title: '宠物编号', key: '_pet', sortable: false },
             { title: '原因', key: 'reason' },
             { title: '处置日期', key: 'euthanized_at' },
@@ -1489,7 +1489,7 @@ const Hospital = {
           received_at: t.received_at,
         };
       });
-      TNR_UI.mountTable(c, { id: 'hospital.ledger.transfer', title: '交接台账', columns: [
+      TNR_UI.mountTable(c, { id: 'hospital.ledger.transfer', columns: [
           { title: '单据编号', key: 'ledger_no' },
           { title: '创建时间', key: 'created_at' },
           { title: '来源捕捉点', key: 'from_shelter_name' },
@@ -1518,7 +1518,7 @@ const Hospital = {
           _status: this.treatmentStatusBadge(t.status),
         };
       });
-      TNR_UI.mountTable(c, { id: 'hospital.ledger.treatment', title: '诊疗台账', columns: [
+      TNR_UI.mountTable(c, { id: 'hospital.ledger.treatment', columns: [
           { title: '宠物编号', key: 'pet_code' },
           { title: '类别/品种/性别', key: '_attr', sortable: false },
           { title: '诊疗项目', key: '_items', sortable: false },
@@ -1543,7 +1543,7 @@ const Hospital = {
           operator_name: t.operator_name || '',
         };
       });
-      TNR_UI.mountTable(c, { id: 'hospital.ledger.material', title: '物料台账', columns: [
+      TNR_UI.mountTable(c, { id: 'hospital.ledger.material', columns: [
           { title: '单据编号', key: 'ledger_no' },
           { title: '类型', key: '_type', sortable: false },
           { title: '物料', key: 'material_name' },
@@ -1562,7 +1562,7 @@ const Hospital = {
         _body: e.body_received ? '<span class="badge badge-success">已移交</span>' : '<span class="badge badge-warning">未移交</span>',
         operator_name: e.operator_name || '',
       }));
-      TNR_UI.mountTable(c, { id: 'hospital.ledger.euthanasia', title: '安乐死台账', columns: [
+      TNR_UI.mountTable(c, { id: 'hospital.ledger.euthanasia', columns: [
           { title: '单据编号', key: 'ledger_no' },
           { title: '宠物编号', key: 'pet_code' },
           { title: '原因', key: 'reason' },
