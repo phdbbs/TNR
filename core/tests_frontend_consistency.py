@@ -1265,3 +1265,164 @@ class LocalDateDefaultTest(SimpleTestCase):
             '以下位置把 UTC 当本地时间用 —— 北京时间 00:00–08:00 会得到前一天：\n  '
             + '\n  '.join(problems)
             + '\n请改用 TNR_UI.todayStr() / TNR_UI.nowLocalStr()。')
+
+
+# ---------------------------------------------------------------------------
+# 筛选条（搜索条件）的取值来源与选项覆盖
+#
+# 第十二轮给十几个列表补了「常用搜索条件」。补筛选条有两类**静默**缺陷
+# （界面完全不报错，只是筛不出东西）：
+#   1. 选项值与后端 choices 脱节 —— 下拉里混进「选了必定 0 条」的死选项。
+#      真实案例：领养审核的状态筛选按「想当然的审批流」写成
+#      pending/pending_claim/completed/rejected，而后端只有
+#      pending_claim/completed/cancelled —— 两个死选项 + 漏掉真实存在的「已取消」。
+#   2. 筛选值不回 getFilterValues 取，而是回 DOM 里捞。真实案例：政府端台账
+#      用 `document.querySelector('[data-filter="district"]')` 读
+#      `selectedOptions[0].textContent` —— 各 `.page-view` 常驻 DOM，全局裸查
+#      命中的是**文档里第一个**区县下拉（机构管理页那个），于是「选任何区县都是空表」。
+# ---------------------------------------------------------------------------
+
+SELECT_FILTER_RE = re.compile(
+    r"key:\s*'([a-zA-Z_]+)'\s*,\s*label:\s*'([^']*)'\s*,"
+    r"\s*type:\s*'select'\s*,\s*options:\s*")
+
+
+def select_filters(source):
+    """列出源码里全部下拉筛选条：[(key, label, 字面量取值集合, options 表达式, 起始下标)]。
+
+    `options` 是动态表达式（`districts.filter(...)`）时，字面量取值集合为空 ——
+    那类筛选条的取值来自接口数据，不能用字面量比对。
+    """
+    out = []
+    for m in SELECT_FILTER_RE.finditer(source):
+        i = m.end()
+        if i < len(source) and source[i] == '[':
+            depth, j = 0, i
+            while j < len(source):
+                if source[j] == '[':
+                    depth += 1
+                elif source[j] == ']':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            expr = source[i:j + 1]
+            values = set(re.findall(r"value:\s*'([^']*)'", expr))
+        else:
+            # 动态 options：这些筛选条都是单行写法，取到行末即可
+            end = source.find('\n', i)
+            expr = source[i:end]
+            values = set()
+        out.append((m.group(1), m.group(2), values, expr, m.start()))
+    return out
+
+
+class FilterBarOptionCoverageTest(SimpleTestCase):
+    """下拉筛选条的选项必须与后端 choices **双向**对齐。
+
+    「缺项」让用户筛不到某一类；「多项」制造死选项。两个方向都要断言。
+    """
+
+    def _find(self, rel, must_have):
+        """按「选项里必然包含的取值」定位某一个下拉筛选条。
+
+        同一个 portal 里 label 为「状态」的筛选条有四五条，靠 key/label 无法区分；
+        用「某个只有该实体才有的枚举值」做指纹最稳（如 `partial` 只属于 Capture）。
+        """
+        for key, label, values, expr, pos in select_filters(read(rel)):
+            if values and must_have <= values:
+                return key, label, values
+        self.fail(f'{rel} 中未找到选项包含 {sorted(must_have)} 的下拉筛选条，'
+                  f'检查测试本身是否失效')
+
+    def _assert_covers(self, rel, must_have, model, field):
+        expected = {c[0] for c in model._meta.get_field(field).choices}
+        self.assertTrue(expected, f'{model.__name__}.{field} 没有定义 choices')
+        key, label, values = self._find(rel, must_have)
+        missing = expected - values
+        extra = values - expected
+        self.assertFalse(
+            missing,
+            f'{rel} 的「{label}」筛选（key={key}）缺少 {sorted(missing)}，'
+            f'用户无法按这些取值过滤。后端 {model.__name__}.{field} 全部取值：{sorted(expected)}')
+        self.assertFalse(
+            extra,
+            f'{rel} 的「{label}」筛选（key={key}）含后端不存在的取值 {sorted(extra)} —— '
+            f'选中它们永远是 0 条（死选项）。后端 {model.__name__}.{field} 全部取值：'
+            f'{sorted(expected)}')
+
+    def test_shelter_capture_status_filter_covers_all(self):
+        """捕捉单状态含 `void`（已作废），筛选下拉必须能选到它。"""
+        self._assert_covers(PORTALS['shelter'], {'partial'}, Capture, 'status')
+
+    def test_shelter_transfer_status_filter_covers_all(self):
+        self._assert_covers(PORTALS['shelter'], {'received'}, Transfer, 'status')
+
+    def test_shelter_adoption_status_filter_covers_all(self):
+        """领养状态只有 pending_claim/completed/cancelled，没有 pending/rejected。"""
+        self._assert_covers(PORTALS['shelter'], {'pending_claim'}, Adoption, 'status')
+
+    def test_shelter_checkin_status_filter_covers_all(self):
+        self._assert_covers(PORTALS['shelter'], {'approved'}, CheckIn, 'status')
+
+
+class DistrictFilterExcludesCityTest(SimpleTestCase):
+    """区县筛选下拉不得包含「全市（市级）」。
+
+    业务记录归属区县一律落到具体区县（`_resolve_district_scope` 明确拒绝市级），
+    所以「全市（市级）」永远筛不出任何一行。它还不是「无害的空选项」——
+    它排在第一位，用户很容易把它当成「全部」，选完看到空表会以为数据丢了。
+    """
+
+    def test_district_filter_options_exclude_city_level(self):
+        problems = []
+        for name, rel in PORTALS.items():
+            source = read(rel)
+            for key, label, values, expr, pos in select_filters(source):
+                if key != 'district':
+                    continue
+                # 只查「取值来自区县接口」的下拉。从业务数据里现推出来的
+                # （如政府端物料监管按流水 district_name 去重生成）天然不含市级。
+                if not re.search(r'\b(activeDistricts|districts)\b', expr):
+                    continue
+                if 'is_city' not in expr:
+                    line = source[:pos].count('\n') + 1
+                    problems.append(f'{rel}:{line} 「{label}」下拉未过滤市级区县')
+        self.assertFalse(
+            problems,
+            '以下区县筛选下拉含「全市（市级）」死选项，请补 `.filter(d => !d.is_city)`：\n  '
+            + '\n  '.join(problems))
+
+
+class FilterValueSourceTest(SimpleTestCase):
+    """筛选值必须走 `TNR_UI.getFilterValues()`，不得回 DOM 里捞。
+
+    这不是风格问题：各 portal 的 `.page-view` **全部常驻 DOM**（切页只切 `.active`），
+    所以任何「全局选择器 + 读控件当前值」的写法都会命中别的页面里的控件，
+    而那个控件此时是默认态 —— 表现为「筛选条怎么选都不变」或「选什么都空」。
+    """
+
+    # 全局裸查：document.querySelector('[data-filter=...]')
+    BARE_GLOBAL = re.compile(r"document\.querySelector(?:All)?\(\s*['\"]\[data-filter")
+    # 把下拉的显示文本当数据源（而非 getFilterValues 给出的 value）
+    DOM_TEXT = re.compile(r'\.selectedOptions\b')
+
+    def test_filter_values_not_read_from_dom(self):
+        problems = []
+        for name, rel in PORTALS.items():
+            source = strip_js_comments(read(rel))
+            for rx, why in (
+                (self.BARE_GLOBAL,
+                 '全局裸查 [data-filter] —— 会命中文档里第一个同类控件（往往是别的'
+                 '页面那个），筛选结果与用户实际所选无关'),
+                (self.DOM_TEXT,
+                 '用 selectedOptions 读下拉显示文本当数据源 —— 应改用 '
+                 'getFilterValues() 的 value，并自行完成 id→名称换算'),
+            ):
+                for m in rx.finditer(source):
+                    line = source[:m.start()].count('\n') + 1
+                    problems.append(f'{rel}:{line} {why}')
+        self.assertFalse(
+            problems,
+            '以下位置把 DOM 当成筛选数据源（各 .page-view 常驻 DOM，必然串页）：\n  '
+            + '\n  '.join(problems))
