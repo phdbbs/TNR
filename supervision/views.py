@@ -21,6 +21,7 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     get_district_scope, pet_brief, pet_archive_records, with_camel_keys,
     validate_operator_district, cascade_operator_district,
+    validate_user_manage_scope,
 )
 from core.audit import ACTION_LABELS
 from core.models import AuditLog, District, Institution
@@ -557,6 +558,13 @@ def user_create(request):
     district_err = validate_operator_district(role, district, institution)
     if district_err:
         return json_fail(district_err)
+
+    # 操作员自己的管辖范围：角色白名单 + 只能管本区县。
+    # 前端 canCreateRole() / 区县下拉只过滤了选项，**接口不做同一套校验就等于没校验** ——
+    # 实测区级管理员直接 POST `role=gov_city` 能建出一个市级管理员账号。
+    scope_err = validate_user_manage_scope(request.user, role, district, institution)
+    if scope_err:
+        return json_fail(scope_err)
 
     user = User.objects.create_user(
         username=username,

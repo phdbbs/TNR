@@ -389,6 +389,61 @@ class UserApiTest(SupervisionBase):
             username='shelter_bad', district_id=self.district_b.id,
             institution_id=self.shelter_a.id)), message='不一致')
 
+    def test_district_admin_cannot_create_government_roles(self):
+        """区级管理员不得建市级/区级管理员账号（服务端必须自己拦）。
+
+        前端 `canCreateRole()` 只是把角色下拉的选项过滤掉 —— 接口不做同一套校验
+        就等于没校验：直接 POST `role=gov_city` + 市级 `district_id` 会建出一个
+        **市级管理员**账号（口令还是攻击者自己填的），登录后
+        `get_district_scope()` 返回 `None`，**全部区县的数据都看得到**。
+        界面上点不出这个选项，所以怎么点都发现不了 —— 只有打接口才会暴露。
+        """
+        self.client.force_login(self.gov_a)
+        for role, district_id in (('gov_city', self.city.id),
+                                  ('gov_district', self.district_a.id)):
+            with self.subTest(role=role):
+                self.expect_fail(self.post_json(f'{API}/users/create/',
+                                                self._create_payload(
+                                                    username=f'esc_{role}',
+                                                    role=role,
+                                                    district_id=district_id,
+                                                    institution_id=None)),
+                                 message='无权创建或修改该角色的账号')
+        self.assertFalse(User.objects.filter(username__startswith='esc_').exists())
+
+    def test_district_admin_cannot_create_user_in_other_district(self):
+        """区级管理员只能管本区县 —— 否则等于给自己开一个跨区县的后门账号。"""
+        self.client.force_login(self.gov_a)
+        self.expect_fail(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='cross_hosp', role='hospital',
+            district_id=self.district_b.id, institution_id=self.hospital_b.id)),
+            message='无权管理其他区县的账号')
+        self.assertFalse(User.objects.filter(username='cross_hosp').exists())
+
+    def test_district_admin_can_create_own_district_operators(self):
+        """正向对照：只加拦截不测放行，过紧的校验发现不了。
+
+        捕捉点操作员按现场约定挂「市级」，判据必须看**机构**而不是账号区县 ——
+        判错就会把区级管理员唯一能建的那类账号全挡掉。
+        """
+        self.client.force_login(self.gov_a)
+        self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='own_hosp', role='hospital',
+            district_id=self.district_a.id, institution_id=self.hospital_a.id)))
+        self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='own_shelter', role='shelter',
+            district_id=self.city.id, institution_id=self.shelter_a.id)))
+
+    def test_city_admin_can_still_create_government_roles(self):
+        """正向对照：市级管理员不受这条限制（否则整个系统建不出第二个管理员）。"""
+        self.client.force_login(self.gov_city)
+        self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='city_new_dist', role='gov_district',
+            district_id=self.district_a.id, institution_id=None)))
+        self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='city_new_city', role='gov_city',
+            district_id=self.city.id, institution_id=None)))
+
     def test_toggle_self_rejected(self):
         """管理员不能停用自己（防止自锁）"""
         self.client.force_login(self.gov_a)

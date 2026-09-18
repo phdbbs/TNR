@@ -813,7 +813,14 @@ const GovPortal = {
     const districts = await TNR_API.getDistricts();
     const activeDistricts = (districts || []).filter(d => d.status === 'active');
     const cityDistricts = activeDistricts.filter(d => d.is_city);     // 市级
-    const realDistricts = activeDistricts.filter(d => !d.is_city);    // 区级
+    // 区级管理员只能管本区县，下拉就必须只列本区县 ——
+    // 否则「所属区县」列出全部 4 个、而「关联机构」只列本区县的，
+    // 随手选一个他区就会撞上「账号区县与机构区县不一致」。
+    // 服务端 `validate_user_manage_scope()` 拦的是同一件事（前端只是别让人白填）。
+    let realDistricts = activeDistricts.filter(d => !d.is_city);      // 区级
+    if (!this.isCityLevel() && this.currentUser && this.currentUser.district_id) {
+      realDistricts = realDistricts.filter(d => d.id === this.currentUser.district_id);
+    }
     const allRoles = [
       { value: 'gov_city', label: '市级管理员' }, { value: 'gov_district', label: '区级管理员' },
       { value: 'shelter', label: '捕捉点操作员' }, { value: 'hospital', label: '医院操作员' }

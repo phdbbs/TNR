@@ -14,7 +14,7 @@ from business.services import (
     adjust_stock, use_chip, amap_ip_location,
     capture_transfer_state, capture_states_bulk,
     validate_operator_district, cascade_operator_district,
-    resolve_operator_district,
+    resolve_operator_district, validate_user_manage_scope,
 )
 from business.tests.base import (
     BusinessTestBase, make_chip, make_district, make_hospital_txn,
@@ -487,6 +487,61 @@ class ResolveOperatorDistrictTest(BusinessTestBase):
                 self.assertEqual(resolved is None, err is None, (err, resolved))
                 if expect:
                     self.assertEqual(resolved, getattr(self, expect))
+
+
+class ValidateUserManageScopeTest(BusinessTestBase):
+    """操作员自己的管辖范围：角色白名单 + 只能管本区县。
+
+    为什么必须做在服务端：前端 `canCreateRole()` 只是把角色下拉的选项过滤掉，
+    接口没有同一套校验就等于没校验 —— 实测区级管理员直接 POST `role=gov_city`
+    **能建出一个市级管理员账号**（口令还是他自己填的），登录后看到全部区县数据。
+    这类「界面上点不出来、只有打接口才会暴露」的漏洞，正是最该用用例锁住的一类。
+    """
+
+    def test_city_admin_can_manage_all_roles(self):
+        for role in ('gov_city', 'gov_district', 'shelter', 'hospital'):
+            with self.subTest(role=role):
+                self.assertIsNone(
+                    validate_user_manage_scope(self.gov_city, role, self.district_a, None))
+
+    def test_district_admin_cannot_create_government_roles(self):
+        """核心越权：区级管理员不得建市级/区级管理员账号。"""
+        for role in ('gov_city', 'gov_district'):
+            with self.subTest(role=role):
+                err = validate_user_manage_scope(self.gov_a, role, self.district_a, None)
+                self.assertIn('无权', err)
+
+    def test_district_admin_can_create_own_district_hospital(self):
+        """正向对照：只加拦截不测放行，过紧的校验发现不了。"""
+        self.assertIsNone(validate_user_manage_scope(
+            self.gov_a, 'hospital', self.district_a, self.hospital_a))
+
+    def test_district_admin_can_create_city_level_shelter_of_own_institution(self):
+        """捕捉点操作员按现场约定挂「市级」，判据要看**机构**而不是账号区县。
+
+        若误判成账号区县，区级管理员唯一能建的那类账号会被全部挡掉。
+        """
+        self.assertIsNone(validate_user_manage_scope(
+            self.gov_a, 'shelter', self.city, self.shelter_a))
+
+    def test_district_admin_cannot_use_other_district_institution(self):
+        """跨区县：机构在乙区，甲区管理员不得拿它建号。"""
+        err = validate_user_manage_scope(
+            self.gov_a, 'hospital', self.district_b, self.hospital_b)
+        self.assertIn('其他区县', err)
+        err = validate_user_manage_scope(
+            self.gov_a, 'shelter', self.city, self.shelter_b)
+        self.assertIn('其他区县', err)
+
+    def test_district_admin_cannot_create_account_in_other_district(self):
+        """没有机构时退化成判账号区县。"""
+        err = validate_user_manage_scope(self.gov_a, 'hospital', self.district_b, None)
+        self.assertIn('其他区县', err)
+
+    def test_non_government_roles_have_no_manageable_roles(self):
+        self.assertIsNotNone(
+            validate_user_manage_scope(self.shelter_user_a, 'hospital',
+                                       self.district_a, self.hospital_a))
 
 
 class CascadeOperatorDistrictTest(BusinessTestBase):

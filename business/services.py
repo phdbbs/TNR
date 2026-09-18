@@ -1054,6 +1054,60 @@ def cascade_operator_district(institution, old_district_id):
     ).update(district=institution.district)
 
 
+# 各角色可以创建/修改的账号角色 —— **服务端唯一真源**。
+#
+# 前端 `GovPortal.canCreateRole()` 早就把这套规则写了一遍（只是把角色下拉的选项
+# 过滤掉），但接口**没有任何对应校验**，等于没校验：
+# 实测区级管理员直接 POST `role=gov_city` + 市级 `district_id` 能建出一个
+# **市级管理员**账号 —— 口令还是他自己填的，登录后 `get_district_scope()` 返回
+# `None`，**全部区县的数据都看得到**。
+#
+# 这类「前端做了、后端没做」的校验特别危险：界面上根本点不出这个选项，
+# 所以无论怎么点都发现不了，只有直接打接口才会暴露。
+MANAGEABLE_ROLES = {
+    'gov_city': ('gov_city', 'gov_district', 'shelter', 'hospital'),
+    'gov_district': ('shelter', 'hospital'),
+}
+
+
+def validate_user_manage_scope(operator, role, district, institution):
+    """校验「当前操作员」有没有资格创建/修改「这样一个账号」，返回错误信息。
+
+    两条规则：
+
+    1. **角色**必须在他可管理的集合里（`MANAGEABLE_ROLES`）；
+    2. **区级管理员**只能管理「**账号所代表的对象**落在本区县」的账号。
+
+    第 2 条的判据是「代表谁」，**不是账号自己的 `district`**：
+    捕捉点操作员按现场约定挂在「全市（市级）」（见 `resolve_district_scope` 的说明），
+    判账号区县会把区级管理员**唯一能建的捕捉点操作员全挡掉**。
+    所以：
+
+    - 捕捉点 → 判**机构所在区县**（操作员代表的是那个捕捉点）；
+    - 医院 → 判**机构所在区县**（医院操作员两者必须一致，
+      见 `validate_operator_district`，取机构侧与它天然同源）。
+
+    :return: 错误信息；通过时为 None
+    """
+    operator_role = getattr(operator, 'role', None)
+    allowed = MANAGEABLE_ROLES.get(operator_role, ())
+    if role not in allowed:
+        return '无权创建或修改该角色的账号'
+    if operator_role != 'gov_district':
+        return None
+
+    if institution is not None:
+        anchor_district_id = institution.district_id
+    elif district is not None:
+        anchor_district_id = district.id
+    else:
+        anchor_district_id = None
+
+    if anchor_district_id != getattr(operator, 'district_id', None):
+        return '无权管理其他区县的账号'
+    return None
+
+
 # ============================================
 # 上传图片校验
 # ============================================

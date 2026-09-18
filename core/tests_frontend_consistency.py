@@ -13,6 +13,7 @@ import re
 from django.test import SimpleTestCase
 
 from business.models import Adoption, Capture, CheckIn, MaterialTransaction, Pet, Treatment, Transfer
+from business.services import MANAGEABLE_ROLES
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -1518,3 +1519,48 @@ class TableHeightFloorTest(SimpleTestCase):
             '列表高度下限没把 wrapper 自身的上下边框算进去。\n'
             'max-height 作用在**边框盒**上（实测 maxHeight=744 → clientHeight=742），'
             '少算这 2px 会让最后一行被裁掉一点点，并造出假滚动条。')
+
+
+class ManageableRolesContractTest(SimpleTestCase):
+    """「谁能建哪些角色的账号」前后端必须同一套，后端是**唯一真源**。
+
+    这里锁的是一类真实漏洞：`GovPortal.canCreateRole()` 早就把规则写在界面上
+    （只是把角色下拉的选项过滤掉），而 `supervision.user_create`
+    **没有任何对应校验** —— 实测区级管理员直接 POST `role=gov_city` +
+    市级 `district_id` 就建出了一个**市级管理员**账号（口令还是他自己填的），
+    登录后 `get_district_scope()` 返回 `None`，**全部区县的数据都看得到**。
+
+    这类「前端做了、后端没做」的校验特别难被发现：界面上根本点不出这个选项，
+    所以怎么点都正常，**只有直接打接口才会暴露**。所以两侧必须用一条断言绑死：
+    改一侧不改另一侧就红。
+    """
+
+    # `if (this.currentUser.role === 'gov_city') return ['a', 'b'].includes(role);`
+    PATTERN = re.compile(
+        r"this\.currentUser\.role\s*===\s*'(\w+)'\)\s*return\s*\[([^\]]*)\]")
+
+    def _frontend_roles(self):
+        source = read(PORTALS['gov'])
+        m = re.search(r'canCreateRole\(role\)\s*\{', source)
+        self.assertIsNotNone(m, 'gov portal 里找不到 canCreateRole —— 本测试需要同步更新')
+        body = brace_body(source, source.index('{', m.start()))
+        self.assertIsNotNone(body, 'canCreateRole 方法体的花括号不配对')
+        return {
+            role: [x.strip().strip('\'"') for x in roles.split(',') if x.strip()]
+            for role, roles in self.PATTERN.findall(body)
+        }
+
+    def test_frontend_role_lists_match_backend(self):
+        self.assertEqual(
+            self._frontend_roles(),
+            {role: list(roles) for role, roles in MANAGEABLE_ROLES.items()},
+            '前端 `canCreateRole()` 与后端 `services.MANAGEABLE_ROLES` 不一致。\n'
+            '后端才是真正生效的那一份 —— 前端只过滤下拉选项，改错了不会有任何提示，\n'
+            '只会让界面上少一个（或凭空多一个）角色选项。')
+
+    def test_backend_roles_cover_every_non_adopter_role(self):
+        """市级管理员必须能建出全部非领养人角色，否则会「建不出第二个管理员」。"""
+        self.assertEqual(
+            set(MANAGEABLE_ROLES['gov_city']),
+            {'gov_city', 'gov_district', 'shelter', 'hospital'},
+            '市级管理员可建角色集合变了 —— 领养人不在政府端创建，其余四种都应可建。')
