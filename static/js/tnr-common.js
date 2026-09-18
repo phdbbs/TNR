@@ -461,14 +461,37 @@ const TNR_UI = {
     }
 
     const GAP = 16;        // 卡片下沿与视口底部的呼吸位
-    // 下限 = 表头 + **默认每页 10 行**（mountTable 默认 10 条/页）。
+    // 下限 = 表头 + **当前每页条数**（mountTable 默认 10 条/页）。
     // 此前下限是「表头 + 1 行」，结果在「列表下方还排着别的卡片」的页面上，剩余视口
     // 空间被 tail 吃掉，列表被压到只剩 1~2 行 —— 实测「动物去向/回收」只显示 1 行、
     // 「账号权限管理」3 行，日常没法用。磊哥要求「列表高度按默认 10 行设置」。
-    // 表头高与行高都取实测值，不写死像素。
+    //
+    // ⚠ 行高**不能**用「首行高 × N」估算：长文本会折行，同一张表里行高并不均匀。
+    // 实测「全量台账中心 / 捕捉台账」首行 70px、第 5/7/10 行 76px，按首行估出
+    // 「10 行刚好 742px」，而实际需要 767px → 第 10 行被裁掉、只完整显示 9 行，
+    // 还凭空多出一条 25px 的内部滚动条（且完全不报错）。
+    // 改成**直接量第 N 行的下沿**，拿到的就是前 N 行的真实累计高度，与行高是否整齐无关。
+    const sizeSel = el.querySelector('.dt-pagesize');
+    const perPage = (sizeSel && parseInt(sizeSel.value, 10)) || 10;
+    const tbody = el.querySelector('.dt-table tbody');
+    const trows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
     const thH = (el.querySelector('.dt-table thead') || {}).offsetHeight || 44;
-    const rowH = (el.querySelector('.dt-table tbody tr') || {}).offsetHeight || 44;
-    const MIN = thH + rowH * 10;
+    let rowsH = 0;
+    if (trows.length) {
+      const last = trows[Math.min(trows.length, perPage) - 1];
+      rowsH = last.getBoundingClientRect().bottom - tbody.getBoundingClientRect().top;
+    }
+    if (!(rowsH > 0)) {
+      // 空态（无数据行）时退回估算，保证下限仍然成立
+      const rowH = (el.querySelector('.dt-table tbody tr') || {}).offsetHeight || 44;
+      rowsH = rowH * perPage;
+    }
+    // max-height 作用在**边框盒**上（实测 maxHeight=744 → clientHeight=742），
+    // 所以要把 wrapper 自身的上下边框与内边距补进来，否则内容区正好差这几像素。
+    const wcs = getComputedStyle(wrap);
+    const boxY = (parseFloat(wcs.borderTopWidth) || 0) + (parseFloat(wcs.borderBottomWidth) || 0)
+      + (parseFloat(wcs.paddingTop) || 0) + (parseFloat(wcs.paddingBottom) || 0);
+    const MIN = Math.ceil(thH + rowsH + boxY);
 
     // 卡片下方的留白 / 内容（容器 padding、页面里排在列表之后的其它卡片）。
     // 页面滚到底时，这些部分会占据视口底部，必须一并扣掉。
@@ -486,7 +509,10 @@ const TNR_UI = {
     // 下限生效（10 行）时，短列表自然高度更小，max-height 只封顶不拉伸，观感不变。
     // 容差：cap 与内容自然高只差 1~2px 时直接取自然高 —— 那是行高的取整误差，
     // 硬限会凭空给列表多出一条 1px 的滚动条（实测「捕捉台账」踩到过）。
-    const natural = wrap.scrollHeight;
+    // 与 cap 同单位：max-height 作用在**边框盒**上，而 scrollHeight 只含「内边距 + 内容」。
+    // 两者差一个上下边框（实测 2px）。单位不一致会让「cap 与自然高只差 1~2px」的容差判断
+    // 失真 —— 该走「内容放得下」分支的表格会被判成放不下，从而被限高、裁掉最后一行。
+    const natural = wrap.scrollHeight + boxY;
     let cap = Math.max(MIN, Math.round(target));
     if (cap >= natural - 2) cap = natural;
 

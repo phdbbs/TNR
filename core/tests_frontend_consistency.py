@@ -1426,3 +1426,74 @@ class FilterValueSourceTest(SimpleTestCase):
             problems,
             '以下位置把 DOM 当成筛选数据源（各 .page-view 常驻 DOM，必然串页）：\n  '
             + '\n  '.join(problems))
+
+
+class TableHeightFloorTest(SimpleTestCase):
+    """列表高度下限（每页 N 行）必须**实测**前 N 行的累计高度，不得用「首行行高 × N」估算。
+
+    表格里长文本会折行，同一张表的行高并不均匀 —— 实测「全量台账中心 / 捕捉台账」
+    首行 69.78px、第 5/7/10 行 76.19px：按首行估出「10 行刚好 742px」，
+    而实际需要 767px，于是第 10 行被裁掉、只完整显示 9 行，还凭空多出一条 25px 的
+    内部滚动条。**界面上完全不报错**（表格照常渲染），只有量「可视行数」才发现得了 ——
+    渲染侧的守卫是 `gui-test-scripts/42_lists_inventory.js` 的「被压扁」栏
+    （该栏原先留了 1 行容差，恰好把这一行放过去，已一并收紧）。
+    """
+
+    # 估算写法：`const MIN = ... rowH * <数字|变量>`
+    ESTIMATED_FLOOR = re.compile(r'\bMIN\s*=\s*[^;]*\browH\s*\*')
+    # 正确写法：某一行的 `.bottom` 减去 tbody 的 `.top` —— 即前 N 行的真实累计高度。
+    # ⚠ 不能只写 `getBoundingClientRect().bottom`：同方法里 `cardBottom` 那行也含它，
+    # 断言会被无关代码满足（本测试第二版就踩到，变异测试才发现咬不住）。
+    MEASURED = re.compile(
+        r'\.bottom\s*-\s*[^;]{0,80}?getBoundingClientRect\(\)\s*\.top')
+
+    def _fit_body(self):
+        """返回 (源码, `_fitTableHeight` 方法体, 方法体在源码里的起始下标)。
+
+        第三个值是**必需的**：方法体的匹配偏移是相对方法体的，直接拿去索引整份源码
+        会算出离谱的行号（本测试第一版就踩到 —— 494 行报成 76 行），
+        把看报错的人带到完全无关的位置。注释已剥离，避免说明文字把断言骗过。
+        """
+        source = strip_js_comments(read('static/js/tnr-common.js'))
+        m = re.search(r'(?m)^  _fitTableHeight\s*\([^)]*\)\s*\{', source)
+        self.assertIsNotNone(
+            m, '未在 static/js/tnr-common.js 找到 _fitTableHeight —— 本测试需要同步更新')
+        base = source.index('{', m.start())
+        body = brace_body(source, base)
+        self.assertIsNotNone(body, '_fitTableHeight 方法体的花括号不配对')
+        return source, body, base
+
+    def test_floor_is_measured_not_estimated(self):
+        source, body, base = self._fit_body()
+        self.assertTrue(
+            self.MEASURED.search(body),
+            '列表高度下限必须**实测**前 N 行的累计高度：取第 N 行的 '
+            '`getBoundingClientRect().bottom` 减去 tbody 顶部。\n'
+            '不能用「首行行高 × N」估算 —— 行高随内容折行而变，'
+            '估算会少算几十像素，把最后一行裁掉且不报错。')
+        m = self.ESTIMATED_FLOOR.search(body)
+        if m:
+            self.fail(
+                'static/js/tnr-common.js:%d 仍在用「行高 × N」估算列表高度下限。\n'
+                '表格行高不齐时（长文本折行）会少算几十像素 → 最后一行被裁、'
+                '并多出一条内部滚动条；实测「全量台账中心 / 捕捉台账」少显示 1 行。\n'
+                '请改成实测第 N 行的下沿。'
+                % (source[:base + m.start()].count('\n') + 1))
+
+    def test_floor_follows_page_size_control(self):
+        """下限的行数必须取自分页的「N 条/页」控件，不能写死 10。"""
+        _, body, _ = self._fit_body()
+        self.assertIn(
+            'dt-pagesize', body,
+            '列表高度下限的行数写死了 —— 用户把「条/页」改成 50 后，'
+            '下限仍按 10 行算，列表会被压到 10 行高。\n'
+            '应从分页的 `.dt-pagesize` 控件读当前每页条数（缺省才回落 10）。')
+
+    def test_floor_covers_wrapper_border(self):
+        """限高值要含 wrapper 自身边框：max-height 作用在**边框盒**上。"""
+        _, body, _ = self._fit_body()
+        self.assertRegex(
+            body, r'borderTopWidth|offsetHeight\s*-\s*wrap\.clientHeight',
+            '列表高度下限没把 wrapper 自身的上下边框算进去。\n'
+            'max-height 作用在**边框盒**上（实测 maxHeight=744 → clientHeight=742），'
+            '少算这 2px 会让最后一行被裁掉一点点，并造出假滚动条。')
