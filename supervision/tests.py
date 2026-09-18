@@ -1,4 +1,6 @@
 """supervision 应用测试：政府监管端接口与权限边界。"""
+import json
+
 from accounts.models import User
 from business.models import (
     Adoption, Capture, Euthanasia, Material, MaterialTransaction, Pet,
@@ -8,7 +10,7 @@ from business.tests.base import (
     ApiMixin, make_district, make_institution, make_material, make_pet,
     make_user,
 )
-from core.models import District
+from core.models import AuditLog, District
 from django.test import TestCase
 from supervision.models import SystemConfig
 
@@ -518,14 +520,59 @@ class SupervisionDataTest(SupervisionBase):
         self.assertTrue(all(r['business_type'] == 'capture' for r in data['records']))
 
     def test_operation_logs(self):
-        from django.contrib.admin.models import ADDITION, LogEntry
-        from django.contrib.contenttypes.models import ContentType
-        LogEntry.objects.log_action(
-            user_id=self.gov_city.id, content_type_id=ContentType.objects.get_for_model(Pet).id,
-            object_id=1, object_repr='测试', action_flag=ADDITION, change_message='测试日志')
+        """操作日志读的是 core.AuditLog。
+
+        这里曾经断言 admin `LogEntry`：业务接口**从不经过 admin**，
+        `LogEntry` 永远是 0 行，测试用 `log_action()` 手工塞一条才能过 ——
+        等于把「日志页永远为空」这个缺陷固化成了守卫。
+        """
+        AuditLog.objects.create(
+            user=self.gov_city, user_name='sv_gov_city', role='gov_city',
+            district=self.district_a, district_name=self.district_a.name,
+            module='机构管理', action_flag=AuditLog.ACTION_ADD,
+            object_repr='I999', summary='机构管理·新增 I999')
         self.client.force_login(self.gov_city)
         data = self.ok(self.client.get(f'{API}/logs/'))['data']
-        self.assertTrue(any(log['change_message'] == '测试日志' for log in data))
+        self.assertTrue(any(log['summary'] == '机构管理·新增 I999' for log in data))
+
+    def test_operation_logs_records_real_business_write(self):
+        """端到端：捕捉点写业务 → 政府端日志里能看到，且归属区县按业务记录算。"""
+        self.client.force_login(self.shelter_user)
+        self.ok(self.client.post(
+            '/api/business/captures/create/',
+            data=json.dumps({
+                'shelter_id': self.shelter_a.id,
+                'pet_count': 1,
+                'property_name': '甲区物业',
+                'community_name': '甲区小区',
+                'contact_person': '张三',
+                'contact_phone': '13800000000',
+            }), content_type='application/json'))
+
+        self.client.force_login(self.gov_a)
+        data = self.ok(self.client.get(f'{API}/logs/'))['data']
+        row = next((r for r in data if r['module'] == '捕捉登记'), None)
+        self.assertIsNotNone(row, '本区县政府的日志页里看不到本区捕捉点刚登记的操作')
+        self.assertEqual(row['districtId'], self.district_a.id)
+        self.assertEqual(row['actionLabel'], '新增')
+        self.assertEqual(row['userName'], 'sv_shelter')
+
+    def test_operation_logs_hidden_from_other_district(self):
+        self.client.force_login(self.shelter_user)
+        self.ok(self.client.post(
+            '/api/business/captures/create/',
+            data=json.dumps({
+                'shelter_id': self.shelter_a.id,
+                'pet_count': 1,
+                'property_name': '甲区物业',
+                'community_name': '甲区小区',
+                'contact_person': '张三',
+                'contact_phone': '13800000000',
+            }), content_type='application/json'))
+        self.client.force_login(self.gov_b)
+        data = self.ok(self.client.get(f'{API}/logs/'))['data']
+        self.assertFalse([r for r in data if r['module'] == '捕捉登记'],
+                         '乙区政府不应看到甲区的操作日志')
 
     def test_system_config_get_defaults(self):
         self.client.force_login(self.gov_city)

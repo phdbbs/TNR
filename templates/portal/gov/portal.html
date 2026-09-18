@@ -20,8 +20,9 @@
   .chart-bar-fill.blue{background:var(--azurite)}
   .log-entry{padding:var(--sp-3) var(--sp-4);border-bottom:1px solid var(--border-faint);display:flex;align-items:center;gap:var(--sp-3)}
   .log-time{font-size:var(--fs-xs);color:var(--ink-light);white-space:nowrap;font-variant-numeric:tabular-nums}
-  .log-action{font-size:var(--fs-sm);color:var(--ink-text);font-weight:500;min-width:100px}
+  .log-action{font-size:var(--fs-sm);color:var(--ink-text);font-weight:500;min-width:150px;flex-shrink:0}
   .log-detail{font-size:var(--fs-xs);color:var(--ink-muted);flex:1}
+  .log-fail{color:var(--rouge);font-weight:600}
   .alert-item{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4);border-radius:var(--r-md);margin-bottom:var(--sp-2)}
   .alert-item.warning{background:var(--autumn-light);border-left:3px solid var(--autumn-gold)}
   .alert-item.danger{background:var(--rouge-light);border-left:3px solid var(--rouge)}
@@ -1980,9 +1981,7 @@ const GovPortal = {
           const f = TNR_UI.getFilterValues(el);
           let filtered = logs || [];
           if (f.logsearch) filtered = (logs || []).filter(l =>
-            (l.action && l.action.toLowerCase().includes(f.logsearch)) ||
-            (JSON.stringify(l.change_message || '').toLowerCase().includes(f.logsearch)) ||
-            (l.user_name && l.user_name.toLowerCase().includes(f.logsearch))
+            this.logSearchFields(l).some(v => v.includes(f.logsearch))
           );
           document.getElementById('logList').innerHTML = this.renderLogList(filtered);
         }, el);
@@ -2014,14 +2013,35 @@ const GovPortal = {
   renderLogList(logs) {
     if (!logs || logs.length === 0) return '<div class="table-empty"><div class="table-empty-icon">📋</div><div class="table-empty-text">暂无操作日志</div></div>';
     const flagMap = { 1: '新增', 2: '修改', 3: '删除' };
-    return logs.map(log => `
+    return logs.map(log => {
+      const action = log.actionLabel || flagMap[log.actionFlag] || '操作';
+      const module = log.module ? `[${log.module}] ` : '';
+      // summary 已由后端拼成「模块·动作 对象标识」，再单独拼一遍 objectRepr
+      // 会显示成「审计演示123 黑名单·新增 审计演示123」。只有摘要里没带上
+      // 对象标识时（例如区县删除这种自定义摘要）才补在后面。
+      const summary = log.summary || '';
+      const detail = (log.objectRepr && !summary.includes(log.objectRepr))
+        ? `${summary} ${log.objectRepr}`.trim()
+        : summary || log.objectRepr || '';
+      const failTag = log.success === false ? ' <span class="log-fail">失败</span>' : '';
+      const who = [log.userName, log.districtName].filter(Boolean).join(' · ');
+      return `
       <div class="log-entry">
-        <span class="log-time">${TNR_UI.formatDateTime(log.action_time)}</span>
-        <span class="log-action">${TNR_UI.escape(flagMap[log.action_flag] || log.content_type || '操作')}</span>
-        <span class="log-detail">${TNR_UI.escape(log.object_repr || '')} ${TNR_UI.escape(log.change_message || '')}</span>
-        <span class="text-muted fs-sm">${TNR_UI.escape(log.user_name || '')}</span>
+        <span class="log-time">${TNR_UI.formatDateTime(log.actionTime)}</span>
+        <span class="log-action">${TNR_UI.escape(module + action)}</span>
+        <span class="log-detail">${TNR_UI.escape(detail)}${failTag}</span>
+        <span class="text-muted fs-sm">${TNR_UI.escape(who)}</span>
       </div>
-    `).join('');
+    `;
+    }).join('');
+  },
+  // 日志搜索的可检索字段。后端返回的字段名是 actionLabel / module / objectRepr …
+  // 早期这里按 `l.action` 过滤，而后端**从未返回过 `action`** —— 搜索框提示写着
+  // 「操作/详情/操作人」，但「操作」永远搜不到（空结果，且不报错）。
+  logSearchFields(log) {
+    return [log.actionLabel, log.module, log.objectRepr, log.summary,
+            log.detail, log.userName, log.username, log.districtName]
+      .map(v => (v || '').toLowerCase());
   }
 };
 

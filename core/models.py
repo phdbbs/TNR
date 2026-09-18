@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 
@@ -43,3 +44,64 @@ class Institution(models.Model):
 
     def __str__(self):
         return f'{self.name} ({self.get_type_display()})'
+
+
+class AuditLog(models.Model):
+    """业务操作审计日志。
+
+    为什么不用 Django admin 的 ``LogEntry``：
+    1. ``LogEntry`` **没有 district 字段**，政府端按区县隔离时只能退化成
+       「按操作人的区县过滤」—— 而现场两个捕捉点操作员都挂在「全市（市级）」下，
+       他们登记的捕捉单/转运单归属区县其实是襄城区/樊城区，按操作人过滤会让
+       **本区县政府在自己的日志页里看不到本区的操作**。
+       这里显式记录**业务记录的归属区县**（`district`），与捕捉单/转运单同一套口径。
+    2. 业务接口从不经过 admin，``LogEntry`` 永远为空（实测 0 行 vs 业务记录 53 条）。
+    3. 需要「模块 / 操作类型 / 对象 / 是否成功 / 来源IP」这些 admin 不关心的维度。
+
+    ``district_name`` / ``user_name`` / ``role`` 是**写入时快照**：区县或账号被改名、
+    停用后，历史日志仍应显示当时的名称（与 `Capture.operator_name` 同一约定）。
+    """
+
+    ACTION_ADD = 1
+    ACTION_CHANGE = 2
+    ACTION_DELETE = 3
+    ACTION_CHOICES = [
+        (ACTION_ADD, '新增'),
+        (ACTION_CHANGE, '修改'),
+        (ACTION_DELETE, '删除'),
+    ]
+
+    action_time = models.DateTimeField('操作时间', auto_now_add=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='audit_logs', verbose_name='操作人')
+    user_name = models.CharField('操作人姓名', max_length=64, blank=True, default='')
+    role = models.CharField('操作人角色', max_length=32, blank=True, default='')
+    district = models.ForeignKey(
+        District, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='audit_logs', verbose_name='归属区县')
+    district_name = models.CharField('区县名称快照', max_length=50, blank=True, default='')
+    module = models.CharField('业务模块', max_length=64, blank=True, default='')
+    action_flag = models.PositiveSmallIntegerField(
+        '操作类型', choices=ACTION_CHOICES, default=ACTION_CHANGE)
+    object_type = models.CharField('对象类型', max_length=64, blank=True, default='')
+    object_id = models.CharField('对象ID', max_length=64, blank=True, default='')
+    object_repr = models.CharField('对象标识', max_length=200, blank=True, default='')
+    summary = models.CharField('操作摘要', max_length=255, blank=True, default='')
+    detail = models.TextField('操作详情', blank=True, default='')
+    method = models.CharField('请求方法', max_length=8, blank=True, default='')
+    path = models.CharField('请求路径', max_length=255, blank=True, default='')
+    success = models.BooleanField('是否成功', default=True)
+    ip = models.GenericIPAddressField('来源IP', null=True, blank=True)
+
+    class Meta:
+        ordering = ['-action_time', '-id']
+        verbose_name = '操作日志'
+        verbose_name_plural = verbose_name
+        indexes = [
+            models.Index(fields=['-action_time'], name='audit_time_idx'),
+            models.Index(fields=['district', '-action_time'], name='audit_dist_time_idx'),
+        ]
+
+    def __str__(self):
+        return f'[{self.action_time:%Y-%m-%d %H:%M}] {self.user_name} {self.summary}'

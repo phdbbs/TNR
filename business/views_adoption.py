@@ -141,6 +141,10 @@ def adoption_info_edit(request, pk):
                 setattr(pet, photo_field, request.FILES[photo_field])
         pet.save()
 
+    # 审计用上下文：`AdoptionHallListing` 没有 district 字段（沿 pet 派生），
+    # 响应体里读不出归属区县。
+    request.audit_district = pet.district
+
     return json_ok(serialize_instance(listing), message='领养信息已更新')
 
 
@@ -504,6 +508,9 @@ def adoption_apply(request):
         hospital_name=hospital.name if hospital else '',
     )
 
+    # 审计用上下文：`AdoptionApplication` 没有 district 字段（沿 pet 派生）。
+    request.audit_district = pet.district
+
     return json_ok(serialize_instance(application), message='领养申请已提交，请等待机构审核')
 
 
@@ -616,6 +623,9 @@ def adoption_application_review(request, pk):
             content='您的领养申请已通过，请前往医院办理领养手续。' if action == 'approve'
             else f'您的领养申请未通过：{application.review_note or "资质不符合要求"}',
         )
+
+    # 审计用上下文：`AdoptionApplication` 没有 district 字段（沿 pet 派生）。
+    request.audit_district = application.pet.district if application.pet_id else None
 
     return json_ok(serialize_instance(application), message='审核完成')
 

@@ -5,7 +5,6 @@ Task 13: 政府监管后端
 """
 from datetime import datetime, timedelta
 
-from django.contrib.admin.models import LogEntry
 from django.contrib.auth.decorators import login_required
 from django.db.models import Sum, Count, Q, Prefetch
 from django.http import JsonResponse
@@ -19,9 +18,10 @@ from business.models import (
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
-    get_district_scope, pet_brief, pet_archive_records,
+    get_district_scope, pet_brief, pet_archive_records, with_camel_keys,
 )
-from core.models import District, Institution
+from core.audit import ACTION_LABELS
+from core.models import AuditLog, District, Institution
 from .models import SystemConfig
 
 
@@ -257,6 +257,8 @@ def institution_toggle_status(request, pk):
 
     inst.status = 'inactive' if inst.status == 'active' else 'active'
     inst.save(update_fields=['status'])
+    # 审计用上下文：响应体只回 id/status，中间件读不出归属区县
+    request.audit_district = inst.district
     return json_ok(
         {'id': inst.id, 'status': inst.status},
         message=f'机构已{"停用" if inst.status == "inactive" else "启用"}'
@@ -301,6 +303,8 @@ def district_create(request):
     district = District.objects.create(
         name=name, code=code, is_city=is_city, status='active'
     )
+    # 审计用上下文：`District` 自己没有 district 外键，响应体里读不出归属区县
+    request.audit_district = district
     return json_ok(serialize_instance(district), message='区县创建成功')
 
 
@@ -340,6 +344,7 @@ def district_edit(request, pk):
     if update_fields:
         district.save(update_fields=update_fields)
 
+    request.audit_district = district
     return json_ok(serialize_instance(district), message='区县更新成功')
 
 
@@ -358,6 +363,7 @@ def district_toggle_status(request, pk):
 
     district.status = 'inactive' if district.status == 'active' else 'active'
     district.save(update_fields=['status'])
+    request.audit_district = district
     return json_ok(
         {'id': district.id, 'status': district.status},
         message=f'区县已{"停用" if district.status == "inactive" else "启用"}'
@@ -402,6 +408,11 @@ def district_delete(request, pk):
     if used:
         detail = '、'.join(f'{k}{v}条' for k, v in used.items())
         return json_fail(f'该区县已被业务数据引用（{detail}），不可删除，请改为停用')
+
+    # 审计：区县本身被删掉了，**不能**把日志归属到它（外键会在写入时报错、
+    # 整条日志丢失）。改为把名称写进摘要，日志保持「无归属区县」= 仅市级可见。
+    request.audit_object_repr = f'{district.name}（{district.code}）'
+    request.audit_summary = f'区县管理·删除 {district.name}（{district.code}）'
 
     district.delete()
     return json_ok({'id': pk}, message='区县删除成功')
@@ -540,6 +551,7 @@ def user_create(request):
         user.institution = institution
     user.save()
 
+    request.audit_district = district
     return json_ok({
         'id': user.id,
         'username': user.username,
@@ -582,6 +594,8 @@ def user_toggle_status(request, pk):
     user.is_active = not user.is_active
     user.status = 'active' if user.is_active else 'inactive'
     user.save(update_fields=['is_active', 'status'])
+    request.audit_district = user.district
+    request.audit_object_repr = user.username
     return json_ok(
         {'id': user.id, 'is_active': user.is_active, 'status': user.status},
         message=f'用户已{"启用" if user.is_active else "停用"}'
@@ -1096,34 +1110,84 @@ def ledger_center(request):
 @role_required('gov_city', 'gov_district')
 @login_required
 def operation_logs(request):
-    """Django admin 操作日志（审计）"""
-    qs = LogEntry.objects.all().select_related('user', 'content_type')
+    """业务操作审计日志。
+
+    数据源是 `core.AuditLog`（由 `core.middleware.AuditLogMiddleware` 写入），
+    **不是** Django admin 的 `LogEntry`：业务接口从不经过 admin，`LogEntry`
+    永远是 0 行；而且它没有 district 字段，只能按操作人区县过滤，会让挂在
+    「全市（市级）」下的捕捉点操作员产生的日志对区县政府不可见。
+
+    区县隔离按**业务记录的归属区县**过滤，与捕捉单/转运单同一口径。
+    """
+    qs = AuditLog.objects.all()
 
     scope = get_district_scope(request)
     if scope is not None:
-        # LogEntry 无 district 字段，按操作用户的区县过滤
-        qs = qs.filter(user__district_id=scope)
+        # 未解析出归属区县的日志（district 为空）不对区县政府展示，
+        # 否则等于绕开区县隔离。
+        qs = qs.filter(district_id=scope)
+
+    module = (request.GET.get('module') or '').strip()
+    if module:
+        qs = qs.filter(module=module)
+
+    action_flag = (request.GET.get('action_flag') or request.GET.get('actionFlag') or '').strip()
+    if action_flag.isdigit():
+        qs = qs.filter(action_flag=int(action_flag))
+
+    success = (request.GET.get('success') or '').strip()
+    if success in ('0', '1'):
+        qs = qs.filter(success=(success == '1'))
+
+    keyword = (request.GET.get('q') or request.GET.get('keyword') or '').strip()
+    if keyword:
+        qs = qs.filter(
+            Q(summary__icontains=keyword)
+            | Q(object_repr__icontains=keyword)
+            | Q(user_name__icontains=keyword)
+            | Q(user__username__icontains=keyword)
+            | Q(module__icontains=keyword)
+            | Q(detail__icontains=keyword)
+        )
 
     limit = request.GET.get('limit', '200')
     try:
         limit_int = int(limit)
     except (ValueError, TypeError):
         limit_int = 200
-    qs = qs[:limit_int]
+    limit_int = max(1, min(limit_int, 1000))
 
+    role_labels = dict(User.ROLE_CHOICES)
     data = []
-    for log in qs:
-        data.append({
+    for log in qs.select_related('user', 'district')[:limit_int]:
+        item = {
             'id': log.id,
             'action_time': log.action_time.isoformat() if log.action_time else '',
             'user_id': log.user_id,
-            'user_name': log.user.get_full_name() or log.user.username if log.user else '',
-            'content_type': str(log.content_type) if log.content_type else '',
+            'user_name': log.user_name,
+            # 账号名与显示名是两回事：`user_name` 存的是写入时的显示名快照
+            # （如「襄城捕捉点操作员」），按账号名 `cy_shelter` 搜是搜不到的。
+            'username': log.user.username if log.user else '',
+            'role': log.role,
+            'role_label': role_labels.get(log.role, log.role),
+            'district_id': log.district_id,
+            'district_name': log.district_name,
+            'module': log.module,
+            'action_flag': log.action_flag,
+            'action_label': ACTION_LABELS.get(log.action_flag, ''),
+            'object_type': log.object_type,
             'object_id': log.object_id,
             'object_repr': log.object_repr,
-            'action_flag': log.action_flag,
-            'change_message': log.change_message,
-        })
+            'summary': log.summary,
+            'detail': log.detail,
+            'method': log.method,
+            'path': log.path,
+            'success': log.success,
+            'ip': log.ip or '',
+            # 兼容旧前端渲染字段（renderLogList 读的是 object_repr + change_message）
+            'change_message': log.summary,
+        }
+        data.append(with_camel_keys(item))
     return json_ok(data)
 
 

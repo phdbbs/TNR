@@ -305,6 +305,9 @@ def mark_message_read(request, pk):
 
     msg.is_read = True
     msg.save(update_fields=['is_read'])
+    # 读回执不写审计：`Message` 没有归属区县（审计里会是一条无法归属的记录），
+    # 而且每次打开消息都会产生一条 —— 只会把真正有意义的业务操作挤出日志页。
+    request.audit_skip = True
     return json_ok(serialize_instance(msg), message='已标记为已读')
 
 

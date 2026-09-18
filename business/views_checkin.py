@@ -117,6 +117,10 @@ def checkin_create(request):
         checkin.photo = request.FILES['photo']
         checkin.save(update_fields=['photo'])
 
+    # 审计用上下文：`CheckIn` 本身没有 district 字段（区县沿 pet 派生），
+    # 响应体里也就读不出归属区县，必须显式指定。
+    request.audit_district = pet.district
+
     return json_ok(serialize_instance(checkin), message='打卡提交成功，待审核')
 
 
@@ -161,6 +165,8 @@ def checkin_review(request, pk):
     checkin.status = new_status
     checkin.operator = request.user
     checkin.save(update_fields=['status', 'operator'])
+
+    request.audit_district = checkin.pet.district if checkin.pet_id else None
 
     return json_ok(serialize_instance(checkin), message='审核完成')
 

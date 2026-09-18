@@ -36,11 +36,19 @@ def json_fail(message='操作失败', data=None, status=400):
 
 
 def parse_json_body(request):
-    """解析 request.body 中的 JSON，失败时返回空字典。"""
+    """解析 request.body 中的 JSON，失败时返回空字典。
+
+    解析结果会挂在 `request.audit_payload` 上，供审计中间件在**视图执行完**
+    之后回溯这次操作的请求体（例如从中取 `district_id` 判定归属区县）。
+    中间件不自己读 `request.body`，是为了复用这里已有的容错逻辑。
+    """
     try:
-        return json.loads(request.body)
+        data = json.loads(request.body)
     except (json.JSONDecodeError, ValueError, TypeError):
-        return {}
+        data = {}
+    if isinstance(data, dict):
+        request.audit_payload = data
+    return data
 
 
 # ============================================

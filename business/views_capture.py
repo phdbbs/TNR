@@ -669,6 +669,11 @@ def capture_delete(request, pk):
     Pet.objects.filter(capture=capture, is_deleted=False).update(
         is_deleted=True, deleted_at=now)
 
+    # 审计用上下文：响应体只回了 id/is_deleted/pet_count，中间件读不出归属区县，
+    # 必须显式指定 —— 否则这条删除日志会因「无归属区县」而对区县政府不可见。
+    request.audit_district = capture.district
+    request.audit_object_repr = capture.ledger_no or capture.community_name
+
     return json_ok({
         'id': capture.id,
         'is_deleted': True,
