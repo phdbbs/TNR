@@ -17,7 +17,7 @@ from business.models import (
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
-    get_district_filtered_queryset, get_scoped_object,
+    get_district_filtered_queryset, get_scoped_object, hospital_pet_scope,
     pet_archive_records, pet_brief, pet_photo_list,
 )
 
@@ -157,8 +157,20 @@ def pet_archive(request):
     聚合逻辑与政府端「台账中心 → 一宠一档」共用
     ``business.services.pet_archive_records``，两端字段与口径完全一致，
     不会出现「一端有出库原因、另一端没有」的漂移。
+
+    **医院角色收敛到本机构**（第二十轮）：同一区县可能有多家医院，
+    按区县过滤会让 A 院读到 B 院名下动物的完整档案与主人联系方式。
+    口径与 ``hospital_pets``（`/pets/`，注释写明「医院只看分配给自己的宠物」）
+    和 ``hospital_hall_listings``（`/hall-listings/`）保持一致。
     """
-    qs = get_district_filtered_queryset(Pet, request.user).filter(is_deleted=False)
+    user = request.user
+    if user.role == 'hospital':
+        qs = Pet.objects.filter(is_deleted=False).filter(
+            hospital_pet_scope(user)).distinct()
+    else:
+        # 捕捉点与政府端按区县：捕捉点就是本区县的收容入口（与 `/pets/`
+        # 的捕捉点分支同口径），政府端本就该看全区。
+        qs = get_district_filtered_queryset(Pet, user).filter(is_deleted=False)
 
     status = request.GET.get('status')
     if status:
@@ -327,8 +339,13 @@ def pet_lifecycle(request, pet_id):
     """返回指定宠物的全生命周期溯源记录。
 
     按时间顺序返回：捕捉、转运、诊疗、放养、领养、安乐死记录。
-    按角色收敛可见范围：领养人仅限自己领养/申请过的动物，医院含本院在治动物，
+    按角色收敛可见范围：领养人仅限自己领养/申请过的动物，
+    **医院限本院在治或本院经手过（诊疗）的动物**，
     其余角色按所属区县过滤，避免只凭主键即可遍历全量动物档案。
+
+    医院这一支**不能按区县收敛**（第二十轮）：同一区县可能有多家医院
+    （襄城区有 2 家），按区县会让 A 院读到 B 院名下动物的完整溯源记录 ——
+    含主人姓名与电话。判据与 ``pet_archive`` 共用 ``hospital_pet_scope()``。
     """
     user = request.user
     if user.role == 'adopter':
@@ -337,8 +354,7 @@ def pet_lifecycle(request, pet_id):
         ).distinct().first()
     elif user.role == 'hospital':
         pet = Pet.objects.filter(id=pet_id).filter(
-            Q(hospital_id=user.institution_id) | Q(district_id=user.district_id)
-        ).first()
+            hospital_pet_scope(user)).distinct().first()
     else:
         pet = get_scoped_object(Pet, pet_id, user)
 

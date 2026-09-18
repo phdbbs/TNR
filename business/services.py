@@ -479,6 +479,30 @@ def get_active_pet(pk, user):
     return get_scoped_object(Pet, pk, user, is_deleted=False)
 
 
+def hospital_pet_scope(user):
+    """**医院角色**的动物可见范围：本院在治 ∪ 本院经手过（诊疗）的动物。
+
+    返回一个 `Q`，调用方自己接 `filter()`，并**必须加 `.distinct()`**
+    —— `treatments` 是反向外键，会 JOIN 出重复行。
+
+    为什么不能按区县收敛：**同一区县可能有多家医院**。襄城区就有两家
+    （爱心宠物医院 / 瑞鹏宠物医院），按区县过滤会让 A 院读到 B 院名下动物的
+    完整档案 —— 含主人姓名与电话（`intake_contact` / `intake_property_name`）。
+    第二十轮实测：爱心看到 16 条（含瑞鹏的 2 条），瑞鹏看到 16 条（含爱心的 5 条）。
+
+    为什么不能只按 `hospital_id`：动物出院（放养 / 领养 / 主人领回 / 安乐死）后
+    `Pet.hospital` 会被清空，只按它会让医院**查不到自己经手过的历史动物**。
+    所以并上「本院诊疗过」。
+
+    没有挂靠机构时返回**空集**而不是 `Q(hospital_id=None)`
+    —— 后者会匹配上所有「尚未分配医院」的动物，等于不设限。
+    """
+    if not user.institution_id:
+        return Q(pk__in=[])
+    return (Q(hospital_id=user.institution_id)
+            | Q(treatments__hospital_id=user.institution_id))
+
+
 def pet_has_pending_release(pet):
     """宠物是否已有「待放养」记录。
 

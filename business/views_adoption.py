@@ -410,8 +410,35 @@ def adoption_reclaim(request, pk):
 @role_required('shelter', 'hospital', 'gov_city', 'gov_district')
 @login_required
 def adoption_list(request):
-    """领养记录列表"""
-    qs = get_district_filtered_queryset(Adoption, request.user)
+    """领养记录列表。
+
+    **医院分支**与孪生接口 ``adoption_application_list``（领养申请列表）对齐：
+    只看到本机构。第二十轮之前这里只有 `get_district_filtered_queryset`，
+    医院按区县口径 —— 同区县另一家医院（襄城区有 2 家）名下的领养记录会一并
+    返回。`Adoption` 直接挂在宠物上，而领养记录含领养人姓名 / 电话，
+    跨机构读是**横向越权**，不是「口径宽松」。
+
+    捕捉点与政府端**沿用原区县口径，未改动** —— 这一支不是漂移：
+    ``/pets/``（``hospital_pets``）明确写着「捕捉点只看**本机构所在区县**的宠物」，
+    与这里按 ``Adoption.district`` 收敛一致。真正与它们不一致的是孪生接口
+    （它按 ``pet__shelter_id``，更窄）；把这里改成跟那个窄口径对齐，等于把
+    「区县级收容入口」缩成「机构级」，捕捉点会看不到本区县、但动物并非由它
+    捕捉的领养记录。**窄不等于对。**
+
+    注意 `qs.filter(...)` 必须**逐支赋值**，不能写成 `qs.filter(a) | qs.filter(b)`
+    —— 那样会丢掉 `qs` 上已有的前置过滤（机构隔离会被直接击穿）并产生重复行。
+    """
+    user = request.user
+    if user.role == 'hospital':
+        if user.institution_id:
+            qs = Adoption.objects.filter(hospital_id=user.institution_id)
+        else:
+            # 没有挂靠机构时必须**空集**：写成 `filter(hospital_id=None)` 会匹配上
+            # 所有「受理医院已被删除」的记录（`Adoption.hospital` 是 SET_NULL），
+            # 等于完全不设限。
+            qs = Adoption.objects.none()
+    else:
+        qs = get_district_filtered_queryset(Adoption, user)
 
     status = request.GET.get('status')
     if status:
