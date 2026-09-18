@@ -43,6 +43,19 @@ def _scope_filter(qs, request, field='district'):
     return qs.filter(**{f'{field}_id': scope})
 
 
+def _district_out_of_scope(request, district_id):
+    """目标区县是否超出操作员的管辖范围（市级管理员永远返回 False）。
+
+    **创建与编辑必须共用这一个判据。** 本轮实测的漏洞正是两处各写一份、
+    然后漂移：`institution_edit` 有这条校验、`institution_create` 没有，
+    于是区级管理员可以 POST 一个他区 `district_id`，直接把机构建到别的区县。
+    新建机构**不会**被 `resolve_district_scope` 兜住 —— 那是给业务记录用的，
+    且它禁止市级归属，而机构是可以挂市级的。
+    """
+    scope = get_district_scope(request)
+    return scope is not None and str(district_id) != str(scope)
+
+
 # ============================================
 # 1. 数据大屏统计
 # ============================================
@@ -163,6 +176,11 @@ def institution_create(request):
         return json_fail('机构类型无效')
 
     district_id = data.get('district_id')
+    if district_id and _district_out_of_scope(request, district_id):
+        # 与 institution_edit 同一条判据：区级管理员只能在本区县建机构。
+        # 少了这一步，区级管理员 POST 一个他区 district_id 就能把机构种到
+        # 别的区县（那些机构会出现在该区县的列表与下拉里）。
+        return json_fail('无权在其他区县创建机构')
     if not district_id:
         scope = get_district_scope(request)
         if scope:
@@ -207,6 +225,15 @@ def institution_edit(request, pk):
 
     与 institution_list 保持一致的区县范围校验：
     列表已按区县过滤，编辑若不做校验，区级管理员猜主键即可改他区机构。
+
+    同时补齐 `institution_create` 已有的两条校验（「医院不能挂市级」与电话格式）。
+    创建与编辑各写一份校验必然会漂移 —— 本轮实测的提权链正是这么来的：
+    编辑没有「医院不能挂市级」，于是可以把一家医院改挂「全市（市级）」，
+    `cascade_operator_district()` 再把它的操作员一起搬过去，
+    那个账号的 `district.is_city` 就变成了 True → `get_district_scope()`
+    返回 None → **整个市所有区县的数据都看得到**，而且它自己就违反了
+    `validate_operator_district()` 的不变式。
+    界面上点不出来（区县下拉过滤掉了市级），**只有直接打接口才会暴露**。
     """
     inst = _scope_filter(Institution.objects.all(), request).filter(id=pk).first()
     if inst is None:
@@ -217,6 +244,21 @@ def institution_edit(request, pk):
     # 换区县前先记住原区县：换完之后要按它找出「区县随机构走」的操作员
     old_district_id = inst.district_id
 
+    # 先算出**改动之后**的类型与区县，再按最终状态校验 ——
+    # 只看单个字段会漏掉「同时改 type 和 district_id」这种组合。
+    new_type = (data['type'] if data.get('type') in ('shelter', 'hospital', 'community')
+                else inst.type)
+    new_district = inst.district
+    if data.get('district_id'):
+        if _district_out_of_scope(request, data['district_id']):
+            return json_fail('无权将机构调整到其他区县')
+        new_district = District.objects.filter(id=data['district_id']).first()
+        if new_district is None:
+            return json_fail('区县不存在')
+
+    if new_type == 'hospital' and new_district is not None and new_district.is_city:
+        return json_fail('医院必须挂具体区县，不能挂市级')
+
     if data.get('name'):
         inst.name = data['name']
         update_fields.append('name')
@@ -224,14 +266,8 @@ def institution_edit(request, pk):
         inst.type = data['type']
         update_fields.append('type')
     if data.get('district_id'):
-        scope = get_district_scope(request)
-        if scope is not None and str(data['district_id']) != str(scope):
-            return json_fail('无权将机构调整到其他区县')
-        try:
-            inst.district = District.objects.get(id=data['district_id'])
-            update_fields.append('district')
-        except District.DoesNotExist:
-            return json_fail('区县不存在')
+        inst.district = new_district
+        update_fields.append('district')
     if 'address' in data:
         inst.address = data['address']
         update_fields.append('address')
@@ -239,7 +275,12 @@ def institution_edit(request, pk):
         inst.contact = data['contact']
         update_fields.append('contact')
     if 'phone' in data:
-        inst.phone = data['phone']
+        # 与 institution_create 同一条格式规则：只在**新建**时校验，
+        # 编辑就能把电话改成任意字符串（前端拦着，接口没拦）。
+        phone = (data['phone'] or '').strip()
+        if phone and not phone.replace('-', '').replace('+', '').isdigit():
+            return json_fail('联系电话格式不正确')
+        inst.phone = phone
         update_fields.append('phone')
 
     moved_users = 0

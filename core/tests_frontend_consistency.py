@@ -1564,3 +1564,88 @@ class ManageableRolesContractTest(SimpleTestCase):
             set(MANAGEABLE_ROLES['gov_city']),
             {'gov_city', 'gov_district', 'shelter', 'hospital'},
             '市级管理员可建角色集合变了 —— 领养人不在政府端创建，其余四种都应可建。')
+
+
+class InstitutionFormScopeContractTest(SimpleTestCase):
+    """「机构表单」前后端必须同一套区县规则。
+
+    锁的是一类真实缺陷：`institution_create` 与 `institution_edit` 是**一对**
+    孪生接口，校验却各写一份，然后漂移 —— 本轮实测的三处都是这个形态：
+
+    1. `create` 拒绝「医院挂市级」，`edit` 没有 → 把医院改挂「全市（市级）」后
+       `cascade_operator_district()` 把它的操作员一起搬过去，那个账号
+       `district.is_city` 变 True → `get_district_scope()` 返回 None →
+       **全市所有区县的数据都看得到**；
+    2. `create` 没有区县范围校验，`edit` 有 → 区级管理员能在他区建机构；
+    3. 前端机构表单的「所属区县」下拉排除了市级，而挂市级的捕捉点确实存在
+       （现场两个捕捉点就挂在「全市（市级）」下）→ 编辑时 `<select>` 退化成
+       选中第一项，**不改区县直接点保存**就把机构静默搬到了具体区县。
+
+    这些都是「界面上点不出来、只有直接打接口（或误点保存）才暴露」的形态。
+    """
+
+    # `if new_type == 'hospital' and ... is_city:` —— create / edit 两处都要有
+    HOSPITAL_CITY_GUARD = re.compile(
+        r"==\s*'hospital'\s*and[\s\S]{0,120}?is_city")
+
+    def _func_body(self, source, name):
+        """取 Python 顶层函数的整段源码。
+
+        不能用 `brace_body`：Python 函数体不靠花括号界定，函数签名之后的
+        第一个 `{` 往往落在某个 dict 字面量里，配出来的是一段无关片段
+        （第一版就是这么写的，四个用例全红）。
+        """
+        m = re.search(r'^def ' + re.escape(name) + r'\(', source, re.M)
+        self.assertIsNotNone(m, f'supervision/views.py 里找不到 {name} —— 本测试需要同步更新')
+        nxt = re.search(r'^(?:def |@|# =)', source[m.end():], re.M)
+        end = len(source) if nxt is None else m.end() + nxt.start()
+        return source[m.start():end]
+
+    def test_create_and_edit_both_reject_city_level_hospital(self):
+        source = read('supervision/views.py')
+        for name in ('institution_create', 'institution_edit'):
+            body = self._func_body(source, name)
+            self.assertRegex(
+                body, self.HOSPITAL_CITY_GUARD,
+                f'`{name}` 缺少「医院不能挂市级」校验。\n'
+                'create 与 edit 是一对孪生接口，校验必须两边都有 ——\n'
+                '只写一边就等于另一边没写，而界面上点不出来，测不出来。')
+
+    def test_create_and_edit_both_check_district_scope(self):
+        source = read('supervision/views.py')
+        for name in ('institution_create', 'institution_edit'):
+            body = self._func_body(source, name)
+            self.assertIn(
+                '_district_out_of_scope(request', body,
+                f'`{name}` 没有走 `_district_out_of_scope()` 做区县范围校验。\n'
+                '两个接口必须共用同一个判据，各写一份必然会漂移。')
+
+    def _institution_modal(self):
+        source = read(PORTALS['gov'])
+        m = re.search(r'showInstitutionModal\(id\)\s*\{', source)
+        self.assertIsNotNone(m, 'gov portal 里找不到 showInstitutionModal —— 本测试需要同步更新')
+        # 用 m.start() 定位方法体的那个 `{`：用 m.end() 会**跳过**它，
+        # 从方法体内部的下一个 `{` 开始配对，取到的是一段无关片段。
+        body = brace_body(source, source.index('{', m.start()))
+        self.assertIsNotNone(body, 'showInstitutionModal 方法体的花括号不配对')
+        return body
+
+    def test_frontend_narrows_district_options_for_district_admin(self):
+        """区级管理员的区县下拉必须收敛到本区县（服务端会拒，前端别让人白填）。"""
+        body = self._institution_modal()
+        self.assertRegex(
+            body, r"isCityLevel\(\)[\s\S]{0,200}?currentUser\.district_id",
+            '机构表单的区县下拉没有按操作员区县收敛 ——\n'
+            '区级管理员会看到全部区县，选了他区才被服务端拒绝，白填一遍。\n'
+            '（账号表单 `showAccountModal` 早就这么做了，机构表单漏了。）')
+
+    def test_frontend_preserves_institution_current_district(self):
+        """编辑时必须把机构当前区县兜底加回选项。
+
+        少了这一步，挂市级的捕捉点（下拉里被 `!d.is_city` 排除）会让
+        `<select>` 退化成选中第一项，**不改区县直接点保存**就把它搬到具体区县。
+        """
+        body = self._institution_modal()
+        self.assertIn('inst.district_id', body,
+                      '机构表单没有把「机构当前区县」加回下拉选项 ——\n'
+                      '挂市级的捕捉点编辑保存时会被静默改判到某个具体区县。')

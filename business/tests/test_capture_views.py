@@ -39,6 +39,94 @@ class CapturePermissionTest(BusinessTestBase):
         self.assertEqual(body['data']['pets'][0]['id'], pet.id)
 
 
+class CaptureDetailDistrictScopeTest(BusinessTestBase):
+    """捕捉单详情必须做区县范围校验。
+
+    这个接口返回的是物业交接人、联系电话、电子签名、经纬度、宠物档案 ——
+    裸查主键（`Capture.objects.get(id=pk)`）会让任何登录用户遍历出**其他区县**
+    的完整捕捉档案。注意它**不能**改成一律 404 收口：医院跨区县送医是允许的
+    （`transfer_create` 不限制目标医院区县），所以医院要额外放行
+    「有动物转到过本院」的捕捉单，否则正常路径会被误伤。
+    """
+
+    def setUp(self):
+        self.cap_a = make_capture(district=self.district_a, shelter=self.shelter_a,
+                                  pet_codes=['PA1'], contact_phone='13800001111',
+                                  contact_person='甲区物业',
+                                  signature='data:image/png;base64,AAA')
+        make_pet(capture=self.cap_a, district=self.district_a, shelter=self.shelter_a)
+
+        # 乙区捕捉单，其中一只动物被**跨区县**送到甲区医院
+        self.cap_b_cross = make_capture(district=self.district_b, shelter=self.shelter_b,
+                                        pet_codes=['PB1'], contact_phone='13900002222',
+                                        contact_person='乙区物业')
+        make_pet(capture=self.cap_b_cross, district=self.district_b,
+                 shelter=self.shelter_b, hospital=self.hospital_a,
+                 status='in_treatment')
+
+        # 乙区另一张单，没有任何动物送到甲区医院
+        self.cap_b_plain = make_capture(district=self.district_b, shelter=self.shelter_b,
+                                        pet_codes=['PC1'], contact_phone='13900002222',
+                                        contact_person='乙区物业',
+                                        signature='data:image/png;base64,BBB')
+        make_pet(capture=self.cap_b_plain, district=self.district_b,
+                 shelter=self.shelter_b)
+
+    def _detail(self, user, capture):
+        self.login_as(user)
+        return self.get_json(f'{CAPTURES_URL}{capture.id}/')
+
+    # ---------- 拦截：跨区县读不到 ----------
+
+    def test_shelter_cannot_view_other_district_capture(self):
+        resp = self._detail(self.shelter_user_a, self.cap_b_plain)
+        self.expect_fail(resp, status=404)
+
+    def test_gov_district_cannot_view_other_district_capture(self):
+        resp = self._detail(self.gov_a, self.cap_b_plain)
+        self.expect_fail(resp, status=404)
+
+    def test_hospital_cannot_view_unrelated_other_district_capture(self):
+        """甲区医院读乙区「与自己毫无关联」的捕捉单，必须 404。"""
+        resp = self._detail(self.hospital_user_a, self.cap_b_plain)
+        self.expect_fail(resp, status=404)
+
+    def test_cross_district_read_does_not_leak_pii(self):
+        """退一步也要保证：被拦下时响应体里不含个人信息。
+
+        只断言状态码不够 —— 有人可能「返回 200 但字段清空」，那仍是数据外泄。
+        （第一版忘了给这张单设 `contact_phone`，断言在空字符串上永远成立，
+        变异验证时它没跟着变红才暴露出来。）
+        """
+        for user in (self.shelter_user_a, self.gov_a, self.hospital_user_a):
+            resp = self._detail(user, self.cap_b_plain)
+            text = resp.content.decode()
+            for secret in ('13900002222', '乙区物业', 'base64,BBB'):
+                self.assertNotIn(secret, text,
+                                 f'{user.username} 的响应体泄漏了 {secret}')
+
+    # ---------- 放行：正向对照 ----------
+
+    def test_shelter_can_view_own_district_capture(self):
+        resp = self._detail(self.shelter_user_a, self.cap_a)
+        body = self.ok(resp)
+        self.assertEqual(body['data']['contactPhone'], '13800001111')
+
+    def test_gov_district_can_view_own_district_capture(self):
+        self.ok(self._detail(self.gov_a, self.cap_a))
+
+    def test_gov_city_can_view_any_capture(self):
+        self.ok(self._detail(self.gov_city, self.cap_a))
+        self.ok(self._detail(self.gov_city, self.cap_b_plain))
+
+    def test_hospital_can_view_capture_of_pet_transferred_to_it(self):
+        """跨区县送医后，接收医院必须仍能打开该捕捉单详情（否则误伤正常路径）。"""
+        self.ok(self._detail(self.hospital_user_a, self.cap_b_cross))
+
+    def test_hospital_can_view_own_district_capture(self):
+        self.ok(self._detail(self.hospital_user_b, self.cap_b_plain))
+
+
 class CaptureCreateTest(BusinessTestBase):
     def _payload(self, **kw):
         payload = {

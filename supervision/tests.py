@@ -10,7 +10,7 @@ from business.tests.base import (
     ApiMixin, make_district, make_institution, make_material, make_pet,
     make_user,
 )
-from core.models import AuditLog, District
+from core.models import AuditLog, District, Institution
 from django.test import TestCase
 from supervision.models import SystemConfig
 
@@ -195,6 +195,59 @@ class InstitutionApiTest(SupervisionBase):
         self.hospital_a.refresh_from_db()
         self.assertEqual(self.hospital_a.district_id, self.district_a.id)
 
+    # ---------- 新建机构的区县范围（与编辑同一条判据） ----------
+    #
+    # 这一组是补漏：`institution_edit` 早就有「不得调整到他区」的校验，
+    # 而 `institution_create` 没有 —— 区级管理员 POST 一个他区 `district_id`
+    # 就能把机构种到别的区县。两处各写一份校验必然会漂移，故改为共用
+    # `_district_out_of_scope()`，下面正反两组用例把这条判据钉死。
+
+    def test_create_district_admin_cannot_create_in_other_district(self):
+        self.client.force_login(self.gov_a)
+        before = Institution.objects.filter(district=self.district_b).count()
+        self.expect_fail(self.post_json(f'{API}/institutions/create/', {
+            'name': '越权机构', 'type': 'shelter',
+            'district_id': self.district_b.id,
+        }), message='无权在其他区县创建机构')
+        self.assertEqual(Institution.objects.filter(district=self.district_b).count(),
+                         before, '被拒后不得落库')
+
+    def test_create_district_admin_can_create_in_own_district(self):
+        """正向对照：只加拦截不测放行，过紧的校验发现不了。"""
+        self.client.force_login(self.gov_a)
+        body = self.ok(self.post_json(f'{API}/institutions/create/', {
+            'name': '本区新捕捉点', 'type': 'shelter',
+            'district_id': self.district_a.id,
+        }))
+        inst = Institution.objects.get(id=body['data']['id'])
+        self.assertEqual(inst.district_id, self.district_a.id)
+
+    def test_create_district_admin_without_district_id_falls_back_to_own(self):
+        """不传 district_id 时按操作员区县兜底，仍不得落到他区。"""
+        self.client.force_login(self.gov_a)
+        body = self.ok(self.post_json(f'{API}/institutions/create/', {
+            'name': '兜底机构', 'type': 'shelter',
+        }))
+        inst = Institution.objects.get(id=body['data']['id'])
+        self.assertEqual(inst.district_id, self.district_a.id)
+
+    def test_create_city_admin_can_create_in_any_district(self):
+        """市级管理员不受区县限制。"""
+        self.client.force_login(self.gov_city)
+        body = self.ok(self.post_json(f'{API}/institutions/create/', {
+            'name': '市级建的乙区机构', 'type': 'shelter',
+            'district_id': self.district_b.id,
+        }))
+        inst = Institution.objects.get(id=body['data']['id'])
+        self.assertEqual(inst.district_id, self.district_b.id)
+        # 市级仍然可以建挂市级的捕捉点（编辑侧同样允许，见 keeps_city_level 用例）
+        body2 = self.ok(self.post_json(f'{API}/institutions/create/', {
+            'name': '挂市级的捕捉点', 'type': 'shelter',
+            'district_id': self.city.id,
+        }))
+        self.assertEqual(Institution.objects.get(id=body2['data']['id']).district_id,
+                         self.city.id)
+
     def test_edit_moving_institution_cascades_operators(self):
         """市级管理员把机构换到别的区县时，挂在它下面的操作员必须一起搬。
 
@@ -228,6 +281,62 @@ class InstitutionApiTest(SupervisionBase):
         op.refresh_from_db()
         self.assertEqual(op.district_id, self.city.id)
         self.assertEqual(body['message'], '机构更新成功')
+
+    # ---------- 编辑侧的「医院不能挂市级」（补 create/edit 漂移） ----------
+    #
+    # `institution_create` 一直拒绝「医院挂市级」，编辑没有这条校验。实测提权链：
+    # 把医院改挂市级 → `cascade_operator_district()` 把它的操作员一起搬过去 →
+    # 该账号 `district.is_city` 变 True → `get_district_scope()` 返回 None →
+    # **全市所有区县的数据都看得到**。界面上点不出来（下拉过滤了市级），
+    # 只有直接打接口才会暴露。
+
+    def test_edit_cannot_move_hospital_to_city_district(self):
+        hospital = make_institution(type='hospital', district=self.district_a)
+        op = make_user('esc_hosp_op', role='hospital',
+                       district=self.district_a, institution=hospital)
+
+        self.client.force_login(self.gov_city)
+        self.expect_fail(self.post_json(
+            f'{API}/institutions/{hospital.id}/edit/', {'district_id': self.city.id}),
+            message='医院必须挂具体区县，不能挂市级')
+
+        hospital.refresh_from_db()
+        op.refresh_from_db()
+        self.assertEqual(hospital.district_id, self.district_a.id)
+        # 关键：机构没改成，操作员也**不能**被连带搬走 ——
+        # 否则「账号挂市级」这一步照样完成，提权链只断了一半。
+        self.assertEqual(op.district_id, self.district_a.id)
+
+    def test_edit_cannot_turn_institution_into_city_hospital_via_type_change(self):
+        """组合改动也要拦：同时把 type 改成 hospital、区县改成市级。
+
+        只看单个字段会漏掉这种组合 —— 两个字段各自「看起来没问题」。
+        """
+        shelter = make_institution(type='shelter', district=self.district_a)
+        self.client.force_login(self.gov_city)
+        self.expect_fail(self.post_json(f'{API}/institutions/{shelter.id}/edit/', {
+            'type': 'hospital', 'district_id': self.city.id,
+        }), message='医院必须挂具体区县，不能挂市级')
+        shelter.refresh_from_db()
+        self.assertEqual(shelter.type, 'shelter')
+
+    def test_edit_still_allows_city_level_shelter(self):
+        """正向对照：捕捉点挂市级是现场约定，必须仍然放行。"""
+        shelter = make_institution(type='shelter', district=self.district_a)
+        self.client.force_login(self.gov_city)
+        self.ok(self.post_json(f'{API}/institutions/{shelter.id}/edit/',
+                               {'district_id': self.city.id}))
+        shelter.refresh_from_db()
+        self.assertEqual(shelter.district_id, self.city.id)
+
+    def test_edit_rejects_bad_phone_like_create_does(self):
+        """电话格式：create 有校验、edit 原来没有（前端拦着，接口没拦）。"""
+        self.client.force_login(self.gov_city)
+        self.expect_fail(self.post_json(
+            f'{API}/institutions/{self.hospital_a.id}/edit/', {'phone': 'abc123'}),
+            message='联系电话格式不正确')
+        self.hospital_a.refresh_from_db()
+        self.assertNotEqual(self.hospital_a.phone, 'abc123')
 
 
 class DistrictApiTest(SupervisionBase):

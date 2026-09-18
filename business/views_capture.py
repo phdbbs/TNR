@@ -186,8 +186,21 @@ def _parse_return_time(v):
 
 
 def _get_capture_for_user(pk, user):
-    """按区县范围取捕捉单，越权访问返回 None。"""
+    """按区县范围取捕捉单，越权访问返回 None。
+
+    医院端额外放行「有动物转到过本院」的捕捉单：`transfer_create` 并**不**限制
+    目标医院的区县（跨区县送医是允许的），若只按区县过滤，跨区县转运后医院
+    点开该捕捉单详情会 404 —— 拦截会误伤这条正常路径。
+
+    注意用**单个 `Q()`** 表达「本区县 OR 本院」，不要写成
+    `qs.filter(...) | qs.filter(...)`：那样会丢前置过滤并产生重复行。
+    """
     qs = get_district_filtered_queryset(Capture, user)
+    if user.role == 'hospital' and user.institution_id:
+        own = Capture.objects.filter(
+            pet__hospital_id=user.institution_id).values('pk')
+        qs = Capture.objects.filter(
+            Q(pk__in=qs.values('pk')) | Q(pk__in=own)).distinct()
     return qs.filter(id=pk).first()
 
 
@@ -838,10 +851,13 @@ def capture_detail(request, pk):
     返回「新增捕捉登记」表单的全部内容（含地址、定位地址、经纬度、整体合影、
     单只照片、电子签名、宠物编号等）以及关联宠物列表和转运状态，
     前端据此渲染详情抽屉并判断能否编辑 / 删除。
+
+    **必须走 `_get_capture_for_user` 做区县范围校验**：这个接口返回的是
+    物业交接人、联系电话、电子签名、经纬度等个人信息，裸查主键会让任何
+    登录用户（捕捉点 / 医院 / 区县监管）遍历出**其他区县**的完整捕捉档案。
     """
-    try:
-        capture = Capture.objects.get(id=pk)
-    except Capture.DoesNotExist:
+    capture = _get_capture_for_user(pk, request.user)
+    if capture is None:
         return json_fail('捕捉记录不存在', status=404)
 
     data = serialize_instance(capture)

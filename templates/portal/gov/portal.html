@@ -651,13 +651,28 @@ const GovPortal = {
   async showInstitutionModal(id) {
     const districts = await TNR_API.getDistricts();
     // 捕捉点/医院必须挂具体区县，不能挂市级
-    const activeDistricts = (districts || []).filter(d => d.status === 'active' && !d.is_city);
-    const typeLabels = { hospital: '医院', shelter: '捕捉点' };
+    let selectable = (districts || []).filter(d => d.status === 'active' && !d.is_city);
+    // 区级管理员只能在本区县建机构，下拉就必须只列本区县 ——
+    // 否则随手选一个他区会撞上「无权在其他区县创建机构」，白填一遍。
+    // 服务端 `_district_out_of_scope()` 拦的是同一件事（前端只是别让人白填）。
+    if (!this.isCityLevel() && this.currentUser && this.currentUser.district_id) {
+      selectable = selectable.filter(d => d.id === this.currentUser.district_id);
+    }
     let inst = null;
     if (id) {
       const all = await TNR_API.getInstitutions(this.instState.tab);
       inst = all.find(i => String(i.id) === String(id));
     }
+    // 编辑时把机构**当前**所属区县兜底加回选项。上面的列表排除了市级，而挂市级的
+    // 捕捉点确实存在（现场两个捕捉点就挂在「全市（市级）」下）—— 少了这一步，
+    // <select> 会退化成选中第一项，于是**不改区县直接点保存**就会把机构
+    // 静默搬到某个具体区县（还会连带搬走它下面的操作员）。
+    if (inst && inst.district_id && !selectable.some(d => d.id === inst.district_id)) {
+      const cur = (districts || []).find(d => d.id === inst.district_id);
+      if (cur) selectable = [cur].concat(selectable);
+    }
+    const activeDistricts = selectable;
+    const typeLabels = { hospital: '医院', shelter: '捕捉点' };
 
     const body = `
       <div class="form-group">
