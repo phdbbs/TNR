@@ -461,30 +461,32 @@ const TNR_UI = {
     }
 
     const GAP = 16;        // 卡片下沿与视口底部的呼吸位
-    // 下限 = 表头 + **当前每页条数**（mountTable 默认 10 条/页）。
-    // 此前下限是「表头 + 1 行」，结果在「列表下方还排着别的卡片」的页面上，剩余视口
-    // 空间被 tail 吃掉，列表被压到只剩 1~2 行 —— 实测「动物去向/回收」只显示 1 行、
-    // 「账号权限管理」3 行，日常没法用。磊哥要求「列表高度按默认 10 行设置」。
+    // 下限 = 表头 + **固定 10 行**（磊哥的要求：「列表高度按默认 10 行设置」）。
+    // ⚠ 这 10 行**不随「条/页」控件变化**。曾误写成「取当前每页条数」，后果很隐蔽：
+    // 一页渲染的行数 = 每页条数 ⇒ 「自然高」恒等于「一页的行高」，于是 MIN ≈ natural，
+    // 下面的容差判断永远把它判成「内容放得下」→ **下限彻底失效**（实测 20 条/页 时
+    // 列表长到 1017px，比视口还高）。更糟的是行数 > 50 的表在 50 条/页 下，
+    // 下限会变成 50 行（约 2500px），列表被顶出屏幕。
+    // 「每页条数」只决定一页渲染多少行，**不决定列表该有多高**。
     //
     // ⚠ 行高**不能**用「首行高 × N」估算：长文本会折行，同一张表里行高并不均匀。
-    // 实测「全量台账中心 / 捕捉台账」首行 70px、第 5/7/10 行 76px，按首行估出
+    // 实测「全量台账中心 / 捕捉台账」首行 69.78px、第 5/7/10 行 76.19px，按首行估出
     // 「10 行刚好 742px」，而实际需要 767px → 第 10 行被裁掉、只完整显示 9 行，
     // 还凭空多出一条 25px 的内部滚动条（且完全不报错）。
     // 改成**直接量第 N 行的下沿**，拿到的就是前 N 行的真实累计高度，与行高是否整齐无关。
-    const sizeSel = el.querySelector('.dt-pagesize');
-    const perPage = (sizeSel && parseInt(sizeSel.value, 10)) || 10;
+    const FLOOR_ROWS = 10;
     const tbody = el.querySelector('.dt-table tbody');
     const trows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
     const thH = (el.querySelector('.dt-table thead') || {}).offsetHeight || 44;
     let rowsH = 0;
     if (trows.length) {
-      const last = trows[Math.min(trows.length, perPage) - 1];
+      const last = trows[Math.min(trows.length, FLOOR_ROWS) - 1];
       rowsH = last.getBoundingClientRect().bottom - tbody.getBoundingClientRect().top;
     }
     if (!(rowsH > 0)) {
       // 空态（无数据行）时退回估算，保证下限仍然成立
       const rowH = (el.querySelector('.dt-table tbody tr') || {}).offsetHeight || 44;
-      rowsH = rowH * perPage;
+      rowsH = rowH * FLOOR_ROWS;
     }
     // max-height 作用在**边框盒**上（实测 maxHeight=744 → clientHeight=742），
     // 所以要把 wrapper 自身的上下边框与内边距补进来，否则内容区正好差这几像素。

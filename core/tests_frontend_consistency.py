@@ -1429,7 +1429,7 @@ class FilterValueSourceTest(SimpleTestCase):
 
 
 class TableHeightFloorTest(SimpleTestCase):
-    """列表高度下限（每页 N 行）必须**实测**前 N 行的累计高度，不得用「首行行高 × N」估算。
+    """列表高度下限（**固定 10 行**）必须**实测**前 10 行的累计高度，不得用「首行行高 × 10」估算。
 
     表格里长文本会折行，同一张表的行高并不均匀 —— 实测「全量台账中心 / 捕捉台账」
     首行 69.78px、第 5/7/10 行 76.19px：按首行估出「10 行刚好 742px」，
@@ -1480,14 +1480,35 @@ class TableHeightFloorTest(SimpleTestCase):
                 '请改成实测第 N 行的下沿。'
                 % (source[:base + m.start()].count('\n') + 1))
 
-    def test_floor_follows_page_size_control(self):
-        """下限的行数必须取自分页的「N 条/页」控件，不能写死 10。"""
+    # 下限的行数常量：`const FLOOR_ROWS = 10`
+    FLOOR_CONST = re.compile(r'\b(?:FLOOR_ROWS|MIN_ROWS)\s*=\s*(\d+)')
+
+    def test_floor_is_fixed_ten_rows(self):
+        """下限是**固定的 10 行**，不得随分页的「条/页」控件变化。
+
+        曾误写成「取当前每页条数」，后果很隐蔽：**一页渲染的行数 = 每页条数**，
+        于是「自然高」恒等于「一页的行高」→ `MIN ≈ natural` → 容差判断永远判成
+        「内容放得下」→ **下限彻底失效**（实测 20 条/页 时列表长到 1017px，比视口还高）。
+        行数 > 50 的表在 50 条/页 下更会算出 50 行的下限（约 2500px），列表被顶出屏幕。
+        「每页条数」只决定一页渲染多少行，**不决定列表该有多高**。
+        """
         _, body, _ = self._fit_body()
-        self.assertIn(
-            'dt-pagesize', body,
-            '列表高度下限的行数写死了 —— 用户把「条/页」改成 50 后，'
-            '下限仍按 10 行算，列表会被压到 10 行高。\n'
-            '应从分页的 `.dt-pagesize` 控件读当前每页条数（缺省才回落 10）。')
+        # 用 assertFalse 而不是 assertNotIn —— 后者会把整个方法体打进报错，
+        # 几百行代码把真正的提示信息埋掉，看报错的人根本找不到重点。
+        self.assertFalse(
+            'dt-pagesize' in body,
+            '列表高度下限读了分页的「条/页」控件 —— 下限会随每页条数一起变大，\n'
+            '而「自然高」恒等于「一页的行高」，两者几乎相等 → 容差判断永远判成\n'
+            '「内容放得下」→ 下限彻底失效（实测 20 条/页 时列表长到 1017px，比视口还高）。\n'
+            '「每页条数」只决定一页渲染多少行，不决定列表该有多高。')
+        m = self.FLOOR_CONST.search(body)
+        self.assertIsNotNone(
+            m, '未找到列表高度下限的行数常量（如 `const FLOOR_ROWS = 10;`）'
+               '—— 本测试需要同步更新')
+        self.assertEqual(
+            m.group(1), '10',
+            f'列表高度下限是 {m.group(1)} 行，应为 **10 行**'
+            '（要求：「列表的高度按照默认 10 行来设置」）。')
 
     def test_floor_covers_wrapper_border(self):
         """限高值要含 wrapper 自身边框：max-height 作用在**边框盒**上。"""
