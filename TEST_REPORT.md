@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **685 个用例，全部通过**（约 52 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **706 个用例，全部通过**（约 53 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白** |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -1703,6 +1703,234 @@ gov 诊疗台账 区县 [2=9 3=0 4=0 5=0 7=0]                         原=9
 
 ---
 
+## 二点二十二、孪生接口的校验漂移 · 三条越权/越界路径（2026-09-18 第十六轮）
+
+上一节（2.21）结尾留了一句：「同类『前端做了、后端没做』的校验值得再扫一遍」。
+本轮按这句话往下扫，**扫出了一个跨区县读 PII 的洞、一条数据编辑提权链，
+以及一处静默改判机构区县的静默数据损坏** —— 三条都不是同一个接口，
+但根因是同一种写法。
+
+### 2.22.1 本轮的方法：把「孪生接口」当成一个检查项
+
+上一轮那条 `canCreateRole()` 的教训是「前端过滤 ≠ 校验」。本轮换个角度找：
+**一对功能对称的接口，如果校验只写在其中一个里，那另一个就是洞。**
+按这个思路逐个比对，命中三处：
+
+| # | 孪生对 | 写在谁那里 | 漏在谁那里 | 后果 |
+|---|---|---|---|---|
+| 1 | `capture_update` / **`capture_detail`** | update 走 `_get_capture_for_user()` | detail 裸查 `Capture.objects.get(id=pk)` | **跨区县读个人信息** |
+| 2 | **`institution_create`** / `institution_edit` | edit 有「不得调整到他区」 | create 没有区县范围校验 | 区级管理员在**他区**建机构 |
+| 3 | `institution_create` / **`institution_edit`** | create 有「医院不能挂市级」 | edit 没有 | **把医院改挂市级 → 操作员获得全量可见** |
+
+第 1、2 条是「同一对接口、校验只写一边」；第 3 条是反向的 ——
+两边都有校验，但**内容不一样**。三种形态的根因相同：**校验各写一份**。
+
+### 2.22.2 缺陷一：捕捉单详情跨区县泄漏（本轮最严重）
+
+`capture_detail` 是裸查：
+
+```python
+capture = Capture.objects.get(id=pk)   # ← 不做任何范围校验
+```
+
+而这个接口返回的是**整张捕捉登记表**：物业交接人、联系电话、定位地址、经纬度、
+整体合影、单只照片、**电子签名**、以及其下全部宠物档案。
+
+实测（甲区账号读乙区捕捉单，`id` 直接猜）：
+
+```
+>>> shelter_a    status=200  泄漏! phone=13900009999 person=乙区物业 sig=data:image/png;base64,ZZZ pets=1
+>>> gov_a        status=200  泄漏! phone=13900009999 person=乙区物业 sig=data:image/png;base64,ZZZ pets=1
+>>> hospital_a   status=200  泄漏! phone=13900009999 person=乙区物业 sig=data:image/png;base64,ZZZ pets=1
+>>> gov_city     status=200  泄漏! phone=13900009999 person=乙区物业 sig=data:image/png;base64,ZZZ pets=1
+```
+
+`gov_city` 本来就该看到全部；前三个都是越权。**同一个模块里
+`capture_update` / `capture_delete` 早就走了 `_get_capture_for_user()`，
+只有 `capture_detail` 漏了。**
+
+修法：`capture_detail` 改走同一个 `_get_capture_for_user()`。
+但**不能简单收口成一律 404** —— 医院跨区县送医是允许的
+（`transfer_create` 不限制目标医院区县），只按区县过滤会让跨区县转运后
+医院点开捕捉详情直接 404。所以 `_get_capture_for_user()` 给医院加了
+「有动物转到过本院」的放行分支：
+
+```python
+qs = get_district_filtered_queryset(Capture, user)
+if user.role == 'hospital' and user.institution_id:
+    own = Capture.objects.filter(pet__hospital_id=user.institution_id).values('pk')
+    qs = Capture.objects.filter(Q(pk__in=qs.values('pk')) | Q(pk__in=own)).distinct()
+return qs.filter(id=pk).first()
+```
+
+**这一步最容易写错的地方**：只加拦截、不测放行，就会把跨区县送医这条正常
+路径一起掐掉 —— 而只测拦截的用例会全绿。所以回归用例里
+「甲区医院读乙区、但那单有动物转到过甲区医院」必须是 **200**。
+
+### 2.22.3 缺陷二：区级管理员能在其他区县建机构
+
+`institution_create` 只在**没传** `district_id` 时才按操作员区县兜底；
+**传了就直接落库**，不校验是否在管辖范围内。而 `institution_edit` 有这条校验：
+
+```python
+# institution_edit 里早就有
+if _district_out_of_scope(request, data['district_id']):
+    return json_fail('无权将机构调整到其他区县')
+```
+
+实测：
+
+```
+>>> 区级管理员(甲区) 向他区(乙区)建机构: status=200 机构创建成功
+>>> 乙区机构数 1 -> 2  ✗✗✗ 越权写入成功
+```
+
+新建机构**不会**被 `resolve_district_scope` 兜住 —— 那是给业务记录用的，
+而且它禁止市级归属，机构却**可以**挂市级（现场两个捕捉点就挂在市级）。
+
+修法：把判据提成一个共用函数，两个接口都调它：
+
+```python
+def _district_out_of_scope(request, district_id):
+    """目标区县是否超出操作员的管辖范围（市级管理员永远返回 False）。"""
+    scope = get_district_scope(request)
+    return scope is not None and str(district_id) != str(scope)
+```
+
+### 2.22.4 缺陷三：把医院改挂市级 → 操作员获得全量可见（提权链）
+
+`institution_create` 明确拒绝「医院挂市级」：
+
+```python
+if inst_type == 'hospital' and district.is_city:
+    return json_fail('医院必须挂具体区县，不能挂市级')
+```
+
+`institution_edit` **没有这一条**。而机构换区县时会连带搬迁其下操作员
+（`cascade_operator_district()`）。于是：
+
+```
+>>> 市级管理员把医院改挂市级: status=200 机构更新成功，1 个操作员的所属区县已同步调整
+>>> 改后：医院区县=全市  操作员区县=全市
+>>> 操作员自洽校验=该角色的账号所属区县必须是具体区县，不能挂市级
+>>> 操作员可见范围（None=全部区县）=可见捕捉单 0 条（全量）
+```
+
+那个账号的 `district.is_city` 变成 `True` → `get_district_scope()` 返回 `None`
+→ **整个市所有区县的数据都看得到**，而且它自己就违反了系统自己的不变式
+`validate_operator_district()`。
+
+> 这条链**完全靠数据编辑**完成，没有一处「看起来像越权」的请求。
+> 界面上点不出来（区县下拉过滤掉了市级），**只有直接打接口才会暴露** ——
+> 与上一轮 `canCreateRole` 是同一种「不可见」。
+
+修法（`institution_edit`）：先算出**改动之后**的类型与区县，再按最终状态校验。
+只看单个字段会漏掉「同时改 `type` 和 `district_id`」这种组合：
+
+```python
+new_type = data['type'] if data.get('type') in (...) else inst.type
+new_district = <解析后的区县，或 inst.district>
+if new_type == 'hospital' and new_district.is_city:
+    return json_fail('医院必须挂具体区县，不能挂市级')
+```
+
+顺带补上 `institution_edit` 缺失的**电话格式**校验（create 有、edit 没有，
+前端拦着、接口没拦）。
+
+### 2.22.5 缺陷四：编辑挂市级的捕捉点，不改区县也会被静默改判
+
+前端机构表单的区县下拉写成 `filter(d => d.status === 'active' && !d.is_city)` ——
+**排除了市级**。而挂市级的捕捉点确实存在。于是打开编辑弹窗时
+`<select>` 里没有机构当前的区县，退化成**选中第一项**；而保存时
+`district_id` 是**无条件**从下拉里读的：
+
+```js
+district_id: document.getElementById('inst-district').value,   // 永远会发
+```
+
+**什么都不改、直接点保存**，机构就被搬到了某个具体区县，还会连带搬走它下面的操作员。
+实测（临时关掉前端兜底，模拟修复前）：
+
+```
+[FAIL] C1 下拉默认选中机构**当前**区县「全市（市级）」（实际「襄城区」）
+[FAIL] C2 挂市级的机构仍能看到「全市（市级）」选项（否则保存必被改判）
+[FAIL] C3 不改区县直接保存后，机构仍在「全市（市级）」（实际「襄城区」）
+```
+
+这是一条**纯静默**的数据损坏：界面上没有任何提示，机构列表里那一行的区县
+就这么变了。修法两条：
+
+1. 编辑时把机构**当前**区县兜底加回选项（哪怕它是市级）；
+2. 区级管理员的区县下拉收敛到本区县（原先列全部 4 个，选了他区才被服务端拒绝，
+   白填一遍 —— 与 2.21 给账号表单做的是同一件事，机构表单漏了）。
+
+### 2.22.6 本轮新增测试（21 个，685 → 706）
+
+| 用例组 | 数量 | 锁什么 |
+|---|---|---|
+| `CaptureDetailDistrictScopeTest` | 9 | 三端跨区县读 404 + **响应体不含 PII** + 5 条正向对照（本区县、市级、跨区县送医） |
+| `InstitutionApiTest` 新增 | 8 | 他区建机构被拒且不落库、正向对照、不传 `district_id` 兜底；医院挂市级被拒 + **操作员不得被连带搬走** + 组合改动 + 正向对照（捕捉点挂市级仍允许）+ 电话格式 |
+| `InstitutionFormScopeContractTest` | 4 | 源码级：create/edit **两侧都要有**「医院挂市级」与 `_district_out_of_scope`；前端下拉收敛 + 保留当前区县 |
+
+两条值得单独说的：
+
+- **`test_cross_district_read_does_not_leak_pii` 第一版是空转的。**
+  它断言响应体里不含那个电话号码，但我忘了给那张单设 `contact_phone` ——
+  断言在空字符串上永远成立。**变异验证时它没跟着变红**才暴露出来，
+  已改成对三端各断言三个字段（电话 / 交接人 / 签名）。
+  「拦截用例也要验证它真的会红」，这一条同样适用于安全用例。
+- **`InstitutionFormScopeContractTest` 第一版四个用例全红**，两个原因都记下了：
+  用 `brace_body` 取 Python 函数体会从签名后第一个 `{` 开始配对
+  （那往往落在某个 dict 字面量里），Python 必须按顶层 `def` 行切；
+  前端那边则要用 `m.start()` 而不是 `m.end()` 去定位方法体的 `{`。
+
+### 2.22.7 变异验证
+
+| 变异 | 变红的用例 |
+|---|---|
+| `capture_detail` 改回裸查 | 3 个（三端跨区县读） |
+| `institution_create` 去掉区县范围校验 | 1 个 + 源码级契约 1 个 |
+| `institution_edit` 去掉「医院挂市级」 | 2 个 + 源码级契约 1 个 |
+| 前端去掉「保留机构当前区县」 | 源码级契约 1 个 + GUI `57` 的 C1/C2/C3 |
+| 前端去掉「区县下拉收敛」 | 源码级契约 1 个 |
+
+### 2.22.8 GUI 实测（`gui-test-scripts/57_institution_form_scope.js`，8/8 通过）
+
+| 检查 | 结果 |
+|---|---|
+| A1/A2 区级管理员机构表单只列本区县（襄城区） | ✅ |
+| A3 区级管理员仍能在本区县新建捕捉点（正向对照） | ✅ |
+| B1/B2 绕过界面在他区建机构被服务端拦下、且不落库 | ✅ |
+| C1/C2 编辑挂市级捕捉点时下拉默认选中「全市（市级）」 | ✅ |
+| C3 **不改区县直接保存**后机构仍在「全市（市级）」 | ✅ |
+
+脚本自带开场清理 + 收尾清理：机构**没有删除接口**，所以探针机构从数据库清，
+清理前先做引用审计（有任何反向引用就跳过并提示），跑完演示数据完全还原
+（已核对：捕捉点区县、操作员区县、无残留机构）。
+
+### 2.22.9 本轮验证结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **706 通过**（685 → +21） |
+| `46` 全端冒烟 | 80 个视图 0 报错 0 空白 |
+| `57` 机构表单区县规则 GUI 实测 | **8/8** |
+| 变异验证 | 5 组全部被抓到 |
+| 演示数据 | 跑完已还原（机构区县 / 操作员区县 / 探针机构均已核对） |
+
+### 2.22.10 已知边界
+
+- `capture_detail` 给医院的「有动物转到过本院」分支**目前 UI 没有用到**
+  （医院端不调 `getCapture`）。保留它是为了不破坏既有契约
+  （`test_hospital_can_view_capture_detail`），并让跨区县送医后的详情可用。
+- 仍**没有系统扫过**「`disabled` / `readonly` / 选项里没有」这三种前端形态：
+  本轮抽查的几处（捕捉单编辑/删除按钮的 `disabled`、库存 ≤ 0 物料的 `disabled`、
+  批号 `readonly`、回收单号 `readonly`）后端都有对应校验或本来就不接受客户端值，
+  但只是抽查，不是穷举。
+- `user_edit` 仍然不存在（见 2.21.8），补的时候必须复用 `validate_user_manage_scope()`。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -1857,7 +2085,7 @@ python manage.py migrate
 python manage.py seed_data          # 幂等，可重复执行；同时校准演示账号
 python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
-python manage.py test --parallel 1  # 685 个用例
+python manage.py test --parallel 1  # 706 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
@@ -1870,4 +2098,5 @@ GUI 实测脚本（`gui-test-scripts/`，需先起 `runserver`）：
 NODE_PATH=/Users/wl/.workbuddy-ai/binaries/node/playwright-env/node_modules \
 /Users/wl/.workbuddy-ai/binaries/node/versions/22.22.2-2/bin/node gui-test-scripts/<脚本>
 # 46 全端 80 视图冒烟｜47 筛选条守卫｜55 操作日志｜56 账号区县一致性
+# 57 机构表单区县规则（区县下拉收敛 / 绕过界面在他区建机构 / 挂市级机构不被静默改判）
 ```
