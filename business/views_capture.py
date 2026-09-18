@@ -213,6 +213,33 @@ def _resolve_district_scope(user, anchor, submitted):
     return resolve_district_scope(user, anchor, submitted)
 
 
+def _shelter_district_conflict(shelter, district):
+    """捕捉点与归属区县是否自相矛盾；矛盾时返回错误信息，否则 None。
+
+    捕捉点**本身挂在具体区县**时，它抓的动物就登记在那个区县；归属区县另填他区
+    会让这张单从**执行机构所在区县**的可见范围里消失 —— 区县隔离按
+    `Capture.district` 过滤，甲区捕捉点操作员看不到自己登记的单，
+    既不能转运也不能作废，而乙区政府却看到一张「甲区捕捉点执行」的单。
+    前端在捕捉点下拉的 change 事件里把归属区县自动同步成捕捉点所在区县
+    （`#ca_shelterId` → `#ca_districtId`），但那个区县下拉**没有禁用**，
+    后端原本也不校验 —— 于是这条同步只是「界面上不容易踩到」，不是约束。
+
+    捕捉点挂在「全市（市级）」时不做约束：现场两个捕捉点就挂在市级，
+    此时归属区县**必须**由操作员指定（`resolve_district_scope` 本就禁止市级归属）。
+
+    创建与编辑共用这一个判据 —— 各写一份必然漂移。
+    """
+    if shelter is None or district is None:
+        return None
+    shelter_district = getattr(shelter, 'district', None)
+    if shelter_district is None or shelter_district.is_city:
+        return None
+    if shelter_district.id != district.id:
+        return (f'捕捉点「{shelter.name}」属于{shelter_district.name}，'
+                f'归属区县必须与之一致（当前提交的是{district.name}）')
+    return None
+
+
 @csrf_exempt
 @role_required('shelter', 'gov_city', 'gov_district')
 @login_required
@@ -375,6 +402,11 @@ def capture_create(request):
     district, err = _resolve_district_scope(request.user, shelter, data.get('district_id'))
     if err:
         return json_fail(err)
+
+    # 与编辑共用同一条一致性判据（放在范围校验之后：跨区县提交应先报「无权归属」）
+    conflict = _shelter_district_conflict(shelter, district)
+    if conflict:
+        return json_fail(conflict)
 
     try:
         pet_count = int(data.get('pet_count', 0))
@@ -555,6 +587,11 @@ def capture_update(request, pk):
         if err:
             return json_fail(err)
         if capture.district_id != new_district.id:
+            # 只在**确实换区县**时校验一致性：历史遗留的错配单（捕捉点与区县
+            # 已不一致）仍要能原地改其它字段，也要能改回与捕捉点一致的那个区县。
+            conflict = _shelter_district_conflict(capture.shelter, new_district)
+            if conflict:
+                return json_fail(conflict)
             capture.district = new_district
             changed.append('district_id')
 

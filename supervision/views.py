@@ -15,7 +15,7 @@ from accounts.decorators import role_required
 from accounts.models import User
 from business.models import (
     Pet, Capture, Transfer, Treatment, Material, MaterialTransaction,
-    Release, Adoption, CheckIn, Blacklist, Euthanasia,
+    Release, Adoption, CheckIn, Blacklist, Euthanasia, OwnerReturn,
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
@@ -54,6 +54,43 @@ def _district_out_of_scope(request, district_id):
     """
     scope = get_district_scope(request)
     return scope is not None and str(district_id) != str(scope)
+
+
+def _district_references(district_id):
+    """统计挂在该区县下的引用（账号 / 机构 / 各类业务记录）。
+
+    抽成**共用函数**：`district_delete` 与 `district_edit` 的 `is_city` 守卫
+    用的是同一份清单。各写一份必然漂移 —— 漏掉某一类就会出现
+    「删不掉但能改级别」的缝隙。
+    """
+    references = {
+        '用户账号': User.objects.filter(district_id=district_id).count(),
+        '机构': Institution.objects.filter(district_id=district_id).count(),
+        '宠物档案': Pet.objects.filter(district_id=district_id).count(),
+        '捕捉记录': Capture.objects.filter(district_id=district_id).count(),
+        '主人领回': OwnerReturn.objects.filter(district_id=district_id).count(),
+        '转运记录': Transfer.objects.filter(district_id=district_id).count(),
+        '诊疗记录': Treatment.objects.filter(district_id=district_id).count(),
+        '物料': Material.objects.filter(district_id=district_id).count(),
+        '物料流水': MaterialTransaction.objects.filter(district_id=district_id).count(),
+        '放养记录': Release.objects.filter(district_id=district_id).count(),
+        '领养记录': Adoption.objects.filter(district_id=district_id).count(),
+        '黑名单': Blacklist.objects.filter(district_id=district_id).count(),
+        '安乐死记录': Euthanasia.objects.filter(district_id=district_id).count(),
+    }
+    return {k: v for k, v in references.items() if v > 0}
+
+
+def _inactive_district_error(district):
+    """区县已停用时返回错误信息，否则 None。
+
+    与 `user_create` 的「所选区县已停用」是同一条判据。前端所有区县下拉都写了
+    `d.status === 'active'`，但**只过滤选项等于没校验**：接口不做同一套校验，
+    就能把机构建到已停用的区县里 —— 而那个区县在界面上根本选不到。
+    """
+    if district is not None and district.status != 'active':
+        return '所选区县已停用'
+    return None
 
 
 # ============================================
@@ -193,6 +230,12 @@ def institution_create(request):
     except District.DoesNotExist:
         return json_fail('区县不存在')
 
+    # 停用区县不得再作为归属：前端下拉过滤了 `status === 'active'`，
+    # 但只过滤选项等于没校验（`user_create` 早有同一条，机构侧漏了）。
+    inactive_err = _inactive_district_error(district)
+    if inactive_err:
+        return json_fail(inactive_err)
+
     # 医院必须挂具体区县，不能挂市级；捕捉点可以挂市级或区县
     if inst_type == 'hospital' and district.is_city:
         return json_fail('医院必须挂具体区县，不能挂市级')
@@ -255,6 +298,12 @@ def institution_edit(request, pk):
         new_district = District.objects.filter(id=data['district_id']).first()
         if new_district is None:
             return json_fail('区县不存在')
+        # 只拦「搬到停用区县」。原地改名（不换区县）必须放行 ——
+        # 否则停在停用区县里的机构连名字都改不了，只能靠改库。
+        if new_district.id != inst.district_id:
+            inactive_err = _inactive_district_error(new_district)
+            if inactive_err:
+                return json_fail(inactive_err)
 
     if new_type == 'hospital' and new_district is not None and new_district.is_city:
         return json_fail('医院必须挂具体区县，不能挂市级')
@@ -390,8 +439,23 @@ def district_edit(request, pk):
         district.code = code
         update_fields.append('code')
     if 'is_city' in data:
-        district.is_city = bool(data.get('is_city'))
-        update_fields.append('is_city')
+        # 区县级别决定**挂在该区县下所有账号**的可见范围：`get_district_scope()`
+        # 对「所属区县 is_city=True」的账号返回 None = 全部数据。于是把已有账号/
+        # 数据的区县改成市级，等于一次性给该区县下所有账号发放全市读权限 ——
+        # 不需要碰任何账号，也不会有任何请求看起来像越权。反向（市级降级）
+        # 会让市级账号失去全部可见性，同样静默。
+        # 界面上这个下拉就在区县表单里（`#dist-is-city`），后端原本零守卫。
+        new_is_city = bool(data.get('is_city'))
+        if new_is_city != district.is_city:
+            used = _district_references(pk)
+            if used:
+                detail = '、'.join(f'{k}{v}条' for k, v in used.items())
+                return json_fail(
+                    f'该区县下仍有数据挂靠（{detail}），不能调整级别；'
+                    '区县级别决定其下所有账号的可见范围，请先迁移数据或另建区县'
+                )
+            district.is_city = new_is_city
+            update_fields.append('is_city')
     if 'status' in data:
         district.status = data.get('status')
         update_fields.append('status')
@@ -438,28 +502,7 @@ def district_delete(request, pk):
     except District.DoesNotExist:
         return json_fail('区县不存在', status=404)
 
-    from accounts.models import User
-    from business.models import (
-        Pet, Capture, OwnerReturn, Transfer, Treatment, Material,
-        MaterialTransaction, Release, Adoption, Blacklist, Euthanasia,
-    )
-
-    references = {
-        '用户账号': User.objects.filter(district_id=pk).count(),
-        '机构': Institution.objects.filter(district_id=pk).count(),
-        '宠物档案': Pet.objects.filter(district_id=pk).count(),
-        '捕捉记录': Capture.objects.filter(district_id=pk).count(),
-        '主人领回': OwnerReturn.objects.filter(district_id=pk).count(),
-        '转运记录': Transfer.objects.filter(district_id=pk).count(),
-        '诊疗记录': Treatment.objects.filter(district_id=pk).count(),
-        '物料': Material.objects.filter(district_id=pk).count(),
-        '物料流水': MaterialTransaction.objects.filter(district_id=pk).count(),
-        '放养记录': Release.objects.filter(district_id=pk).count(),
-        '领养记录': Adoption.objects.filter(district_id=pk).count(),
-        '黑名单': Blacklist.objects.filter(district_id=pk).count(),
-        '安乐死记录': Euthanasia.objects.filter(district_id=pk).count(),
-    }
-    used = {k: v for k, v in references.items() if v > 0}
+    used = _district_references(pk)
     if used:
         detail = '、'.join(f'{k}{v}条' for k, v in used.items())
         return json_fail(f'该区县已被业务数据引用（{detail}），不可删除，请改为停用')

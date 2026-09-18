@@ -855,3 +855,88 @@ class GeocodeIpTest(BusinessTestBase):
         self.assertEqual(body['data']['longitude'], 119.75)
         self.assertEqual(body['data']['address'], '')
         self.assertEqual(body['data']['precision'], 'city')
+
+
+class CaptureShelterDistrictConsistencyTest(BusinessTestBase):
+    """捕捉单的「捕捉点」与「归属区县」必须自洽（第十七轮）。
+
+    前端在捕捉点下拉的 change 事件里把归属区县自动同步成该捕捉点所在区县
+    （`#ca_shelterId` → `#ca_districtId`），但那个区县下拉**没有禁用**，
+    后端也没有一致性校验 —— 于是可以提交「甲区的捕捉点 + 乙区的归属区县」。
+    后果是这张单会从**执行机构所在区县**的可见范围里消失（区县隔离按
+    `Capture.district` 过滤），甲区捕捉点操作员看不到自己登记的单、无法转运。
+
+    例外：捕捉点本身挂在「全市（市级）」时（现场两个捕捉点就是这种），
+    归属区县**必须**由操作员指定，此时不做一致性约束。
+    """
+
+    def _payload(self, **kw):
+        payload = {
+            'shelter_id': self.shelter_a.id,
+            'property_name': '阳光物业',
+            'community_name': '幸福小区',
+            'address': '幸福路1号',
+            'contact_person': '物业张三',
+            'contact_phone': '13800001234',
+            'pet_count': 1,
+        }
+        payload.update(kw)
+        return payload
+
+    def test_create_rejects_district_mismatch_with_concrete_shelter(self):
+        self.login_as(self.gov_city)
+        self.expect_fail(self.post_json(
+            f'{CAPTURES_URL}create/',
+            self._payload(district_id=self.district_b.id)))
+        self.assertFalse(Capture.objects.filter(shelter=self.shelter_a).exists())
+
+    def test_create_allows_matching_district(self):
+        """正向对照：与捕捉点同区县照常放行。"""
+        self.login_as(self.gov_city)
+        body = self.ok(self.post_json(
+            f'{CAPTURES_URL}create/',
+            self._payload(district_id=self.district_a.id)))
+        capture = Capture.objects.get(id=body['data']['capture']['id'])
+        self.assertEqual(capture.district_id, self.district_a.id)
+
+    def test_create_without_district_still_falls_back_to_shelter(self):
+        """正向对照：不传区县时仍按捕捉点兜底。"""
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{CAPTURES_URL}create/', self._payload()))
+        capture = Capture.objects.get(id=body['data']['capture']['id'])
+        self.assertEqual(capture.district_id, self.district_a.id)
+
+    def test_create_allows_any_district_for_city_level_shelter(self):
+        """正向对照：挂市级的捕捉点必须能指定具体区县（否则无法登记）。"""
+        city_shelter = make_institution(type='shelter', district=self.city,
+                                        name='市级捕捉点')
+        self.login_as(self.gov_city)
+        body = self.ok(self.post_json(
+            f'{CAPTURES_URL}create/',
+            self._payload(shelter_id=city_shelter.id, district_id=self.district_b.id)))
+        capture = Capture.objects.get(id=body['data']['capture']['id'])
+        self.assertEqual(capture.district_id, self.district_b.id)
+
+    def test_update_rejects_district_mismatch(self):
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{CAPTURES_URL}create/', self._payload()))
+        capture = Capture.objects.get(id=body['data']['capture']['id'])
+        self.login_as(self.gov_city)
+        self.expect_fail(self.post_json(
+            f'{CAPTURES_URL}{capture.id}/update/',
+            {'district_id': self.district_b.id}))
+        capture.refresh_from_db()
+        self.assertEqual(capture.district_id, self.district_a.id)
+
+    def test_update_rejects_district_mismatch_without_moving_pets(self):
+        """拦截必须连宠物档案的区县一起保住 —— 只断一半等于没断。"""
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{CAPTURES_URL}create/', self._payload()))
+        capture = Capture.objects.get(id=body['data']['capture']['id'])
+        self.login_as(self.gov_city)
+        self.post_json(f'{CAPTURES_URL}{capture.id}/update/',
+                       {'district_id': self.district_b.id})
+        self.assertEqual(
+            Pet.objects.filter(capture=capture, district=self.district_a).count(), 1)
+        self.assertEqual(
+            Pet.objects.filter(capture=capture, district=self.district_b).count(), 0)

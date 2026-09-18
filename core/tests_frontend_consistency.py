@@ -1649,3 +1649,120 @@ class InstitutionFormScopeContractTest(SimpleTestCase):
         self.assertIn('inst.district_id', body,
                       '机构表单没有把「机构当前区县」加回下拉选项 ——\n'
                       '挂市级的捕捉点编辑保存时会被静默改判到某个具体区县。')
+
+
+class NarrowedOptionContractTest(SimpleTestCase):
+    """「前端把选项收窄了、后端不校验」这一类（第十七轮）。
+
+    前两轮把 `disabled` / `readonly` 两种形态扫过一遍，本轮补第三种：
+    **下拉里根本没有这个选项** —— 前端按某个规则过滤掉了候选值，
+    而服务端对同一个字段不做任何校验。界面上点不出来，只有直接打接口才暴露；
+    反过来，界面上**能**改的（下拉没禁用）却又是服务端要拒的，则是另一种坑：
+    用户改一下就撞 400，看不出原因。
+
+    本轮实测的三处都属于这个形态，且都带「跨模块孪生漂移」的性质：
+    同一个判据在一个模块里写了、在另一个模块里漏了。
+    """
+
+    def _py_func(self, source, name):
+        """取 Python 顶层函数的整段源码（不能用花括号配对，见上一轮的教训）。"""
+        m = re.search(r'^def ' + re.escape(name) + r'\(', source, re.M)
+        self.assertIsNotNone(m, f'找不到 {name} —— 本测试需要同步更新')
+        nxt = re.search(r'^(?:def |@|# =)', source[m.end():], re.M)
+        end = len(source) if nxt is None else m.end() + nxt.start()
+        return source[m.start():end]
+
+    def _js_method(self, source, pattern, label):
+        m = re.search(pattern, source)
+        self.assertIsNotNone(m, f'找不到 {label} —— 本测试需要同步更新')
+        body = brace_body(source, source.index('{', m.start()))
+        self.assertIsNotNone(body, f'{label} 的花括号不配对')
+        return body
+
+    # ---------- 一、区县级别（is_city）改动 ----------
+
+    def test_district_edit_guards_is_city_change(self):
+        """`district_edit` 改 `is_city` 必须先做引用审计。
+
+        `get_district_scope()` 对「所属区县 is_city=True」的账号返回 None = 全部数据。
+        所以把已有账号/数据的区县改成市级，等于一次性给该区县所有账号发放全市读权限，
+        而且不需要碰任何账号、没有任何请求看起来像越权。
+        前端这个下拉就在区县表单里（`#dist-is-city`），后端原本零守卫。
+        """
+        body = self._py_func(read('supervision/views.py'), 'district_edit')
+        self.assertRegex(
+            body, r"is_city[\s\S]{0,600}?_district_references\(",
+            '`district_edit` 调整 `is_city` 时没有做引用审计。\n'
+            '区县级别决定其下所有账号的可见范围，改它等于批量改权限。')
+
+    def test_district_delete_and_edit_share_reference_helper(self):
+        """删除与改级别必须共用同一份引用清单，否则会出现「删不掉但能改级别」的缝隙。"""
+        source = read('supervision/views.py')
+        for name in ('district_delete', 'district_edit'):
+            self.assertIn(
+                '_district_references(', self._py_func(source, name),
+                f'`{name}` 没有走共用的 `_district_references()` —— '
+                '两处各列一份清单必然会漂移。')
+
+    # ---------- 二、停用区县 ----------
+
+    def test_institution_create_and_edit_reject_inactive_district(self):
+        """机构创建/编辑都要拒绝停用区县。
+
+        `user_create` 早有「所选区县已停用」，机构侧没有 —— 同一模块内两条创建
+        路径各写一份判据，必然漂移。前端所有区县下拉都写了 `status === 'active'`，
+        但只过滤选项等于没校验。
+        """
+        source = read('supervision/views.py')
+        for name in ('institution_create', 'institution_edit'):
+            self.assertIn(
+                '_inactive_district_error(', self._py_func(source, name),
+                f'`{name}` 没有校验「区县已停用」。\n'
+                '与 `user_create` 是同一条判据，必须共用 `_inactive_district_error()`。')
+
+    # ---------- 三、捕捉点 ↔ 归属区县 ----------
+
+    def test_capture_create_and_update_share_shelter_district_judgement(self):
+        """捕捉单的创建与编辑必须共用同一条「捕捉点 ↔ 归属区县」判据。
+
+        捕捉点本身挂在具体区县时，归属区县是派生值。填成他区会让这张单从
+        **执行机构所在区县**的可见范围里消失（区县隔离按 `Capture.district` 过滤），
+        捕捉点操作员看不到自己登记的单，既不能转运也不能作废。
+        """
+        source = read('business/views_capture.py')
+        for name in ('capture_create', 'capture_update'):
+            self.assertIn(
+                '_shelter_district_conflict(', self._py_func(source, name),
+                f'`{name}` 没有校验捕捉点与归属区县的一致性。\n'
+                'create 与 update 是一对孪生接口，必须共用同一个判据。')
+
+    def test_capture_create_form_locks_district_to_shelter(self):
+        """新建捕捉单：捕捉点挂在具体区县时，归属区县下拉必须**禁用**。
+
+        只做「change 时自动同步」不够 —— 同步完还能手改，等于留了一个必撞 400 的入口。
+        """
+        body = self._js_method(
+            read(PORTALS['shelter']),
+            r'function _syncDistrictFromShelter\(\)',
+            'shelter portal 的 _syncDistrictFromShelter')
+        # 断言必须带上右侧的取值：只写 `districtSelect.disabled =` 的话，
+        # `= false` 这种「写了但没生效」的写法照样能过 —— 变异验证时它没跟着变红，
+        # 才发现第一版是空转的。
+        self.assertRegex(
+            body, r'districtSelect\.disabled\s*=\s*locked\b',
+            '捕捉单表单没有按捕捉点锁定归属区县下拉 ——\n'
+            '服务端会拒绝不一致的提交，界面必须跟着禁用。')
+
+    def test_capture_edit_form_locks_district_when_shelter_is_concrete(self):
+        """编辑捕捉单：同样要锁，但历史错配数据必须留一个改回来的入口。"""
+        body = self._js_method(
+            read(PORTALS['shelter']),
+            r'async showCaptureEdit\(',
+            'shelter portal 的 showCaptureEdit')
+        self.assertIn(
+            'districtLocked', body,
+            '编辑弹窗没有计算 `districtLocked` —— 归属区县下拉会留着可改，'
+            '用户一改就撞 400。')
+        self.assertRegex(
+            body, r'ed_districtId[\s\S]{0,80}?\$\{districtLocked \? \'disabled\'',
+            '编辑弹窗的 `#ed_districtId` 没有按 `districtLocked` 禁用。')

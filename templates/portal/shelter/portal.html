@@ -679,6 +679,19 @@ const Shelter = {
     // 必须从详情接口返回的 full.pets 取；否则渲染时抛 ReferenceError，弹窗整体打不开。
     const pets = full.pets || [];
 
+    // 捕捉点挂在**具体区县**时，归属区县是派生值 —— 服务端
+    // `_shelter_district_conflict()` 会拒绝与捕捉点不一致的提交。界面上要跟着锁死，
+    // 否则下拉留着可改，用户一改就撞 400 却看不出原因。
+    // 两种情形放开：捕捉点挂「全市（市级）」；以及本单区县与捕捉点已经不一致
+    // （历史遗留数据）—— 后者必须留一个改回一致的入口。
+    let districtLocked = false;
+    try {
+      const insts = await TNR_API.getInstitutions('shelter');
+      const mine = (insts || []).find(i => String(i.id) === String(full.shelterId || full.shelter_id));
+      const sd = mine && (districts || []).find(d => d.id === mine.districtId);
+      districtLocked = !!(sd && sd.id === full.districtId);
+    } catch (e) { /* 取不到机构时降级为可改，由服务端兜底 */ }
+
     const body = (el) => {
       el.innerHTML = `
         <div class="form-row">
@@ -686,9 +699,10 @@ const Shelter = {
           <div class="form-group"><label class="form-label">所在小区<span class="req">*</span></label><input class="form-input" id="ed_communityName" value="${esc(full.communityName || '')}" placeholder="请手动填写小区名称"></div>
         </div>
         <div class="form-row">
-          <div class="form-group"><label class="form-label">归属区县</label><select class="form-select" id="ed_districtId">
+          <div class="form-group"><label class="form-label">归属区县</label><select class="form-select" id="ed_districtId" ${districtLocked ? 'disabled' : ''}>
             ${(districts || []).filter(d => !d.isCity).map(d => '<option value="' + d.id + '"' + (d.id === full.districtId ? ' selected' : '') + '>' + esc(d.name) + '</option>').join('')}
-          </select></div>
+          </select>
+          <div class="form-hint">${districtLocked ? '由执行捕捉点所在区县确定，不可修改' : '捕捉单必须归属到具体区县'}</div></div>
           <div class="form-group"><label class="form-label">捕捉点</label><input class="form-input" id="ed_shelterName" value="${esc(full.shelterName || '')}" disabled></div>
         </div>
         <div class="form-group"><label class="form-label">详细地址</label><input class="form-input" id="ed_address" value="${esc(full.address || '')}" placeholder="门牌号等详细信息"></div>
@@ -908,7 +922,7 @@ const Shelter = {
               <select class="form-select" id="ca_districtId">
                 ${realDistricts.map(d => '<option value="' + d.id + '"' + (d.id === defaultDistrictId ? ' selected' : '') + '>' + TNR_UI.escape(d.name) + '</option>').join('')}
               </select>
-              <div class="form-hint">捕捉单必须归属到具体区县；默认取当前捕捉点所在区县</div>
+              <div class="form-hint" id="ca_districtHint">捕捉单必须归属到具体区县；默认取当前捕捉点所在区县</div>
             </div>
           </div>
           ${isGov ? `
@@ -1076,17 +1090,39 @@ const Shelter = {
           || host.endsWith('.localhost');
     }
 
-    // 监管账号：选定执行捕捉点后，归属区县自动跟随该捕捉点所在区县，
-    // 避免登记出来的捕捉单区县与捕捉点实际位置不一致。
+    // 归属区县与捕捉点是**派生关系**：捕捉点本身挂在具体区县时，它抓的动物
+    // 就登记在那个区县，服务端 `_shelter_district_conflict()` 会拒绝不一致的
+    // 提交（否则这张单会从执行机构所在区县的可见范围里消失）。
+    // 所以界面上不能只做「自动同步」—— 同步完还能手改，等于给了个必撞 400 的入口。
+    // 捕捉点挂在「全市（市级）」时才放开下拉：那种情况下区县只能由操作员指定。
     const shelterSelect = document.getElementById('ca_shelterId');
+    const districtSelect = document.getElementById('ca_districtId');
+    const districtHint = document.getElementById('ca_districtHint');
+    const HINT_DEFAULT = '捕捉单必须归属到具体区县；默认取当前捕捉点所在区县';
+
+    function _syncDistrictFromShelter() {
+      // 监管账号用下拉里选中的捕捉点；捕捉点账号用它自己绑定的机构
+      const picked = shelterSelect
+        ? (institutions || []).find(i => String(i.id) === shelterSelect.value)
+        : myInstitution;
+      const target = picked && picked.districtId;
+      const locked = !!target && realDistricts.some(d => d.id === target);
+      if (locked) {
+        districtSelect.value = target;
+      }
+      districtSelect.disabled = locked;
+      if (districtHint) {
+        const name = locked
+          ? (realDistricts.find(d => d.id === target) || {}).name : '';
+        districtHint.textContent = locked
+          ? `已按执行捕捉点所在区县锁定为「${name}」`
+          : HINT_DEFAULT;
+      }
+    }
+
+    _syncDistrictFromShelter();
     if (shelterSelect) {
-      shelterSelect.addEventListener('change', () => {
-        const picked = (institutions || []).find(i => String(i.id) === shelterSelect.value);
-        const target = picked && picked.districtId;
-        if (target && realDistricts.some(d => d.id === target)) {
-          document.getElementById('ca_districtId').value = target;
-        }
-      });
+      shelterSelect.addEventListener('change', _syncDistrictFromShelter);
     }
 
     document.getElementById('btnLocate').addEventListener('click', () => {

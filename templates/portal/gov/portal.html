@@ -569,6 +569,7 @@ const GovPortal = {
         </select>
       </div>
       <p class="form-hint">说明：市级区县用于市管理员/捕捉点操作员归属；区级区县用于区级管理员/医院归属。</p>
+      ${dist ? `<p class="form-hint" style="color:var(--rouge);">该区县下已有账号或业务数据挂靠时，级别不可修改 —— 级别决定其下所有账号的可见范围（市级 = 可见全部区县）。</p>` : ''}
     `;
     const m = TNR_UI.modal({
       title: dist ? '编辑区县' : '新增区县', body, size: 'md',

@@ -814,3 +814,111 @@ class SupervisionDataTest(SupervisionBase):
         self.client.force_login(self.gov_a)
         self.expect_fail(self.client.get(f'{API}/config/'), status=403)
         self.expect_fail(self.post_json(f'{API}/config/', {'x': 'y'}), status=403)
+
+
+class DistrictIsCityGuardTest(SupervisionBase):
+    """区县 `is_city` 翻转的权限后果（第十七轮）。
+
+    `get_district_scope()` / `get_district_filtered_queryset()` 对
+    「所属区县 is_city=True」的用户返回**全部数据**。因此把**已有账号挂靠**的
+    区县改成市级，等于给该区县下所有账号发放全市读权限 —— 而且不需要碰账号本身。
+    前端区县表单有这个下拉（`#dist-is-city`），后端原本零守卫。
+    """
+
+    def test_flip_to_city_with_accounts_rejected(self):
+        self.client.force_login(self.gov_city)
+        self.expect_fail(self.post_json(
+            f'{API}/districts/{self.district_a.id}/edit/', {'is_city': True}))
+        self.district_a.refresh_from_db()
+        self.assertFalse(self.district_a.is_city)
+
+    def test_flip_to_city_does_not_widen_district_scope(self):
+        """主断言：翻完之后区级账号仍只看得到本区数据。"""
+        make_pet(district=self.district_a, shelter=self.shelter_a)
+        make_pet(district=self.district_b, shelter=self.hospital_b)
+        self.client.force_login(self.gov_city)
+        self.post_json(f'{API}/districts/{self.district_a.id}/edit/', {'is_city': True})
+        self.login_as(self.gov_a)
+        data = self.ok(self.client.get(f'{API}/dashboard/'))['data']
+        self.assertEqual(data['pet_total'], 1)
+
+    def test_demote_city_district_with_accounts_rejected(self):
+        """反向：把市级区县降级会让市级账号失去全部可见性。"""
+        self.client.force_login(self.gov_city)
+        self.expect_fail(self.post_json(
+            f'{API}/districts/{self.city.id}/edit/', {'is_city': False}))
+        self.city.refresh_from_db()
+        self.assertTrue(self.city.is_city)
+
+    def test_flip_empty_district_allowed(self):
+        """正向对照：没有账号/数据挂靠的区县仍可改为市级。"""
+        empty = make_district(name='空区', code='SEMPTY')
+        self.client.force_login(self.gov_city)
+        self.ok(self.post_json(f'{API}/districts/{empty.id}/edit/', {'is_city': True}))
+        empty.refresh_from_db()
+        self.assertTrue(empty.is_city)
+
+    def test_plain_edit_without_is_city_unaffected(self):
+        """正向对照：不动 is_city 的普通改名不受影响。"""
+        self.client.force_login(self.gov_city)
+        self.ok(self.post_json(
+            f'{API}/districts/{self.district_a.id}/edit/', {'name': '甲区改名'}))
+        self.district_a.refresh_from_db()
+        self.assertEqual(self.district_a.name, '甲区改名')
+
+    def test_same_value_is_city_is_noop(self):
+        """正向对照：提交与当前值相同的 is_city 不算「改动」。"""
+        self.client.force_login(self.gov_city)
+        self.ok(self.post_json(
+            f'{API}/districts/{self.district_a.id}/edit/', {'is_city': False}))
+
+
+class InactiveDistrictAssignmentTest(SupervisionBase):
+    """停用区县不得再作为归属（第十七轮）。
+
+    前端机构表单的区县下拉写的是 `d.status === 'active' && !d.is_city`，
+    后端上一轮补了 `!is_city`、**漏了 `status`** —— 而同一个模块的
+    `user_create` 两条都校验了（`所选区县已停用`）。同一模块内两条创建路径
+    各写一份，必然漂移。
+    """
+
+    def setUp(self):
+        self.district_b.status = 'inactive'
+        self.district_b.save(update_fields=['status'])
+        self.client.force_login(self.gov_city)
+
+    def test_create_institution_in_inactive_district_rejected(self):
+        self.expect_fail(self.post_json(f'{API}/institutions/create/', {
+            'name': '停用区医院', 'type': 'hospital',
+            'district_id': self.district_b.id}))
+        self.assertFalse(Institution.objects.filter(name='停用区医院').exists())
+
+    def test_edit_institution_into_inactive_district_rejected(self):
+        inst = make_institution(type='hospital', district=self.district_a,
+                                name='待迁医院')
+        self.expect_fail(self.post_json(
+            f'{API}/institutions/{inst.id}/edit/', {'district_id': self.district_b.id}))
+        inst.refresh_from_db()
+        self.assertEqual(inst.district_id, self.district_a.id)
+
+    def test_create_institution_in_active_district_allowed(self):
+        """正向对照。"""
+        self.ok(self.post_json(f'{API}/institutions/create/', {
+            'name': '正常医院', 'type': 'hospital',
+            'district_id': self.district_a.id}))
+
+    def test_edit_institution_without_district_change_allowed(self):
+        """正向对照：原地改名不受影响（区县没换，即使本区停用也允许改名）。"""
+        inst = make_institution(type='hospital', district=self.district_a,
+                                name='原名医院')
+        self.ok(self.post_json(
+            f'{API}/institutions/{inst.id}/edit/', {'name': '新名医院'}))
+        inst.refresh_from_db()
+        self.assertEqual(inst.name, '新名医院')
+
+    def test_user_create_in_inactive_district_already_rejected(self):
+        """锚点：同模块 `user_create` 早有这条校验，机构侧必须对齐。"""
+        self.expect_fail(self.post_json(f'{API}/users/create/', {
+            'username': 'inactive_probe', 'name': '探针', 'role': 'hospital',
+            'district_id': self.district_b.id,
+            'institution_id': self.hospital_b.id}), message='所选区县已停用')
