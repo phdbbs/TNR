@@ -810,10 +810,93 @@ class SupervisionDataTest(SupervisionBase):
         data = self.ok(self.client.get(f'{API}/config/'))['data']
         self.assertEqual(data['capture_prefix'], 'ZB')
 
-    def test_system_config_gov_district_403(self):
+    def test_system_config_gov_district_can_read(self):
+        """区级管理员必须能读到**真实**前缀，而不是空串。
+
+        第十九轮：此前 GET 也限死 `gov_city`，区级拿 403 后
+        `TNR_API._get()` 静默返回 `[]`，政府端「系统配置」页把
+        CAP/TRF/… 渲染成**空白输入框** —— 看上去像「编号规则没配置」。
+        这与「兜底谎报业务状态」同族：无权限时不能拿空值冒充真实值。
+        """
         self.client.force_login(self.gov_a)
-        self.expect_fail(self.client.get(f'{API}/config/'), status=403)
-        self.expect_fail(self.post_json(f'{API}/config/', {'x': 'y'}), status=403)
+        data = self.ok(self.client.get(f'{API}/config/'))['data']
+        self.assertEqual(data['pet_code_prefix'], 'TNR')
+        self.assertEqual(data['capture_prefix'], 'CAP')
+        self.assertEqual(data['transfer_prefix'], 'TRF')
+
+    def test_system_config_gov_district_cannot_write(self):
+        """区级只读：POST 必须 403，且**库里的值不能被改**。"""
+        SystemConfig.objects.update_or_create(
+            key='capture_prefix', defaults={'value': 'CAP'})
+        self.client.force_login(self.gov_a)
+        self.expect_fail(
+            self.post_json(f'{API}/config/', {'capture_prefix': 'ZZ'}), status=403)
+        self.assertEqual(SystemConfig.objects.get(key='capture_prefix').value, 'CAP')
+
+    def test_system_config_other_roles_403(self):
+        """捕捉点 / 医院 / 领养人：读写一律 403。"""
+        for user in (self.shelter_user, self.hospital_user, self.adopter):
+            self.client.force_login(user)
+            self.expect_fail(self.client.get(f'{API}/config/'), status=403)
+            self.expect_fail(self.post_json(f'{API}/config/', {'x': 'y'}), status=403)
+
+
+class SystemConfigPageContractTest(SupervisionBase):
+    """源码级契约：编号规则的读/写权限必须**两端同时**收口（第十九轮）。
+
+    这一类的典型形态是「同一条规则只写了一半」——后端 GET 限市级、
+    前端却按「可读」渲染，界面上就是一片空白前缀。所以断言必须两侧都查，
+    并且**反向断言**「静默封装不得再被用于此处」：`TNR_API._get()` 在非 2xx
+    时返回 `[]`，用它读配置就等于把 403 渲染成「没有配置」。
+    """
+
+    def _read(self, rel):
+        import pathlib
+        from django.conf import settings
+        return (pathlib.Path(settings.BASE_DIR) / rel).read_text(encoding='utf-8')
+
+    def test_backend_splits_read_and_write(self):
+        import inspect
+        import re
+        from supervision import views
+        src = inspect.getsource(views.system_config)
+        self.assertRegex(
+            src, r"@role_required\('gov_city',\s*'gov_district'\)",
+            'GET 必须对区级管理员开放')
+        self.assertRegex(
+            src, r"if request\.user\.role != 'gov_city':\s*\n\s*return json_fail\([^)]*status=403\)",
+            'POST 必须保留市级守卫')
+        self.assertNotRegex(
+            src, r"@role_required\('gov_city'\)\s*\n@login_required\ndef system_config",
+            '整函数限市级会让区级读到空值')
+
+    def test_frontend_gates_write_and_surfaces_read_failure(self):
+        src = self._read('templates/portal/gov/portal.html')
+        self.assertIn("const canEdit = this.isCityLevel();", src)
+        # 输入框只读门禁
+        self.assertIn("canEdit ? '' : ' readonly'", src)
+        # 保存按钮受同一门禁
+        self.assertIn('${canEdit ? `<div class="card-header"', src)
+        # 读失败必须显式报错，不得静默渲染空值
+        self.assertIn("await TNR_API.get('/api/supervision/config/')", src)
+        self.assertIn('加载配置失败', src)   # 失败要显式渲染，不能只是吞掉
+        # 反向断言：整个政府端都不得再用静默封装读配置。
+        # 注意不能写成 `assertNotIn('config = await TNR_API.getSystemConfig();')`
+        # —— 改写成 `const json = await ...` 就绕过去了，是空转断言。
+        self.assertNotIn(
+            'TNR_API.getSystemConfig()', src,
+            '静默封装会把 403 渲染成「编号规则没配置」')
+
+    def test_silent_config_wrapper_stays_removed(self):
+        """`getSystemConfig` 不得被加回来。
+
+        它就是本轮的成因：经 `_get()` 在非 2xx 时静默返回 `[]`。
+        删掉之后「读配置」只剩 `TNR_API.get(...)` 一条路，失败必抛错。
+        """
+        src = self._read('static/js/tnr-api.js')
+        self.assertNotIn('async getSystemConfig', src)
+        # 但 `_get` 本身的危害必须在源码里写明，否则下一个调用方还会踩
+        self.assertIn('静默封装', src)
 
 
 class DistrictIsCityGuardTest(SupervisionBase):

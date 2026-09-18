@@ -1310,13 +1310,22 @@ def operation_logs(request):
 # 15. 系统配置
 # ============================================
 @csrf_exempt
-@role_required('gov_city')
+@role_required('gov_city', 'gov_district')
 @login_required
 def system_config(request):
-    """系统配置（仅市级管理员）
+    """系统配置
 
-    GET: 返回当前配置
-    POST: 更新配置（键值对）
+    GET: 返回当前配置（市级 / 区级管理员都可**读取**）
+    POST: 更新配置（键值对，**仅市级管理员**）
+
+    读、写权限必须分开。政府端「系统配置」页对区级管理员是**可见**的
+    （同一页的「操作日志」标签页本就允许区级访问），前端也按「可读」渲染
+    编号前缀表，提示文案写的正是「仅市级管理员可**修改**编号规则配置」。
+
+    此前 GET 一并限死 `gov_city`，区级拿到 403 后 `TNR_API._get()` 静默返回
+    `[]`，界面把真实的 CAP/TRF/… 前缀渲染成**空串** —— 用户看到的是
+    「编号规则没配置」。这与「兜底谎报业务状态」同族：无权限时不能拿空值
+    冒充真实值。
     """
     if request.method == 'GET':
         configs = SystemConfig.objects.all()
@@ -1340,7 +1349,9 @@ def system_config(request):
                 data[k] = v
         return json_ok(data)
 
-    # POST: 更新配置
+    # POST: 更新配置（仅市级管理员）
+    if request.user.role != 'gov_city':
+        return json_fail('仅市级管理员可修改系统配置', status=403)
     data = parse_json_body(request)
     updated = []
     for key, value in data.items():

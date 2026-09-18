@@ -22,6 +22,13 @@ const TNR_API = {
     if (!u || u.role === 'gov_city') return null;
     return u.district_id;
   },
+  /* 静默封装：任何非 2xx（含 403 / 500）都返回 `[]`，调用方拿不到失败信号。
+   *
+   * 列表页用它是可以的（空表格 ≈ 没有数据）。但**凡是「值必须如实显示」的
+   * 场景都不能用它** —— 403 会变成「配置为空」、500 会变成「暂无数据」，
+   * 用户看到的是错误结论而不是错误提示。这类场景一律用 `get()`（失败抛错）。
+   * 第十九轮政府端「系统配置」页就是栽在这里：区级拿 403 后前缀全渲染成空串。
+   */
   async _get(url) {
     const res = await fetch(url);
     const data = await res.json();
@@ -214,7 +221,10 @@ const TNR_API = {
     const url = limit ? `/api/supervision/logs/?limit=${limit}` : '/api/supervision/logs/';
     return this._get(url);
   },
-  async getSystemConfig() { return this._get('/api/supervision/config/'); },
+  // getSystemConfig 已移除（第十九轮）。
+  // 它经 `_get()` 在非 2xx 时**静默返回 `[]`**，把 403 渲染成「配置为空」——
+  // 政府端「系统配置」页因此把真实的 CAP/TRF/… 前缀显示成空白输入框。
+  // 读配置请用 `TNR_API.get('/api/supervision/config/')`（失败会抛错）。
   async updateSystemConfig(data) { return this._post('/api/supervision/config/', data); },
   async generatePetCodes(count) {
     try {

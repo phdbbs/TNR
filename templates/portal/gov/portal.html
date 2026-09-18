@@ -1929,11 +1929,19 @@ const GovPortal = {
     const tab = this.settingsState.tab;
 
     if (tab === 'prefix') {
-      let config = {};
+      // 编号规则：市级可改，区级只读。读/写权限在后端也是分开的
+      // （GET 允许两级、POST 仅市级），此处门禁必须与服务端一致。
+      const canEdit = this.isCityLevel();
+      let config = null;
       try {
-        config = await TNR_API.getSystemConfig();
+        // 必须用 TNR_API.get（失败会抛错）而不是 getSystemConfig ——
+        // 后者经 `_get()` 在非 2xx 时静默返回 []，会把真实的 CAP/TRF/…
+        // 前缀渲染成空串，看上去像「编号规则没配置」（兜底谎报）。
+        const json = await TNR_API.get('/api/supervision/config/');
+        config = json.data || {};
       } catch (e) {
-        TNR_UI.toast('加载配置失败：' + e.message, 'danger');
+        el.innerHTML = `<div class="table-empty"><div class="table-empty-icon">⚠️</div><div class="table-empty-text">加载配置失败：${TNR_UI.escape(e.message)}</div></div>`;
+        return;
       }
       const prefixes = [
         { type: '捕捉记录', key: 'capture_prefix', example: 'CAP-2025-0110-001' },
@@ -1948,9 +1956,9 @@ const GovPortal = {
       ];
       el.innerHTML = `
         <div class="card">
-          <div class="card-header" style="justify-content:flex-end;">
+          ${canEdit ? `<div class="card-header" style="justify-content:flex-end;">
             <button class="btn btn-primary btn-sm" id="btnSavePrefixes">保存配置</button>
-          </div>
+          </div>` : ''}
           <div class="card-body card-body-flush">
             <div class="table-wrapper" style="border:none;">
               <table class="data-table">
@@ -1959,7 +1967,7 @@ const GovPortal = {
                   ${prefixes.map(p => `
                     <tr>
                       <td>${p.type}</td>
-                      <td><input type="text" class="form-input" style="width:120px;" value="${TNR_UI.escape(config[p.key] || '')}" data-prefix-key="${p.key}"></td>
+                      <td><input type="text" class="form-input" style="width:120px;" value="${TNR_UI.escape(config[p.key] || '')}" data-prefix-key="${p.key}"${canEdit ? '' : ' readonly'}></td>
                       <td class="text-muted">${p.example}</td>
                     </tr>
                   `).join('')}
@@ -1968,10 +1976,9 @@ const GovPortal = {
             </div>
           </div>
         </div>
-        ${!this.isCityLevel() ? '<p class="form-hint mt-3">说明：仅市级管理员可修改编号规则配置。</p>' : ''}
+        ${canEdit ? '' : '<p class="form-hint mt-3">说明：仅市级管理员可修改编号规则配置。</p>'}
       `;
-      document.getElementById('btnSavePrefixes').addEventListener('click', async () => {
-        if (!this.isCityLevel()) { TNR_UI.toast('仅市级管理员可修改配置', 'danger'); return; }
+      if (canEdit) document.getElementById('btnSavePrefixes').addEventListener('click', async () => {
         const payload = {};
         document.querySelectorAll('[data-prefix-key]').forEach(input => {
           payload[input.dataset.prefixKey] = input.value.trim();
