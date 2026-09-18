@@ -976,6 +976,84 @@ def resolve_district_scope(user, anchor, submitted):
     return district, None
 
 
+def resolve_operator_district(role, district, institution):
+    """算出「这个账号的所属区县本应该是哪个」，用于修复已存在的不一致账号。
+
+    与 `validate_operator_district()` **互补**：校验说没问题就返回 `None`，
+    校验报错就返回应该改成的那个区县。两者必须保持一致 ——
+    否则会出现「巡检报错、修复脚本却说不用改」的死循环，
+    所以有专门的用例锁死这个不变式（`ResolveOperatorDistrictTest`）。
+
+    为什么以**机构**为准：机构是有实体的（医院/捕捉点就落在那个区县），
+    而账号的 `district` 只是建号时填的一个字段。实测库里那个不一致账号
+    （区县=南漳县、机构=东津新区的宠安宠物诊所）也是机构侧更可信。
+
+    :return: 应该改成哪个区县；无需修改时为 None
+    """
+    if validate_operator_district(role, district, institution) is None:
+        return None
+    return institution.district
+
+
+def validate_operator_district(role, district, institution):
+    """校验「账号所属区县」与「所属机构所在区县」是否自洽，返回错误信息。
+
+    为什么必须校验：账号的 `district` 决定**读取**侧的区县隔离范围
+    （`get_district_filtered_queryset`），而 `institution` 决定它在业务里代表谁。
+    两者不一致时，这个账号会**看到 A 区县的档案、却以 B 区县的机构身份操作** ——
+    实测库里已经存在一个这样的账号（区县=南漳县、机构=东津新区的「宠安宠物诊所」），
+    而政府端的「用户管理」只有新增与启停、**没有编辑**，管理员在界面上根本改不回来。
+
+    规则：
+    - 医院操作员：账号区县必须**等于**机构所在区县（医院不能挂市级，见 `user_create`）。
+    - 捕捉点操作员：允许挂「市级」—— 现场约定，两个捕捉点操作员都挂在
+      「全市（市级）」下（见 `resolve_district_scope` 的说明）；
+      但若挂了具体区县，就必须与机构一致。
+    - 无机构的角色（gov_*）：不做校验。
+
+    :param role: 账号角色
+    :param district: 账号所属区县（District 实例，可为 None）
+    :param institution: 所属机构（Institution 实例，可为 None）
+    :return: 错误信息；通过时为 None
+    """
+    if institution is None:
+        return None
+    inst_district = getattr(institution, 'district', None)
+    if inst_district is None:
+        return None
+    if district is None:
+        return '账号缺少所属区县'
+
+    if getattr(district, 'is_city', False):
+        if role == 'shelter':
+            return None
+        return '该角色的账号所属区县必须是具体区县，不能挂市级'
+
+    if district.id != inst_district.id:
+        return (f'账号所属区县（{district.name}）与机构所在区县'
+                f'（{inst_district.name}）不一致，请改为一致')
+    return None
+
+
+def cascade_operator_district(institution, old_district_id):
+    """机构换了区县时，把挂在它下面、区县随机构走的操作员一起搬过去。
+
+    不搬的后果与「账号区县 ≠ 机构区县」同源：操作员会看到**旧**区县的档案，
+    却以**新**区县的机构身份操作。挂「市级」的捕捉点操作员是现场约定
+    （`validate_operator_district` 明确允许），**不动**它们 ——
+    只搬「区县恰好等于机构原区县」的那些账号。
+
+    :return: 被一起调整的账号数
+    """
+    if institution is None or institution.district_id is None or old_district_id is None:
+        return 0
+    if old_district_id == institution.district_id:
+        return 0
+    return User.objects.filter(
+        institution=institution, district_id=old_district_id,
+    ).update(district=institution.district)
+
+
 # ============================================
 # 上传图片校验
 # ============================================

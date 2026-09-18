@@ -195,6 +195,40 @@ class InstitutionApiTest(SupervisionBase):
         self.hospital_a.refresh_from_db()
         self.assertEqual(self.hospital_a.district_id, self.district_a.id)
 
+    def test_edit_moving_institution_cascades_operators(self):
+        """市级管理员把机构换到别的区县时，挂在它下面的操作员必须一起搬。
+
+        不搬的后果与「账号区县 ≠ 机构区县」同源：操作员会看到**旧**区县的档案，
+        却以**新**区县的机构身份操作 —— 正是 `validate_operator_district`
+        要拦的那种账号，而且政府端用户管理没有编辑入口，事后改不回来。
+        """
+        hospital = make_institution(type='hospital', district=self.district_a)
+        op = make_user('cascade_api_op', role='hospital',
+                       district=self.district_a, institution=hospital)
+
+        self.client.force_login(self.gov_city)
+        body = self.ok(self.post_json(f'{API}/institutions/{hospital.id}/edit/',
+                                      {'district_id': self.district_b.id}))
+
+        op.refresh_from_db()
+        self.assertEqual(op.district_id, self.district_b.id)
+        # 搬了几个人必须让操作者看见，否则这次编辑看起来「只改了机构」
+        self.assertIn('1 个操作员', body['message'])
+
+    def test_edit_keeps_city_level_shelter_operator(self):
+        """挂「市级」的捕捉点操作员是现场约定，机构换区县时不能顺手把它搬走。"""
+        shelter = make_institution(type='shelter', district=self.district_a)
+        op = make_user('cascade_api_city', role='shelter',
+                       district=self.city, institution=shelter)
+
+        self.client.force_login(self.gov_city)
+        body = self.ok(self.post_json(f'{API}/institutions/{shelter.id}/edit/',
+                                      {'district_id': self.district_b.id}))
+
+        op.refresh_from_db()
+        self.assertEqual(op.district_id, self.city.id)
+        self.assertEqual(body['message'], '机构更新成功')
+
 
 class DistrictApiTest(SupervisionBase):
     def test_create_only_gov_city(self):
@@ -329,6 +363,31 @@ class UserApiTest(SupervisionBase):
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(institution_id=self.hospital_a.id)),
                          message='所选机构不是捕捉点类型')
+
+    def test_create_hospital_operator_district_must_match_institution(self):
+        """账号区县决定**读取**范围，机构决定它代表谁，两者不一致就拦下。
+
+        实测库里存在过一个这样的账号（区县=南漳县、机构=东津新区的宠安宠物诊所）：
+        它会看到南漳县的档案，却以一家东津新区的医院身份写数据。
+        """
+        self.client.force_login(self.gov_city)
+        self.expect_fail(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='mismatch_hosp', role='hospital',
+            district_id=self.district_b.id, institution_id=self.hospital_a.id)),
+            message='不一致')
+        self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='match_hosp', role='hospital',
+            district_id=self.district_a.id, institution_id=self.hospital_a.id)))
+
+    def test_create_shelter_operator_district_rule(self):
+        """捕捉点操作员：挂「市级」放行（现场约定），挂具体区县则必须与机构一致。"""
+        self.client.force_login(self.gov_city)
+        self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='shelter_city_ok', district_id=self.city.id,
+            institution_id=self.shelter_a.id)))
+        self.expect_fail(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='shelter_bad', district_id=self.district_b.id,
+            institution_id=self.shelter_a.id)), message='不一致')
 
     def test_toggle_self_rejected(self):
         """管理员不能停用自己（防止自锁）"""

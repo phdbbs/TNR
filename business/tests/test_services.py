@@ -13,6 +13,8 @@ from business.services import (
     get_district_filtered_queryset, get_hospital_stock, serialize_instance,
     adjust_stock, use_chip, amap_ip_location,
     capture_transfer_state, capture_states_bulk,
+    validate_operator_district, cascade_operator_district,
+    resolve_operator_district,
 )
 from business.tests.base import (
     BusinessTestBase, make_chip, make_district, make_hospital_txn,
@@ -405,6 +407,121 @@ LOCAL_DATE_FILES = (
     'business/views_euthanasia.py',
     'supervision/views.py',
 )
+
+
+class ValidateOperatorDistrictTest(BusinessTestBase):
+    """账号区县必须与所属机构所在区县自洽。
+
+    不一致的账号会「看到 A 区县的档案、以 B 区县的机构身份操作」——
+    实测库里就有一个（区县=南漳县、机构=东津新区的宠安宠物诊所），
+    而政府端用户管理只有新增与启停、没有编辑，事后在界面上改不回来。
+    """
+
+    def test_hospital_operator_must_match_institution(self):
+        err = validate_operator_district('hospital', self.district_b, self.hospital_a)
+        self.assertIn('不一致', err)
+        self.assertIn(self.district_b.name, err)
+        self.assertIn(self.district_a.name, err)
+
+    def test_hospital_operator_matching_passes(self):
+        self.assertIsNone(
+            validate_operator_district('hospital', self.district_a, self.hospital_a))
+
+    def test_hospital_operator_cannot_sit_in_city_district(self):
+        err = validate_operator_district('hospital', self.city, self.hospital_a)
+        self.assertIn('市级', err)
+
+    def test_shelter_operator_may_sit_in_city_district(self):
+        """现场约定：两个捕捉点操作员都挂在「全市（市级）」下。"""
+        self.assertIsNone(
+            validate_operator_district('shelter', self.city, self.shelter_a))
+
+    def test_shelter_operator_with_specific_district_must_match(self):
+        self.assertIsNone(
+            validate_operator_district('shelter', self.district_a, self.shelter_a))
+        self.assertIsNotNone(
+            validate_operator_district('shelter', self.district_b, self.shelter_a))
+
+    def test_missing_district_is_rejected(self):
+        self.assertIsNotNone(
+            validate_operator_district('hospital', None, self.hospital_a))
+
+    def test_roles_without_institution_are_not_checked(self):
+        self.assertIsNone(validate_operator_district('gov_city', self.city, None))
+        self.assertIsNone(validate_operator_district('gov_district', self.district_a, None))
+
+
+class ResolveOperatorDistrictTest(BusinessTestBase):
+    """`resolve_operator_district()` 与 `validate_operator_district()` 必须互补。
+
+    这两个函数是一对：校验负责**拦**（建号时），解析负责**修**（历史账号）。
+    一旦它们对同一个输入给出矛盾结论，就会出现「巡检报错、修复脚本却说不用改」
+    的死循环 —— 而且两边各自的用例都会通过，因为没人测过它们的一致性。
+    所以这里用一张表把两个结论并排断言。
+    """
+
+    def test_resolver_is_the_exact_complement_of_validator(self):
+        cases = [
+            # (角色, 账号区县, 机构, 期望：是否报错, 期望解析结果)
+            ('hospital', 'district_a', 'hospital_a', False, None),
+            ('hospital', 'district_b', 'hospital_a', True, 'district_a'),
+            ('hospital', 'city', 'hospital_a', True, 'district_a'),
+            ('hospital', None, 'hospital_a', True, 'district_a'),
+            ('hospital', 'district_b', None, False, None),
+            ('shelter', 'city', 'shelter_a', False, None),      # 现场约定：放行
+            ('shelter', 'district_a', 'shelter_a', False, None),
+            ('shelter', 'district_b', 'shelter_a', True, 'district_a'),
+            ('gov_city', 'city', None, False, None),
+            ('gov_district', 'district_a', None, False, None),
+        ]
+        for role, district_key, institution_key, should_error, expect in cases:
+            with self.subTest(role=role, district=district_key, institution=institution_key):
+                district = getattr(self, district_key) if district_key else None
+                institution = getattr(self, institution_key) if institution_key else None
+
+                err = validate_operator_district(role, district, institution)
+                resolved = resolve_operator_district(role, district, institution)
+
+                self.assertEqual(bool(err), should_error, err)
+                # 互补的核心：校验通过 ⟺ 无需修复
+                self.assertEqual(resolved is None, err is None, (err, resolved))
+                if expect:
+                    self.assertEqual(resolved, getattr(self, expect))
+
+
+class CascadeOperatorDistrictTest(BusinessTestBase):
+    """机构换区县时，区县随机构走的操作员必须一起搬。"""
+
+    def test_moves_matching_operators(self):
+        hospital = make_institution(type='hospital', district=self.district_a)
+        op = make_user('cascade_op_t', role='hospital',
+                       district=self.district_a, institution=hospital)
+        hospital.district = self.district_b
+        hospital.save(update_fields=['district'])
+
+        moved = cascade_operator_district(hospital, self.district_a)
+
+        op.refresh_from_db()
+        self.assertEqual(moved, 1)
+        self.assertEqual(op.district, self.district_b)
+
+    def test_keeps_city_level_operators(self):
+        """挂「市级」的捕捉点操作员是现场约定，搬动会破坏它。"""
+        shelter = make_institution(type='shelter', district=self.district_a)
+        op = make_user('cascade_city_t', role='shelter',
+                       district=self.city, institution=shelter)
+        shelter.district = self.district_b
+        shelter.save(update_fields=['district'])
+
+        moved = cascade_operator_district(shelter, self.district_a)
+
+        op.refresh_from_db()
+        self.assertEqual(moved, 0)
+        self.assertEqual(op.district, self.city)
+
+    def test_noop_when_district_unchanged(self):
+        self.assertEqual(
+            cascade_operator_district(self.hospital_a, self.district_a.id), 0)
 
 
 def _read_source(rel):

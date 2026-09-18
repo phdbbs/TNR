@@ -13,8 +13,8 @@ from accounts.models import User
 from business.models import Pet
 from core.models import District, Institution
 
-SEQ = {"district": 0, "institution": 0, "user": 0, "pet": 0, "material": 0,
-       "chip": 0, "capture": 0}
+SEQ = {"district": 0, "institution": 0, "inst_code": 0, "user": 0, "pet": 0,
+       "material": 0, "chip": 0, "capture": 0}
 
 
 def make_image_file(name='photo.png', w=8, h=8, color=(200, 120, 80)):
@@ -49,7 +49,19 @@ def make_district(name=None, code=None, is_city=False, status="active"):
 
 
 def make_institution(type="shelter", district=None, name=None, status="active", **kw):
+    """造一个机构。
+
+    默认**带业务编号**：`Institution.code` 在模型上可空，但生产库里每个机构
+    都有编号（seed_data 按 code 幂等匹配、`institution_create` 也会自动生成），
+    「没有 code」本身是一种要被巡检报出来的异常状态。夹具若默认不写 code，
+    就等于让每条用例都跑在一个**现实中不该存在**的数据形态上 ——
+    `check_data_integrity` 的第一版回归测试正是因此把 5 个正常夹具机构
+    全报成了「机构缺少业务编号」。
+    编号用 `TI###` 前缀，与生产前缀 `I###`/`C###` 区分开，
+    免得干扰 `_next_institution_code()` 的取号断言。
+    """
     return Institution.objects.create(
+        code=kw.pop("code", None) or _next("inst_code", "TI{:03d}"),
         name=name or _next("institution", {"shelter": "捕捉点{}", "hospital": "医院{}", "community": "小区{}"}[type]),
         type=type,
         district=district or make_district(),

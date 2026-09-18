@@ -6,6 +6,7 @@ Task 13: 政府监管后端
 from datetime import datetime, timedelta
 
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.db.models import Sum, Count, Q, Prefetch
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -19,6 +20,7 @@ from business.models import (
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     get_district_scope, pet_brief, pet_archive_records, with_camel_keys,
+    validate_operator_district, cascade_operator_district,
 )
 from core.audit import ACTION_LABELS
 from core.models import AuditLog, District, Institution
@@ -211,6 +213,8 @@ def institution_edit(request, pk):
 
     data = parse_json_body(request)
     update_fields = []
+    # 换区县前先记住原区县：换完之后要按它找出「区县随机构走」的操作员
+    old_district_id = inst.district_id
 
     if data.get('name'):
         inst.name = data['name']
@@ -237,10 +241,19 @@ def institution_edit(request, pk):
         inst.phone = data['phone']
         update_fields.append('phone')
 
+    moved_users = 0
     if update_fields:
-        inst.save(update_fields=update_fields)
+        # 机构换区县时**必须**把挂在它下面的操作员一起搬过去，否则会静默制造出
+        # 「账号区县 ≠ 机构区县」的不一致（见 validate_operator_district）。
+        # 两条写入放在同一事务里：机构已换、账号没跟上，比不改更糟。
+        with transaction.atomic():
+            inst.save(update_fields=update_fields)
+            moved_users = cascade_operator_district(inst, old_district_id)
 
-    return json_ok(serialize_instance(inst), message='机构更新成功')
+    message = '机构更新成功'
+    if moved_users:
+        message = f'机构更新成功，{moved_users} 个操作员的所属区县已同步调整'
+    return json_ok(serialize_instance(inst), message=message)
 
 
 # ============================================
@@ -537,6 +550,13 @@ def user_create(request):
             institution = Institution.objects.get(id=institution_id, type='hospital')
         except Institution.DoesNotExist:
             return json_fail('所选机构不是医院类型')
+
+    # 账号区县必须与机构所在区县自洽：账号的 district 决定**读取**侧的区县
+    # 隔离范围，而 institution 决定它代表谁。不一致的账号会「看到 A 区县的档案、
+    # 以 B 区县的机构身份操作」，而政府端用户管理没有编辑入口、事后改不回来。
+    district_err = validate_operator_district(role, district, institution)
+    if district_err:
+        return json_fail(district_err)
 
     user = User.objects.create_user(
         username=username,

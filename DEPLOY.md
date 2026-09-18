@@ -33,6 +33,12 @@ python manage.py ensure_superuser          # 已有启用的超管则跳过，�
 # 6. 启动前自检（生产配置缺失会在这里就报出来，而不是等到线上出问题）
 python manage.py check --deploy
 
+# 6.1 数据一致性巡检（只读，不改库；有违规时退出码为 1）
+python manage.py check_data_integrity
+# 检查「界面上看不出来、但会让某个角色看到错误数据」的隐性问题：
+# 账号区县 ≠ 所属机构区县、业务记录区县 ≠ 归属对象区县、捕捉单作废但宠物未作废。
+# 有输出时逐条人工确认后再处理，命令本身不会自动修复。
+
 # 7. 按你的部署方式重启（gunicorn/supervisor/systemd 或 runserver）
 ```
 
@@ -106,6 +112,7 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 | 演示账号可用 | 访问 `/login/` 用 `cy_shelter` / `123456` | 能进入捕捉点门户 |
 | 照片上传可用 | 捕捉登记里传一张照片 | 上传成功，`media/` 出现文件 |
 | 数据隔离生效 | 用 `cy_gov` 访问他区宠物生命周期 | 返回 404 |
+| 数据一致性 | `python manage.py check_data_integrity` | 输出「未发现一致性问题」 |
 | 定时任务在跑 | `supervisorctl status` | `tnr-qworker` 为 RUNNING |
 
 ## 六、常见报错对照

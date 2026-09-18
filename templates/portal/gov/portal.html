@@ -715,8 +715,10 @@ const GovPortal = {
       };
       try {
         if (inst) {
-          TNR_UI.assertOk(await TNR_API.editInstitution(inst.id, payload), '机构更新失败');
-          TNR_UI.toast('机构更新成功', 'success');
+          const res = TNR_UI.assertOk(await TNR_API.editInstitution(inst.id, payload), '机构更新失败');
+          // 用服务端消息：机构换区县时会把挂在它下面的操作员一起搬过去，
+          // 这件事必须让操作者看到（「1 个操作员的所属区县已同步调整」）。
+          TNR_UI.toast(res.message || '机构更新成功', 'success');
         } else {
           TNR_UI.assertOk(await TNR_API.createInstitution(payload), '机构创建失败');
           TNR_UI.toast('机构创建成功', 'success');
