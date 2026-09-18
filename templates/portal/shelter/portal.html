@@ -700,7 +700,7 @@ const Shelter = {
         </div>
         <div class="form-row">
           <div class="form-group"><label class="form-label">归属区县</label><select class="form-select" id="ed_districtId" ${districtLocked ? 'disabled' : ''}>
-            ${(districts || []).filter(d => !d.isCity).map(d => '<option value="' + d.id + '"' + (d.id === full.districtId ? ' selected' : '') + '>' + esc(d.name) + '</option>').join('')}
+            ${(districts || []).filter(d => !d.isCity && (d.status === 'active' || d.id === full.districtId)).map(d => '<option value="' + d.id + '"' + (d.id === full.districtId ? ' selected' : '') + '>' + esc(d.name) + '</option>').join('')}
           </select>
           <div class="form-hint">${districtLocked ? '由执行捕捉点所在区县确定，不可修改' : '捕捉单必须归属到具体区县'}</div></div>
           <div class="form-group"><label class="form-label">捕捉点</label><input class="form-input" id="ed_shelterName" value="${esc(full.shelterName || '')}" disabled></div>
@@ -870,12 +870,17 @@ const Shelter = {
     const institutions = await TNR_API.getInstitutions('shelter');
     const isGov = user && (user.role === 'gov_city' || user.role === 'gov_district');
 
-    // 捕捉单必须归属到具体区县，不能是「全市（市级）」：
-    // 落到市级会让本区县政府在区县隔离下看不到本区捕捉点的数据。
-    const realDistricts = (districts || []).filter(d => !d.isCity);
     // 默认区县取「当前捕捉点（机构）所在区县」，而不是操作员所属区县——
     // 捕捉点物理上坐落在某个区县，操作员可能被挂在「全市（市级）」下。
     const myInstitution = (institutions || []).find(i => i.id === user?.institution_id);
+    // 捕捉单必须归属到具体区县，不能是「全市（市级）」：
+    // 落到市级会让本区县政府在区县隔离下看不到本区捕捉点的数据。
+    // 已停用的区县也不再列出（服务端 `capture_create` 对显式提交的 district_id
+    // 会拒），但**当前捕捉点所在区县必须保留**：否则下面「按捕捉点同步归属区县」
+    // 赋不上值，下拉会退到第一个选项，提交的区县与捕捉点不一致 ——
+    // 用户会看到一条自己无法修正的报错。
+    const realDistricts = (districts || []).filter(
+      d => !d.isCity && (d.status === 'active' || d.id === myInstitution?.districtId));
     const defaultDistrictId = (realDistricts.some(d => d.id === myInstitution?.districtId)
       ? myInstitution.districtId
       : (realDistricts.some(d => d.id === user?.district_id)
@@ -930,9 +935,9 @@ const Shelter = {
             <div class="form-group"><label class="form-label">捕捉点（执行机构）<span class="req">*</span></label>
               <select class="form-select" id="ca_shelterId">
                 <option value="">请选择捕捉点</option>
-                ${(institutions || []).map(i => '<option value="' + i.id + '">' + TNR_UI.escape(i.name) + '</option>').join('')}
+                ${(institutions || []).filter(i => i.status === 'active').map(i => '<option value="' + i.id + '">' + TNR_UI.escape(i.name) + '</option>').join('')}
               </select>
-              <div class="form-hint">当前为监管账号，需指定由哪个捕捉点执行本次登记</div>
+              <div class="form-hint">当前为监管账号，需指定由哪个捕捉点执行本次登记（已停用的捕捉点不列出）</div>
             </div>
           </div>
           ` : ''}
@@ -1679,7 +1684,7 @@ const Shelter = {
         });
         html += '</div></div>';
         html += '<div class="form-row">';
-        html += '<div class="form-group"><label class="form-label">接收医院<span class="req">*</span></label><select class="form-select" id="tr_hospital">' + (hospitals || []).map(h => '<option value="' + h.id + '" data-name="' + esc(h.name) + '">' + esc(h.name) + '</option>').join('') + '</select></div>';
+        html += '<div class="form-group"><label class="form-label">接收医院<span class="req">*</span></label><select class="form-select" id="tr_hospital">' + (hospitals || []).filter(h => h.status === 'active').map(h => '<option value="' + h.id + '" data-name="' + esc(h.name) + '">' + esc(h.name) + '</option>').join('') + '</select></div>';
         html += '<div class="form-group"><label class="form-label">备注</label><input class="form-input" id="tr_note" placeholder="转运备注"></div>';
         html += '</div>';
         html += '<button class="btn btn-primary" id="btnCreateTransfer">下发转运单</button>';
@@ -2019,7 +2024,7 @@ const Shelter = {
       const hospitals = await TNR_API.getInstitutions('hospital');
       let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>下发出库登记</div></div><div class="card-body">';
       html += '<div class="form-row-3">';
-      html += '<div class="form-group"><label class="form-label">接收医院<span class="req">*</span></label><select class="form-select" id="ob_hospital">' + (hospitals || []).map(h => '<option value="' + h.id + '" data-name="' + TNR_UI.escape(h.name) + '">' + TNR_UI.escape(h.name) + '</option>').join('') + '</select></div>';
+      html += '<div class="form-group"><label class="form-label">接收医院<span class="req">*</span></label><select class="form-select" id="ob_hospital">' + (hospitals || []).filter(h => h.status === 'active').map(h => '<option value="' + h.id + '" data-name="' + TNR_UI.escape(h.name) + '">' + TNR_UI.escape(h.name) + '</option>').join('') + '</select></div>';
       html += '<div class="form-group"><label class="form-label">物料名称<span class="req">*</span></label><select class="form-select" id="ob_material">' + materials.map(m => '<option value="' + m.id + '" data-name="' + TNR_UI.escape(m.name) + '" data-unit="' + (m.unit || '') + '" data-category="' + (m.category || '') + '">' + TNR_UI.escape(m.name) + '（库存' + (m.shelterStock ?? 0) + (m.unit || '') + '）' + '</option>').join('') + '</select></div>';
       html += '<div class="form-group"><label class="form-label">下发数量<span class="req">*</span></label><input type="number" class="form-input" id="ob_qty" min="1" value="1"></div>';
       html += '</div><div class="form-row-3">';

@@ -21,7 +21,7 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     get_district_scope, pet_brief, pet_archive_records, with_camel_keys,
     validate_operator_district, cascade_operator_district,
-    validate_user_manage_scope,
+    validate_user_manage_scope, inactive_district_error,
 )
 from core.audit import ACTION_LABELS
 from core.models import AuditLog, District, Institution
@@ -84,13 +84,15 @@ def _district_references(district_id):
 def _inactive_district_error(district):
     """区县已停用时返回错误信息，否则 None。
 
-    与 `user_create` 的「所选区县已停用」是同一条判据。前端所有区县下拉都写了
-    `d.status === 'active'`，但**只过滤选项等于没校验**：接口不做同一套校验，
-    就能把机构建到已停用的区县里 —— 而那个区县在界面上根本选不到。
+    **薄封装**：实现只有 `services.inactive_district_error()` 一份。
+    原先这里与 `user_create` 各写一份同义判断，而业务侧（捕捉单归属区县）
+    又完全没有这条校验 —— 同一个概念散在三处，正是漂移的温床。
+
+    前端政府端的区县下拉确实都写了 `d.status === 'active'`，但捕捉点端
+    新建捕捉单的归属区县下拉只过滤了 `!isCity`（**注释曾声称「前端所有区县
+    下拉都写了」，实测不成立**）。所以服务端这条判据不能省。
     """
-    if district is not None and district.status != 'active':
-        return '所选区县已停用'
-    return None
+    return inactive_district_error(district)
 
 
 # ============================================
@@ -606,8 +608,9 @@ def user_create(request):
     except District.DoesNotExist:
         return json_fail('所选区县不存在')
 
-    if district.status != 'active':
-        return json_fail('所选区县已停用')
+    inactive_err = _inactive_district_error(district)
+    if inactive_err:
+        return json_fail(inactive_err)
 
     # 市级角色（gov_city）必须选市级区县
     if role == 'gov_city':

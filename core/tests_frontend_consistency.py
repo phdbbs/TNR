@@ -1766,3 +1766,81 @@ class NarrowedOptionContractTest(SimpleTestCase):
         self.assertRegex(
             body, r'ed_districtId[\s\S]{0,80}?\$\{districtLocked \? \'disabled\'',
             '编辑弹窗的 `#ed_districtId` 没有按 `districtLocked` 禁用。')
+
+
+class InactiveEntityContractTest(SimpleTestCase):
+    """「停用」状态必须在前后端两侧都真的生效（第十八轮）。
+
+    `Institution.status` 曾在整个后端**没有任何读取点** —— 只有
+    `institution_create` 写 `status='active'` 与 `institution_toggle_status`
+    翻转这两处写入，业务侧一次都没读过。停用一家医院只改了列表里的一个徽标：
+    新建转运单的医院下拉照旧列出它、`transfer_create` 照旧接受。
+
+    而前端只有**政府端**的机构下拉过滤了 `status === 'active'`，捕捉点端三处
+    漏了 —— 同一条规则只写了一半，就成了跨端漂移。服务端两侧都没有，
+    所以「停用」在整条链路上等于没写。
+    """
+
+    def _py_func(self, source, name):
+        m = re.search(r'^def ' + re.escape(name) + r'\(', source, re.M)
+        self.assertIsNotNone(m, f'找不到 {name} —— 本测试需要同步更新')
+        nxt = re.search(r'^(?:def |@|# =)', source[m.end():], re.M)
+        end = len(source) if nxt is None else m.end() + nxt.start()
+        return source[m.start():end]
+
+    def test_business_create_paths_reject_inactive_institution(self):
+        """新建捕捉单 / 新建转运单都要走共用的 `inactive_institution_error()`。"""
+        for path, name in (('business/views_capture.py', 'capture_create'),
+                           ('business/views_transfer.py', 'transfer_create')):
+            self.assertIn(
+                'inactive_institution_error(', self._py_func(read(path), name),
+                f'`{name}` 没有校验机构是否已停用 ——\n'
+                '「停用」必须真的拦住新业务，否则它只是个徽标。')
+
+    def test_inactive_judgement_has_single_implementation(self):
+        """判据只能有一份实现，其余是薄封装。"""
+        services = read('business/services.py')
+        self.assertIn('def inactive_institution_error(', services,
+                      '服务层没有 `inactive_institution_error()`')
+        self.assertIn('def inactive_district_error(', services,
+                      '服务层没有 `inactive_district_error()`')
+        body = self._py_func(read('supervision/views.py'), '_inactive_district_error')
+        # 断言必须落在**真正的委托语句**上。第一版只写了
+        # `assertIn('inactive_district_error(', body)` —— 结果**文档字符串里那句
+        # `services.inactive_district_error()`** 就把它命中了：把实现改回各写一份
+        # 照样能过（变异验证时 M8 没跟着变红才发现）。断言越像「检查某个写法
+        # 出现过」越容易空转。
+        self.assertRegex(
+            body, re.compile(r'^\s+return inactive_district_error\(district\)', re.M),
+            '`_inactive_district_error` 没有委托给服务层的同一份实现 ——\n'
+            '同一个概念散在多处就是漂移的温床。')
+        self.assertNotIn(
+            "district.status != 'active'", body,
+            '`_inactive_district_error` 里又出现了就地判断 ——\n'
+            '它应当只是服务层判据的薄封装。')
+
+    def test_shelter_portal_excludes_inactive_institutions(self):
+        """捕捉点端的机构下拉必须与政府端一样排除停用机构。"""
+        html = read(PORTALS['shelter'])
+        found = (html.count("i.status === 'active'")
+                 + html.count("h.status === 'active'"))
+        self.assertGreaterEqual(
+            found, 3,
+            '捕捉点端至少三处机构下拉要排除停用机构：新建捕捉单的捕捉点、\n'
+            '转运单与下发出库的接收医院。政府端早就过滤了，只写一半就是跨端漂移。')
+
+    def test_capture_district_dropdowns_exclude_inactive_district(self):
+        """区县下拉要排除停用区县，且必须留「当前值」的兜底。"""
+        html = read(PORTALS['shelter'])
+        self.assertGreaterEqual(
+            html.count("d.status === 'active'"), 2,
+            '捕捉点端的区县下拉（新建 / 编辑）没有排除停用区县 ——\n'
+            '服务端会拒，界面上却选得到。')
+        # 只过滤会让「当前值」从下拉里消失 → select 退到第一个选项 →
+        # 提交的区县被静默改掉，或者撞 400 而用户无法修正。
+        self.assertRegex(
+            html,
+            r"d\.status === 'active' \|\| d\.id === "
+            r"(myInstitution\?\.districtId|full\.districtId)",
+            '区县下拉过滤停用区县时没有保留「当前值」的兜底 ——\n'
+            '存量记录的下拉会退到第一个选项，归属区县被静默改掉。')

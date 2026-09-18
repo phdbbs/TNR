@@ -1170,6 +1170,47 @@ def validate_uploaded_images(files, labels=None):
     return None
 
 
+def inactive_institution_error(institution, label='机构'):
+    """机构已停用时返回错误信息，否则 None。
+
+    **「停用」必须真的拦住点什么。** 此前 `Institution.status` 在整个后端
+    **没有任何读取点** —— 只有 `institution_create` 写 `status='active'`
+    和 `institution_toggle_status` 翻转这两处**写入**，业务侧一次都没读过。
+    后果：停用一家医院只改了列表里的一个徽标 —— 新建转运单的医院下拉照旧
+    列出它、`transfer_create` 照旧接受；停用一个捕捉点后照旧能对它登记新的
+    捕捉单；`institution_toggle_status` 也**不联动其下账号**（操作员照旧能登录、
+    照旧能签收）。实测把接收医院停用后，转运单依然创建成功。
+
+    与 `inactive_district_error()` 是同一条原则：**停用的实体不能再作为
+    新业务的归属对象**。只拦「新引用」，不拦存量 —— 已提交给该医院的转运单
+    仍要能签收/驳回，停在停用捕捉点下的历史捕捉单仍要能编辑与转运。
+    所以判据只出现在**创建**路径上，编辑路径不校验（否则存量记录会被锁死）。
+
+    前端两侧必须同步过滤下拉，否则是「界面上能选、服务端要拒」的死胡同：
+    政府端早已过滤 `status === 'active'`（gov portal 三处），捕捉点端三处漏了
+    —— 同一条规则只写了一半，就是跨端漂移。
+    """
+    if institution is not None and institution.status != 'active':
+        return f'{label}「{institution.name}」已停用，不能用于新的业务记录'
+    return None
+
+
+def inactive_district_error(district):
+    """区县已停用时返回错误信息，否则 None。
+
+    实现只有这一份：`supervision.views._inactive_district_error()` 是薄封装，
+    `user_create` 也走它。此前那条注释声称「前端所有区县下拉都写了
+    `d.status === 'active'`」—— 实测**不成立**：捕捉点端新建捕捉单的归属区县
+    下拉只过滤了 `!isCity`，停用区县照样能选，`resolve_district_scope()` 也照样
+    接受（它只校验 `is_city`，不看 `status`）。所以这条判据必须在服务端兜住。
+
+    消息文案与 `user_create` 的历史文案保持一致（已有用例锁死该字符串）。
+    """
+    if district is not None and district.status != 'active':
+        return '所选区县已停用'
+    return None
+
+
 def resolve_community(district, community_id=None, community_name=None):
     """把「小区」解析成 ``Institution(type='community')``，解析不到返回 None。
 

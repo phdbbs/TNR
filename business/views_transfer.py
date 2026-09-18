@@ -13,7 +13,7 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
     resolve_district_scope, recalc_capture_status, get_scoped_object,
-    busy_transfer_codes,
+    busy_transfer_codes, inactive_institution_error,
 )
 from core.models import Institution
 
@@ -92,6 +92,12 @@ def transfer_create(request):
         return json_fail(err)
     district_id = district.id
 
+    # 停用的捕捉点也不能再发起转运（与 `capture_create` 是同一条判据）。
+    # 停用一个捕捉点意味着它不再运营，它的操作员不该继续往外送动物。
+    shelter_err = inactive_institution_error(shelter, '捕捉点')
+    if shelter_err:
+        return json_fail(shelter_err)
+
     capture_id = data.get('capture_id')
     capture = Capture.objects.filter(id=capture_id).first() if capture_id else None
 
@@ -132,6 +138,26 @@ def transfer_create(request):
 
     created = []
     assigned_pet_ids = set()  # 防止同一宠物被拆分进多家医院
+
+    # 停用的医院不能接收新的转运单：`Institution.status` 此前在后端**没有任何
+    # 读取点**，停用一家医院只改了列表里的一个徽标 —— 下拉照旧列出它、
+    # 这里照旧接受，动物被「送」到一家已经不运营的医院。
+    #
+    # 必须放在**写库之前**：本函数是边校验边落库（下面的循环里
+    # `Transfer.objects.create` + 改宠物归属），在循环里 `return json_fail`
+    # 会留下半截转运单和已被改走归属的宠物 —— 违反两段式约定。
+    # 也必须在**所有** item 上校验，不能只看第一条。
+    for item in items:
+        hospital_id = item.get('hospital_id')
+        if not hospital_id:
+            continue
+        hospital = Institution.objects.filter(id=hospital_id, type='hospital').first()
+        if hospital is None:
+            continue
+        inst_err = inactive_institution_error(hospital, '接收医院')
+        if inst_err:
+            return json_fail(inst_err)
+
     for item in items:
         hospital_id = item.get('hospital_id')
         if not hospital_id:

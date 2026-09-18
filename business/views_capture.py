@@ -21,6 +21,7 @@ from business.services import (
     amap_ip_location, capture_transfer_state, capture_states_bulk,
     recalc_capture_status, get_active_pet, validate_uploaded_images,
     resolve_district_scope, resolve_community,
+    inactive_district_error, inactive_institution_error,
 )
 from core.models import District, Institution
 
@@ -408,6 +409,22 @@ def capture_create(request):
     if conflict:
         return json_fail(conflict)
 
+    # 「停用」必须真的拦住点什么（第十八轮）：`Institution.status` 此前在后端
+    # 没有任何读取点，停用捕捉点后照旧能对它登记新捕捉单。同理，显式提交的
+    # 归属区县也必须是启用状态（前端那个下拉只过滤了 `!isCity`，漏了 `status`）。
+    #
+    # 只拦**创建**，不拦编辑：存量记录（含停在停用捕捉点 / 停用区县下的历史
+    # 捕捉单）仍要能改名、能转运、能作废，否则一次停用就把历史业务全锁死。
+    inst_err = inactive_institution_error(shelter, '捕捉点')
+    if inst_err:
+        return json_fail(inst_err)
+    if data.get('district_id'):
+        # 只在**显式提交**时校验：未提交时 district 由捕捉点/操作员推导，
+        # 那是存量事实，不该被状态拦住。
+        district_err = inactive_district_error(district)
+        if district_err:
+            return json_fail(district_err)
+
     try:
         pet_count = int(data.get('pet_count', 0))
     except (TypeError, ValueError):
@@ -592,6 +609,12 @@ def capture_update(request, pk):
             conflict = _shelter_district_conflict(capture.shelter, new_district)
             if conflict:
                 return json_fail(conflict)
+            # 换区县时目标区县必须是启用状态（与 `capture_create` 同一条判据）。
+            # 放在「确实换区县」分支**内**：原地保存（含停在停用区县里的历史单）
+            # 不受影响，否则这些单连名字都改不了，只能靠改库。
+            district_err = inactive_district_error(new_district)
+            if district_err:
+                return json_fail(district_err)
             capture.district = new_district
             changed.append('district_id')
 
