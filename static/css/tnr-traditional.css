@@ -1622,7 +1622,12 @@ body .page-view .filter-bar {
 body .dt-card .table-wrapper {
   overflow: auto;   /* 保留横向滚动（宽表）；纵向由 max-height 触发 */
 }
-body .dt-card .data-table.dt-table thead th {
+/* 表头冻结覆盖**所有** data-table，不限于 mountTable 生成的 .dt-table ——
+   政府端还有手写 <table class="data-table">（物料库存明细 / 物料流水追踪 /
+   编号规则配置 / 区县业务统计），它们同样不该出现「表头跟着内容滚走」。
+   选择器比后段的 `.data-table thead th { position: relative; }` 更具体，能稳稳盖住；
+   那条 relative 仍要保留 —— 它是列宽拖拽手柄 .dt-colresizer 的定位祖先。 */
+body .table-wrapper > .data-table thead th {
   position: sticky;
   top: 0;
   z-index: 3;

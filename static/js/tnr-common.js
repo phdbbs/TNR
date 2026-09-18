@@ -203,6 +203,20 @@ const TNR_UI = {
     return isSelector ? document.querySelector(target) : document.getElementById(target);
   },
 
+  /* 筛选控件的默认作用域。
+     各 portal 的 .page-view 全部常驻 DOM（切页只切 .active），所以**不传 scope 时
+     不能退回 document** —— 那会把所有页面的 [data-filter] 混在一起读，
+     典型故障是「A 页输入的关键词把 B 页的表格也过滤掉了」，且不报错、很难查。
+     这里优先锁到当前激活页；只有当激活页内一个筛选控件都没有时（例如筛选条被放在
+     页壳层顶部而非 page-view 内）才退回 document，以兼容既有布局。 */
+  _filterScope(scope) {
+    const explicit = this._resolveEl(scope);
+    if (explicit) return explicit;
+    const active = document.querySelector('.page-view.active');
+    if (active && active.querySelector('[data-filter]')) return active;
+    return document;
+  },
+
   _pref(key, value) {
     // localStorage 读写（JSON），失败静默降级为无记忆
     try {
@@ -438,16 +452,23 @@ const TNR_UI = {
     // 限高造成的差值补回去，判定就与当前是否限高无关，稳定收敛。
     const unclampDelta = Math.max(0, wrap.scrollHeight - wrap.clientHeight);
     if (scroller.scrollHeight + unclampDelta <= scroller.clientHeight + 1) {
+      // 页面本身不滚动 → 不存在「表头被筛选条压住」的场景，保持列表自然高度。
+      // 但要把上一步可能设过的 overflow 还原：clip 会把宽表裁掉。
       wrap.style.maxHeight = '';
+      wrap.style.overflow = 'auto';
+      this._setHeadTop(wrap, 0);
       return;
     }
 
     const GAP = 16;        // 卡片下沿与视口底部的呼吸位
-    // 下限取「表头 + 1 行」的实测高度，而不是写死 200px ——
-    // 写死会在一部分页面上白白多留几十像素，把表头顶回筛选条底下（实测抓到过）。
+    // 下限 = 表头 + **默认每页 10 行**（mountTable 默认 10 条/页）。
+    // 此前下限是「表头 + 1 行」，结果在「列表下方还排着别的卡片」的页面上，剩余视口
+    // 空间被 tail 吃掉，列表被压到只剩 1~2 行 —— 实测「动物去向/回收」只显示 1 行、
+    // 「账号权限管理」3 行，日常没法用。磊哥要求「列表高度按默认 10 行设置」。
+    // 表头高与行高都取实测值，不写死像素。
     const thH = (el.querySelector('.dt-table thead') || {}).offsetHeight || 44;
     const rowH = (el.querySelector('.dt-table tbody tr') || {}).offsetHeight || 44;
-    const MIN = thH + rowH;
+    const MIN = thH + rowH * 10;
 
     // 卡片下方的留白 / 内容（容器 padding、页面里排在列表之后的其它卡片）。
     // 页面滚到底时，这些部分会占据视口底部，必须一并扣掉。
@@ -460,34 +481,68 @@ const TNR_UI = {
     // 固定头部（标签页 top:0 / 筛选条 top:46）永久占据视口顶部，同样扣掉。
     // 于是：页面滚到底时列表恰好铺满剩余视口 —— 表头正好停在筛选条下沿，
     // 既不会被遮住，分页条也不会被顶出屏幕。
-    const reserved = this._pinnedHeight(wrap, scroller);
+    const reserved = this._pinnedHeight(scroller);
     const target = viewportH - reserved - pagerH - tail - GAP;
-    wrap.style.maxHeight = Math.max(MIN, Math.round(target)) + 'px';
+    // 下限生效（10 行）时，短列表自然高度更小，max-height 只封顶不拉伸，观感不变。
+    // 容差：cap 与内容自然高只差 1~2px 时直接取自然高 —— 那是行高的取整误差，
+    // 硬限会凭空给列表多出一条 1px 的滚动条（实测「捕捉台账」踩到过）。
+    const natural = wrap.scrollHeight;
+    let cap = Math.max(MIN, Math.round(target));
+    if (cap >= natural - 2) cap = natural;
+
+    if (cap >= natural) {
+      // 内容放得下 → 列表内部不需要滚动。
+      // 但页面可能因为「列表下方还排着别的卡片」而滚动；这时若 wrapper 仍是滚动容器，
+      // 表头会被关在它里面（它自己不滚）→ 页面一滚，表头就被筛选条压住。
+      // 所以这里放开 wrapper 的**纵向** overflow，让最近的滚动容器变成 .portal-content，
+      // 表头便能钉在**页面级** —— 滚页面时停在筛选条下沿，而不是被它盖住。
+      // 横向：确实要左右滚的宽表保留 auto（此时页面级 sticky 失效，退回原行为）；
+      // 不需要的用 clip —— clip 不产生滚动容器，也不会把内容溢出到卡片外。
+      const needX = wrap.scrollWidth > wrap.clientWidth + 4;
+      wrap.style.maxHeight = '';
+      if (needX) {
+        wrap.style.overflow = 'auto';
+        this._setHeadTop(wrap, 0);
+      } else {
+        wrap.style.overflowX = 'clip';
+        wrap.style.overflowY = 'visible';
+        this._setHeadTop(wrap, reserved);
+      }
+    } else {
+      // 内容超出 → 让 wrapper 成为真正的纵向滚动容器，表头钉在它自己的顶部
+      wrap.style.overflow = 'auto';
+      wrap.style.maxHeight = cap + 'px';
+      this._setHeadTop(wrap, 0);
+    }
   },
 
-  /* 统计「表格上方、且自身固定（sticky/fixed）」的元素占用的视口上沿高度。
-     取值是 `top + offsetHeight` 的**最大值**而非累加 —— 这些元素是叠着钉的
-     （标签页 top:0/h:46、筛选条 top:46/h:54），取最大下沿才是真正被占掉的高度。
+  /* 设置该列表所有表头的 sticky top。
+     0 = 钉在列表自身滚动区顶部（列表内部滚动时用）；
+     >0 = 钉在页面级，值即筛选条/标签栏钉住后的底边（页面滚动时用）。 */
+  _setHeadTop(wrap, px) {
+    const v = px > 0 ? Math.round(px) + 'px' : '0px';
+    wrap.querySelectorAll('thead th').forEach((th) => {
+      if (th.style.top !== v) th.style.top = v;
+    });
+  },
 
-     只遍历 wrap 之前的节点（按文档序），命中 sticky 即停止下钻，避免父子重复累加；
-     高度为 0 的节点（隐藏的其它 .page-view）直接跳过，省掉无谓的 getComputedStyle。 */
-  _pinnedHeight(wrap, root) {
+  /* 统计页面里「钉住的头部」占用的高度：取所有 sticky 头部（标签栏 top:0、
+     筛选条 top:46px）中 `top + offsetHeight` 的**最大值**，而非累加 ——
+     它们是叠着钉的，最大下沿才是真正被占掉的高度。
+
+     注意**不要再回到「沿 wrapper 的 previousElementSibling 逐层找」的写法**：
+     筛选条与列表并不总在同一层兄弟位置，那种写法会漏算 —— 实测「动物去向/回收」
+     的第一个列表只算到标签栏 46px，于是表头被设成 top:46px，被 145px 高的筛选条
+     压住（该页筛选条有 7 项、会折行）。
+     高度为 0 的节点（隐藏的其它 .page-view）直接跳过。 */
+  _pinnedHeight(root) {
     let maxEdge = 0;
-    const walk = (node) => {
-      if (!node || node.nodeType !== 1 || !node.offsetHeight) return;
-      const cs = getComputedStyle(node);
-      if (cs.position === 'sticky' || cs.position === 'fixed') {
-        maxEdge = Math.max(maxEdge, (parseFloat(cs.top) || 0) + node.offsetHeight);
-        return;
-      }
-      for (const child of node.children) walk(child);
-    };
-    let node = wrap;
-    while (node && node !== root && node.parentElement) {
-      let sib = node.previousElementSibling;
-      while (sib) { walk(sib); sib = sib.previousElementSibling; }
-      node = node.parentElement;
-    }
+    root.querySelectorAll('.tabs, .filter-bar').forEach((el) => {
+      if (!el.offsetHeight) return;
+      const cs = getComputedStyle(el);
+      if (cs.position !== 'sticky' && cs.position !== 'fixed') return;
+      maxEdge = Math.max(maxEdge, (parseFloat(cs.top) || 0) + el.offsetHeight);
+    });
     return maxEdge;
   },
 
@@ -843,7 +898,7 @@ const TNR_UI = {
      传容器可以避免「A 页面的筛选条件被 B 页面的表格读到」——各 portal 的
      .page-view 都常驻 DOM，全局查询会把所有页面的筛选值混在一起。 */
   bindFilter(tableRender, scope) {
-    const root = this._resolveEl(scope) || document;
+    const root = this._filterScope(scope);
     // 标准「搜索 / 重置」按钮
     root.querySelectorAll('[data-fb="search"]').forEach(btn => {
       const fresh = btn.cloneNode(true);
@@ -882,7 +937,7 @@ const TNR_UI = {
   },
 
   getFilterValues(scope) {
-    const root = this._resolveEl(scope) || document;
+    const root = this._filterScope(scope);
     const vals = {};
     root.querySelectorAll('[data-filter]').forEach(input => {
       vals[input.dataset.filter] = input.value.trim().toLowerCase();

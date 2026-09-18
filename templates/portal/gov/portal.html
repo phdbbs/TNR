@@ -70,7 +70,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260918d"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260918i"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -349,9 +349,6 @@ const GovPortal = {
 
       <div class="dashboard-grid">
         <div class="card">
-          <div class="card-header">
-            <div class="card-title"><span class="card-title-bar"></span>区县业务统计（${rangeText}）</div>
-          </div>
           <div class="card-body card-body-flush">
             <div class="table-wrapper" style="border:none;">
               <table class="data-table district-compare-table">
@@ -375,7 +372,7 @@ const GovPortal = {
 
         <div class="card">
           <div class="card-header">
-            <div class="card-title"><span class="card-title-bar"></span>物料流转统计（${rangeText}）</div>
+            <div class="card-title"><span class="card-title-bar"></span>物料流转统计</div>
           </div>
           <div class="card-body">
             <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:var(--sp-5);">
@@ -397,7 +394,7 @@ const GovPortal = {
 
       <div class="card">
         <div class="card-header">
-          <div class="card-title"><span class="card-title-bar"></span>业务动态（${rangeText}${recentActivities.length ? ' · 最近 ' + recentActivities.length + ' 条' : ''}）</div>
+          <div class="card-title"><span class="card-title-bar"></span>业务动态</div>
         </div>
         <div class="card-body">
           <div class="timeline">
@@ -484,7 +481,7 @@ const GovPortal = {
         + '<div class="table-wrapper" id="distTableWrapper"></div>';
       if (canManage) document.getElementById('btnAddDist').addEventListener('click', () => this.showDistrictModal());
       await this.renderDistrictsTable();
-      TNR_UI.bindFilter(() => this.renderDistrictsTable());
+      TNR_UI.bindFilter(() => this.renderDistrictsTable(), contentEl);
       return;
     }
 
@@ -497,11 +494,11 @@ const GovPortal = {
       + '<div class="table-wrapper" id="instTableWrapper"></div>';
     document.getElementById('btnAddInst').addEventListener('click', () => this.showInstitutionModal());
     await this.renderInstitutionsTable();
-    TNR_UI.bindFilter(() => this.renderInstitutionsTable());
+    TNR_UI.bindFilter(() => this.renderInstitutionsTable(), contentEl);
   },
 
   async renderDistrictsTable() {
-    const filters = TNR_UI.getFilterValues();
+    const filters = TNR_UI.getFilterValues(document.getElementById('instContent'));
     let data = await TNR_API.getDistricts();
     if (filters.status) data = data.filter(d => d.status === filters.status);
     if (filters.search) {
@@ -612,7 +609,7 @@ const GovPortal = {
   },
 
   async renderInstitutionsTable() {
-    const filters = TNR_UI.getFilterValues();
+    const filters = TNR_UI.getFilterValues(document.getElementById('instContent'));
     let data = await TNR_API.getInstitutions(this.instState.tab);
     if (!this.isCityLevel() && this.currentUser.district_id) {
       data = data.filter(i => i.district_id === this.currentUser.district_id);
@@ -760,12 +757,12 @@ const GovPortal = {
 
     document.getElementById('btnAddAcct').addEventListener('click', () => this.showAccountModal());
     await this.renderAccountsTable();
-    TNR_UI.bindFilter(() => this.renderAccountsTable());
+    TNR_UI.bindFilter(() => this.renderAccountsTable(), el);
     this.renderRolePermissions();
   },
 
   async renderAccountsTable() {
-    const filters = TNR_UI.getFilterValues();
+    const filters = TNR_UI.getFilterValues(document.getElementById('page-accounts'));
     let data = await TNR_API.getUsers();
     // 政府端账号管理只展示非领养人账号
     data = data.filter(u => u.role !== 'adopter');
@@ -1009,15 +1006,17 @@ const GovPortal = {
     const activeDistricts = (districts || []).filter(d => d.status === 'active');
     const contentEl = document.getElementById('supContent');
     contentEl.innerHTML = TNR_UI.renderFilterBar([
-      { key: 'district', label: '区县', type: 'select', options: activeDistricts.map(d => ({ value: d.id, label: d.name })) },
+      // 排除「全市（市级）」：全业务监管里没有任何一条记录归属市级，
+      // 留着就是「选了必定 0 条」的死选项（区县管理页早已按 `!d.is_city` 处理）。
+      { key: 'district', label: '区县', type: 'select', options: activeDistricts.filter(d => !d.is_city).map(d => ({ value: d.id, label: d.name })) },
       { key: 'search', label: '搜索', type: 'search', placeholder: '编号/单据号/名称' }
     ]) + '<div class="table-wrapper" id="supTableWrapper"></div>';
     await this.renderSupervisionTable();
-    TNR_UI.bindFilter(() => this.renderSupervisionTable());
+    TNR_UI.bindFilter(() => this.renderSupervisionTable(), contentEl);
   },
 
   async renderSupervisionTable() {
-    const filters = TNR_UI.getFilterValues();
+    const filters = TNR_UI.getFilterValues(document.getElementById('supContent'));
     const type = this.supState.tab;
     const sup = await TNR_API.getBusinessSupervision(type);
     const districts = await TNR_API.getDistricts();
@@ -1341,7 +1340,12 @@ const GovPortal = {
 
       const txnTypeMap = { purchase: { text: '采购入库', badge: 'badge-success' }, dispatch: { text: '下发出库', badge: 'badge-info' }, receive: { text: '签收入库', badge: 'badge-cinnabar' }, consume: { text: '消耗', badge: 'badge-cinnabar' }, adjustment: { text: '调整', badge: 'badge-default' } };
 
-      const recentTxns = [...txns].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)).slice(0, 10);
+      /* 「物料库存明细」「物料流水追踪」原先是手写 <table class="data-table">：
+         既没有搜索条件也没有分页，流水追踪还被硬截断成「最近 10 条」——数据一多就
+         查不到历史。现统一改造成标准列表（mountTable：客户端分页 + 点击排序 + 列宽记忆），
+         各自带一条筛选条。 */
+      const matDistricts = [...new Set(materials.map(m => m.district_name).filter(Boolean))]
+        .map(n => ({ value: n, label: n }));
 
       el.innerHTML = `
         <div class="stat-grid">
@@ -1351,85 +1355,104 @@ const GovPortal = {
           <div class="stat-card rouge"><div class="stat-card-icon">⚠️</div><div><div class="stat-card-value">${stats.alert_count || 0}</div><div class="stat-card-label">库存预警</div></div></div>
         </div>
 
-        <div class="dashboard-grid">
-          <div class="card">
-            <div class="card-header">
-              <div class="card-title"><span class="card-title-bar"></span>物料库存明细</div>
-            </div>
-            <div class="card-body card-body-flush">
-              <div class="table-wrapper" style="border:none;">
-                <table class="data-table">
-                  <thead><tr>
-                    <th>物料名称</th>
-                    <th>分类</th>
-                    <th>捕捉点库存</th>
-                    <th>安全库存</th>
-                    <th>单位</th>
-                    <th>区县</th>
-                  </tr></thead>
-                  <tbody>
-                    ${materials.length ? materials.map(m => `
-                      <tr>
-                        <td><strong>${TNR_UI.escape(m.name)}</strong></td>
-                        <td>${TNR_UI.escape(m.category_display || m.category || '—')}</td>
-                        <td><span class="${(m.shelter_stock || 0) < (m.safety_stock || 0) ? 'text-danger font-bold' : ''}">${m.shelter_stock || 0}</span></td>
-                        <td>${m.safety_stock || 0}</td>
-                        <td>${TNR_UI.escape(m.unit || '—')}</td>
-                        <td>${TNR_UI.escape(m.district_name || '—')}</td>
-                      </tr>
-                    `).join('') : '<tr><td colspan="6" class="table-empty">暂无物料数据</td></tr>'}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-
-          <div class="card">
-            <div class="card-header">
-              <div class="card-title"><span class="card-title-bar"></span>库存异常预警</div>
-            </div>
-            <div class="card-body">
-              ${alerts.length ? alerts.map(a => `
-                <div class="alert-item warning">
-                  <span class="alert-icon">🟡</span>
-                  <span class="alert-text">${TNR_UI.escape(a.name)} 库存 ${a.shelter_stock} ${a.unit || ''}，低于安全库存 ${a.safety_stock} ${a.unit || ''}（缺口 ${a.shortage}）</span>
-                </div>
-              `).join('') : '<div class="table-empty"><div class="table-empty-icon">✅</div><div class="table-empty-text">暂无异常</div></div>'}
-            </div>
+        <div id="govMatStockFilterBar">${TNR_UI.renderFilterBar([
+          { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料名称 / 分类 / 单位' },
+          { key: 'district', label: '区县', type: 'select', options: matDistricts }
+        ])}</div>
+        <div class="card">
+          <div class="card-body card-body-flush">
+            <div id="govMatStockTable"></div>
           </div>
         </div>
 
         <div class="card">
           <div class="card-header">
-            <div class="card-title"><span class="card-title-bar"></span>物料流水追踪（最近 10 条）</div>
+            <div class="card-title"><span class="card-title-bar"></span>库存异常预警</div>
           </div>
+          <div class="card-body">
+            ${alerts.length ? alerts.map(a => `
+              <div class="alert-item warning">
+                <span class="alert-icon">🟡</span>
+                <span class="alert-text">${TNR_UI.escape(a.name)} 库存 ${a.shelter_stock} ${a.unit || ''}，低于安全库存 ${a.safety_stock} ${a.unit || ''}（缺口 ${a.shortage}）</span>
+              </div>
+            `).join('') : '<div class="table-empty"><div class="table-empty-icon">✅</div><div class="table-empty-text">暂无异常</div></div>'}
+          </div>
+        </div>
+
+        <div id="govMatTxnFilterBar">${TNR_UI.renderFilterBar([
+          { key: 'keyword', label: '搜索', type: 'search', placeholder: '单据号 / 物料 / 批号 / 操作人' },
+          { key: 'type', label: '类型', type: 'select', options: [
+            { value: 'purchase', label: '采购入库' },
+            { value: 'dispatch', label: '下发出库' },
+            { value: 'receive', label: '签收入库' },
+            { value: 'consume', label: '消耗' },
+            { value: 'adjustment', label: '调整' }
+          ]},
+          { key: 'start_date', label: '开始日期', type: 'date' },
+          { key: 'end_date', label: '结束日期', type: 'date' }
+        ])}</div>
+        <div class="card">
           <div class="card-body card-body-flush">
-            <div class="table-wrapper" style="border:none;">
-              <table class="data-table">
-                <thead><tr>
-                  <th>单据号</th><th>类型</th><th>物料</th><th>数量</th><th>批号</th><th>来源/去向</th><th>操作人</th><th>区县</th><th>日期</th>
-                </tr></thead>
-                <tbody>
-                  ${recentTxns.length ? recentTxns.map(t => {
-                    const tm = txnTypeMap[t.type] || { text: t.type, badge: 'badge-default' };
-                    return `<tr>
-                      <td>${TNR_UI.escape(t.ledger_no || '—')}</td>
-                      <td><span class="badge ${tm.badge}">${tm.text}</span></td>
-                      <td>${TNR_UI.escape(t.material_name)}</td>
-                      <td>${t.quantity} ${t.unit || ''}</td>
-                      <td>${TNR_UI.escape(t.batch_no || '—')}</td>
-                      <td>${TNR_UI.escape(t.from_to || '—')}</td>
-                      <td>${TNR_UI.escape(t.operator_name || '—')}</td>
-                      <td>${TNR_UI.escape(t.district_name || '—')}</td>
-                      <td>${TNR_UI.formatDate(t.date)}</td>
-                    </tr>`;
-                  }).join('') : '<tr><td colspan="9" class="table-empty">暂无物料流水</td></tr>'}
-                </tbody>
-              </table>
-            </div>
+            <div id="govMatTxnTable"></div>
           </div>
         </div>
       `;
+
+      /* 两个列表的列定义与渲染。mountTable 必须在容器随 innerHTML 进入 DOM 之后调用 ——
+         反过来的话选择器查不到元素，表格会静默不渲染且不报错。 */
+      const matStockCols = [
+        { title: '物料名称', key: 'name', render: r => '<strong>' + TNR_UI.escape(r.name || '') + '</strong>' },
+        { title: '分类', render: r => TNR_UI.escape(r.category_display || r.category || '—') },
+        { title: '捕捉点库存', render: r => '<span class="' + ((r.shelter_stock || 0) < (r.safety_stock || 0) ? 'text-danger font-bold' : '') + '">' + (r.shelter_stock || 0) + '</span>' },
+        { title: '安全库存', render: r => String(r.safety_stock || 0) },
+        { title: '单位', render: r => TNR_UI.escape(r.unit || '—') },
+        { title: '区县', render: r => TNR_UI.escape(r.district_name || '—') }
+      ];
+      const matTxnCols = [
+        { title: '单据号', render: r => TNR_UI.escape(r.ledger_no || '—') },
+        { title: '类型', render: r => {
+            const tm = txnTypeMap[r.type] || { text: r.type, badge: 'badge-default' };
+            return '<span class="badge ' + tm.badge + '">' + tm.text + '</span>';
+          } },
+        { title: '物料', render: r => TNR_UI.escape(r.material_name || '') },
+        { title: '数量', render: r => (r.quantity || 0) + ' ' + (r.unit || '') },
+        { title: '批号', render: r => TNR_UI.escape(r.batch_no || '—') },
+        { title: '来源/去向', render: r => TNR_UI.escape(r.from_to || '—') },
+        { title: '操作人', render: r => TNR_UI.escape(r.operator_name || '—') },
+        { title: '区县', render: r => TNR_UI.escape(r.district_name || '—') },
+        { title: '日期', render: r => TNR_UI.formatDate(r.date) }
+      ];
+
+      const matStockBar = document.getElementById('govMatStockFilterBar');
+      const renderMatStock = () => {
+        const v = TNR_UI.getFilterValues(matStockBar);
+        const rows = materials.filter(m => {
+          if (v.district && String(m.district_name || '').toLowerCase() !== v.district) return false;
+          if (!v.keyword) return true;
+          return [m.name, m.category_display, m.category, m.unit, m.district_name]
+            .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
+        });
+        TNR_UI.mountTable('govMatStockTable', { id: 'gov.material.stock', columns: matStockCols, data: rows, emptyText: '暂无物料数据' });
+      };
+      renderMatStock();
+      TNR_UI.bindFilter(renderMatStock, matStockBar);
+
+      const matTxnBar = document.getElementById('govMatTxnFilterBar');
+      const renderMatTxn = () => {
+        const v = TNR_UI.getFilterValues(matTxnBar);
+        const rows = txns.filter(t => {
+          if (v.type && String(t.type) !== v.type) return false;
+          const d = String(t.date || '').slice(0, 10);
+          if (v.start_date && d < v.start_date) return false;
+          if (v.end_date && d > v.end_date) return false;
+          if (!v.keyword) return true;
+          return [t.ledger_no, t.material_name, t.batch_no, t.from_to, t.operator_name, t.district_name]
+            .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
+        });
+        TNR_UI.mountTable('govMatTxnTable', { id: 'gov.material.txn', columns: matTxnCols, data: rows, emptyText: '暂无物料流水' });
+      };
+      renderMatTxn();
+      TNR_UI.bindFilter(renderMatTxn, matTxnBar);
     } catch (e) {
       el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⚠️</div><div class="table-empty-text">加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
     }
@@ -1469,10 +1492,16 @@ const GovPortal = {
   async renderLedgerContent() {
     const districts = await TNR_API.getDistricts();
     const activeDistricts = (districts || []).filter(d => d.status === 'active');
+    // 缓存下来供 renderLedgerTable 做「区县 id → 名称」换算。
+    // 台账接口返回的行里只有 `district_name`、没有 district id，而筛选条给出的是 id，
+    // 必须在这一层完成换算 —— **绝不能**在渲染函数里去 DOM 里找下拉读 textContent
+    // （见 renderLedgerTable 里的说明）。
+    this._ledgerDistricts = activeDistricts;
     const institutions = await TNR_API.getInstitutions();
     const contentEl = document.getElementById('ledgerContent');
     contentEl.innerHTML = TNR_UI.renderFilterBar([
-      { key: 'district', label: '区县', type: 'select', options: activeDistricts.map(d => ({ value: d.id, label: d.name })) },
+      // 排除「全市（市级）」——台账行没有一条归属市级（死选项）。
+      { key: 'district', label: '区县', type: 'select', options: activeDistricts.filter(d => !d.is_city).map(d => ({ value: d.id, label: d.name })) },
       { key: 'institution_id', label: '机构', type: 'select', options: institutions.map(i => ({ value: i.id, label: i.name })) },
       { key: 'start_date', label: '开始日期', type: 'date' },
       { key: 'end_date', label: '结束日期', type: 'date' }
@@ -1486,13 +1515,15 @@ const GovPortal = {
     });
     document.getElementById('btnPrintLedger').addEventListener('click', () => window.print());
     await this.renderLedgerTable();
-    TNR_UI.bindFilter(() => this.renderLedgerTable());
+    TNR_UI.bindFilter(() => this.renderLedgerTable(), contentEl);
   },
 
   async renderLedgerTable() {
     // 注意：getFilterValues 返回小写的值，但 ledger API 需要 institution_id 和 business_type
+    // 作用域必须限定在 #ledgerContent —— 各 .page-view 常驻 DOM，全局裸查会把别的
+    // 页面上残留的筛选值一起读进来（本页自己不做过滤，是直接透传给后端的）。
     const rawFilters = {};
-    document.querySelectorAll('[data-filter]').forEach(input => {
+    document.getElementById('ledgerContent').querySelectorAll('[data-filter]').forEach(input => {
       const key = input.dataset.filter;
       rawFilters[key] = input.value;
     });
@@ -1507,8 +1538,15 @@ const GovPortal = {
     const result = await TNR_API.getLedger(params);
     let records = (result && result.records) || [];
     if (rawFilters.district) {
-      const sel = document.querySelector('[data-filter="district"]');
-      const districtName = sel?.selectedOptions[0]?.textContent || '';
+      // ⚠ 这里曾经写成 `document.querySelector('[data-filter="district"]')` 再去读
+      // `selectedOptions[0].textContent` —— **全局裸查 + 拿 DOM 当数据源**，双重错误：
+      //   1. 各 `.page-view` 常驻 DOM，全局裸查命中的是**文档里第一个**区县下拉
+      //      （机构管理页那个），跟用户在台账页选的东西毫无关系；
+      //   2. 那个下拉此时是默认态，textContent 是占位项，于是过滤结果恒为 0 条。
+      // 症状极隐蔽：下拉能选、界面不报错，只是**选任何区县都是空表**。
+      // 正确做法是用已经拿到的 district id 去缓存里换算名称，不碰 DOM。
+      const d = (this._ledgerDistricts || []).find(x => String(x.id) === String(rawFilters.district));
+      const districtName = d ? d.name : '';
       records = records.filter(r => r.district_name && r.district_name === districtName);
     }
 
@@ -1884,8 +1922,7 @@ const GovPortal = {
       ];
       el.innerHTML = `
         <div class="card">
-          <div class="card-header">
-            <div class="card-title"><span class="card-title-bar"></span>编号规则配置</div>
+          <div class="card-header" style="justify-content:flex-end;">
             <button class="btn btn-primary btn-sm" id="btnSavePrefixes">保存配置</button>
           </div>
           <div class="card-body card-body-flush">
@@ -1940,7 +1977,7 @@ const GovPortal = {
           </div>
         `;
         TNR_UI.bindFilter(() => {
-          const f = TNR_UI.getFilterValues();
+          const f = TNR_UI.getFilterValues(el);
           let filtered = logs || [];
           if (f.logsearch) filtered = (logs || []).filter(l =>
             (l.action && l.action.toLowerCase().includes(f.logsearch)) ||
@@ -1948,7 +1985,7 @@ const GovPortal = {
             (l.user_name && l.user_name.toLowerCase().includes(f.logsearch))
           );
           document.getElementById('logList').innerHTML = this.renderLogList(filtered);
-        });
+        }, el);
       } catch (e) {
         el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⚠️</div><div class="table-empty-text">加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
       }

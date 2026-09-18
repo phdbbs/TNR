@@ -67,7 +67,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260918d"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260918i"></script>
 <script>
 /* ====================================================
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
@@ -292,7 +292,14 @@ const Hospital = {
         '<div class="tab-item ' + (this.state.receiveTab === 'received' ? 'active' : '') + '" data-rtab="received">已接收 (' + recv + ')</div>' +
         '<div class="tab-item ' + (this.state.receiveTab === 'rejected' ? 'active' : '') + '" data-rtab="rejected">已驳回 (' + rej + ')</div>' +
         '<div class="tab-item ' + (this.state.receiveTab === 'void' ? 'active' : '') + '" data-rtab="void">已撤回 (' + vd + ')</div>' +
-        '</div><div id="receiveTabContent"></div>';
+        '</div>' +
+        // 四个状态标签页共用一条筛选条，位置紧跟 .tabs（CSS 里 .tabs 钉 top:0、.filter-bar 钉 top:46px）。
+        '<div id="receiveFilterBar">' + TNR_UI.renderFilterBar([
+          { key: 'keyword', label: '搜索', type: 'search', placeholder: '交接单号 / 宠物编号 / 来源捕捉点' },
+          { key: 'start_date', label: '开始日期', type: 'date' },
+          { key: 'end_date', label: '结束日期', type: 'date' }
+        ]) + '</div>' +
+        '<div id="receiveTabContent"></div>';
 
       document.getElementById('page-receive').innerHTML = html;
 
@@ -306,7 +313,10 @@ const Hospital = {
         });
       });
 
+      this._receiveCache = transfers;
       this.renderReceiveTab(transfers);
+      TNR_UI.bindFilter(() => this.renderReceiveTab(this._receiveCache || []),
+        document.getElementById('page-receive'));
     } catch (e) {
       document.getElementById('page-receive').innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div></div>';
     }
@@ -357,6 +367,17 @@ const Hospital = {
       };
     });
 
+    const bar = document.getElementById('receiveFilterBar');
+    const v = TNR_UI.getFilterValues(bar);
+    const shown = rows.filter(r => {
+      const d = String(r.created_at || '').slice(0, 10);
+      if (v.start_date && d < v.start_date) return false;
+      if (v.end_date && d > v.end_date) return false;
+      if (!v.keyword) return true;
+      // 行是映射后的展示结构（含 HTML 片段），逐字段拼 haystack，避免漏列。
+      return Object.keys(r).map(k => r[k]).join(' ').toLowerCase().includes(v.keyword);
+    });
+
     TNR_UI.mountTable(c, { id: 'hospital.receive', columns: [
         { title: '交接单号', key: '_ledger', sortable: false },
         { title: '宠物信息', key: 'petInfo', sortable: false },
@@ -364,7 +385,7 @@ const Hospital = {
         { title: '数量', key: 'pet_count_num', align: 'center' },
         { title: '状态', key: 'status', sortable: false },
         { title: '操作', key: '_actions', sortable: false },
-      ], data: rows, emptyText: '暂无待交接动物' });
+      ], data: shown, emptyText: '暂无待交接动物' });
 
     TNR_UI.delegateClick(c, {
       'data-receive': (id) => this.confirmReceive(id),
@@ -762,15 +783,36 @@ const Hospital = {
         };
       });
 
-      TNR_UI.mountTable(c, { id: 'hospital.treatments', columns: [
-          { title: '宠物编号', key: 'pet_code' },
-          { title: '诊疗项目', key: '_items', sortable: false },
-          { title: '医院', key: 'hospital_name' },
-          { title: '医生', key: '_doctor', sortable: false },
-          { title: '日期', key: 'created_at' },
-          { title: '状态', key: '_status', sortable: false },
-          { title: '操作', key: '_actions', sortable: false },
-        ], data: rows, emptyText: '暂无诊疗记录' });
+      /* 列表卡不再渲染标题；筛选条放列表容器内 —— 本页有「诊疗操作 / 诊疗记录」两个
+         子标签，筛选条只对记录有意义，放 sub-tabs 下面常驻会在另一个标签页里显得多余。 */
+      c.innerHTML = '<div id="treatListFilterBar">' + TNR_UI.renderFilterBar([
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号 / 医院 / 医生' },
+        { key: 'start_date', label: '开始日期', type: 'date' },
+        { key: 'end_date', label: '结束日期', type: 'date' }
+      ]) + '</div><div id="treatTableHolder"></div>';
+      const treatBar = document.getElementById('treatListFilterBar');
+      const renderTreatTable = () => {
+        const v = TNR_UI.getFilterValues(treatBar);
+        const list = rows.filter(r => {
+          const d = String(r.created_at || '').slice(0, 10);
+          if (v.start_date && d < v.start_date) return false;
+          if (v.end_date && d > v.end_date) return false;
+          if (!v.keyword) return true;
+          return [r.pet_code, r.hospital_name, r._doctor]
+            .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
+        });
+        TNR_UI.mountTable('treatTableHolder', { id: 'hospital.treatments', columns: [
+            { title: '宠物编号', key: 'pet_code' },
+            { title: '诊疗项目', key: '_items', sortable: false },
+            { title: '医院', key: 'hospital_name' },
+            { title: '医生', key: '_doctor', sortable: false },
+            { title: '日期', key: 'created_at' },
+            { title: '状态', key: '_status', sortable: false },
+            { title: '操作', key: '_actions', sortable: false },
+          ], data: list, emptyText: '暂无诊疗记录' });
+      };
+      renderTreatTable();
+      TNR_UI.bindFilter(renderTreatTable, c);
 
       TNR_UI.delegateClick(c, {
         'data-view-treatment': (id) => this.viewTreatmentDetail(id)
@@ -861,7 +903,14 @@ const Hospital = {
       '<div class="tab-item ' + (this.state.materialTab === 'stock' ? 'active' : '') + '" data-mtab="stock">实时库存</div>' +
       '<div class="tab-item ' + (this.state.materialTab === 'adjustment' ? 'active' : '') + '" data-mtab="adjustment">库存异动 (' + adjustments + ')</div>' +
       '<div class="tab-item ' + (this.state.materialTab === 'ledger' ? 'active' : '') + '" data-mtab="ledger">出入库台账 (' + txns.length + ')</div>' +
-      '</div><div id="materialTabContent"></div>';
+      '</div>' +
+      // 四个标签页共用一条筛选条，位置紧跟 .tabs（CSS 里 .tabs 钉 top:0、.filter-bar 钉 top:46px）。
+      '<div id="materialFilterBar">' + TNR_UI.renderFilterBar([
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料 / 单号 / 批号 / 操作人' },
+        { key: 'start_date', label: '开始日期', type: 'date' },
+        { key: 'end_date', label: '结束日期', type: 'date' }
+      ]) + '</div>' +
+      '<div id="materialTabContent"></div>';
 
     page.querySelectorAll('[data-mtab]').forEach(el => {
       el.addEventListener('click', () => {
@@ -873,7 +922,25 @@ const Hospital = {
       });
     });
 
+    this._matCache = txns;
     this.renderMaterialTab(txns);
+    TNR_UI.bindFilter(() => this.renderMaterialTab(this._matCache || []), page);
+  },
+
+  /* 物料管理页四个标签页共用一条筛选条（#materialFilterBar），统一在这里取值与判定。
+     日期字段各页不同（date 为主），故 inRange 按值传入。 */
+  _matQuery() {
+    const bar = document.getElementById('materialFilterBar');
+    const v = TNR_UI.getFilterValues(bar);
+    return {
+      ok: (hay) => !v.keyword || String(hay || '').toLowerCase().includes(v.keyword),
+      inRange: (d) => {
+        const s = String(d || '').slice(0, 10);
+        if (v.start_date && s < v.start_date) return false;
+        if (v.end_date && s > v.end_date) return false;
+        return true;
+      }
+    };
   },
 
   async renderMaterialTab(txns) {
@@ -886,7 +953,10 @@ const Hospital = {
   },
 
   renderMaterialPending(c, txns) {
-    const dispatches = txns.filter(t => t.type === 'dispatch' && !(t.note || '').includes('[已签收]'));
+    const q = this._matQuery();
+    const dispatches = txns.filter(t => t.type === 'dispatch' && !(t.note || '').includes('[已签收]'))
+      .filter(t => q.inRange(t.date)
+        && q.ok([t.material_name, t.ledger_no, t.batch_no, t.operator_name].join(' ')));
     if (dispatches.length === 0) {
       c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📦</div><div class="empty-state-text">暂无待接收物料</div><div class="empty-state-desc">所有下发的物料已确认接收</div></div>';
       return;
@@ -917,9 +987,16 @@ const Hospital = {
   async renderMaterialStock(c) {
     c.innerHTML = '<div class="loading-state">加载中...</div>';
     try {
-      const materials = await TNR_API.getMaterials();
-      if (materials.length === 0) {
+      const q = this._matQuery();
+      const allMats = await TNR_API.getMaterials();
+      const materials = allMats.filter(m =>
+        q.ok([m.name, m.specification, m.batch_no, m.category].join(' ')));
+      if (allMats.length === 0) {
         c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📦</div><div class="empty-state-text">暂无物料</div></div>';
+        return;
+      }
+      if (materials.length === 0) {
+        c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-text">没有符合筛选条件的物料</div></div>';
         return;
       }
       const cards = materials.map(m => {
@@ -949,7 +1026,10 @@ const Hospital = {
     let materials = [];
     try { materials = await TNR_API.getMaterials(); } catch(e) {}
 
-    const adj = txns.filter(t => t.type === 'adjustment');
+    const q = this._matQuery();
+    const adj = txns.filter(t => t.type === 'adjustment')
+      .filter(t => q.inRange(t.date)
+        && q.ok([t.material_name, t.note, t.operator_name].join(' ')));
     let adjHtml = '<div class="empty-state" style="padding:var(--sp-6);"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无异动记录</div></div>';
     const adjRows = adj.map(t => ({
       material_name: t.material_name || '',
@@ -967,7 +1047,7 @@ const Hospital = {
       '</select></div><div class="form-group"><label class="form-label">数量<span class="req">*</span></label><input type="number" class="form-input" id="adjQty" value="1" min="1" /></div></div>' +
       '<div class="form-group"><label class="form-label">原因说明<span class="req">*</span></label><textarea class="form-textarea" id="adjReason" placeholder="请说明异动原因（过期/破损/盘亏等）"></textarea></div>' +
       '<div style="display:flex;justify-content:flex-end;"><button class="btn btn-primary" id="adjSubmitBtn">提交报备</button></div></div></div></div></div>' +
-      '<div class="card mt-5"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>异动记录</div></div><div class="card-body-flush">' + adjHtml + '</div></div>';
+      '<div class="card mt-5"><div class="card-body-flush">' + adjHtml + '</div></div>';
 
     if (adj.length > 0) {
       TNR_UI.mountTable('hospitalAdjTable', { id: 'hospital.material.adjustment', columns: [
@@ -1005,7 +1085,10 @@ const Hospital = {
   },
 
   renderMaterialLedger(c, txns) {
-    const data = txns.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const q = this._matQuery();
+    const data = txns.filter(t => q.inRange(t.date)
+        && q.ok([t.ledger_no, t.material_name, t.type, t.operator_name].join(' ')))
+      .slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     if (data.length === 0) {
       c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无台账记录</div></div>';
       return;
@@ -1110,37 +1193,52 @@ const Hospital = {
         _actions: '<button class="btn btn-primary btn-sm" data-confirm-claim="' + a.id + '">确认领出</button>',
       }));
 
-      if (pets.length === 0 && pendingClaims.length === 0) {
-        page.innerHTML = applHtml + '<div class="empty-state"><div class="empty-state-icon">🐾</div><div class="empty-state-text">暂无待领养动物</div><div class="empty-state-desc">诊疗完成5天后，动物状态将自动变更为「待领养」</div></div>';
-        if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', columns: [
+      /* 两个待办列表（待审核申请 / 待领出确认）共用一条筛选条。
+         本方法有 3 条分支、每条都重设 page.innerHTML，所以 mountTable 一律走下面两个
+         包装函数，避免过滤逻辑在 5 个调用点上各写一遍。 */
+      const infoBarHtml = '<div id="adoptInfoFilterBar">' + TNR_UI.renderFilterBar([
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 申请人 / 电话' }
+      ]) + '</div>';
+      // 行对象是映射后的展示结构（含 HTML 片段），逐字段拼成 haystack 最省事，
+      // 也不会漏列 —— 逐列写死字段名在字段改名后会静默失效。
+      const infoHit = (r) => {
+        const v = TNR_UI.getFilterValues(document.getElementById('adoptInfoFilterBar'));
+        return !v.keyword
+          || Object.keys(r).map(k => r[k]).join(' ').toLowerCase().includes(v.keyword);
+      };
+      const mountAppl = () => {
+        if (pendingAppls.length === 0) return;
+        TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', columns: [
             { title: '宠物编号', key: '_pet', sortable: false },
             { title: '申请人', key: 'applicant_name' },
             { title: '电话', key: 'applicant_phone' },
             { title: '资质说明', key: '_qual', sortable: false },
             { title: '申请时间', key: 'applied_at' },
             { title: '操作', key: '_actions', sortable: false },
-          ], data: applRows, emptyText: '暂无申请' });
-        return;
-      }
-
-      if (pets.length === 0) {
-        page.innerHTML = claimsHtml + applHtml + '<div class="empty-state"><div class="empty-state-icon">🐾</div><div class="empty-state-text">暂无待领养动物</div><div class="empty-state-desc">诊疗完成5天后，动物状态将自动变更为「待领养」</div></div>';
-        if (pendingClaims.length > 0) TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', columns: [
+          ], data: applRows.filter(infoHit), emptyText: '暂无申请' });
+      };
+      const mountClaims = () => {
+        if (pendingClaims.length === 0) return;
+        TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', columns: [
             { title: '领养单号', key: 'ledger_no' },
             { title: '宠物编号', key: '_pet', sortable: false },
             { title: '领养人', key: 'adopter_name' },
             { title: '电话', key: 'adopter_phone' },
             { title: '登记时间', key: 'created_at' },
             { title: '操作', key: '_actions', sortable: false },
-          ], data: claimRows, emptyText: '暂无记录' });
-        if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', columns: [
-            { title: '宠物编号', key: '_pet', sortable: false },
-            { title: '申请人', key: 'applicant_name' },
-            { title: '电话', key: 'applicant_phone' },
-            { title: '资质说明', key: '_qual', sortable: false },
-            { title: '申请时间', key: 'applied_at' },
-            { title: '操作', key: '_actions', sortable: false },
-          ], data: applRows, emptyText: '暂无申请' });
+          ], data: claimRows.filter(infoHit), emptyText: '暂无记录' });
+      };
+
+      if (pets.length === 0 && pendingClaims.length === 0) {
+        page.innerHTML = infoBarHtml + applHtml + '<div class="empty-state"><div class="empty-state-icon">🐾</div><div class="empty-state-text">暂无待领养动物</div><div class="empty-state-desc">诊疗完成5天后，动物状态将自动变更为「待领养」</div></div>';
+        mountAppl();
+        return;
+      }
+
+      if (pets.length === 0) {
+        page.innerHTML = infoBarHtml + claimsHtml + applHtml + '<div class="empty-state"><div class="empty-state-icon">🐾</div><div class="empty-state-text">暂无待领养动物</div><div class="empty-state-desc">诊疗完成5天后，动物状态将自动变更为「待领养」</div></div>';
+        mountClaims();
+        mountAppl();
         return;
       }
 
@@ -1178,23 +1276,10 @@ const Hospital = {
           '</div></div></div>';
       }).join('');
 
-      page.innerHTML = claimsHtml + applHtml + html;
-      if (pendingClaims.length > 0) TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', columns: [
-          { title: '领养单号', key: 'ledger_no' },
-          { title: '宠物编号', key: '_pet', sortable: false },
-          { title: '领养人', key: 'adopter_name' },
-          { title: '电话', key: 'adopter_phone' },
-          { title: '登记时间', key: 'created_at' },
-          { title: '操作', key: '_actions', sortable: false },
-        ], data: claimRows, emptyText: '暂无记录' });
-      if (pendingAppls.length > 0) TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', columns: [
-          { title: '宠物编号', key: '_pet', sortable: false },
-          { title: '申请人', key: 'applicant_name' },
-          { title: '电话', key: 'applicant_phone' },
-          { title: '资质说明', key: '_qual', sortable: false },
-          { title: '申请时间', key: 'applied_at' },
-          { title: '操作', key: '_actions', sortable: false },
-        ], data: applRows, emptyText: '暂无申请' });
+      page.innerHTML = infoBarHtml + claimsHtml + applHtml + html;
+      mountClaims();
+      mountAppl();
+      TNR_UI.bindFilter(() => { mountClaims(); mountAppl(); }, page);
     } catch (e) {
       page.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div></div>';
     }
@@ -1343,14 +1428,39 @@ const Hospital = {
         '<div class="form-group"><label class="form-label">动物状况描述<span class="req">*</span></label><textarea class="form-textarea" id="euthCondition" placeholder="请详细描述动物状况及处置原因"></textarea></div>' +
         '<div style="display:flex;justify-content:flex-end;"><button class="btn btn-danger" id="euthSubmitBtn">提交安乐死处置</button></div></div></div>';
 
-      /* 记录列表 */
-      html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>安乐死处置记录</div></div><div class="card-body-flush">';
+      /* 记录列表：列表卡不再渲染标题（数量看列表下方「共 N 条」），
+         筛选条独立于卡片、放页面级 —— 嵌在卡片里时 sticky 的可钉范围被卡片高度限制住。 */
+      html += '<div id="euthFilterBar">' + TNR_UI.renderFilterBar([
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号 / 原因 / 操作人' },
+        { key: 'body', label: '遗体移交', type: 'select', options: [
+          { value: 'done', label: '已移交' },
+          { value: 'todo', label: '未移交' }
+        ]},
+        { key: 'start_date', label: '开始日期', type: 'date' },
+        { key: 'end_date', label: '结束日期', type: 'date' }
+      ]) + '</div>';
+      html += '<div class="card"><div class="card-body-flush">';
       html += '<div id="hospitalEuthTable"></div></div></div>';
 
       page.innerHTML = html;
 
-      if (records.length > 0) {
-        const rows = records.map(e => ({
+      const euthBar = document.getElementById('euthFilterBar');
+      const renderEuthTable = () => {
+        const v = TNR_UI.getFilterValues(euthBar);
+        const list = records.filter(e => {
+          if (v.body === 'done' && !e.body_received) return false;
+          if (v.body === 'todo' && e.body_received) return false;
+          const d = String(e.euthanized_at || '').slice(0, 10);
+          if (v.start_date && d < v.start_date) return false;
+          if (v.end_date && d > v.end_date) return false;
+          if (v.keyword) {
+            const hay = [e.pet_code, e.reason, e.operator_name].filter(Boolean).join(' ').toLowerCase();
+            if (!hay.includes(v.keyword)) return false;
+          }
+          return true;
+        });
+        if (records.length === 0) return;
+        const rows = list.map(e => ({
           _pet: '<div style="font-weight:500;">' + this.escape(e.pet_code || '') + '</div>',
           reason: e.reason || '',
           euthanized_at: e.euthanized_at,
@@ -1366,7 +1476,9 @@ const Hospital = {
             { title: '操作人', key: 'operator_name' },
             { title: '操作', key: '_actions', sortable: false },
           ], data: rows, emptyText: '暂无处置记录' });
-      }
+      };
+      renderEuthTable();
+      TNR_UI.bindFilter(renderEuthTable, page);
 
       page.querySelector('#euthSubmitBtn')?.addEventListener('click', () => this.saveEuthanasia());
       TNR_UI.delegateClick(page, {
@@ -1438,7 +1550,15 @@ const Hospital = {
         '<div class="tab-item ' + (this.state.ledgerTab === 'treatment' ? 'active' : '') + '" data-ltab="treatment">诊疗台账 (' + treatments.length + ')</div>' +
         '<div class="tab-item ' + (this.state.ledgerTab === 'material' ? 'active' : '') + '" data-ltab="material">物料台账 (' + txns.length + ')</div>' +
         '<div class="tab-item ' + (this.state.ledgerTab === 'euthanasia' ? 'active' : '') + '" data-ltab="euthanasia">安乐死台账 (' + euthanasia.length + ')</div>' +
-        '</div><div id="ledgerTabContent"></div>';
+        '</div>' +
+        // 四个标签页共用一条筛选条（关键词 + 日期区间）：字段同构，分四条只会多一次维护。
+        // 位置紧跟 .tabs —— CSS 里 .tabs 钉 top:0、.filter-bar 钉 top:46px，是配套的。
+        '<div id="ledgerFilterBar">' + TNR_UI.renderFilterBar([
+          { key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 物料 / 操作人' },
+          { key: 'start_date', label: '开始日期', type: 'date' },
+          { key: 'end_date', label: '结束日期', type: 'date' }
+        ]) + '</div>' +
+        '<div id="ledgerTabContent"></div>';
 
       page.querySelectorAll('[data-ltab]').forEach(el => {
         el.addEventListener('click', () => {
@@ -1450,7 +1570,12 @@ const Hospital = {
         });
       });
 
+      this._ledgerCache = { transfers, treatments, txns, euthanasia, pets };
       this.renderLedgerTab(transfers, treatments, txns, euthanasia, pets);
+      TNR_UI.bindFilter(() => {
+        const d = this._ledgerCache || {};
+        this.renderLedgerTab(d.transfers, d.treatments, d.txns, d.euthanasia, d.pets);
+      }, page);
     } catch (e) {
       page.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div></div>';
     }
@@ -1473,8 +1598,22 @@ const Hospital = {
       return seen.length ? seen.join('；') : '—';
     };
 
+    /* 四个标签页共用一条筛选条，统一在这里取值。
+       日期字段各页不同（created_at / date / euthanized_at），故按值传入 inRange。 */
+    const bar = document.getElementById('ledgerFilterBar');
+    const v = TNR_UI.getFilterValues(bar);
+    const inRange = (d) => {
+      const s = String(d || '').slice(0, 10);
+      if (v.start_date && s < v.start_date) return false;
+      if (v.end_date && s > v.end_date) return false;
+      return true;
+    };
+    const hit = (hay) => !v.keyword || String(hay || '').toLowerCase().includes(v.keyword);
+
     if (tab === 'transfer') {
-      const data = transfers.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+      const data = transfers.filter(t => inRange(t.created_at)
+          && hit([t.ledger_no, t.from_shelter_name, t.pet_codes].join(' ')))
+        .slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无交接台账</div></div>'; return; }
       const rows = data.map(t => {
         const codes = this.parsePetCodes(t.pet_codes);
@@ -1500,7 +1639,9 @@ const Hospital = {
           { title: '接收时间', key: 'received_at' },
         ], data: rows, emptyText: '暂无交接台账' });
     } else if (tab === 'treatment') {
-      const data = treatments.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+      const data = treatments.filter(t => inRange(t.created_at)
+          && hit([t.pet_code, t.hospital_name, t.sterilization_surgeon, t.operator_name].join(' ')))
+        .slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无诊疗台账</div></div>'; return; }
       const rows = data.map(t => {
         const items = [];
@@ -1528,7 +1669,9 @@ const Hospital = {
           { title: '状态', key: '_status', sortable: false },
         ], data: rows, emptyText: '暂无诊疗台账' });
     } else if (tab === 'material') {
-      const data = txns.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+      const data = txns.filter(t => inRange(t.date)
+          && hit([t.ledger_no, t.material_name, t.operator_name].join(' ')))
+        .slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无物料台账</div></div>'; return; }
       const typeMap = {'purchase': '采购入库', 'dispatch': '捕捉点下发', 'receive': '签收入库', 'consume': '诊疗消耗', 'adjustment': '库存异动'};
       const typeBadge = {'purchase': 'badge-success', 'dispatch': 'badge-info', 'receive': 'badge-cinnabar', 'consume': 'badge-warning', 'adjustment': 'badge-danger'};
@@ -1552,7 +1695,9 @@ const Hospital = {
           { title: '操作人', key: 'operator_name' },
         ], data: rows, emptyText: '暂无物料台账' });
     } else if (tab === 'euthanasia') {
-      const data = euthanasia.slice().sort((a, b) => (b.euthanized_at || '').localeCompare(a.euthanized_at || ''));
+      const data = euthanasia.filter(e => inRange(e.euthanized_at)
+          && hit([e.ledger_no, e.pet_code, e.reason, e.operator_name].join(' ')))
+        .slice().sort((a, b) => (b.euthanized_at || '').localeCompare(a.euthanized_at || ''));
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无安乐死台账</div></div>'; return; }
       const rows = data.map(e => ({
         ledger_no: e.ledger_no || '',
