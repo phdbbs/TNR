@@ -22,6 +22,7 @@ from business.services import (
     recalc_capture_status, get_active_pet, validate_uploaded_images,
     resolve_district_scope, resolve_community,
     inactive_district_error, inactive_institution_error,
+    parse_int_param, parse_date_param, MAX_CAPTURE_BATCH,
 )
 from core.models import District, Institution
 
@@ -255,9 +256,22 @@ def capture_list(request):
     if status:
         qs = qs.filter(status=status)
 
+    # `district` 既可能是**区县 id**（前端下拉的 value），也可能是**区县名称**
+    # （手输 / URL 分享）。原先写成
+    #     Q(district__name__icontains=d) | Q(district_id=d)
+    # —— `Q` 的**两半都会被求值**，于是传中文名时 `district_id='襄城区'`
+    # 直接 `ValueError` 打成 500。也就是说「按区县名筛选」这条分支
+    # **从来没成功过**，症状是「一填区县名就 500」，而按 id 筛选是好的。
+    # 正确做法：先判是不是纯数字，是才拼 id 那半。
+    # 这里**故意忽略**解析错误：非数字不是「非法输入」而是「按名称查」，
+    # 名称那半仍然生效，筛选没有被静默丢掉。
     district = request.GET.get('district', '').strip()
     if district:
-        qs = qs.filter(Q(district__name__icontains=district) | Q(district_id=district))
+        cond = Q(district__name__icontains=district)
+        district_id, _err = parse_int_param(district, '区县')
+        if district_id is not None:
+            cond |= Q(district_id=district_id)
+        qs = qs.filter(cond)
 
     community = request.GET.get('community', '').strip()
     if community:
@@ -303,11 +317,18 @@ def capture_list(request):
 @login_required
 def pet_codes_preview(request):
     """预览即将生成的宠物编号（与提交后实际生成规则一致）。"""
-    try:
-        count = int(request.GET.get('count', 0))
-    except (TypeError, ValueError):
-        count = 0
-    if count <= 0:
+    # ⚠ 必须有**上限**。`generate_pet_codes()` 是纯 `for i in range(count)` 循环，
+    # 原先只判 `count <= 0`，于是 `?count=999999999` 会真的去生成 10 亿个编号：
+    # 实测 20 万条约 23ms，线性外推 ≈ 110 秒 CPU + 数十 GB 内存，进程被拖死。
+    # 这类「**合法但荒谬**」的参数值探针扫不出来 —— 接口最终仍返回 200，
+    # 只是在返回之前已经把服务端吃光了。上限与 `checkin_create` 同源，
+    # 避免「预览能生成 10 万条、提交却被拒」这种孪生漂移。
+    count, err = parse_int_param(
+        request.GET.get('count'), '数量', minimum=0, maximum=MAX_CAPTURE_BATCH)
+    if err:
+        return json_fail(err)
+    if not count:
+        # 参数缺省与 0 都归到同一句提示（保持原口径）
         return json_fail('数量必须大于0')
     return json_ok(generate_pet_codes(count))
 
@@ -425,13 +446,15 @@ def capture_create(request):
         if district_err:
             return json_fail(district_err)
 
-    try:
-        pet_count = int(data.get('pet_count', 0))
-    except (TypeError, ValueError):
-        pet_count = 0
-    if pet_count <= 0:
+    # 与 `pet_codes_preview` 走同一个解析器、同一个上限常量（`MAX_CAPTURE_BATCH`），
+    # 避免孪生接口漂移：一边只判 `count<=0`、另一边才卡 100，
+    # 就会出现「预览能生成 10 万条、提交只收 100 条」。
+    pet_count, err = parse_int_param(data.get('pet_count'), '动物数量', minimum=0)
+    if err:
+        return json_fail(err)
+    if not pet_count:
         return json_fail('动物数量必须大于0')
-    if pet_count > 100:
+    if pet_count > MAX_CAPTURE_BATCH:
         return json_fail('单批捕捉数量不能超过100只，请分批登记')
 
     # 与前端表单必填项保持一致，避免脏数据落库
@@ -767,9 +790,17 @@ def owner_return_list(request):
     qs = get_district_filtered_queryset(OwnerReturn, request.user)
     qs = qs.select_related('pet')
 
-    # 时间范围（按 return_time，无值则退到 created_at）
-    start_date = request.GET.get('start_date', '').strip()
-    end_date = request.GET.get('end_date', '').strip()
+    # 时间范围（按 return_time，无值则退到 created_at）。
+    # 必须**解析成 date 对象**再进 ORM：把字符串直接塞进 `__date__gte`
+    # 会让 Django 在解析阶段抛 `ValidationError`（500）。前端
+    # `<input type="date">` 正常只会给 `YYYY-MM-DD`，但 URL 可以手改，
+    # 接口不能把非法值当成 500 处理。
+    start_date, err = parse_date_param(request.GET.get('start_date'), '开始日期')
+    if err:
+        return json_fail(err)
+    end_date, err = parse_date_param(request.GET.get('end_date'), '结束日期')
+    if err:
+        return json_fail(err)
     if start_date:
         qs = qs.filter(
             Q(return_time__date__gte=start_date)

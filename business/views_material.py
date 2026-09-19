@@ -7,6 +7,7 @@ Task 7: 物料供应链与双台账
 from datetime import datetime
 
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -17,7 +18,7 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
     adjust_stock, get_hospital_stock, get_scoped_object,
-    get_own_institution_object,
+    get_own_institution_object, parse_int_param,
 )
 from core.models import Institution
 
@@ -76,6 +77,19 @@ def purchase_create(request):
     data = parse_json_body(request)
     user = request.user
 
+    # ⚠ 数量**必须最先校验**。原先 `int(data.get('quantity', 0))` 排在
+    # 「按名称新建物料」**之后**，于是：
+    #   - `quantity=0`（或缺失）→ 先 `Material.objects.create()` 建出一条物料，
+    #     紧接着 `return json_fail('采购数量必须大于0')` —— **报错了，孤儿物料留下了**；
+    #   - `quantity='abc'` → `int()` 直接 `ValueError`，打成 500，同样留下孤儿物料。
+    # 多表写入一律「**先全校验 → 再落库**」（项目约定）。
+    # `minimum=0` 让 0 通过解析器、由下面那句业务判据给出更准确的中文提示。
+    quantity, err = parse_int_param(data.get('quantity'), '采购数量', minimum=0)
+    if err:
+        return json_fail(err)
+    if not quantity:
+        return json_fail('采购数量必须大于0')
+
     material_id = data.get('material_id')
     material = None
     if material_id:
@@ -105,54 +119,53 @@ def purchase_create(request):
                 district_id=district_id,
             )
 
-    quantity = int(data.get('quantity', 0))
-    if quantity <= 0:
-        return json_fail('采购数量必须大于0')
-
     district_id = material.district_id
 
-    # 创建采购流水（捕捉点侧，hospital=None）
-    txn = adjust_stock(
-        material=material,
-        hospital=None,
-        quantity=quantity,
-        txn_type='purchase',
-        operator=user,
-        operator_name=user.get_full_name() or user.username,
-        supplier=data.get('supplier', ''),
-        batch_no=data.get('batch_no', ''),
-        from_to=data.get('supplier', ''),
-        note=data.get('note', '采购入库'),
-        ledger_no=generate_ledger_no('PUR'),
-        district_id=district_id,
-    )
+    # 校验全部通过，从这里开始才写库。整体包一个事务：
+    # 采购要同时写「物料行 / 采购流水 / 芯片号段」，中途任何异常都不该留下半截数据。
+    with transaction.atomic():
+        # 创建采购流水（捕捉点侧，hospital=None）
+        txn = adjust_stock(
+            material=material,
+            hospital=None,
+            quantity=quantity,
+            txn_type='purchase',
+            operator=user,
+            operator_name=user.get_full_name() or user.username,
+            supplier=data.get('supplier', ''),
+            batch_no=data.get('batch_no', ''),
+            from_to=data.get('supplier', ''),
+            note=data.get('note', '采购入库'),
+            ledger_no=generate_ledger_no('PUR'),
+            district_id=district_id,
+        )
 
-    # 更新物料扩展信息
-    update_fields = []
-    if data.get('supplier'):
-        material.supplier = data['supplier']
-        update_fields.append('supplier')
-    if data.get('batch_no'):
-        material.batch_no = data['batch_no']
-        update_fields.append('batch_no')
-    if data.get('expiry_date'):
-        try:
-            material.expiry_date = datetime.strptime(str(data['expiry_date'])[:10], '%Y-%m-%d').date()
-            update_fields.append('expiry_date')
-        except (ValueError, TypeError):
-            pass
-    if update_fields:
-        material.save(update_fields=update_fields)
+        # 更新物料扩展信息
+        update_fields = []
+        if data.get('supplier'):
+            material.supplier = data['supplier']
+            update_fields.append('supplier')
+        if data.get('batch_no'):
+            material.batch_no = data['batch_no']
+            update_fields.append('batch_no')
+        if data.get('expiry_date'):
+            try:
+                material.expiry_date = datetime.strptime(str(data['expiry_date'])[:10], '%Y-%m-%d').date()
+                update_fields.append('expiry_date')
+            except (ValueError, TypeError):
+                pass
+        if update_fields:
+            material.save(update_fields=update_fields)
 
-    # 芯片采购：创建芯片号段（兼容前端 chip_start/chip_end 与后端 chip_range_* 两种命名）
-    if material.category == 'chip':
-        range_start = data.get('chip_range_start', '') or data.get('chip_start', '')
-        range_end = data.get('chip_range_end', '') or data.get('chip_end', '')
-        if range_start and range_end:
-            _create_chip_range(range_start, range_end, material)
-            material.chip_range_start = range_start
-            material.chip_range_end = range_end
-            material.save(update_fields=['chip_range_start', 'chip_range_end'])
+        # 芯片采购：创建芯片号段（兼容前端 chip_start/chip_end 与后端 chip_range_* 两种命名）
+        if material.category == 'chip':
+            range_start = data.get('chip_range_start', '') or data.get('chip_start', '')
+            range_end = data.get('chip_range_end', '') or data.get('chip_end', '')
+            if range_start and range_end:
+                _create_chip_range(range_start, range_end, material)
+                material.chip_range_start = range_start
+                material.chip_range_end = range_end
+                material.save(update_fields=['chip_range_start', 'chip_range_end'])
 
     return json_ok(serialize_instance(txn), message=f'采购入库成功，增加库存 {quantity}')
 
@@ -192,8 +205,13 @@ def dispatch_create(request):
     if hospital.district_id != material.district_id:
         return json_fail('只能下发到本区县医院')
 
-    quantity = int(data.get('quantity', 0))
-    if quantity <= 0:
+    # 与 `purchase_create` 同一口径：非法数量必须 400，不能是 500。
+    # 原先裸写 `int(data.get('quantity', 0))` —— `quantity='abc'` → `ValueError` → 500；
+    # `quantity='9'*24` 连 `int()` 都不报错（Python 整数无上限），要等写库才溢出。
+    quantity, err = parse_int_param(data.get('quantity'), '下发数量', minimum=0)
+    if err:
+        return json_fail(err)
+    if not quantity:
         return json_fail('下发数量必须大于0')
 
     if material.shelter_stock < quantity:
@@ -320,11 +338,15 @@ def stock_adjustment(request):
     if material is None:
         return json_fail('物料不存在或无权访问', status=404)
 
-    try:
-        quantity = int(data.get('quantity', 0))
-    except (TypeError, ValueError):
-        return json_fail('异动数量必须为整数')
-    if quantity <= 0:
+    # 与 `purchase_create` / `dispatch_create` 统一走共用解析器。
+    # 原先这里虽然包了 `try/except (TypeError, ValueError)`，但
+    # `int('9' * 24)` **不报错** —— 超大数要一路走到 `adjust_stock` 的库存
+    # 比较才被挡住，判据靠下游兜底。同一个「数量」参数，三个接口三种写法
+    # 就是孪生漂移，统一到共用解析器上。
+    quantity, err = parse_int_param(data.get('quantity'), '异动数量', minimum=0)
+    if err:
+        return json_fail(err)
+    if not quantity:
         return json_fail('异动数量必须大于0')
 
     hospital = None
@@ -370,7 +392,12 @@ def material_transactions(request):
     if txn_type:
         qs = qs.filter(type=txn_type)
 
-    material_id = request.GET.get('material_id')
+    # 非法值直接 400：原先裸写 `qs.filter(material_id=material_id)`，
+    # `?material_id=abc` → `ValueError`；`?material_id=999…9`（超长数字）→
+    # **`OverflowError`**（`int()` 自己不会报错，是 SQLite 绑定参数时才溢出）→ 500。
+    material_id, err = parse_int_param(request.GET.get('material_id'), '物料')
+    if err:
+        return json_fail(err)
     if material_id:
         qs = qs.filter(material_id=material_id)
 
@@ -395,7 +422,10 @@ def shelter_stock_ledger(request):
     # 捕捉点台账：所有 hospital=None 的流水 + dispatch 流水（单条 Q 组合，避免 | 破坏前置过滤）
     qs = qs.filter(Q(hospital__isnull=True) | Q(type='dispatch'))
 
-    material_id = request.GET.get('material_id')
+    # 与 `material_transactions` 同款：非法物料 id 必须 400，不能是 500。
+    material_id, err = parse_int_param(request.GET.get('material_id'), '物料')
+    if err:
+        return json_fail(err)
     if material_id:
         qs = qs.filter(material_id=material_id)
 

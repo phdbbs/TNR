@@ -8,7 +8,7 @@ import random
 import re
 import urllib.parse
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from django.db.models import Q, Sum
 from django.http import JsonResponse
@@ -49,6 +49,118 @@ def parse_json_body(request):
     if isinstance(data, dict):
         request.audit_payload = data
     return data
+
+
+# ============================================
+# 查询 / 请求参数安全解析
+# ============================================
+# 为什么必须统一走这里，而不是各处裸写 `int(...)` / 直接把字符串塞进 ORM：
+#
+# 一个**格式非法**的参数值会以**四种互不相同**的异常把接口打成 500，
+# 所以「随手包一层 `except ValueError`」是**假修**：
+#
+#   1) `filter(<整型外键>=非数字)`      -> builtins.ValueError
+#   2) `filter(<整型外键>=超大数)`      -> builtins.OverflowError
+#      ⚠ `int('9' * 24)` 本身**不报错** —— Python 整数无上限。
+#        是 SQLite 绑定参数时才溢出，所以校验必须发生在**进 ORM 之前**，
+#        靠 `try: int(x) except ValueError` 永远拦不住。
+#   3) `filter(<日期字段>=非日期)`      -> django.core.exceptions.ValidationError
+#   4) 日期字段上做算术（`end_date + timedelta(days=1)`）
+#                                       -> builtins.OverflowError
+#      （`date.max` 加一天；与第 2 种同名不同源，`except ValueError` 同样拦不住）
+#
+# 返回值语义是**三态**（不用「非法就静默忽略」——静默忽略筛选条件等于
+# 用户设了筛选却看到全量，属于最难被发现的一类静默失败）：
+#
+#   - 参数缺省 / 空串 -> `(None, None)`  调用方按「未筛选」处理
+#   - 参数非法        -> `(None, 消息)`  调用方 `return json_fail(消息)`
+#   - 参数合法        -> `(值, None)`
+#
+# 用法：
+#     material_id, err = parse_int_param(request.GET.get('material_id'), '物料')
+#     if err:
+#         return json_fail(err)
+#     if material_id:
+#         qs = qs.filter(material_id=material_id)
+
+# SQLite 的 INTEGER 是 64 位有符号，超过即绑定失败（异常类型 2）。
+MAX_SQLITE_INT = 2 ** 63 - 1
+# 用正则而不是裸 `int()`：`int()` 会接受 `'１２'`（全角）、`'1_0'`（下划线）、
+# `'+5'`、`' 5 '` 这些「像数字但不是」的写法，口径比业务预期宽。
+_INT_RE = re.compile(r'^[0-9]+$')
+# 月/日允许不补零（`2026-9-1`）：Python 的 `strptime` 本来就接受这种写法，
+# 收紧了只会让老书签 / 手工拼的 URL 无谓地撞 400。
+_DATE_RE = re.compile(r'^(\d{4})-(\d{1,2})-(\d{1,2})')
+
+
+def parse_int_param(raw, label='参数', minimum=1, maximum=MAX_SQLITE_INT):
+    """把参数解析成整数（主键 id 用）。返回 ``(值, 错误消息)``，语义见本节开头。
+
+    `minimum` 默认 1：这些参数全是自增主键，0 与负数不可能命中任何记录，
+    放进 ORM 只会白跑一次查询（`-1` 还会被 SQLite 当合法整数收下）。
+
+    `maximum` 用来挡**「合法但荒谬」**的数值 —— 那类值不会让接口报错，
+    而是让服务端**跑很久 / 吃光内存**（例如 `?count=999999999` 会真的去
+    循环生成 10 亿个编号）。这类问题探针扫不出来：接口最终是 200，
+    只是在这之前已经把进程拖死。所以数量类参数必须显式给 `maximum`。
+    """
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if not text:
+        return None, None
+    if not _INT_RE.match(text):
+        return None, f'{label}必须是数字'
+    # 先按**位数**挡一道，再 `int()`：Python 3.11+ 对超长数字串的转换
+    # 本身有 4300 位上限（`int('9'*5000)` 会 ValueError），位数判断更稳。
+    if len(text) > 19:
+        return None, f'{label}超出有效范围'
+    value = int(text)
+    if value < minimum:
+        return None, f'{label}超出有效范围'
+    if value > maximum:
+        # 业务上限（如单批 100）要报出来，否则用户不知道能填多少；
+        # SQLite 量级的上限属于内部实现细节，不外露具体数字。
+        if maximum >= MAX_SQLITE_INT:
+            return None, f'{label}超出有效范围'
+        return None, f'{label}不能超过 {maximum}'
+    return value, None
+
+
+def parse_date_param(raw, label='日期'):
+    """把参数解析成 ``datetime.date``。返回 ``(值, 错误消息)``，语义见本节开头。
+
+    返回的是 **date 对象而不是字符串** —— 直接把字符串塞进
+    `__date__gte` 会让 Django 在解析阶段抛 `ValidationError`（异常类型 3）。
+    允许 `2026-09-19T10:00:00` 这类 ISO 串，只取日期部分。
+    """
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if not text:
+        return None, None
+    m = _DATE_RE.match(text)
+    if not m:
+        return None, f'{label}格式应为 YYYY-MM-DD'
+    try:
+        # 交给 strptime 校验月/日真实范围：`2026-02-30`、`0000-01-01` 都要拒。
+        return datetime.strptime(m.group(0), '%Y-%m-%d').date(), None
+    except (TypeError, ValueError):
+        return None, f'{label}不是有效日期'
+
+
+def date_upper_exclusive(d):
+    """日期区间上界：把「含当天」的闭区间上界换成**开区间**上界。
+
+    返回 ``(上界值, 是否开区间)``。
+    `d == date.max`（9999-12-31）时加一天会 `OverflowError`（异常类型 4），
+    此时退回闭区间上界 `d` —— 两者语义等价，因为不可能有比 `date.max`
+    更晚的记录。**不要**用 `try: ... except ValueError` 去兜，类型不对。
+    """
+    try:
+        return d + timedelta(days=1), True
+    except OverflowError:
+        return d, False
 
 
 # ============================================
@@ -211,6 +323,12 @@ def serialize_instance(instance, fields=None, exclude=None):
 # ============================================
 # 编号生成
 # ============================================
+# 单批捕捉数量上限。`checkin_create`（真实建单）与 `pet_codes_preview`
+# （编号预览）**必须守同一个数** —— 只卡一边就是孪生接口漂移：
+# 预览能生成 10 万条、提交却被拒，或者反过来。
+MAX_CAPTURE_BATCH = 100
+
+
 def generate_pet_codes(count, year=None):
     """批量生成宠物档案编号。
 
@@ -314,6 +432,17 @@ def adjust_stock(material, hospital, quantity, txn_type, **extra):
     operator = extra.get('operator')
     today = timezone.localdate()
 
+    # ⚠ 库存判据必须在**建流水之前**。
+    # 原先先 `MaterialTransaction.objects.create()` 再判库存，库存不足时抛
+    # `ValueError` —— 调用方看到 400「库存不足」，但那条流水**已经落库**，
+    # 会实实在在出现在捕捉点台账里：数量对不上，且全程没有任何报错。
+    # 这与 `views_treatment` 里「先建诊疗记录再校验库存」是同一个反模式
+    # （那一处已在早期轮次修掉，见 `test_treatment_views` 的同名用例）。
+    # 「写库后才 `return json_fail` / `raise`」= 孤儿记录，判据一律前置。
+    if hospital is None and txn_type in ('dispatch', 'consume', 'adjustment'):
+        if material.shelter_stock < quantity:
+            raise ValueError(f'捕捉点库存不足（当前 {material.shelter_stock}，需 {quantity}）')
+
     txn = MaterialTransaction.objects.create(
         type=txn_type,
         material=material,
@@ -332,13 +461,11 @@ def adjust_stock(material, hospital, quantity, txn_type, **extra):
         note=extra.get('note', ''),
     )
 
-    # 捕捉点侧直接调整库存字段（扣减类操作不允许库存为负）
+    # 捕捉点侧直接调整库存字段（扣减类操作不允许库存为负；判据已在上面前置）
     if hospital is None:
         if txn_type in ('purchase',):
             material.shelter_stock += quantity
         elif txn_type in ('dispatch', 'consume', 'adjustment'):
-            if material.shelter_stock < quantity:
-                raise ValueError(f'捕捉点库存不足（当前 {material.shelter_stock}，需 {quantity}）')
             material.shelter_stock -= quantity
         material.save(update_fields=['shelter_stock'])
 

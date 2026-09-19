@@ -3,8 +3,6 @@ Task 13: 政府监管后端
 - 数据大屏统计 / 机构管理 / 区县管理 / 用户管理
 - 业务监管 / 物资监管 / 台账中心 / 操作日志 / 系统配置
 """
-from datetime import datetime, timedelta
-
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.db.models import Sum, Count, Q, Prefetch
@@ -22,6 +20,7 @@ from business.services import (
     get_district_scope, pet_brief, pet_archive_records, with_camel_keys,
     validate_operator_district, cascade_operator_district,
     validate_user_manage_scope, inactive_district_error,
+    parse_int_param, parse_date_param, date_upper_exclusive,
 )
 from core.audit import ACTION_LABELS
 from core.models import AuditLog, District, Institution
@@ -955,27 +954,34 @@ def ledger_center(request):
 
     每笔记录附带详情数据(detail)，包括动物编号、照片、具体字段等。
     """
-    start_date = request.GET.get('start_date')
-    end_date = request.GET.get('end_date')
-    institution_id = request.GET.get('institution_id')
+    # 参数解析统一**前置**：非法值直接 400，不要放进 ORM 里炸成 500。
+    # `institution_id` 被下面**七处**台账分支共用（捕捉/转运/诊疗/放养/领养/
+    # 安乐死/…），原先每处各写一遍 `qs.filter(xxx_id=institution_id)`，
+    # 一个非法值就能在任意一处把接口打成 500 —— 所以必须**只解析一次**。
+    # 前端 `TNR_API.get()` 与 `getLedger()` 都会先滤掉空串，正常操作不会触发。
+    start_date, err = parse_date_param(request.GET.get('start_date'), '开始日期')
+    if err:
+        return json_fail(err)
+    end_date, err = parse_date_param(request.GET.get('end_date'), '结束日期')
+    if err:
+        return json_fail(err)
+    institution_id, err = parse_int_param(request.GET.get('institution_id'), '机构')
+    if err:
+        return json_fail(err)
     business_type = request.GET.get('business_type')
 
     records = []
 
     def _date_filter(qs, date_field='created_at'):
         if start_date:
-            try:
-                sd = datetime.strptime(start_date[:10], '%Y-%m-%d').date()
-                qs = qs.filter(**{f'{date_field}__gte': sd})
-            except (ValueError, TypeError):
-                pass
+            qs = qs.filter(**{f'{date_field}__gte': start_date})
         if end_date:
-            try:
-                ed = datetime.strptime(end_date[:10], '%Y-%m-%d').date()
-                # 结束日期含当天：用次日零点开区间，避免当天非零点记录被排除
-                qs = qs.filter(**{f'{date_field}__lt': ed + timedelta(days=1)})
-            except (ValueError, TypeError):
-                pass
+            # 结束日期含当天：用次日零点开区间，避免当天非零点记录被排除。
+            # `end_date == date.max`（9999-12-31）时加一天会 `OverflowError`
+            # —— 那是**第四种**异常类型，`except ValueError` 兜不住，
+            # 由 `date_upper_exclusive()` 统一处理（退回闭区间上界，语义等价）。
+            upper, exclusive = date_upper_exclusive(end_date)
+            qs = qs.filter(**{f'{date_field}__{"lt" if exclusive else "lte"}': upper})
         return qs
 
     # 一宠一档（按宠物档案聚合全生命周期数据）
