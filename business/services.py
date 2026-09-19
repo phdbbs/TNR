@@ -479,6 +479,36 @@ def get_active_pet(pk, user):
     return get_scoped_object(Pet, pk, user, is_deleted=False)
 
 
+def get_own_institution_object(model, pk, user, field='hospital_id', **extra):
+    """按「**本机构**」取单条记录；不属于本机构或不存在一律返回 None。
+
+    用途：医院端的写接口。**必须**用它，不要裸写 ``Model.objects.get(id=pk)`` ——
+    裸取会让「记录存在但不属于本院」与「记录不存在」返回**不同**的结果，
+    形成**存在性预言机**：跨机构/跨区县枚举 id 就能问出记录是否存在，
+    甚至从错误文案里读出业务状态（第二十三轮实测：
+
+        POST /api/business/transfers/<跨区县 id>/receive/
+          → 400 「当前状态(received)不可签收」      ← 记录存在，且状态被读出
+        POST /api/business/transfers/<不存在的 id>/receive/
+          → 404 「转运记录不存在」                  ← 不存在
+
+    两者可区分 = 可枚举。改成按机构取单后，两种情况都是同一个 404。）
+
+    **为什么不能换成 `get_district_filtered_queryset`（按区县收敛）**：
+    转运单**允许跨区县送医**（`transfer_create` 不限制目标医院的区县），
+    按区县收敛会打断这条正常业务路径。所以这里按 `field`（本机构外键）收敛。
+
+    账号没有机构时返回 None（而不是「跳过校验」）——
+    `if user.institution_id and ...` 这种写法会让判据在字段为空时**静默失效**。
+    """
+    if not user.institution_id:
+        return None
+    qs = model.objects.all()
+    if extra:
+        qs = qs.filter(**extra)
+    return qs.filter(pk=pk, **{field: user.institution_id}).first()
+
+
 def hospital_pet_scope(user):
     """**医院角色**的动物可见范围：本院在治 ∪ 本院经手过（诊疗）的动物。
 

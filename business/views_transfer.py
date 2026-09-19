@@ -14,6 +14,7 @@ from business.services import (
     generate_ledger_no, get_district_filtered_queryset,
     resolve_district_scope, recalc_capture_status, get_scoped_object,
     busy_transfer_codes, inactive_institution_error,
+    get_own_institution_object,
 )
 from core.models import Institution
 
@@ -229,17 +230,18 @@ def transfer_create(request):
 @login_required
 def transfer_receive(request, pk):
     """医院签收转运"""
-    try:
-        transfer = Transfer.objects.get(id=pk)
-    except Transfer.DoesNotExist:
-        return json_fail('转运记录不存在', status=404)
+    user = request.user
+
+    # 按「**本机构**」取单：不属于本院与不存在都返回同一个 404。
+    # 不能用裸 `objects.get(id=pk)` —— 那样「存在但不是本院的」会走到下面的
+    # 状态检查，返回 400 并带上真实状态，形成**存在性预言机**（可枚举 id）。
+    # 也不能按区县收敛：转运允许跨区县送医，那会打断正常路径。
+    transfer = get_own_institution_object(Transfer, pk, user, 'to_hospital_id')
+    if transfer is None:
+        return json_fail('转运记录不存在或无权访问', status=404)
 
     if transfer.status != 'pending':
         return json_fail(f'当前状态({transfer.status})不可签收')
-
-    user = request.user
-    if user.institution_id != transfer.to_hospital_id:
-        return json_fail('无权签收此转运记录')
 
     transfer.status = 'received'
     transfer.received_at = timezone.localdate()
@@ -261,18 +263,15 @@ def transfer_receive(request, pk):
 def transfer_reject(request, pk):
     """医院驳回转运"""
     data = parse_json_body(request)
+    user = request.user
 
-    try:
-        transfer = Transfer.objects.get(id=pk)
-    except Transfer.DoesNotExist:
-        return json_fail('转运记录不存在', status=404)
+    # 与 `transfer_receive` 同款：按本机构取单，不属于本院 = 不存在（同一个 404）。
+    transfer = get_own_institution_object(Transfer, pk, user, 'to_hospital_id')
+    if transfer is None:
+        return json_fail('转运记录不存在或无权访问', status=404)
 
     if transfer.status != 'pending':
         return json_fail(f'当前状态({transfer.status})不可驳回')
-
-    user = request.user
-    if user.institution_id != transfer.to_hospital_id:
-        return json_fail('无权驳回此转运记录')
 
     transfer.status = 'rejected'
     transfer.reject_reason = data.get('reason', '')

@@ -17,6 +17,7 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
     adjust_stock, get_hospital_stock, get_scoped_object,
+    get_own_institution_object,
 )
 from core.models import Institution
 
@@ -247,14 +248,16 @@ def material_receive(request, pk):
 
     签收后创建一条 receive 类型流水，增加医院库存。
     """
-    try:
-        txn = MaterialTransaction.objects.get(id=pk, type='dispatch')
-    except MaterialTransaction.DoesNotExist:
-        return json_fail('下发记录不存在', status=404)
-
     user = request.user
-    if user.institution_id != txn.hospital_id:
-        return json_fail('无权签收此物料')
+
+    # 按「**本机构**」取单：不是发给本院的与不存在都返回同一个 404。
+    # 原先裸 `objects.get(id=pk, type='dispatch')` + 之后单独判机构，
+    # 会让「存在但不是本院的」返回 400「无权签收此物料」、而「不存在」返回 404
+    # —— 两者可区分 = 可枚举 id 探知他院下发单是否存在（存在性预言机）。
+    txn = get_own_institution_object(
+        MaterialTransaction, pk, user, 'hospital_id', type='dispatch')
+    if txn is None:
+        return json_fail('下发记录不存在或无权访问', status=404)
 
     # 检查是否已签收（避免重复签收）
     already_received = MaterialTransaction.objects.filter(

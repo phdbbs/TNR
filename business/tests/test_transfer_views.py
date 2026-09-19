@@ -181,10 +181,24 @@ class TransferReceiveTest(BusinessTestBase):
         self.assertIsNotNone(transfer.received_at)
 
     def test_receive_wrong_hospital(self):
+        """他院签收 → 404，且与**不存在的 id** 响应完全一致。
+
+        第二十三轮前这里是 `400「无权签收此转运记录」`，而「不存在」是
+        `404「转运记录不存在」` —— 两者可区分，于是枚举 id 就能问出
+        他院转运单是否存在（**存在性预言机**）。现已合并为同一个 404。
+        """
         _, transfer = self._make_pending()
         self.login_as(self.hospital_user_b)
-        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/'),
-                  message='无权签收此转运记录')
+        other = self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/')
+        ghost = self.post_json(f'{TRANSFER_URL}99999999/receive/')
+        self.assertEqual(other.status_code, 404, other.content)
+        self.assertFalse(other.json()['success'])
+        self.assertEqual(other.status_code, ghost.status_code,
+                         '「他院的」与「不存在的」状态码不同 = 可枚举')
+        self.assertEqual(other.json()['message'], ghost.json()['message'],
+                         '「他院的」与「不存在的」文案不同 = 可枚举')
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'pending', '被拒后转运单被签收')
 
     def test_receive_twice_rejected(self):
         _, transfer = self._make_pending()

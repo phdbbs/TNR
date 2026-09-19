@@ -219,9 +219,21 @@ class MaterialReceiveTest(BusinessTestBase):
         self.expect_fail(self.post_json(f'{URL}{txn_id}/receive/'), message='此物料已签收')
 
     def test_receive_wrong_hospital(self):
+        """他院签收 → 404，且与**不存在的 id** 响应完全一致。
+
+        第二十三轮前这里是 `400「无权签收此物料」`，而「不存在」是
+        `404「下发记录不存在」` —— 两者可区分 = 存在性预言机。现已合并。
+        """
         _, txn_id = self._dispatch()
         self.login_as(self.hospital_user_b)
-        self.expect_fail(self.post_json(f'{URL}{txn_id}/receive/'), message='无权签收此物料')
+        other = self.post_json(f'{URL}{txn_id}/receive/')
+        ghost = self.post_json(f'{URL}99999999/receive/')
+        self.assertEqual(other.status_code, 404, other.content)
+        self.assertFalse(other.json()['success'])
+        self.assertEqual(other.status_code, ghost.status_code,
+                         '「他院的」与「不存在的」状态码不同 = 可枚举')
+        self.assertEqual(other.json()['message'], ghost.json()['message'],
+                         '「他院的」与「不存在的」文案不同 = 可枚举')
 
     def test_receive_unknown_txn(self):
         self.login_as(self.hospital_user_a)
@@ -229,9 +241,17 @@ class MaterialReceiveTest(BusinessTestBase):
                   message='下发记录不存在')
 
     def test_receive_non_dispatch_txn_rejected(self):
+        """非 `dispatch` 类型的流水不能签收。
+
+        ⚠ 夹具必须把 `hospital` 设成**本院**（第二十三轮变异 M20 才发现原先漏了）：
+        不设 `hospital` 时，这条单据是被**机构过滤**挡掉的，与 `type` 过滤无关 ——
+        于是把 `type='dispatch'` 从视图里删掉，这条用例**照样通过**（空转）。
+        设成本院后，只剩 `type` 过滤能拒它，判别力才落在被测的那行代码上。
+        """
         material = make_material(district=self.district_a)
         txn = MaterialTransaction.objects.create(
             material=material, quantity=1, type='purchase',
+            hospital=self.hospital_a,
             district=self.district_a, date=timezone.localdate())
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json(f'{URL}{txn.id}/receive/'), status=404)
