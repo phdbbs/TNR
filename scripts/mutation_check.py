@@ -67,6 +67,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEST_TARGETS = sys.argv[1:] or [
     'business.tests.test_write_scope',
     'business.tests.test_own_institution_scope',
+    'business.tests.test_param_contract',
     'business.tests.test_transfer_views',
     'business.tests.test_material_views',
     'business.tests.test_endpoint_role_scope',
@@ -162,14 +163,16 @@ MUTATIONS += [
     (
         'M11 只升 4 个门户里的 1 处版本号（漏升 5 处）',
         'templates/portal/hospital/portal.html',
-        "js/tnr-api.js' %}?v=20260919a",
         "js/tnr-api.js' %}?v=20260919b",
+        "js/tnr-api.js' %}?v=20260919a",
         'all_version_query_params_are_identical',
     ),
     (
+        # ⚠ M11 / M12 里写死了当前版本号 —— **每次升 `?v=` 都要同步改这两条**，
+        # 否则预检会报「命中 0 次」。第二十四轮升 `20260919a → b` 时就踩到了。
         'M12 某个门户的 tnr-api.js 去掉版本号',
         'templates/portal/adopter/portal.html',
-        "js/tnr-api.js' %}?v=20260919a",
+        "js/tnr-api.js' %}?v=20260919b",
         "js/tnr-api.js' %}",
         'versioned_in_every_portal',
     ),
@@ -305,6 +308,307 @@ MUTATIONS += [
         'test_comment_cannot_fake_a_check',
     ),
 ]
+
+# ---------- 第二十四轮：查询参数契约（类型 / 范围 / 量级）----------
+#
+# 这一轮的核心是「**非法参数值不能打成 500**」，而最容易犯的假修是
+# 「随手包一层 `except ValueError`」。所以变异表里**必须**有一条
+# 专门复现这个假修（M33），证明测试真的把它挡下来了 —— 否则「修好了」
+# 只是因为恰好撞上了那一种异常类型。
+MUTATIONS += [
+    (
+        # 复现原缺陷：`Q` 的**两半都会被求值**，于是中文区县名会让
+        # `district_id='襄城区'` 直接 ValueError ——
+        # 「按区县名筛选」这条分支从来没成功过。
+        'M23 复现原缺陷：district 拼进 district_id（中文名 500）',
+        'business/views_capture.py',
+        """        cond = Q(district__name__icontains=district)
+        district_id, _err = parse_int_param(district, '区县')
+        if district_id is not None:
+            cond |= Q(district_id=district_id)
+        qs = qs.filter(cond)
+""",
+        """        qs = qs.filter(Q(district__name__icontains=district) | Q(district_id=district))
+""",
+        'test_filter_by_district_name_works',
+    ),
+    (
+        'M24 台账 material_id 退回裸过滤（非数字 → 500）',
+        'business/views_material.py',
+        """    material_id, err = parse_int_param(request.GET.get('material_id'), '物料')
+    if err:
+        return json_fail(err)
+    if material_id:
+        qs = qs.filter(material_id=material_id)
+
+    if user.role == 'hospital':
+""",
+        """    material_id = request.GET.get('material_id')
+    if material_id:
+        qs = qs.filter(material_id=material_id)
+
+    if user.role == 'hospital':
+""",
+        'test_poison_material_id_rejected',
+    ),
+    (
+        'M25 捕捉点台账 material_id 退回裸过滤（非数字 → 500）',
+        'business/views_material.py',
+        """    material_id, err = parse_int_param(request.GET.get('material_id'), '物料')
+    if err:
+        return json_fail(err)
+    if material_id:
+        qs = qs.filter(material_id=material_id)
+
+    data = []
+""",
+        """    material_id = request.GET.get('material_id')
+    if material_id:
+        qs = qs.filter(material_id=material_id)
+
+    data = []
+""",
+        'test_poison_material_id_rejected',
+    ),
+    (
+        # **第四种异常类型**：`end_date == date.max` 时 `+1 天` 抛
+        # `OverflowError`。注意 `except ValueError` **兜不住它** ——
+        # 这正是「随手包一层」的假修在日期这条路径上的形态。
+        'M26 台账 end_date 退回无保护的日期加法（date.max → 500）',
+        'supervision/views.py',
+        """        if end_date:
+            # 结束日期含当天：用次日零点开区间，避免当天非零点记录被排除。
+            # `end_date == date.max`（9999-12-31）时加一天会 `OverflowError`
+            # —— 那是**第四种**异常类型，`except ValueError` 兜不住，
+            # 由 `date_upper_exclusive()` 统一处理（退回闭区间上界，语义等价）。
+            upper, exclusive = date_upper_exclusive(end_date)
+            qs = qs.filter(**{f'{date_field}__{"lt" if exclusive else "lte"}': upper})
+""",
+        """        if end_date:
+            from datetime import timedelta
+            qs = qs.filter(**{f'{date_field}__lt': end_date + timedelta(days=1)})
+""",
+        'test_end_date_date_max_does_not_500',
+    ),
+    (
+        'M27 台账 institution_id 退回裸过滤（非数字 → 500）',
+        'supervision/views.py',
+        """    institution_id, err = parse_int_param(request.GET.get('institution_id'), '机构')
+    if err:
+        return json_fail(err)
+    business_type = request.GET.get('business_type')
+""",
+        """    institution_id = request.GET.get('institution_id')
+    business_type = request.GET.get('business_type')
+""",
+        'test_poison_institution_id_rejected',
+    ),
+    (
+        # 去掉业务上限：`?count=` 又能拿到任意大的数量，
+        # `generate_pet_codes()` 会真的去循环那么多轮（资源耗尽，C 类缺陷）。
+        'M28 编号预览去掉数量上限（数量参数无约束）',
+        'business/views_capture.py',
+        """    count, err = parse_int_param(
+        request.GET.get('count'), '数量', minimum=0, maximum=MAX_CAPTURE_BATCH)
+""",
+        """    count, err = parse_int_param(
+        request.GET.get('count'), '数量', minimum=0)
+""",
+        'test_count_over_cap_rejected',
+    ),
+    (
+        'M29 真实建单去掉数量上限（与预览端漂移）',
+        'business/views_capture.py',
+        """    if pet_count > MAX_CAPTURE_BATCH:
+        return json_fail('单批捕捉数量不能超过100只，请分批登记')
+""",
+        None,
+        'test_cap_is_shared_with_checkin_create',
+    ),
+    (
+        # 共用解析器只判下界 —— 等价于「只包 `except ValueError`」：
+        # 超大数在 `int()` 这一步**不会报错**，于是照样进 ORM，
+        # 要等 SQLite 绑定参数才抛 `OverflowError`。
+        'M31 共用解析器只判下界（超大数漏进 ORM）',
+        'business/services.py',
+        """    if value < minimum:
+        return None, f'{label}超出有效范围'
+    if value > maximum:
+        # 业务上限（如单批 100）要报出来，否则用户不知道能填多少；
+        # SQLite 量级的上限属于内部实现细节，不外露具体数字。
+        if maximum >= MAX_SQLITE_INT:
+            return None, f'{label}超出有效范围'
+        return None, f'{label}不能超过 {maximum}'
+    return value, None
+""",
+        """    if value < minimum:
+        return None, f'{label}超出有效范围'
+    return value, None
+""",
+        # ⚠ 这里**必须**指 `test_over_sqlite_max_rejected`（用 `str(2**63)`，
+        # 19 位、刚好通过长度检查），不能指 `test_huge_number_rejected_before_orm`
+        # —— 后者用的 `'9' * 24` 是 24 位，在**长度检查**那一关就被挡掉了，
+        # 与 `maximum` 分支无关，删掉 `maximum` 分支它照样绿。
+        # （第一版就是指错了，报 WEAK；定点复验后改到这里。）
+        'test_over_sqlite_max_rejected',
+    ),
+    (
+        # 解析器忘了把字符串转成 `date` —— 字符串进 `__date__gte`
+        # 会让 Django 在解析阶段抛 `ValidationError`。
+        'M32 日期解析器返回字符串而不是 date 对象',
+        'business/services.py',
+        """        return datetime.strptime(m.group(0), '%Y-%m-%d').date(), None
+""",
+        """        return m.group(0), None
+""",
+        'test_returns_date_object_not_string',
+    ),
+    (
+        # **本轮最重要的一条**：复现「随手包一层 `except ValueError`」这个假修。
+        # 非法日期抛的是 `django.core.exceptions.ValidationError`，
+        # **不是** `ValueError` —— 于是 500 原样回来。
+        # 这条变异证明测试挡得住假修，而不只是挡住「完全没修」。
+        'M33 假修：日期只包 except ValueError（ValidationError 漏网）',
+        'business/views_capture.py',
+        """    start_date, err = parse_date_param(request.GET.get('start_date'), '开始日期')
+    if err:
+        return json_fail(err)
+    end_date, err = parse_date_param(request.GET.get('end_date'), '结束日期')
+    if err:
+        return json_fail(err)
+    if start_date:
+        qs = qs.filter(
+            Q(return_time__date__gte=start_date)
+            | Q(return_time__isnull=True, created_at__date__gte=start_date)
+        )
+""",
+        """    start_date = request.GET.get('start_date', '').strip()
+    end_date = request.GET.get('end_date', '').strip()
+    try:
+        if start_date:
+            qs = qs.filter(
+                Q(return_time__date__gte=start_date)
+                | Q(return_time__isnull=True, created_at__date__gte=start_date)
+            )
+    except ValueError:
+        pass
+""",
+        'test_poison_dates_rejected_with_400',
+    ),
+    (
+        # 契约扫描忘了 `textwrap.dedent`：嵌套函数/方法的源码带缩进，
+        # `ast.parse` 抛 IndentationError → 判据恒返回 False。
+        # 于是「注释不能伪装」那条对照会**靠报错通过**，变成空转。
+        'M34 契约扫描去掉 dedent（判据退化成恒 False）',
+        'business/tests/test_param_contract.py',
+        """        src = textwrap.dedent(inspect.getsource(view))
+        tree = ast.parse(src)
+""",
+        """        src = inspect.getsource(view)
+        tree = ast.parse(src)
+""",
+        'test_real_call_counts',
+    ),
+    (
+        # 共用函数本体：库存判据挪到**建流水之后** —— 报错了，
+        # 但那条流水已经落库，会出现在捕捉点台账里（孤儿记录）。
+        'M30 库存判据挪到建流水之后（孤儿流水）',
+        'business/services.py',
+        """    if hospital is None and txn_type in ('dispatch', 'consume', 'adjustment'):
+        if material.shelter_stock < quantity:
+            raise ValueError(f'捕捉点库存不足（当前 {material.shelter_stock}，需 {quantity}）')
+
+    txn = MaterialTransaction.objects.create(
+""",
+        """    txn = MaterialTransaction.objects.create(
+""",
+        'test_insufficient_stock_leaves_no_orphan_transaction',
+    ),
+    (
+        # 数量校验挪到「按名称新建物料」之后 —— 报错了，但孤儿物料已经落库。
+        'M35 采购数量校验挪到建物料之后（孤儿物料）',
+        'business/views_material.py',
+        """    quantity, err = parse_int_param(data.get('quantity'), '采购数量', minimum=0)
+    if err:
+        return json_fail(err)
+    if not quantity:
+        return json_fail('采购数量必须大于0')
+
+    material_id = data.get('material_id')
+""",
+        """    material_id = data.get('material_id')
+""",
+        'test_purchase_zero_quantity_creates_no_orphan_material',
+    ),
+    (
+        # 界面路径的静默失败：`getLedger` 退回 `_get()`。
+        # `_get()` **完全忽略 HTTP 状态**，非 2xx 返回 `[]` ——
+        # 服务端的 400「机构必须是数字」于是被渲染成一张**空表**。
+        'M36 getLedger 退回 _get（失败被静默渲染成空表）',
+        'static/js/tnr-api.js',
+        """    const res = await fetch(url, { credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || `台账加载失败（HTTP ${res.status}）`);
+    }
+    return data.data;
+""",
+        """    return this._get(url);
+""",
+        'test_get_ledger_does_not_use_silent_get',
+    ),
+    (
+        # 服务端抛了，界面没接住 —— 表格区既没有数据也没有错误提示，
+        # 表现为「卡住」或「空白」，同样属于静默失败。
+        'M37 renderLedgerTable 去掉 try/catch（错误没人接）',
+        'templates/portal/gov/portal.html',
+        """    let records = [];
+    try {
+      const result = await TNR_API.getLedger(params);
+      records = (result && result.records) || [];
+    } catch (e) {
+      TNR_UI.toast(e.message || '台账加载失败', 'danger');
+      document.getElementById('ledgerTableWrapper').innerHTML =
+        '<div class="table-empty"><div class="table-empty-icon">⚠️</div>' +
+        '<div class="table-empty-text">台账加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
+      return;
+    }
+""",
+        """    const result = await TNR_API.getLedger(params);
+    let records = (result && result.records) || [];
+""",
+        'test_render_ledger_table_catches_and_shows_error',
+    ),
+    (
+        # 前端 `max` 与服务端上限漂移：界面能填 200，提交必被 400 拒 ——
+        # 「用户一改就撞错」（技能 5.14 的反向形态）。
+        'M38 捕捉表单 max 与服务端上限漂移（界面能填、提交被拒）',
+        'templates/portal/shelter/portal.html',
+        'id="ca_petCount" min="1" max="100"',
+        'id="ca_petCount" min="1" max="200"',
+        'test_frontend_input_max_matches_backend_cap',
+    ),
+]
+
+# 把被删掉的判据插回**落库之后** —— 表达「判据晚于写库」这类变异
+MOVE_AFTER.update({
+    'M30 库存判据挪到建流水之后（孤儿流水）': (
+        'business/services.py',
+        "        material.save(update_fields=['shelter_stock'])\n",
+        "\n    if hospital is None and txn_type in ('dispatch', 'consume', 'adjustment'):\n"
+        "        if material.shelter_stock < quantity:\n"
+        "            raise ValueError(f'捕捉点库存不足（当前 {material.shelter_stock}，需 {quantity}）')\n",
+    ),
+    'M35 采购数量校验挪到建物料之后（孤儿物料）': (
+        'business/views_material.py',
+        "    district_id = material.district_id\n",
+        "\n    quantity, err = parse_int_param(data.get('quantity'), '采购数量', minimum=0)\n"
+        "    if err:\n"
+        "        return json_fail(err)\n"
+        "    if not quantity:\n"
+        "        return json_fail('采购数量必须大于0')\n",
+    ),
+})
 
 # 允许 5 元组（单文件变异）与 6 元组（+ 附加改动，用于「复现原缺陷」这类跨文件变异）
 MUTATIONS = [m if len(m) == 6 else m + ([],) for m in MUTATIONS]
