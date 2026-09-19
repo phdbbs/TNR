@@ -79,6 +79,18 @@ def adoption_info_edit(request, pk):
         "flow_doc": "领养流程...",
         "is_active": true
     }
+
+    **数据权限（第二十一轮收口）**：`get_active_pet()` 只按**区县**收敛 ——
+    对医院账号来说，同区县另一家医院名下的宠物也能取到，于是 A 院能改 B 院的
+    领养上架文案、甚至把它**上架到公开领养大厅**（匿名可见）或下架。
+    医院分支必须再加**本机构**判据。
+
+    这里刻意用「**当前挂在本院名下**」（`pet.hospital_id == user.institution_id`），
+    比读侧判据 `hospital_pet_scope()`（本院在治 ∪ 本院**经手过**）**更严**：
+    读可以回溯历史，**写只能动当前归属自己的对象**。
+    与同类医院写接口口径一致（`adoption_confirm_claim` 用
+    `adoption.hospital_id != user.institution_id`；`transfer_receive` / `transfer_reject`
+    用 `transfer.to_hospital_id != user.institution_id`）。
     """
     data = parse_json_body(request)
 
@@ -91,6 +103,11 @@ def adoption_info_edit(request, pk):
     pet = get_active_pet(pk, user)
     if pet is None:
         return json_fail('宠物不存在或无权访问', status=404)
+
+    # 医院只能动**当前挂在本院名下**的宠物 —— 与同类写接口口径一致。
+    # 放在任何落库动作之前：否则会先建/改 listing 再报错，留下半截写入。
+    if user.role == 'hospital' and pet.hospital_id != user.institution_id:
+        return json_fail('无权编辑此动物的领养信息')
 
     hospital = pet.hospital or user.institution
     if not hospital:
