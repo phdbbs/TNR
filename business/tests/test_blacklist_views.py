@@ -59,13 +59,13 @@ class BlacklistCheckTest(BusinessTestBase):
 
     def test_check_by_phone(self):
         self._add(phone='13900009999')
-        self.login_as(self.adopter)
+        self.login_as(self.shelter_user_a)
         data = self.ok(self.get_json(URL + 'check/?phone=13900009999'))['data']
         self.assertTrue(data['in_blacklist'])
         self.assertEqual(data['reason'], '弃养')
 
     def test_check_miss(self):
-        self.login_as(self.adopter)
+        self.login_as(self.shelter_user_a)
         data = self.ok(self.get_json(URL + 'check/?phone=10000000000'))['data']
         self.assertFalse(data['in_blacklist'])
 
@@ -76,9 +76,20 @@ class BlacklistCheckTest(BusinessTestBase):
             URL + 'check/?id_card=110102199001015678&phone='))['data']
         self.assertTrue(data['in_blacklist'])
 
-    def test_hospital_can_check(self):
+    def test_hospital_cannot_check(self):
+        """医院端**不能**查黑名单（第二十二轮收窄）。
+
+        这条用例原名 `test_hospital_can_check` 并断言 200 —— 它记录的正是
+        那个**旧口径**：同族 5 个接口里只有 `check` 多放了 `hospital` / `adopter`，
+        而 `check` 的响应体带姓名与拉黑原因，且 `check_blacklist()` 刻意**不按区县收敛**
+        （黑名单是全市概念）→ 院外/站外账号能问到别人的姓名与拉黑事由。
+        收窄后旧断言必须反过来，否则这条用例会一直替漏洞站岗。
+
+        角色矩阵的完整穷举见 `business/tests/test_endpoint_role_scope.py`。
+        """
         self.login_as(self.hospital_user_a)
-        self.assertEqual(self.client.get(URL + 'check/').status_code, 200)
+        resp = self.client.get(URL + 'check/?phone=13900009999')
+        self.assertEqual(resp.status_code, 403)
 
 
 class BlacklistUpdateDeleteTest(BusinessTestBase):
@@ -131,10 +142,13 @@ class BlacklistUpdateDeleteTest(BusinessTestBase):
         self.assertNotIn(self.record.id, [b['id'] for b in data])
 
     def test_deleted_no_longer_blocks(self):
-        """移出黑名单后不应再拦截。"""
+        """移出黑名单后不应再拦截。
+
+        这里用捕捉点账号查（第二十二轮收窄后 `adopter` 已不能查 `check/`）——
+        本用例考的是「逻辑删除后还拦不拦」，与查询者角色无关。
+        """
         self.login_as(self.shelter_user_a)
         self.ok(self.post_json(self.base + 'delete/'))
-        self.login_as(self.adopter)
         data = self.ok(self.get_json(URL + 'check/?phone=13911110000'))['data']
         self.assertFalse(data['in_blacklist'])
 

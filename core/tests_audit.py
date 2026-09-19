@@ -93,11 +93,20 @@ class AuditWriteTest(BusinessTestBase):
         self.assertEqual(AuditLog.objects.count(), before, 'GET 请求不应产生审计记录')
 
     def test_read_only_post_is_not_logged(self):
-        """黑名单校验是 POST 但只读，不能污染日志。"""
-        self.login_as(self.hospital_user_a)
+        """黑名单校验是 POST 但只读，不能污染日志。
+
+        **必须用 `shelter` 身份**（第二十二轮）：该接口第二十二轮把角色集合
+        收敛到 `('shelter', 'gov_city', 'gov_district')`，原先这里用的
+        `hospital_user_a` 会拿到 403 —— 而 403 同样不写审计，
+        **测试会绿得毫无意义**（空转）。所以下面同时断言 200，
+        确保请求真的进了视图。
+        """
+        self.login_as(self.shelter_user_a)
         before = AuditLog.objects.count()
-        self.post_json('/api/business/blacklist/check/', {
+        resp = self.post_json('/api/business/blacklist/check/', {
             'id_card': '420602199001011234', 'phone': '13800000000'})
+        self.assertEqual(resp.status_code, 200,
+                         '请求没进视图（403？）—— 这条断言会因此空转')
         self.assertEqual(AuditLog.objects.count(), before,
                          '只读 POST 接口不应产生审计记录')
 

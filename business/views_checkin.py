@@ -306,12 +306,36 @@ def blacklist_delete(request, pk):
 
 
 @csrf_exempt
-@role_required('shelter', 'hospital', 'adopter', 'gov_city', 'gov_district')
+@role_required('shelter', 'gov_city', 'gov_district')
 @login_required
 def blacklist_check(request):
     """检查身份证/电话是否在黑名单中（前端拦截用）
 
     GET 参数: ?id_card=xxx&phone=xxx
+
+    **角色集合（第二十二轮收口）**：本接口是**捕捉点端表单的前端预检**，
+    返回体含 `name`（姓名）/ `reason`（拉黑原因）—— 是**个人信息**。
+
+    原先放行 `('shelter', 'hospital', 'adopter', 'gov_city', 'gov_district')`，
+    与同族接口不一致：黑名单的**列表 / 新建 / 编辑 / 移出**四个接口全部只放行
+    `('shelter', 'gov_city', 'gov_district')`，**只有「查询」多带了 `adopter`
+    与 `hospital`**（唯一异类）。而：
+
+    1. 前端**零调用点** —— 全仓库 `TNR_API.checkBlacklist()` 只有捕捉点端
+       三处调用（主人领回 / 收回加黑 / 黑名单查询拦截），医院端与领养人端
+       **连黑名单页面都没有**；
+    2. 服务端**不需要**它 —— 所有写入点在服务端**内部**已调用 `check_blacklist()`
+       拦截（线下登记 `adoption_create`、确认领养、在线申请 `adoption_apply`、
+       主人领回 `owner_return`），这个接口只是把同一判据提前给界面做提示。
+
+    于是一个**站外领养人账号**就能拿任意手机号来问：「这人在黑名单里吗、
+    叫什么、为什么被拉黑」。实测 `adopter1`（襄城区）读到了**东津新区**
+    某条黑名单记录的姓名与原因「弃养」—— 既跨机构也**跨区县**。
+    收敛到与同族一致即可关掉这条口子，且不影响任何正常流程。
+
+    **注意**：`check_blacklist()` 本身**刻意不做区县收敛** ——
+    黑名单是**全市**概念（一个人在襄城区被拉黑，去樊城区照样不该能领养），
+    所以跨区县命中是**设计如此**，本轮未改。改的只是「谁能来问」。
     """
     id_card = request.GET.get('id_card', '').strip()
     phone = request.GET.get('phone', '').strip()
