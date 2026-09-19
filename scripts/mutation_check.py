@@ -66,6 +66,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # 所以凡涉及角色集合的变异，目标列表里必须带上受影响的存量模块。
 TEST_TARGETS = sys.argv[1:] or [
     'business.tests.test_write_scope',
+    'business.tests.test_own_institution_scope',
+    'business.tests.test_transfer_views',
+    'business.tests.test_material_views',
     'business.tests.test_endpoint_role_scope',
     'business.tests.test_blacklist_views',
     'core.tests_audit',
@@ -101,23 +104,12 @@ MUTATIONS = [
         None,
         'checks_before_any_write',
     ),
-    (
-        'M5 契约层：换等价写法（institution_id → institution.pk）',
-        'business/views_transfer.py',
-        "    if user.institution_id != transfer.to_hospital_id:\n"
-        "        return json_fail('无权签收此转运记录')",
-        "    if user.institution.pk != transfer.to_hospital_id:\n"
-        "        return json_fail('无权签收此转运记录')",
-        'test_every_hospital_write_view_has_institution_check',
-    ),
-    (
-        'M6 契约层：判据换成区县维度', 'business/views_transfer.py',
-        "if user.institution_id != transfer.to_hospital_id:\n"
-        "        return json_fail('无权签收此转运记录')",
-        "if user.district_id != transfer.district_id:\n"
-        "        return json_fail('无权签收此转运记录')",
-        'cross_institution',
-    ),
+    # M5 / M6 已**删除**（第二十三轮）：它们的目标串
+    #   `if user.institution_id != transfer.to_hospital_id:`
+    # 是 `transfer_receive` 的**旧实现**；该接口改为调用共用取数函数
+    # `get_own_institution_object()` 后，旧串在文件里命中 0 次 → 只会 SKIP。
+    # 两条变异要表达的意思（契约层换写法 / 判据换成区县维度）已由
+    # M16、M17 用新写法重新表达。
 ]
 
 # 可选：把「被删除的判据」插到指定锚点之后 —— 用来表达「判据挪到落库之后」这类变异
@@ -209,6 +201,108 @@ MUTATIONS += [
         '',
         'every_page_view_is_reachable_from_navigation',
         [('templates/portal/shelter/portal.html', "      '黑名单管理': 'blacklist',\n", '')],
+    ),
+]
+
+# ---------- 第二十三轮：存在性预言机（按 id 取单）----------
+MUTATIONS += [
+    (
+        # 原缺陷的**完整复现**：裸取 + 状态检查排在机构检查之前。
+        # 于是「他院的单」会被状态分支接走，把**真实状态**写进错误文案。
+        'M16 复现原缺陷：裸取 + 状态检查早于机构检查', 'business/views_transfer.py',
+        "    transfer = get_own_institution_object(Transfer, pk, user, 'to_hospital_id')\n"
+        "    if transfer is None:\n"
+        "        return json_fail('转运记录不存在或无权访问', status=404)\n"
+        "\n"
+        "    if transfer.status != 'pending':\n"
+        "        return json_fail(f'当前状态({transfer.status})不可签收')\n",
+        "    try:\n"
+        "        transfer = Transfer.objects.get(id=pk)\n"
+        "    except Transfer.DoesNotExist:\n"
+        "        return json_fail('转运记录不存在', status=404)\n"
+        "\n"
+        "    if transfer.status != 'pending':\n"
+        "        return json_fail(f'当前状态({transfer.status})不可签收')\n"
+        "\n"
+        "    if user.institution_id != transfer.to_hospital_id:\n"
+        "        return json_fail('无权签收此转运记录')\n",
+        'test_receive_does_not_leak_status',
+    ),
+    (
+        # 修预言机时**最容易犯的错**：顺手把机构收敛换成区县收敛。
+        # 转运本就允许跨区县送医 —— 这么改会掐断正常路径。
+        'M17 机构收敛错换成区县收敛（会掐断跨区县送医）', 'business/views_transfer.py',
+        "    transfer = get_own_institution_object(Transfer, pk, user, 'to_hospital_id')\n"
+        "    if transfer is None:\n"
+        "        return json_fail('转运记录不存在或无权访问', status=404)\n"
+        "\n"
+        "    if transfer.status != 'pending':\n"
+        "        return json_fail(f'当前状态({transfer.status})不可签收')\n",
+        "    transfer = get_district_filtered_queryset(Transfer, user).filter(pk=pk).first()\n"
+        "    if transfer is None:\n"
+        "        return json_fail('转运记录不存在或无权访问', status=404)\n"
+        "\n"
+        "    if transfer.status != 'pending':\n"
+        "        return json_fail(f'当前状态({transfer.status})不可签收')\n",
+        'test_cross_district_receive_succeeds',
+    ),
+    (
+        # 共用函数本体：把机构过滤丢掉 → 退化成裸取，预言机原样回来。
+        'M18 共用取数函数丢掉机构过滤', 'business/services.py',
+        "    return qs.filter(pk=pk, **{field: user.institution_id}).first()",
+        "    return qs.filter(pk=pk).first()",
+        'test_returns_none_for_other_institution',
+    ),
+    (
+        # 「账号没有机构」时**静默放行**（而不是返回 None）——
+        # `if user.institution_id and ...` 这类写法在字段为空时判据整个失效。
+        'M19 账号无机构时静默放行（判据静默失效）', 'business/services.py',
+        "    if not user.institution_id:\n"
+        "        return None\n"
+        "    qs = model.objects.all()\n",
+        "    qs = model.objects.all()\n"
+        "    if not user.institution_id:\n"
+        "        return (qs.filter(**extra) if extra else qs).filter(pk=pk).first()\n",
+        'test_receive_account_without_institution_refused',
+    ),
+    (
+        # `material_receive` 靠 `**extra` 锁定 `type='dispatch'`；
+        # 丢掉它，**本院的采购单**也能被当成下发单签收。
+        #
+        # ⚠ 本条变异暴露了一处**存量用例空转**（第二十三轮实测）：
+        # `test_material_views.test_receive_non_dispatch_txn_rejected` 造的采购单
+        # **没有 `hospital`**，于是它其实是被**机构过滤**挡掉的、与 `type` 无关 ——
+        # 删掉 `type='dispatch'` 它照样绿。夹具已补上 `hospital=self.hospital_a`，
+        # 并在 `test_own_institution_scope` 里加了视图级 + 「无连带写入」的断言。
+        'M20 丢掉 extra 过滤（本院采购单被当成下发单）', 'business/views_material.py',
+        "        MaterialTransaction, pk, user, 'hospital_id', type='dispatch')",
+        "        MaterialTransaction, pk, user, 'hospital_id')",
+        'test_material_receive_rejects_non_dispatch_on_own_hospital',
+    ),
+    (
+        # 契约扫描退回**文本匹配** —— 三个已改写的接口源码里没有字面量
+        # `institution_id` 了，会被全部误报为「缺失」。这条证明 AST 升级是承重的。
+        'M21 契约扫描退回文本匹配（误报三个已改接口）',
+        'business/tests/test_write_scope.py',
+        "            ok, _why = has_institution_check(src)\n"
+        "            if not ok:\n",
+        "            ok = 'institution_id' in src\n"
+        "            if not ok:\n",
+        'test_every_hospital_write_view_has_institution_check',
+    ),
+    (
+        # 判据本身退回**朴素文本包含** —— 注释/字符串里提到过函数名就算「有判据」，
+        # 这正是第二十二轮「自己的注释把可达性检查骗过」的同款空转。
+        'M22 判据退回朴素文本包含（被注释/字符串骗过）',
+        'business/tests/test_write_scope.py',
+        "    try:\n"
+        "        tree = ast.parse(src)\n"
+        "    except SyntaxError as exc:          # 解析不了 = 判不了，按「缺失」处理（宁可误报）\n"
+        "        return False, f'源码无法解析：{exc}'\n",
+        "    if 'institution_id' in src or 'get_own_institution_object' in src:\n"
+        "        return True, '朴素文本匹配'\n"
+        "    tree = ast.parse(src)\n",
+        'test_comment_cannot_fake_a_check',
     ),
 ]
 
