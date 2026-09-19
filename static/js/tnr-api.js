@@ -153,11 +153,27 @@ const TNR_API = {
   async createBlacklist(data) { return this._post('/api/business/blacklist/create/', data); },
   async updateBlacklist(id, data) { return this._post(`/api/business/blacklist/${id}/update/`, data); },
   async deleteBlacklist(id) { return this._post(`/api/business/blacklist/${id}/delete/`, {}); },
+  /* 黑名单校验**不能用 `_get`**（第二十二轮）。
+   *
+   * `_get` 把任何非 2xx 静默变成 `[]`，而三处调用点都写成
+   * `if (bl && (bl.name || bl.idCard))` —— 于是 403 / 500 / 断网时
+   * 一律走进 else 分支：主人领回**不弹黑名单警告**、线下登记**直接放行**、
+   * 「黑名单查询拦截」还会明晃晃显示「✓ 通过：未在黑名单中」。
+   * **界面说的和实际发生的不是一回事** —— 而且这是安全控制的前端预检。
+   *
+   * 改用 `get()`：失败**抛错**，调用方必须显式处理（提示「校验失败，请重试」），
+   * 而不是把「没查成」渲染成「通过」。
+   *
+   * 服务端在 `owner_return` / `adoption_create` 里都会**硬拦**
+   * （`return json_fail(...)`），所以这里不是绕过，但错误结论同样不能留。
+   *
+   * 返回**完整响应体** `{success, data, message}`，调用方取 `r.data`。
+   */
   async checkBlacklist(idCard, phone) {
     const params = new URLSearchParams();
     if (idCard) params.set('id_card', idCard);
     if (phone) params.set('phone', phone);
-    return this._get(`/api/business/blacklist/check/?${params}`);
+    return this.get(`/api/business/blacklist/check/?${params}`);
   },
   async getEuthanasia() { return this._get('/api/business/euthanasia/'); },
   async createEuthanasia(data) { return this._post('/api/business/euthanasia/create/', data); },

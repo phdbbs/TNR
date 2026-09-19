@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260918k"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260919a"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -215,7 +215,12 @@ const Shelter = {
     this.navigate('dashboard');
   },
 
-  /* 绑定 shelter_base 侧边栏导航 → SPA 路由 */
+  /* 绑定 shelter_base 侧边栏导航 → SPA 路由。
+   *
+   * **映射按「标签文本」而不是下标** —— 所以侧栏里增删条目只要同步这里即可，
+   * 不会打乱其它条目。（第二十二轮补 `黑名单管理`：页面与 `render_blacklist()`
+   * 一直都在，但侧栏改版时把入口弄丢了，整页在界面上不可达。）
+   */
   bindSidebarNav() {
     const navMap = {
       '首页看板': 'dashboard',
@@ -225,6 +230,7 @@ const Shelter = {
       '动物去向': 'release',
       '领养审核管理': 'adoption',
       '领养回访管控': 'followup',
+      '黑名单管理': 'blacklist',
       '全量台账中心': 'ledger',
       '个人中心': 'profile'
     };
@@ -1465,6 +1471,20 @@ const Shelter = {
   },
 
   /* ========== 4. 主人领回 ========== */
+  /* ⚠ 当前**不可达**（第二十二轮实测）：
+   *
+   * 本方法 + `showOwnerReturnForm()` + `#page-owner-return` 组成「主人领回」独立页，
+   * 但**没有任何入口指向它** —— 侧栏没有、首页快捷操作的「回收登记」走的是
+   * `navigate('release', 'recovery')`（动物去向 → 回收标签），也没有任何
+   * `navigate('owner-return')` 调用。两者只互相引用，所以整段是**死代码**。
+   *
+   * 主人领回**实际走的是「动物去向」页的「回收」标签**（`render_release` 里
+   * `data-tab="recovery"`），那条路径**没有前端黑名单预检**
+   * （服务端 `owner_return` 会硬拦，所以只是少了提示，不是漏洞）。
+   *
+   * 本轮**没有删除**这段代码（删不删要业务确认），只在下面那处黑名单校验
+   * 一并做了「失败不再静默」的修复 —— 万一以后恢复此页，修复已经在了。
+   */
   async render_owner_return() {
     const el = document.getElementById('page-owner-return');
     const filters = [
@@ -1567,8 +1587,17 @@ const Shelter = {
         if (!ownerName || !ownerPhone || !reason) { TNR_UI.toast('请填写完整信息', 'warning'); return; }
         if (sigPad.isEmpty()) { TNR_UI.toast('请完成主人电子签名', 'warning'); return; }
 
-        // 黑名单检查
-        const bl = await TNR_API.checkBlacklist(ownerIdCard, ownerPhone);
+        // 黑名单检查：**失败必须显式提示**，不能当成「不在黑名单」
+        // （第二十二轮：原先 `_get` 会把 403/500/断网静默变成 `[]`，
+        //  于是校验没做成也照样直接领回，不弹任何警告）
+        let bl = null;
+        try {
+          const r = await TNR_API.checkBlacklist(ownerIdCard, ownerPhone);
+          bl = r && r.data;
+        } catch (e) {
+          TNR_UI.toast('黑名单校验失败，请重试：' + (e.message || '未知错误'), 'danger');
+          return;
+        }
         const doReturn = async () => {
           const res = await TNR_API.ownerReturn(petId, {
             pet_id: petId,
@@ -2881,8 +2910,15 @@ const Shelter = {
       const pet = adoptablePets.find(p => String(p.id) === String(petSel.value));
       if (!name || !phone || !pet) { TNR_UI.toast('请填写完整信息', 'warning'); return; }
 
-      // 黑名单检查
-      const bl = await TNR_API.checkBlacklist(idCard, phone);
+      // 黑名单检查：**失败必须中止登记**（第二十二轮）
+      let bl = null;
+      try {
+        const r = await TNR_API.checkBlacklist(idCard, phone);
+        bl = r && r.data;
+      } catch (e) {
+        TNR_UI.toast('黑名单校验失败，请重试：' + (e.message || '未知错误'), 'danger');
+        return;
+      }
       if (bl && (bl.name || bl.idCard)) {
         TNR_UI.toast('警告：该领养人在黑名单中！原因：' + (bl.reason || bl.reasonText || ''), 'danger');
         return;
@@ -3166,8 +3202,18 @@ const Shelter = {
     document.getElementById('btnDoCheck').addEventListener('click', async () => {
       const idCard = document.getElementById('ck_idCard').value.trim();
       const phone = document.getElementById('ck_phone').value.trim();
-      const bl = await TNR_API.checkBlacklist(idCard, phone);
       const result = document.getElementById('ckResult');
+      // 第二十二轮：校验失败**不能**渲染成「✓ 通过」——
+      // 那会把「没查成」说成「没问题」，是最容易骗过人的一种错。
+      let bl = null;
+      try {
+        const r = await TNR_API.checkBlacklist(idCard, phone);
+        bl = r && r.data;
+      } catch (e) {
+        result.innerHTML = '<div class="badge badge-warning" style="padding:8px 12px;font-size:13px;">'
+          + '⚠ 校验失败：' + TNR_UI.escape(e.message || '未知错误') + '（请重试，结果未知）</div>';
+        return;
+      }
       if (bl && (bl.name || bl.idCard || bl.phone)) {
         result.innerHTML = '<div class="badge badge-danger" style="padding:8px 12px;font-size:13px;">⚠ 拦截：该人员存在于黑名单</div>' +
           TNR_UI.renderDescList([

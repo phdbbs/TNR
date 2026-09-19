@@ -203,6 +203,15 @@
       <a class="nav-item {% block nav_adopt_visit %}{% endblock %}" href="{% url 'shelter_home' %}">
         <span class="nav-item-icon">📞</span><span class="nav-item-label">领养回访管控</span>
       </a>
+      <!-- 黑名单管理（第二十二轮补回入口）：
+           页面 `#page-blacklist` 与 `Shelter.render_blacklist()` 一直都在，
+           但侧栏从 `renderSidebar()` 改成这里的静态 HTML 时漏掉了这一项，
+           于是**整页在界面上不可达** —— 只能靠控制台 `Shelter.navigate('blacklist')`。
+           受影响的还有依赖该页的「黑名单登记 / 解除 / 查询拦截」三个操作。
+           导航映射见 `shelter/portal.html` 的 `navMap`（按标签文本匹配）。 -->
+      <a class="nav-item {% block nav_blacklist %}{% endblock %}" href="{% url 'shelter_home' %}">
+        <span class="nav-item-icon">⛔</span><span class="nav-item-label">黑名单管理</span>
+      </a>
       <a class="nav-item {% block nav_ledger %}{% endblock %}" href="{% url 'shelter_home' %}">
         <span class="nav-item-icon">📒</span><span class="nav-item-label">全量台账中心</span>
       </a>

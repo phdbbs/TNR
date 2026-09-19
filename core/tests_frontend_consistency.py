@@ -627,6 +627,27 @@ def strip_js_comments(source):
     return ''.join(chars)
 
 
+def strip_html_comments(source):
+    """把 HTML 注释 `<!-- ... -->` 替换成等长空白（保留换行）。
+
+    与 `strip_js_comments` 同因同果，只是**同一个坑换了个马甲**：
+    第二十二轮我在 `shelter_base.html` 补「黑名单管理」入口时，顺手在它上方
+    写了说明注释，注释里引用了 ``Shelter.navigate('blacklist')`` 这个词组。
+    `strip_js_comments` 只管 JS 注释，HTML 注释原样留着 ——
+    于是「页面可达性」检查把**我自己的说明注释**当成了真实的导航入口，
+    「侧栏 + navMap 同时删掉」的变异体照样通过（变异验证报 WEAK 才暴露）。
+
+    教训：只要判据是「源码里有没有出现 X」，就必须先把**所有形态的注释**
+    剥干净 —— 注释里写「这里曾经写错了 X」，不该让 X 被当成存在。
+
+    等长替换的理由同 `strip_js_comments`：保持索引与行号一一对应。
+    """
+    return re.sub(
+        r'<!--.*?-->',
+        lambda m: re.sub(r'[^\n]', ' ', m.group(0)),
+        source, flags=re.S)
+
+
 class RenderContainerOrderingTest(SimpleTestCase):
     """`mountTable` 的目标容器必须先写进 DOM，否则表格静默不渲染。"""
 
@@ -1111,6 +1132,212 @@ class WriteFailureVisibilityTest(SimpleTestCase):
             r'assertOk\s*\([^)]*\)\s*\{[^}]*success\s*===\s*false[^}]*throw',
             'assertOk 必须在 success === false 时抛异常，'
             '否则调用方的 catch 仍然是死代码')
+
+    def test_blacklist_check_does_not_use_silent_get(self):
+        """黑名单校验是**安全控制**的前端预检，**不能用 `_get`**（第二十二轮）。
+
+        上面那条管的是「写接口失败被吞」，这条是它的**读侧对应物**：
+        `_get` 把 403 / 500 / 断网静默变成 `[]`，而三处调用点都写成
+
+            if (bl && (bl.name || bl.idCard)) { ...警告... } else { ...放行... }
+
+        于是**校验没做成时一律走「不在黑名单」分支** ——
+        「黑名单查询拦截」还会明晃晃显示「✓ 通过：未在黑名单中」，
+        主人领回不弹警告、线下登记直接放行。
+
+        服务端在 `owner_return` / `adoption_create` 里会**硬拦**，所以这不是绕过；
+        但「没查成」被渲染成「通过」是**错误结论**，比报错更难发现。
+        改用 `get()`（失败抛错），由调用方显式提示「校验失败，请重试」。
+        """
+        source = strip_js_comments(read('static/js/tnr-api.js'))
+        m = re.search(r'async checkBlacklist\([^)]*\)\s*\{(.*?)\n  \}', source, re.S)
+        self.assertIsNotNone(
+            m, 'tnr-api.js 里找不到 checkBlacklist，测试本身可能已失效')
+        body = m.group(1)
+        self.assertNotIn(
+            '_get(', body,
+            'checkBlacklist 又用回 _get 了 —— 它会把校验失败静默变成「不在黑名单」，'
+            '界面于是显示「✓ 通过」')
+        self.assertIn(
+            'this.get(', body,
+            'checkBlacklist 必须走 get()：失败抛错，调用方才能提示「校验失败」')
+
+
+class PageReachabilityTest(SimpleTestCase):
+    """每个 `#page-<id>` 都必须能从导航点到（第二十二轮）。
+
+    真实案例：`#page-blacklist` 与 `Shelter.render_blacklist()` **一直都在**，
+    但侧栏从 `renderSidebar()`（按 JS 里的 `navGroups` 渲染）改成
+    `shelter_base.html` 里的**静态 HTML** 时漏掉了这一项 —— 于是
+    **整页在界面上不可达**，只能靠控制台 `Shelter.navigate('blacklist')` 进去。
+    依赖它的「黑名单登记 / 解除 / 查询拦截」随之全部作废。
+
+    `BusinessFlowEntryPointTest` **抓不到**这种：它检查「API 方法有没有被调用」，
+    而 `createBlacklist(` 确实被调用了 —— 只是在一个**点不到的页面**里。
+    「功能实现了」和「功能能点到」是两件事。
+
+    判据：页面 id 必须出现在导航目标的任一形态里 ——
+    `navMap` 的值、`data-nav` / `data-page` / `data-tab`、或 `navigate('x')` 调用。
+    （四端机制不同：捕捉点/政府端用 `navMap` 按标签文本映射，
+    医院端用 `data-nav`，领养人端用 `data-tab` 的移动端底栏。）
+    """
+
+    # 已知不可达但**有意保留**的页面 → 理由。加进这里必须写清原因。
+    EXEMPT = {
+        ('shelter', 'owner-return'):
+            '主人领回已改为「动物去向 → 回收」标签（首页快捷操作指向 '
+            'navigate("release","recovery")），独立页保留为死代码，删留待业务确认',
+    }
+
+    @staticmethod
+    def _page_ids(source):
+        return set(re.findall(r'id="page-([A-Za-z0-9_-]+)"', source))
+
+    @staticmethod
+    def _nav_targets(source):
+        targets = set()
+        for m in re.finditer(r'navMap\s*=\s*\{(.*?)\n\s*\};', source, re.S):
+            targets |= set(re.findall(r"'([A-Za-z0-9_-]+)'", m.group(1)))
+        for attr in ('data-nav', 'data-page', 'data-tab', 'data-quick'):
+            targets |= set(re.findall(rf'{attr}="([A-Za-z0-9_-]+)"', source))
+        targets |= set(re.findall(r"navigate\('([A-Za-z0-9_-]+)'", source))
+        targets |= set(re.findall(r"page:\s*'([A-Za-z0-9_-]+)'", source))
+        return targets
+
+    @staticmethod
+    def _sources(name):
+        """返回 (portal 源码, base 源码)，**各自先剥掉注释**（HTML + JS）。
+
+        不剥注释会踩「注释把测试骗过」的老坑，本项目**踩过两次**：
+          1. 我在 `render_owner_return` 的 JS 注释里写了
+             ``navigate('owner-return')``，`_nav_targets` 把它当真实调用，
+             `owner-return` 被判成「已可达」，豁免复核断言直接报「豁免已过期」；
+          2. 我在 `shelter_base.html` 的 **HTML 注释**里写了
+             ``Shelter.navigate('blacklist')`` —— `strip_js_comments` 只管
+             JS 注释，于是「黑名单管理」被判成「有导航入口」，
+             「侧栏 + navMap 同时删掉」的变异体照样通过（变异验证报 WEAK）。
+        所以这里要**两种注释都剥**，且 HTML 先剥（HTML 注释边界无歧义，
+        先剥掉就不会让注释里的引号把 JS 扫描器的字符串配对带偏）。
+
+        两个文件要**分别**剥离再拼 —— 拼起来再剥会破坏引号配对。
+        """
+        def clean(text):
+            return strip_js_comments(strip_html_comments(text))
+
+        portal = clean(read(PORTALS[name]))
+        base_path = f'templates/portal/{name}_base.html'
+        base = ''
+        if os.path.exists(os.path.join(ROOT, base_path)):
+            base = clean(read(base_path))
+        return portal, base
+
+    def test_every_page_view_is_reachable_from_navigation(self):
+        problems = []
+        scanned = 0
+        for name in PORTALS:
+            portal, base = self._sources(name)
+            pages = self._page_ids(portal)
+            self.assertTrue(
+                pages, f'{PORTALS[name]} 里一个 #page-* 都没扫到 —— 扫描逻辑失效了')
+            scanned += len(pages)
+            targets = self._nav_targets(portal + base)
+            for pid in sorted(pages - targets):
+                if (name, pid) in self.EXEMPT:
+                    continue
+                problems.append(
+                    f'{name}: #page-{pid} 在导航里没有任何入口'
+                    f'（侧栏 / 快捷操作 / navigate 调用都没有）')
+        self.assertGreaterEqual(scanned, 20, '扫到的页面数偏少，扫描逻辑可能失效')
+        self.assertEqual(
+            problems, [],
+            '有页面在界面上点不到（功能实现了但用户到不了）：\n  '
+            + '\n  '.join(problems))
+
+    def test_exemptions_are_still_unreachable(self):
+        """豁免清单要**定期复核** —— 页面被恢复或删除后，豁免就该删掉。
+
+        不做这条断言的话，豁免会永久留着，把真问题挡住。
+        """
+        stale = []
+        for (name, pid), reason in self.EXEMPT.items():
+            portal, base = self._sources(name)
+            if pid not in self._page_ids(portal):
+                stale.append(f'{name}.{pid} 已不存在（页面被删了？）→ 删掉豁免：{reason}')
+            elif pid in self._nav_targets(portal + base):
+                stale.append(f'{name}.{pid} 已经可达了 → 删掉豁免：{reason}')
+        self.assertEqual(stale, [], '豁免清单已过期：\n  ' + '\n  '.join(stale))
+
+    def test_comments_cannot_fake_reachability(self):
+        """守卫的守卫：注释里的 `navigate('x')` 不能算导航入口。
+
+        这条断言本身不长，但它防的是**最阴的一类失效**：判据靠源码文本匹配，
+        而修复时顺手写的说明注释正好包含了那个文本 —— 于是判据被自己骗过，
+        而且**变异验证会报 WEAK 而不是 FAIL**，很容易被当成「小瑕疵」放过。
+        本项目已经踩过两次（JS 注释一次、HTML 注释一次），所以钉死在这里。
+        """
+        probe = (
+            '<script>\n'
+            "  // 说明：以前靠 Shelter.navigate('ghost-a') 进页面\n"
+            "  /* 块注释里也有 navigate('ghost-b') */\n"
+            '  const real = 1;\n'
+            '</script>\n'
+            "<!-- HTML 注释：也可以 Shelter.navigate('ghost-c') -->\n"
+        )
+        cleaned = strip_js_comments(strip_html_comments(probe))
+        self.assertEqual(
+            self._nav_targets(cleaned), set(),
+            '注释里的 navigate 被当成了导航入口 —— 剥离逻辑失效')
+
+        # 正向对照：真代码必须仍被认出来，否则说明剥离器把有效代码也剥了
+        # （那样守卫会变成「一律报不可达」的误报机器，同样不能用）。
+        self.assertIn('ghost-d', self._nav_targets("  this.navigate('ghost-d');"))
+        self.assertIn('ghost-e', self._nav_targets('  <a data-nav="ghost-e">'))
+        self.assertIn(
+            'ghost-f',
+            self._nav_targets("  const navMap = {\n    '标签': 'ghost-f'\n  };"))
+
+
+class StaticAssetCacheBustTest(SimpleTestCase):
+    """静态资源的 `?v=` 必须**全局同一个值**。
+
+    改 `static/` 下任何文件都要同时升 5 个模板里的 **6 处** `?v=`
+    （`base.html` 的 CSS + `tnr-common.js`，以及 4 个门户各自引入的 `tnr-api.js`）。
+    漏升任何一处，那个页面就会继续读浏览器缓存里的旧文件 ——
+    表现为「改了没生效」，而且**只在某一个端上不生效**，极难排查。
+    第十轮给 4 处补版本号、第二十二轮升 `20260918k` → `20260919a` 时都靠人工核对，
+    这条断言把它变成机器检查。
+    """
+
+    def test_all_version_query_params_are_identical(self):
+        seen = {}   # 版本号 → [文件:行]
+        for rel in ['templates/base.html'] + list(PORTALS.values()):
+            for i, line in enumerate(read(rel).split('\n'), 1):
+                for v in re.findall(r'\?v=([A-Za-z0-9_.-]+)', line):
+                    seen.setdefault(v, []).append(f'{rel}:{i}')
+        self.assertTrue(seen, '一个 ?v= 都没扫到 —— 扫描逻辑失效了')
+        self.assertEqual(
+            len(seen), 1,
+            '静态资源版本号不一致（漏升会导致某个端继续读缓存）：\n  '
+            + '\n  '.join(f'{v} → {", ".join(locs)}' for v, locs in seen.items()))
+
+    def test_tnr_api_js_is_versioned_in_every_portal(self):
+        """4 个门户都必须给 `tnr-api.js` 带版本号。
+
+        （第十轮之前 4 处**都没有**版本号，改 `tnr-api.js` 后用户永远读旧文件。）
+        """
+        missing = []
+        for name, rel in PORTALS.items():
+            source = read(rel)
+            # 注意 `{% static '...' %}` 的 `%}` 在路径与 `?v=` 之间 ——
+            # 漏掉它会让正则永远匹配不到版本号，把 4 个端全报成「缺版本号」
+            # （第一版就踩了，幸好它报错而不是静默通过）。
+            m = re.search(r"static\s+'js/tnr-api\.js'\s*%\}\s*(\?v=)?", source)
+            if m is None:
+                missing.append(f'{name}: 找不到 tnr-api.js 的引入语句')
+            elif not m.group(1):
+                missing.append(f'{name}: 引入了 tnr-api.js 但没带 ?v=')
+        self.assertEqual(missing, [], '门户引入 tnr-api.js 缺版本号：\n  '
+                                      + '\n  '.join(missing))
 
 
 # ============================================================
