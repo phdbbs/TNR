@@ -71,7 +71,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260919a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260919b"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -1561,8 +1561,21 @@ const GovPortal = {
       institution_id: rawFilters.institution_id || ''
     };
 
-    const result = await TNR_API.getLedger(params);
-    let records = (result && result.records) || [];
+    // ⚠ `getLedger` 失败时**抛异常**（第二十四轮改的：原先走 `_get()`，
+    // 非 2xx 静默返回 `[]`）。必须在这里接住并**显示出来** ——
+    // 否则「筛选条件被服务端拒了（400）」和「这个条件下真的没有记录」
+    // 在界面上长得一模一样，都是空表。
+    let records = [];
+    try {
+      const result = await TNR_API.getLedger(params);
+      records = (result && result.records) || [];
+    } catch (e) {
+      TNR_UI.toast(e.message || '台账加载失败', 'danger');
+      document.getElementById('ledgerTableWrapper').innerHTML =
+        '<div class="table-empty"><div class="table-empty-icon">⚠️</div>' +
+        '<div class="table-empty-text">台账加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
+      return;
+    }
     if (rawFilters.district) {
       // ⚠ 这里曾经写成 `document.querySelector('[data-filter="district"]')` 再去读
       // `selectedOptions[0].textContent` —— **全局裸查 + 拿 DOM 当数据源**，双重错误：

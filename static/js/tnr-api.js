@@ -231,7 +231,20 @@ const TNR_API = {
       });
     }
     const qs = params.toString();
-    return this._get('/api/supervision/ledger/' + (qs ? '?' + qs : ''));
+    const url = '/api/supervision/ledger/' + (qs ? '?' + qs : '');
+    // ⚠ 这里**不能**走 `_get()`。`_get()` 只看响应体、**完全忽略 HTTP 状态**，
+    // 非 2xx 时返回 `[]`（见文件顶部说明）—— 于是服务端的 400/403/500 全被
+    // 渲染成「暂无台账数据」：用户以为「这个筛选条件下没有记录」，
+    // 实际上是**筛选条件被服务端拒了**。这是最难排查的一类静默失败
+    // （第二十四轮实测：`getLedger({institution_id:'abc'})` 返回
+    // `{ok:true, count:0}`，而服务端其实是 400「机构必须是数字」）。
+    // 台账接口的失败必须**抛出去**，由调用方决定怎么显示。
+    const res = await fetch(url, { credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || `台账加载失败（HTTP ${res.status}）`);
+    }
+    return data.data;
   },
   async getOperationLogs(limit) {
     const url = limit ? `/api/supervision/logs/?limit=${limit}` : '/api/supervision/logs/';
