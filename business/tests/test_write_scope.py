@@ -28,10 +28,12 @@
 2. **契约**：源码级扫描 —— 医院可达的写接口必须出现机构判据，
    防止以后新增接口又漏。
 """
+import ast
 import datetime
 import inspect
 import re
 
+from django.test import SimpleTestCase
 from django.urls import get_resolver
 
 from business.models import (
@@ -236,18 +238,52 @@ class HospitalWriteOwnRecordsTest(HospitalWriteScopeBase):
         self.assert_ok(resp, '市级 edit-info')
 
 
+# 机构判据的两种合法形态（源码级）：
+#   ① 直接比较 `...institution_id`；
+#   ② 调用共用取数函数 `get_own_institution_object(...)`（按机构外键收敛，取不到即 404）。
+INSTITUTION_HELPERS = {'get_own_institution_object'}
+
+
+def has_institution_check(src):
+    """源码里是否**真的**存在机构判据。返回 ``(bool, 命中原因)``。
+
+    用 **AST** 而不是字符串匹配 —— 这一点是第二十二轮的教训换来的：
+    当时 `PageReachabilityTest` 用字符串找 `Shelter.navigate('blacklist')`，
+    结果被**自己写的注释**（注释里提到过这个调用）满足了，守卫**空转**通过。
+    注释不在语法树里、字符串是 ``ast.Constant``，两者都无法伪装成
+    一次真正的 `user.institution_id` 读取或一次 `get_own_institution_object(...)` 调用。
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as exc:          # 解析不了 = 判不了，按「缺失」处理（宁可误报）
+        return False, f'源码无法解析：{exc}'
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == 'institution_id':
+            return True, '读取 institution_id'
+        if isinstance(node, ast.Name) and node.id == 'institution_id':
+            return True, '引用 institution_id'
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = getattr(fn, 'id', None) or getattr(fn, 'attr', None)
+            if name in INSTITUTION_HELPERS:
+                return True, f'调用 {name}()'
+    return False, '未发现机构判据'
+
+
 class HospitalWriteScopeContractTest(BusinessTestBase):
     """源码级契约：**医院可达的写接口必须出现机构判据**。
 
     这一条是给「以后新增接口」用的 —— 本轮那个洞就是「同类接口都写了、
     只有这一个没写」，靠逐个接口人工比对很容易漏。
 
-    **已知局限（第二十一轮变异 M5 实测）**：判据是**文本级**的（查字面量
-    `institution_id`），所以把判据改写成**等价但不同字面量**的形式
-    （如 `user.institution.pk != transfer.to_hospital.pk`）会被**误报**为「缺失」。
-    这是刻意的保守取向：宁可让重构的人来显式确认一次，也不要放过真正的漏写。
-    真被误报时，正确做法是在接口里保留 `_id` 比较（也更快，少一次关联查询），
-    而不是放宽这条扫描。
+    **判据的演进（第二十三轮）**：第二十一轮实现为**文本级**（查字面量
+    `institution_id`），于是把判据改写成等价形式（如
+    `user.institution.pk != transfer.to_hospital.pk`）会被**误报**。
+    第二十三轮引入共用取数函数 `get_own_institution_object()` 后，
+    三个接口的源码里**已经没有**字面量 `institution_id` 了 ——
+    说明「文本匹配」这条路已经撑不住，改为 **AST 判定**：
+    既认字面量比较，也认共用函数调用，且**不会被注释/字符串骗过**
+    （对照用例见 `InstitutionCheckContractSelfTest`）。
     """
 
     @staticmethod
@@ -305,7 +341,8 @@ class HospitalWriteScopeContractTest(BusinessTestBase):
                 src = inspect.getsource(cb)
             except Exception:
                 continue
-            if 'institution_id' not in src:
+            ok, _why = has_institution_check(src)
+            if not ok:
                 missing.append(f'{fn}  ({pat})')
         self.assertEqual(missing, [], f'以下医院写接口缺少机构判据：{missing}')
 
@@ -321,3 +358,68 @@ class HospitalWriteScopeContractTest(BusinessTestBase):
         self.assertIsNotNone(m, '机构判据不见了（或被改成别的比较）')
         i_write = src.index('listing.save()')
         self.assertLess(m.start(), i_write, '机构判据必须早于 listing.save()')
+
+
+class InstitutionCheckContractSelfTest(SimpleTestCase):
+    """契约判据**自身**不能空转。
+
+    上一版是 `'institution_id' not in src` —— 只要源码里出现过这个词就算通过。
+    而注释和字符串都能轻松出现这个词，于是「守卫通过」可以完全不依赖真判据。
+    这组对照用例把「伪装不算数」和「真判据算数」两边都锁住：
+    只测「真判据算数」会漏掉伪装，只测「伪装不算数」会漏掉判据识别本身坏掉。
+    """
+
+    def test_comment_cannot_fake_a_check(self):
+        """注释里写满判据也算「没有判据」。"""
+        src = (
+            "# 这里有机构判据：\n"
+            "# get_own_institution_object(Transfer, pk, user, 'to_hospital_id')\n"
+            "# if user.institution_id != obj.to_hospital_id: return 404\n"
+            "def view(request, pk):\n"
+            "    obj = Transfer.objects.get(id=pk)\n"
+            "    return obj\n"
+        )
+        ok, why = has_institution_check(src)
+        self.assertFalse(ok, f'注释里的判据被当成了真判据（命中：{why}）')
+
+    def test_string_cannot_fake_a_check(self):
+        """字符串里提到判据/函数名也算「没有判据」。"""
+        src = (
+            "def view(request, pk):\n"
+            "    msg = 'institution_id'\n"
+            "    fn = 'get_own_institution_object'\n"
+            "    obj = Transfer.objects.get(id=pk)\n"
+        )
+        ok, why = has_institution_check(src)
+        self.assertFalse(ok, f'字符串里的判据被当成了真判据（命中：{why}）')
+
+    def test_direct_comparison_counts(self):
+        """正向对照①：字面量比较应被认作有判据。"""
+        src = (
+            "def view(request, pk):\n"
+            "    if user.institution_id != obj.to_hospital_id:\n"
+            "        return None\n"
+        )
+        ok, why = has_institution_check(src)
+        self.assertTrue(ok, f'正向对照失败：字面量比较没被识别（{why}）')
+
+    def test_helper_call_counts(self):
+        """正向对照②：共用取数函数调用应被认作有判据。"""
+        src = (
+            "def view(request, pk):\n"
+            "    return get_own_institution_object(Transfer, pk, user, 'to_hospital_id')\n"
+        )
+        ok, why = has_institution_check(src)
+        self.assertTrue(ok, f'正向对照失败：共用函数调用没被识别（{why}）')
+
+    def test_real_views_are_detected_by_both_forms(self):
+        """把真接口拉进来：三个已改写的接口必须被判为「有判据」。
+
+        防止「判据识别整体失效」——上面全是人造源码，万一真源码有
+        解析不了的结构（装饰器、多行签名…），人造用例照样全绿。
+        """
+        from business import views_material, views_transfer
+        for fn in (views_transfer.transfer_receive, views_transfer.transfer_reject,
+                   views_material.material_receive):
+            ok, why = has_institution_check(inspect.getsource(fn))
+            self.assertTrue(ok, f'{fn.__name__} 未被识别出机构判据（{why}）')
