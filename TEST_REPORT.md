@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **831 个用例，全部通过**（约 62 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **915 个用例，全部通过**（约 63 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
-| 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归） |
+| 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -48,6 +48,7 @@ business/tests/
 ├── test_write_scope.py        # 医院横向越权（写侧）：跨机构写必须被拒且**库里一字未改**
 ├── test_endpoint_role_scope.py # 接口 × 角色矩阵：同族角色集合一致 + 辅助接口不得更宽
 ├── test_own_institution_scope.py # 存在性预言机：跨机构/跨区县 id 必须与不存在的 id 不可区分
+├── test_param_contract.py     # 查询参数契约：类型（四种异常）/ 范围 / 上限 + 共用解析器 AST 契约
 ├── test_tasks.py              # 诊疗完成 5 天自动转待领养
 ├── test_seed_data.py          # 种子数据幂等性 / 演示账号自愈 / 芯片号段一致性
 ├── test_migrations.py         # 数据迁移 0010/0011：区县改判、机构改名、北京地名清理（含幂等）
@@ -3199,6 +3200,248 @@ def get_own_institution_object(model, pk, user, field='hospital_id', **extra):
 
 ---
 
+### 2.30 第二十四轮：查询参数 —— 类型契约 / 可见范围 / 数量上限
+
+#### 2.30.1 本轮视角：第三个正交维度
+
+前几轮扫的是「**谁**能访问」（接口 × 角色矩阵）和「**哪条记录**」（id 越权 /
+存在性预言机）。本轮换第三个维度：**同一个接口、同一个角色、完全合法的会话，
+只用查询参数去操纵结果集**。三类检查：
+
+| 类 | 判据 | 本轮实测缺陷 |
+|---|---|---|
+| **A 类型契约** | 非法参数值必须被拒绝（4xx）或被忽略（200），**不能 500** | 13 条未捕获异常 |
+| **B 可见范围** | 范围类参数不得放宽可见 id 集合 | **0**（负结论，见 2.30.11） |
+| **C 数量上限** | 「合法但荒谬」的数量不得让服务端真的去干那么大的活 | 2 条（编号预览无上限） |
+
+**A 与 C 必须分开写判据**：C 类的响应**仍然是 200**，A 类判据（「不能 5xx」）
+原理上扫不出来。
+
+#### 2.30.2 四种未捕获异常 —— 「随手包一层 `except ValueError`」是假修
+
+实测：同一类「非法参数值」会以**四种互不相同**的异常把接口打成 500：
+
+| 场景 | 异常 |
+|---|---|
+| `filter(<整型外键>=非数字)` | `builtins.ValueError` |
+| `filter(<整型外键>=超大数)` | **`builtins.OverflowError`** |
+| `filter(<日期字段>=非日期)` | **`django.core.exceptions.ValidationError`** |
+| 日期字段上做算术（`end_date + timedelta(days=1)`） | **`builtins.OverflowError`**（**同名不同源**） |
+
+两条关键事实：
+
+1. **`except ValueError` 只覆盖四种里的第一种。** 写了它、以为修完了，是假修。
+   变异 M33 专门复现这个假修（日期只包 `except ValueError`），确认判据能抓住。
+2. **`int('9' * 24)` 本身不报错** —— Python 整数无上限，它等于
+   `999999999999999999999999`。是 **SQLite 绑定参数时**才溢出。
+   所以「`try: int(x) except ValueError`」**永远拦不住**，
+   校验必须发生在**进 ORM 之前**。
+
+第 4 种（日期算术溢出）**只有 `?end_date=9999-12-31` 这一类值能触发** ——
+它不是一个「非法值」，而是一个**完全合法的日期**（`date.max`）撞上日期算术的边界。
+第一版毒值表里**一个日期格式串都没有**，所以这条漏了（见 2.30.8）。
+
+#### 2.30.3 修法：共用参数解析器（三态语义）
+
+`business/services.py` 新增：
+
+| 函数 | 用途 |
+|---|---|
+| `parse_int_param(raw, label, minimum=1, maximum=MAX_SQLITE_INT)` | 整型查询参数 / 请求体数量 |
+| `parse_date_param(raw, label)` | 日期参数（`YYYY-MM-DD`，月/日允许不补零） |
+| `date_upper_exclusive(d)` | 「含当天」的区间上界 → `(值, 是否开区间)`；`date.max` 退回闭区间 |
+
+**三态返回**，而不是「非法就静默忽略」：
+
+| 返回值 | 含义 | 调用方 |
+|---|---|---|
+| `(None, None)` | 缺省 / 空串 | 按「未筛选」处理 |
+| `(None, 消息)` | 非法 | `return json_fail(消息)` |
+| `(值, None)` | 合法 | 正常进 ORM |
+
+**为什么不做「非法就 `pass`」**：静默忽略筛选条件 = 用户设了筛选却看到**全量**，
+列表「看起来有数据」，只是不是他要的 —— 属于最难被发现的一类静默失败。
+旧代码 `supervision/views.py` 的
+`try: sd = datetime.strptime(...) except (ValueError, TypeError): pass` 就是这个反模式。
+
+另外用**正则 `^[0-9]+$`** 而不是裸 `int()`：`int()` 的口径比业务预期宽 ——
+`int('1_0') == 10`（下划线）、`int('１２') == 12`（全角）、`int('+5') == 5`。
+
+#### 2.30.4 逐条修复
+
+| # | 位置 | 症状 | 修法 |
+|---|---|---|---|
+| 1 | `business/views_capture.py` `capture_list` 的 `district` | `?district=襄城区` → **500**。原写法 `Q(district__name__icontains=d) \| Q(district_id=d)`，`Q` 的**两半都会被求值** → `district_id='襄城区'` 直接 `ValueError`。**「按区县名筛选」这条分支从来没成功过** | 先探测是否纯数字，是才拼 id 那半；非数字不算非法（那是「按名称查」） |
+| 2 | 同上 `owner_return_list` 的 `start_date` / `end_date` | 非日期串 → `ValidationError` → 500 | `parse_date_param()` + 400 |
+| 3 | `supervision/views.py` `ledger_center` 的 `institution_id` | 非数字 → 500。该参数被**七处**台账分支共用，一个非法值在任意一处都能打成 500 | 解析**前置到所有分支之前**，只解析一次 |
+| 4 | 同上 `end_date` | `?end_date=9999-12-31` → 500（第 4 种异常）。原实现 `ed + timedelta(days=1)` 无保护，且解析失败被 `pass` 静默吞掉 | `parse_date_param()` + `date_upper_exclusive()` |
+| 5 | `business/views_material.py` `material_transactions` / `shelter_stock_ledger` 的 `material_id` | 非数字 → `ValueError`；超长数字 → **`OverflowError`** | `parse_int_param()` + 400 |
+| 6 | 同上 `purchase_create` / `dispatch_create` / `stock_adjustment` 的 `quantity` | 裸写 `int()` → 非数字 500；超大数要一路走到写库才溢出 | 统一走 `parse_int_param()`（孪生漂移收口） |
+| 7 | `business/views_capture.py` `pet_codes_preview` 的 `count` | 只判 `count <= 0`，**无上限**（见 2.30.5） | 与 `checkin_create` 共用 `MAX_CAPTURE_BATCH = 100` |
+
+#### 2.30.5 C 类：资源耗尽 —— 「合法但荒谬」的数量
+
+`?count=999999999` **不报错、返回 200**，只是在返回之前把服务端吃光。
+`generate_pet_codes()` 是纯 `for i in range(count)` 循环：
+
+```
+实测 generate_pet_codes(200000) ≈ 23 ms
+线性外推 ?count=999999999     ≈ 110 秒 CPU + 数十 GB 内存
+```
+
+两条工程约束：
+
+1. **上限提成共享常量** `MAX_CAPTURE_BATCH = 100`，让「编号预览」与「真实建单」
+   守同一个数 —— 只卡一边就是孪生接口漂移（会出现「预览能生成 10 万条、
+   提交只收 100 条」）。
+2. **⚠「会把检测工具杀掉」的检测工具没有用。** 修复前在 worktree 上跑探针时，
+   `?count='9'*24` 让服务端真的去 `range(10**24)`，把进程**和探针自己一起** OOM 掉
+   （实测被 SIGTERM，exit 137），**连结论都报不出来**。
+   所以探针新增 `poison_for(name)`：对数量类参数**剔除**超大数毒值，
+   量级问题交给 C 类用 `LARGE_COUNT = 100_000`（够小到能跑完、够大到能证明无上限）。
+
+#### 2.30.6 孤儿记录：「判据晚于写库」（两处）
+
+两处形态相同，都在**校验通过之前就落库**：
+
+```python
+# ❌ purchase_create：先建物料，再校验数量
+material = Material.objects.create(...)          # ← 落库
+quantity = int(data.get('quantity', 0))          # ← 'abc' 在这里 ValueError → 500
+if not quantity: return json_fail('采购数量必须大于0')  # ← 400，但物料已经建出来了
+
+# ❌ adjust_stock：先建流水，再判库存
+txn = MaterialTransaction.objects.create(...)    # ← 落库
+if material.shelter_stock < quantity: raise ...  # ← 400，但流水已进台账
+```
+
+**症状**：调用方看到 400，数据库里却多了一条谁也没要的记录，
+数量对不上，且**全程没有任何报错**。
+
+修法（与项目既有的「多表写入两段式」一致）：**全校验前置** → 落库段包
+`transaction.atomic()`；用例必须**断言孤儿不存在**（`Material.objects.count()` 不变），
+变异里配 `MOVE_AFTER`（把判据挪回落库之后）验证判据真的会红（M30 / M35）。
+
+#### 2.30.7 界面路径的静默失败（GUI 65 的 D2/D3 发现，本轮一并修）
+
+GUI 65 的 D 段验证「界面按钮内部调用的那个函数」时发现：服务端已经把非法参数
+修成 400 了，**但界面看不出来** ——
+
+```js
+// static/js/tnr-api.js（修复前）
+async getLedger(filters) { ... return this._get(url); }
+
+async _get(url) {
+  const res = await fetch(url);
+  const data = await res.json();
+  return data.success ? data.data : (Array.isArray(data.data) ? data.data : []);
+  // ⚠ 完全忽略 HTTP 状态
+}
+```
+
+```
+服务端：400「机构必须是数字」
+界面：  一张空表（「暂无台账数据」）
+```
+
+用户看到的是「这个筛选条件下没有记录」，而不是「你的筛选条件被拒了」。
+**这比 500 更难排查 —— 500 至少有报错。**
+
+修法成对做：
+
+1. `getLedger` 改成**状态感知**（`res.ok` + `data.success`，失败 `throw` 并带上服务端文案）；
+2. `renderLedgerTable` 接住异常 → `TNR_UI.toast(..., 'danger')` + 表格区渲染
+   `table-empty` 失败态（沿用政府端既有范式），并 `return`；
+3. 判据：`LedgerApiSurfacesErrorsTest`（源码级，5 条）+ GUI 65 的
+   **D5（界面真的显示「加载失败」）** 与 **D6（改回合法值后表格恢复渲染，正向对照）**。
+
+> 只改服务端不修界面 = 修了等于没修：用户侧的观感完全没变。
+
+#### 2.30.8 侦察工具与判据校准（本轮踩到的四个坑）
+
+| 坑 | 真因 | 对策 |
+|---|---|---|
+| **毒值表覆盖度不足** | 第一版毒值表 `['abc','9'*24,'-1','1.5','']` **一个日期串都没有** → 漏掉 `?end_date=9999-12-31`（第 4 种异常） | 毒值表**按参数语义分组**：整型 / 日期（`9999-12-31`、`0000-01-01`、`2026-02-30`、`2026-13-01`）/ 文本。**修完必须用同一张表复跑** |
+| **门槛把自己要守的对象跳过去** | C 检查原先排在「基线必须 200」之后，而 `codes-preview` **无参数时本就 400** → 基线不过 → `continue` → 正好跳过它该守的接口 | C 检查**提到门槛之前**；门槛只认 `401/403/404/405`（**400 不算**不可访问）。改完「正常拒绝/忽略」76 → 94 |
+| **判据靠报错通过** | AST 契约扫描对嵌套函数用 `inspect.getsource` 拿到**带缩进**的源码 → `ast.parse` 抛 `IndentationError` → 判据恒 `False` → 「注释不能伪装」那条对照**靠报错通过**（空转） | `textwrap.dedent` 之后再 `ast.parse`；并补**正向对照**（「把真接口拉进来必须返回 True」） |
+| **注释把判据打红（假阳性）** | 「`getLedger` 里不能出现 `_get(`」这条判据，被我自己写的「这里**不能**走 `_get()`」这句**修复注释**打红 | 断言前先 `strip_js_comments()`（保持长度不变）；并加对照用例证明剥离真的生效、且没剥掉代码 |
+
+前两条是「判据看起来在工作、其实空转」，后两条是判据与注释的关系 ——
+**方向相反的两个陷阱**（一个假阴性、一个假阳性），都只能靠「判据自身的对照用例」发现。
+
+#### 2.30.9 修复前后对比（同一套扩展后的毒值表）
+
+```
+修复前（4708a2a）：
+🔴 A 未捕获异常 13
+  /api/business/captures/                        [gov_district]  district      → 'abc'/'襄城区'/'9'*24/'1.5'/… 全 500
+  /api/business/captures/                        [shelter]       district      → 同上
+  /api/business/materials/shelter-ledger/        [gov_district]  material_id   → 同上
+  /api/business/materials/shelter-ledger/        [shelter]       material_id   → 同上
+  /api/business/materials/transactions/          [gov_district]  material_id   → 同上
+  /api/business/materials/transactions/          [hospital]      material_id   → 同上
+  /api/business/materials/transactions/          [shelter]       material_id   → 同上
+  /api/business/owner-returns/                   [gov_district]  start_date    → 'abc'/'襄城区'/'9'*24/'-1'/'1.5'/…
+  /api/business/owner-returns/                   [gov_district]  end_date      → 同上
+  /api/business/owner-returns/                   [shelter]       start_date    → 同上
+  /api/business/owner-returns/                   [shelter]       end_date      → 同上
+  /api/supervision/ledger/                       [gov_district]  end_date      → '9999-12-31'=500   ← 只有扩展毒值表才够得到
+  /api/supervision/ledger/                       [gov_district]  institution_id→ 'abc'/'襄城区'/'9'*24/'1.5'/… 全 500
+🔴 B 可见范围被参数放宽 0
+🔴 C 数量参数没有上限 2
+  /api/business/captures/codes-preview/  [gov_district]  count=100000 → HTTP 200，返回 100000 条
+  /api/business/captures/codes-preview/  [shelter]       count=100000 → HTTP 200，返回 100000 条
+合计：未捕获异常 13｜可见范围放宽 0｜数量无上限 2｜正常拒绝/忽略 81｜跳过 90
+```
+
+修复后：
+
+```
+合计：未捕获异常 0｜可见范围放宽 0｜数量无上限 0｜正常拒绝/忽略 94｜跳过 90
+```
+
+「正常拒绝/忽略」从 81 涨到 94 —— 多出来的 13 条正是原先报 500 的那些
+（`13 + 81 = 94`），也就是**修复量与异常数完全对得上**。
+
+#### 2.30.10 本轮验证结果
+
+| 手段 | 结果 |
+|---|---|
+| 枚举探针 | **未捕获异常 0｜可见范围放宽 0｜数量无上限 0｜正常拒绝/忽略 94｜跳过 90**（修复前 13｜0｜2｜81｜90） |
+| 全量测试套件 | **915 通过**（第二十三轮 831，本轮 +84） |
+| 变异验证 | **36/36 全部被捕获**（新增 M23~M38） |
+| GUI 实测 | `65` **29/29**（首轮 24/3，3 处失败全部定位并修复，见下） |
+| GUI 回归 | `61` 19/19、`62` 13/13、`63` 19/19、`64` 26/26、`46` 81 视图无 JS 报错 |
+| 工作区 | 变异跑完 `git status` 无残留（只有本轮预期改动） |
+
+GUI 65 首轮的 3 处失败**都不是服务端缺陷**，逐条定位如下 —— 这正是「实测比推理可靠」：
+
+| 失败 | 真因 | 归类 |
+|---|---|---|
+| `C3` | **夹具 bug**：两条流水建在**同一个物料**上，负向断言（「不该出现 MT-B」）自相矛盾 | 测试自身 |
+| `D2` / `D3` | **真缺陷**：`TNR_API.getLedger` 走 `_get()`，把 400 静默渲染成空表 | 生产代码（已在 2.30.7 修复） |
+
+#### 2.30.11 负结论与已知边界
+
+- **B 类「可见范围放宽」修复前后均为 0** —— 这是**负结论**（不是没测）：
+  `district` / `institution_id` 都是在**区县收敛之后**才收窄的，不能击穿隔离。
+- **`capture_list` 的 `district` 现在**既支持 id 也支持中文名。「非数字」被当成
+  「按名称查」而**不是**非法输入 —— 这是**有意的**：若一律 400，
+  用户手输区县名就会撞错，而按名称筛选本来就是它的功能之一。
+- **探针「跳过 90」不等于「通过」**：其中大量是 `gov_city`（账号区县=全市，
+  用它看不出收窄，探针主动跳过）；「视图不读任何查询参数」的接口也不在 A/B/C 的
+  覆盖范围内。
+- **A/B/C 三类只覆盖「查询参数」**。请求体（JSON body）侧的同类问题
+  （`quantity='abc'`）本轮顺手修了三处（见 2.30.6），但**没有**写成探针的第四类，
+  仍是逐接口人工核对。
+- **`_get()` 的静默语义只修了 `getLedger` 这一处**。其余走 `_get()` 的调用点
+  （`getInstitutions` / `getDistricts` / `getDashboardStats` …）**语义未变** ——
+  它们的失败仍会被渲染成「空」。这是**已知遗留**，需要逐个判断「空」是否可接受。
+- **`supervision/views.py:961` 的注释**说明：筛选值正常操作下不会为空串
+  （前端 `getLedger()` 会先滤掉空串），所以「参数缺省」这条路径主要靠单测覆盖。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -3381,7 +3624,7 @@ python manage.py migrate
 python manage.py seed_data          # 幂等，可重复执行；同时校准演示账号
 python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
-python manage.py test --parallel 1  # 831 个用例
+python manage.py test --parallel 1  # 915 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
@@ -3404,10 +3647,13 @@ NODE_PATH=/Users/wl/.workbuddy-ai/binaries/node/playwright-env/node_modules \
 #    黑名单管理页侧栏可达 / 错误分支显示「校验失败」，19 项）
 # 64 存在性预言机（伪造他院转运单/下发单 id 必须与「不存在的 id」状态码+文案逐字相同 /
 #    点真实按钮签收本院单 / 页内隔离，26 项）
+# 65 查询参数契约（非法参数不能 500 / 范围参数不放宽可见集合 / 数量参数有上限，
+#    含界面路径与负向对照，29 项）
 # 注：56 与 58/59 自带开场+收尾清理（政府端用户/机构没有删除入口，只能从库清）
 # 注：62 的写操作**改完即还原**，收尾断言演示库无残留文案
 # 注：63 只读；C 段的「故障注入」在**页面内**改 checkBlacklist，测完立即还原，不动服务器
 # 注：64 自带开场建夹具 + 收尾删除（全部带 GUI64- 前缀），收尾断言演示库无残留
+# 注：65 自带开场建夹具 + 收尾删除（全部带 GUI65- 前缀），收尾断言演示库无残留
 ```
 
 枚举探针（只读 + 写后回滚，不依赖 runserver）：
@@ -3421,10 +3667,27 @@ NODE_PATH=/Users/wl/.workbuddy-ai/binaries/node/playwright-env/node_modules \
 #   跨区县领养申请在演示库造不出，已由 test_own_institution_scope.py 用夹具覆盖。
 ```
 
+查询参数探针（只读，不依赖 runserver；三类检查 A/B/C）：
+
+```bash
+.venv/bin/python scripts/param_probe.py
+# 枚举全部「带查询参数的接口」× 5 个角色，三类判据：
+#   A 类型契约 —— 非法参数值不能 500（可以 4xx、可以 200 忽略）
+#   B 可见范围 —— 范围类参数不得放宽可见 id 集合
+#   C 数量上限 —— 「合法但荒谬」的数量不得让服务端真去干那么大的活
+# 输出：🔴 A 未捕获异常 / 🔴 B 可见范围放宽 / 🔴 C 数量无上限 / ✅ 正常拒绝·忽略 / ⚪ 跳过
+# 当前基线：未捕获异常 0｜可见范围放宽 0｜数量无上限 0｜正常拒绝/忽略 94｜跳过 90。
+# 修复前（4708a2a）：未捕获异常 13｜可见范围放宽 0｜数量无上限 2｜正常拒绝/忽略 81｜跳过 90。
+# ⚠ 毒值表按参数语义分组（整型 / 日期 / 文本），**日期毒值必须有**
+#   （`9999-12-31` 触发 `date.max + 1天` 的 OverflowError，是第四种异常类型）。
+# ⚠ 数量类参数要剔除超大数毒值：`?count='9'*24` 会把服务端**和探针一起** OOM
+#   （实测被 SIGTERM，连结论都报不出来），量级交给 C 类用 100000 这种值。
+```
+
 变异验证（把判据逐个破坏，确认测试真的会红）：
 
 ```bash
-.venv/bin/python scripts/mutation_check.py     # 22 条变异，全绿即「测试有判别力」
+.venv/bin/python scripts/mutation_check.py     # 36 条变异，全绿即「测试有判别力」
 # ⚠ 别在前台跑到超时 —— 进程被信号杀掉会把变异体留在盘上（脚本已装信号还原，但跑完
 #   仍应 `git status` 复核）。
 ```
