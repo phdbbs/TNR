@@ -2615,6 +2615,13 @@ return (Q(hospital_id=user.institution_id)
 
 #### 2.26.9 顺带发现（**本轮未修**，见遗留建议）：4 个捕捉点账号被放大成全市可见
 
+> **口径更正（2026-09-19 复核）**：「捕捉点账号挂在全市（市级）下」这个**事实本身
+> 早有记录**（`MEMORY-deploy.md`：「`cy_shelter`/`hd_shelter` 的 `district_id` 是 1
+> （全市/市级）…因此该账号能看到**全部**区县数据；验证区县隔离请用 `cy_gov`/`hd_gov`」）。
+> 本轮**新的是**：① 把它与 `hospital_pets` 的处理**并排对照**，看出同一份代码对同一事实
+> 处理相反；② **量化了影响面**（下面那张表，含 PII 字段）。写这一节时我把它当成
+> 「新发现」是**表述失准** —— 发现「已知事实」时应先查项目记忆，别当新发现汇报。
+
 本轮为了确认「其余接口有没有横向越权」，对医院侧与捕捉点侧各接口做了一次实测。
 医院侧全部干净（他机构 0 条）。捕捉点侧却测出**跨机构**结果：
 
@@ -2815,6 +2822,8 @@ if district and getattr(district, 'is_city', False):
       市级用户直接 `return all()`。实测 `hd_shelter`：捕捉单 12 条（本机构 3 + 他机构 9）、
       主人领回 5 条（1 + 4）、放养 4 条（1 + 3）、档案 32 条（全市）。
       `/owner-returns/` 的返回体含 `owner_name` / `owner_phone` / `owner_id_card`。
+      （「账号挂全市」这个**事实**在 `MEMORY-deploy.md` 早有记录；
+      **新的是**它与 `hospital_pets` 的处理相反、以及上面这份量化影响面。）
     - **为什么说是「不一致」而不是「设计如此」**：`views_portal.hospital_pets`
       对**同一个事实**给出的处理是相反的 —— 它**特意不用 `user.district`**，
       改用 `user.institution.district_id`，注释写明「现场把捕捉点操作员都挂在
