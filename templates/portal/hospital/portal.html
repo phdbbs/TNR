@@ -67,7 +67,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260919b"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260919c"></script>
 <script>
 /* ====================================================
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
@@ -179,10 +179,10 @@ const Hospital = {
   async render_dashboard() {
     try {
       const [transfers, pets, materials, txns] = await Promise.all([
-        TNR_API.getTransfers(),
-        TNR_API.getHospitalPets(),
-        TNR_API.getMaterials(),
-        TNR_API.getMaterialTransactions()
+        TNR_API.getTransfersStrict(),
+        TNR_API.getHospitalPetsStrict(),
+        TNR_API.getMaterialsStrict(),
+        TNR_API.getMaterialTransactionsStrict()
       ]);
 
       const pendRecv = transfers.filter(t => t.status === 'pending').length;
@@ -281,7 +281,7 @@ const Hospital = {
   /* ========== 2. 动物交接管理 ========== */
   async render_receive() {
     try {
-      const transfers = await TNR_API.getTransfers();
+      const transfers = await TNR_API.getTransfersStrict();
       const pend = transfers.filter(t => t.status === 'pending').length;
       const recv = transfers.filter(t => t.status === 'received').length;
       const rej = transfers.filter(t => t.status === 'rejected').length;
@@ -482,7 +482,7 @@ const Hospital = {
     c.innerHTML = '<div class="loading-state">加载中...</div>';
 
     try {
-      const pets = await TNR_API.getHospitalPets('in_treatment');
+      const pets = await TNR_API.getHospitalPetsStrict('in_treatment');
       if (pets.length === 0) {
         c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔬</div><div class="empty-state-text">暂无待诊疗动物</div><div class="empty-state-desc">请先在「动物交接管理」中确认接收转运单</div><button class="btn btn-primary mt-4" data-nav-btn="receive">前往动物交接管理</button></div>';
         c.querySelector('[data-nav-btn]')?.addEventListener('click', () => this.navigateTo('receive'));
@@ -760,7 +760,7 @@ const Hospital = {
     c.innerHTML = '<div class="loading-state">加载中...</div>';
 
     try {
-      const treatments = await TNR_API.getTreatments();
+      const treatments = await TNR_API.getTreatmentsStrict();
       if (treatments.length === 0) {
         c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无诊疗记录</div></div>';
         return;
@@ -988,7 +988,7 @@ const Hospital = {
     c.innerHTML = '<div class="loading-state">加载中...</div>';
     try {
       const q = this._matQuery();
-      const allMats = await TNR_API.getMaterials();
+      const allMats = await TNR_API.getMaterialsStrict();
       const materials = allMats.filter(m =>
         q.ok([m.name, m.specification, m.batch_no, m.category].join(' ')));
       if (allMats.length === 0) {
@@ -1156,9 +1156,9 @@ const Hospital = {
 
     try {
       const [pets, listings, adoptions, appJson] = await Promise.all([
-        TNR_API.getHospitalPets('pending_adopt'),
-        TNR_API.getHallListings(),
-        TNR_API.getAdoptions(),
+        TNR_API.getHospitalPetsStrict('pending_adopt'),
+        TNR_API.getHallListingsStrict(),
+        TNR_API.getAdoptionsStrict(),
         TNR_API.get(TNR_API.BASE + 'adoptions/applications/')
       ]);
 
@@ -1413,8 +1413,8 @@ const Hospital = {
 
     try {
       const [eligiblePets, records] = await Promise.all([
-        TNR_API.getHospitalPets(),
-        TNR_API.getEuthanasia()
+        TNR_API.getHospitalPetsStrict(),
+        TNR_API.getEuthanasiaStrict()
       ]);
 
       const eligible = eligiblePets.filter(p => p.status === 'in_treatment' || p.status === 'pending_adopt');
@@ -1538,11 +1538,11 @@ const Hospital = {
 
     try {
       const [transfers, treatments, txns, euthanasia, pets] = await Promise.all([
-        TNR_API.getTransfers(),
-        TNR_API.getTreatments(),
-        TNR_API.getMaterialTransactions(),
-        TNR_API.getEuthanasia(),
-        TNR_API.getHospitalPets()
+        TNR_API.getTransfersStrict(),
+        TNR_API.getTreatmentsStrict(),
+        TNR_API.getMaterialTransactionsStrict(),
+        TNR_API.getEuthanasiaStrict(),
+        TNR_API.getHospitalPetsStrict()
       ]);
 
       page.innerHTML = '<div class="tabs">' +

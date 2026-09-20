@@ -71,7 +71,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260919b"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260919c"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -190,16 +190,16 @@ const GovPortal = {
       // 一次性拉取全部明细数据，汇总一律由前端按时间范围过滤后加总
       const [districts, institutions, captures, treatments, releases, adoptions,
              euthanasia, transfers, pets, materialSup] = await Promise.all([
-        TNR_API.getDistricts(),
-        TNR_API.getInstitutions(),
-        TNR_API.getCaptures(),
-        TNR_API.getTreatments(),
-        TNR_API.getReleases(),
-        TNR_API.getAdoptions(),
-        TNR_API.getEuthanasia(),
-        TNR_API.getTransfers(),
-        TNR_API.getPets(),
-        TNR_API.getMaterialSupervision(),
+        TNR_API.getDistrictsStrict(),
+        TNR_API.getInstitutionsStrict(),
+        TNR_API.getCapturesStrict(),
+        TNR_API.getTreatmentsStrict(),
+        TNR_API.getReleasesStrict(),
+        TNR_API.getAdoptionsStrict(),
+        TNR_API.getEuthanasiaStrict(),
+        TNR_API.getTransfersStrict(),
+        TNR_API.getPetsStrict(),
+        TNR_API.getMaterialSupervisionStrict(),
       ]);
       this._dash = {
         districts: districts || [], institutions: institutions || [],
@@ -1356,13 +1356,13 @@ const GovPortal = {
     const el = document.getElementById('page-material');
     el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⏳</div><div class="table-empty-text">加载中...</div></div>';
     try {
-      const sup = await TNR_API.getMaterialSupervision();
+      const sup = await TNR_API.getMaterialSupervisionStrict();
       const materials = sup.materials || [];
       const txns = sup.transactions || [];
       const alerts = sup.alerts || [];
       const stats = sup.stats || {};
 
-      const hospitals = (await TNR_API.getInstitutions('hospital')).filter(h => h.status === 'active');
+      const hospitals = (await TNR_API.getInstitutionsStrict('hospital')).filter(h => h.status === 'active');
 
       const txnTypeMap = { purchase: { text: '采购入库', badge: 'badge-success' }, dispatch: { text: '下发出库', badge: 'badge-info' }, receive: { text: '签收入库', badge: 'badge-cinnabar' }, consume: { text: '消耗', badge: 'badge-cinnabar' }, adjustment: { text: '调整', badge: 'badge-default' } };
 
@@ -2006,7 +2006,7 @@ const GovPortal = {
     } else if (tab === 'logs') {
       el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⏳</div><div class="table-empty-text">加载中...</div></div>';
       try {
-        const logs = await TNR_API.getOperationLogs();
+        const logs = await TNR_API.getOperationLogsStrict();
         el.innerHTML = `
           <div class="filter-bar">
             <div class="filter-item">

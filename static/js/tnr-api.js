@@ -223,6 +223,30 @@ const TNR_API = {
     return this._get(url);
   },
   async getMaterialSupervision() { return this._get('/api/supervision/materials/'); },
+  /* === 严格读内核：失败**抛错**，成功返回 `data` ===
+   *
+   * 与 `_get()` 的唯一区别是「失败不静默」。`_get()` **丢掉响应信封**
+   * （只返回 `data`），调用方拿到的 `[]` **无法区分**「没有数据」与
+   * 「服务端拒绝」—— 凡是在 `try/catch` 里包着读接口、并在 catch 里渲染
+   * 失败态的代码，那个失败态**覆盖不到 HTTP 错误**（第二十五轮实测 12 处）。
+   *
+   * 后端信封统一由 `json_ok` / `json_fail` 产出：
+   *   `{success: true,  data, message}` / `{success: false, data, message}`
+   * （全仓只有 2 处裸 `JsonResponse`，见 accounts/views.py，也都带 `success`）。
+   * 所以 `!res.ok || !data.success` 就是完整的失败判据。
+   *
+   * 分工：
+   *   * 需要「失败可见」的调用点 → `getXxxStrict()`（见下方严格读方法区）；
+   *   * 需要「失败降级成空」的列表页 → 继续用 `getXxx()`，**默认语义未变**。
+   */
+  async getData(url) {
+    const res = await fetch(url, { credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || `加载失败（HTTP ${res.status}）`);
+    }
+    return data.data;
+  },
   async getLedger(filters) {
     const params = new URLSearchParams();
     if (filters) {
@@ -232,19 +256,11 @@ const TNR_API = {
     }
     const qs = params.toString();
     const url = '/api/supervision/ledger/' + (qs ? '?' + qs : '');
-    // ⚠ 这里**不能**走 `_get()`。`_get()` 只看响应体、**完全忽略 HTTP 状态**，
-    // 非 2xx 时返回 `[]`（见文件顶部说明）—— 于是服务端的 400/403/500 全被
-    // 渲染成「暂无台账数据」：用户以为「这个筛选条件下没有记录」，
-    // 实际上是**筛选条件被服务端拒了**。这是最难排查的一类静默失败
-    // （第二十四轮实测：`getLedger({institution_id:'abc'})` 返回
-    // `{ok:true, count:0}`，而服务端其实是 400「机构必须是数字」）。
+    // ⚠ 这里**不能**走 `_get()` —— 理由见 `getData()` 的说明。
+    // 第二十四轮实测：`getLedger({institution_id:'abc'})` 返回 `{ok:true, count:0}`，
+    // 而服务端其实是 400「机构必须是数字」—— 筛选条件被拒却渲染成「暂无台账数据」。
     // 台账接口的失败必须**抛出去**，由调用方决定怎么显示。
-    const res = await fetch(url, { credentials: 'same-origin' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success) {
-      throw new Error(data.message || `台账加载失败（HTTP ${res.status}）`);
-    }
-    return data.data;
+    return this.getData(url);
   },
   async getOperationLogs(limit) {
     const url = limit ? `/api/supervision/logs/?limit=${limit}` : '/api/supervision/logs/';
@@ -264,6 +280,46 @@ const TNR_API = {
     const d = new Date();
     const yearStr = String(d.getFullYear()).substr(-2) + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
     return Array.from({length: count}, (_, i) => 'TNR' + yearStr + String(i+1).padStart(3,'0'));
+  },
+  /* === 严格读便捷方法（失败抛错） ===
+   *
+   * 与同名 `getXxx()` **一一对应**，只是把 `_get()` 换成 `getData()`：
+   * 非 2xx 或 `success:false` 一律抛错，让调用方已经写好的 `catch` 真正生效。
+   * 供「**已经写了 `try/catch` 且 catch 里呈现失败态**」的调用点使用（第二十五轮）。
+   *
+   * ⚠ 与软版本的**唯一**区别就是失败可见性，URL 与返回结构完全一致。
+   * 新增接口时若要在「呈现失败」的调用点使用，必须同时加对应的 `XxxStrict`；
+   * 否则界面又会退回「失败 = 空」。
+   * `business/tests/test_silent_read_contract.py` 会静态检查这一点。
+   */
+  async getPetLifecycleStrict(petId) { return this.getData(`/api/business/pets/${petId}/lifecycle/`); },
+  async getCapturesStrict() { return this.getData('/api/business/captures/'); },
+  async getTreatmentsStrict() { return this.getData('/api/business/treatments/'); },
+  async getReleasesStrict() { return this.getData('/api/business/releases/'); },
+  async getAdoptionsStrict() { return this.getData('/api/business/adoptions/'); },
+  async getEuthanasiaStrict() { return this.getData('/api/business/euthanasia/'); },
+  async getTransfersStrict() { return this.getData('/api/business/transfers/'); },
+  async getMaterialsStrict() { return this.getData('/api/business/materials/'); },
+  async getMaterialTransactionsStrict() { return this.getData('/api/business/materials/transactions/'); },
+  async getHallListingsStrict() { return this.getData('/api/business/hall-listings/'); },
+  // getPetsStrict / getHospitalPetsStrict 是同一接口的两个别名，与软版本保持一致
+  async getPetsStrict(status) {
+    const url = status ? `/api/business/pets/?status=${status}` : '/api/business/pets/';
+    return this.getData(url);
+  },
+  async getHospitalPetsStrict(status) {
+    const url = status ? `/api/business/pets/?status=${status}` : '/api/business/pets/';
+    return this.getData(url);
+  },
+  async getDistrictsStrict() { return this.getData('/api/supervision/districts/'); },
+  async getInstitutionsStrict(type) {
+    const url = type ? `/api/supervision/institutions/?type=${type}` : '/api/supervision/institutions/';
+    return this.getData(url);
+  },
+  async getMaterialSupervisionStrict() { return this.getData('/api/supervision/materials/'); },
+  async getOperationLogsStrict(limit) {
+    const url = limit ? `/api/supervision/logs/?limit=${limit}` : '/api/supervision/logs/';
+    return this.getData(url);
   },
   getPetStatusText(status) {
     const map = {'in_transit':'在途','in_treatment':'待诊疗/诊疗中','pending_adopt':'待领养','pending_claim':'待领出','adopted':'已领养','released':'已放养','euthanized':'已死亡','owner_returned':'主人领回'};

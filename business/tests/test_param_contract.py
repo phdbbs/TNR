@@ -1024,6 +1024,10 @@ class LedgerApiSurfacesErrorsTest(SimpleTestCase):
     """`getLedger` 必须状态感知；台账表必须把失败显示出来。
 
     纯源码级断言（不跑浏览器）—— GUI 65 的 D2/D3/D5/D6 是它的**运行期**对照。
+
+    ⚠ 第二十五轮把「状态感知」的逻辑**提成了 `getData(url)`**（严格读内核），
+    `getLedger` 改成委托它。所以「判 HTTP 状态 / 抛错带服务端文案」这些断言
+    要打在 `getData` 上，`getLedger` 只断言「确实委托了」。
     """
 
     @classmethod
@@ -1034,6 +1038,8 @@ class LedgerApiSurfacesErrorsTest(SimpleTestCase):
         # ⚠ 一律在**剥掉注释之后**的源码上断言（见 strip_js_comments 的说明）
         cls.ledger = strip_js_comments(
             extract_js_block(cls.api_src, 'async getLedger(filters)'))
+        cls.getdata = strip_js_comments(
+            extract_js_block(cls.api_src, 'async getData(url)'))
         cls.render = strip_js_comments(
             extract_js_block(cls.gov_src, 'async renderLedgerTable()'))
 
@@ -1045,22 +1051,25 @@ class LedgerApiSurfacesErrorsTest(SimpleTestCase):
         # 正向对照：证明「_get 这个串」不是全局不存在（否则上一条是空转）
         self.assertIn('this._get(', strip_js_comments(extract_js_block(
             self.api_src, 'async getInstitutions(type)')))
+        # 且必须真的走了严格读内核
+        self.assertIn('this.getData(', self.ledger,
+                      'getLedger 没有委托 getData，状态感知逻辑丢了')
 
     def test_comment_stripping_is_not_vacuous(self):
         """判据自身的对照：注释剥离必须真的剥掉了、且没剥掉代码。"""
         raw = extract_js_block(self.api_src, 'async getLedger(filters)')
         self.assertIn('_get()', raw, '注释里的 _get() 不见了，这条对照失效了')
-        self.assertIn('fetch(', self.ledger, '剥离把代码也剥掉了')
+        self.assertIn('fetch(', self.getdata, '剥离把代码也剥掉了')
         self.assertEqual(len(raw), len(strip_js_comments(raw)), '剥离改变了长度')
 
-    def test_get_ledger_is_status_aware(self):
-        self.assertIn('res.ok', self.ledger, 'getLedger 没有判 HTTP 状态')
-        self.assertIn('data.success', self.ledger, 'getLedger 没有判 success')
+    def test_get_data_is_status_aware(self):
+        self.assertIn('res.ok', self.getdata, 'getData 没有判 HTTP 状态')
+        self.assertIn('data.success', self.getdata, 'getData 没有判 success')
 
-    def test_get_ledger_throws_with_server_message(self):
+    def test_get_data_throws_with_server_message(self):
         """必须把**服务端文案**带出来，否则界面只能显示「加载失败」。"""
-        self.assertIn('throw new Error', self.ledger)
-        self.assertIn('data.message', self.ledger)
+        self.assertIn('throw new Error', self.getdata)
+        self.assertIn('data.message', self.getdata)
 
     def test_render_ledger_table_catches_and_shows_error(self):
         """`renderLedgerTable` 必须接住异常并渲染错误 —— 不能只是空表。"""
