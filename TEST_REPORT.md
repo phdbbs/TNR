@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **915 个用例，全部通过**（约 63 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **932 个用例，全部通过**（约 64 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
-| 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照） |
+| 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」） |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -3438,7 +3438,272 @@ GUI 65 首轮的 3 处失败**都不是服务端缺陷**，逐条定位如下 �
   （`getInstitutions` / `getDistricts` / `getDashboardStats` …）**语义未变** ——
   它们的失败仍会被渲染成「空」。这是**已知遗留**，需要逐个判断「空」是否可接受。
 - **`supervision/views.py:961` 的注释**说明：筛选值正常操作下不会为空串
-  （前端 `getLedger()` 会先滤掉空串），所以「参数缺省」这条路径主要靠单测覆盖。
+   （前端 `getLedger()` 会先滤掉空串），所以「参数缺省」这条路径主要靠单测覆盖。
+
+---
+
+### 2.31 第二十五轮：静默读 —— 「失败可见性」这第四个正交维度
+
+前四轮查的是「**谁**能访问」（接口 × 角色矩阵，2.25/2.26/2.27/2.28）、
+「**哪条记录**」（id 越权 / 存在性预言机，2.29）、「**什么参数**」（查询参数契约，2.30）。
+本轮换第四个正交维度：**同一个合法请求失败了，界面看得见吗？**
+
+#### 2.31.1 病根：封装的返回值**丢掉了响应信封**
+
+```js
+async _get(url) {
+  const res = await fetch(url);
+  const data = await res.json();
+  return data.success ? data.data : (Array.isArray(data.data) ? data.data : []);
+}
+```
+
+非 2xx 时返回 `[]`，**不抛异常**。于是模板里这种写法：
+
+```js
+try { const rows = await TNR_API.getXxx(); }
+catch (e) { 渲染「加载失败」 }          // ← 作者承诺了，但兑现不了
+```
+
+⚠ **措辞必须准确**：不要说「catch 永远走不到」—— 那是**过火**的结论。
+catch 仍会触发于 ① `fetch` 网络层失败（断网 / 连接被拒）；
+② 响应体不是 JSON（网关返回 HTML 错误页，`res.json()` 抛错）。
+准确的说法是：**catch 覆盖不到「服务端返回了合法 JSON 的失败」** ——
+而那恰好是权限 / 参数 / 业务拒绝 / 内部错误的主要形态。
+
+#### 2.31.2 先给接口方法分类，别一锅端
+
+`TNR_API` 有 74 个方法，失败可见性**完全不同**：
+
+| 类别 | 数量 | 判据（方法体） | 失败时 | 调用方能否感知 |
+|---|---|---|---|---|
+| `get-silent` | 27 | 含 `this._get(` | 返回 `[]` | ❌ **构造上不可感知** |
+| `post-silent` | 34 | 含 `this._post(` / `_postForm(` | 返回 `res.json()` | ✅ 查 `res.success` / 用 `assertOk` |
+| `throwing` | 8 | 含 `this.get(` / `this.post(` / `_handle(` | 抛异常 | ✅ catch 有效 |
+| `fallback` | 1 | `generatePetCodes`（有本地兜底） | 降级到本地 | ⚠ 有意为之 |
+| `pure` | 4 | `getPetStatusText` 等同步纯函数 | 不发请求 | — 不参与判定 |
+
+**两个必须踩准的点**：
+
+1. **`_get` 与 `_post` 不是一回事。** `_post` 把完整信封返回给调用方，
+   `if (res.success) … else toast(res.message)` 就能感知失败 ——
+   所以「没包 `assertOk` 的写操作」**不是**本轮的缺陷类。
+   第一版分类器把 `post-silent` 也算进去，死 catch 一下子从 12 涨到 22，
+   逐个核对后发现全是**误报**。**只有 `_get` 是构造上不可感知的。**
+2. **纯函数必须显式登记。** `getPetStatusText` / `getPetStatusBadge` /
+   `petAttrText` / `getMaterialCategoryText` 是**同步**方法，只扫 `async`
+   会让它们不在表里，分类只能靠「未知即 pure」的**默认值**兜着 ——
+   那是隐式巧合。实测它们曾被当成「抛错调用」，把「半死」的判定带偏。
+
+#### 2.31.3 判据：两个条件**同时**成立才是缺陷
+
+```
+死 catch = try 体里的 API 调用「全部是静默读」  且  catch 体里「向用户呈现了失败」
+```
+
+「呈现了失败」= catch 体（**剥注释后**）含 `toast(` / `alert(` / `.innerHTML` / `.textContent`。
+
+⚠ **只用「catch 体是否非空」判会误报**：`catch (e) { pets = []; }` 也有代码，
+但它是**降级**不是承诺。第一版就是这么判的，多报了 1 处（hospital `renderReceiveTab`）。
+
+#### 2.31.4 实测清单：12 处「承诺落空」，9 处「有意降级」
+
+| 端 | 行 | 方法 | 静默读 |
+|---|---|---|---|
+| shelter | 3622 | `showPetArchive` | `getPetLifecycle` |
+| gov | 189 | `render_dashboard` | `getAdoptions getCaptures getDistricts getEuthanasia getInstitutions getMaterialSupervision getPets getReleases getTransfers getTreatments`（10 个并发读） |
+| gov | 1358 | `render_material` | `getInstitutions getMaterialSupervision` |
+| gov | 2008 | `renderSettingsContent`（操作日志） | `getOperationLogs` |
+| hospital | 180 | `render_dashboard` | `getHospitalPets getMaterialTransactions getMaterials getTransfers` |
+| hospital | 283 | `render_receive` | `getTransfers` |
+| hospital | 484 | `renderTreatmentOperate` | `getHospitalPets` |
+| hospital | 762 | `renderTreatmentList` | `getTreatments` |
+| hospital | 989 | `renderMaterialStock` | `getMaterials` |
+| hospital | 1157 | `render_adoption_info` | `getAdoptions getHallListings getHospitalPets`（**半死**：另有 `get()` 已抛错） |
+| hospital | 1414 | `render_euthanasia` | `getEuthanasia getHospitalPets` |
+| hospital | 1539 | `render_ledger` | `getEuthanasia getHospitalPets getMaterialTransactions getTransfers getTreatments` |
+
+其中 **gov `renderSettingsContent` 的「操作日志」最值得单独说**：
+`getOperationLogs` 失败会被渲染成「暂无操作日志」—— **审计证据缺失被伪装成
+「没有操作发生」**。这是安全面的静默失败，不是「空表格」那么无害。
+
+**9 处有意降级**（`catch` 里只降级、不呈现失败）**保持不动**，
+但写进测试**钉住**它们，避免后人「顺手修掉」：
+shelter `showCaptureDetail` / `showCaptureEdit`(×2) / `showRecoverModal`；
+hospital `renderReceiveTab` / `renderTreatmentForm` / `render_material` /
+`renderMaterialAdjustment`；adopter `showLifecycle`。
+
+#### 2.31.5 修法：严格读内核 + 严格便捷方法（**默认语义零变化**）
+
+**没有**把 `_get` 直接改成抛错 —— 它的调用点有几十个，其中大部分是**列表页**，
+项目明确接受「读接口失败降级成空比整页崩掉更可接受」（见 `tnr-common.js` 说明）。
+改基方法会让几十个调用点变成未捕获的 rejection，而项目**没有**全局
+`unhandledrejection` 兜底 → 页面会静默失效。**爆炸半径不可接受。**
+
+改成**加法**：
+
+```js
+/* 严格读内核：失败**抛错**，成功返回 `data` */
+async getData(url) {
+  const res = await fetch(url, { credentials: 'same-origin' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.success) {
+    throw new Error(data.message || `加载失败（HTTP ${res.status}）`);
+  }
+  return data.data;
+},
+/* 严格读便捷方法：与同名 getXxx() 一一对应，只把 _get 换成 getData */
+async getTransfersStrict() { return this.getData('/api/business/transfers/'); },
+```
+
+* 新增 `getData` + **16 个 `XxxStrict()`**（接口方法 74 → 91）；
+* **只改那 12 处**调用点，其余几十个调用点**一行不动**；
+* `getLedger` 原有内联严格读**重构为委托 `getData`**，消除重复。
+
+判据用 `json_ok` / `json_fail` 的**统一信封**：全仓只有 2 处裸 `JsonResponse`
+（`accounts/views.py`），也都带 `success` → `!res.ok || !data.success` 就是完整判据。
+
+#### 2.31.6 侦察阶段的坑：扫描器比被扫的代码更容易出错
+
+要扫「模板里到底写了什么 JS」，得先把字符串 / 模板 / 注释 / 正则剥成等长空白
+（`scripts/jslex.py`）。这个剥离器**每一处失真都会变成漏报，而且不报错**。
+实测踩了四个：
+
+| # | 坑 | 后果 |
+|---|---|---|
+| 1 | 剥**整个 HTML 文件** | 属性引号产生上千个失配区段；一旦失步会**跨区域**污染后面的脚本 |
+| 2 | 模板字符串的 **`${}` 嵌套**（`` ${d ? `<p>x</p>` : ''} ``） | 内层反引号被当成外层结束 → 状态错位一个反引号 → 整段被吞 |
+| 3 | **`</button>` 被误判成正则起点**（`<` 曾在正则前导集里） | `/` 一直吃到下一个 `/` —— 把「一处失步」放大成「整段被吞」：gov 端 13 处 `try {` 吞到只剩 **3** 处 |
+| 4 | 「正则体里出现引号就判否」 | `/"/g` 是**合法正则**，被误杀 → `.replace(/"/g, '""')` 整段失步（shelter 第 3462 行） |
+
+修法与判据：
+* 只在 `<script>` 区域内剥（跳过带 `src=` 的外链）；
+* 模板字符串用**上下文栈**：遇 `${` 进「表达式」上下文，`}` 深度归零才回模板；
+* 正则前导集**只用标准启发式** `( , = : [ ! & | ? { } ;`，**不含 `< > + - * % ~ ^`**；
+  再加「闭 `/` 后若跟字母，必须是合法正则标志 `dgimsuvy`」；
+* 原则：**宁可漏剥一个正则，也不能吞掉代码**（吞代码 = 漏报 = 静默失败）。
+
+**定位失步的通用手法**：剥离保证**长度不变** → 逐字符比对原始与剥离结果，
+或检查「原始里每个 `try {` 在剥离后是否仍在同一偏移」，第一个对不上的就是失步起点。
+
+#### 2.31.7 一个「位置全对、结构坏了」的隐蔽 bug
+
+`${` 抹成了两个空格，**闭 `}` 却原样输出** → 大括号**多一个闭括号** →
+`match_brace` 提前收尾 → **方法体被静默截断**。
+后果：「静默读方法集」少了 **7 个**（`getHospitalPets` / `getPets` /
+`getInstitutions` / `getUsers` / `getBusinessSupervision` /
+`getAdoptionApplications` / `getOperationLogs` 全被判成「非静默」）。
+
+⚠ 而**只查「`try {` 偏移一致」抓不到它** —— 那时所有 `try {` 位置都是对的。
+所以扫描器自检必须三条：**① 长度不变 ② `try {` 偏移一致 ③ 大括号/圆括号配平**。
+第 ② 条还要**跳过注释里的 `try {`**，否则会被「讲这件事的注释」打红（假阳性）。
+
+#### 2.31.8 新增 17 个测试（915 → 932）
+
+`business/tests/test_silent_read_contract.py`，4 个测试类：
+
+| 类 | 用例 | 钉住什么 |
+|---|---|---|
+| `LexerSelfCheckTest` | 6 | 词法器三条不变量 + 三个坑各一条回归 + **判据不空转对照** |
+| `ApiMethodClassificationTest` | 5 | **静默读方法集钉死**（新增必须是自觉行为）；`getData` 抛错 / `_get` 静默；纯函数不得混入；每个 `XxxStrict` 必须委托 `getData` 且必须有软版本孪生 |
+| `DeadCatchIsZeroTest` | 4 | 死 catch 必须 **0**；扫描非空转；**植入两处回归必须被抓到** |
+| `SilentReadInventoryTest` | 1 | 9 处**有意降级仍在**（防后人「顺手修掉」） |
+
+`business/tests/test_param_contract.py` 的 `LedgerApiSurfacesErrorsTest` 同步改造：
+状态感知断言（`res.ok` / `data.success` / `throw` / `data.message`）从 `getLedger`
+**移到 `getData`**，`getLedger` 改为断言「确实委托了 `getData`」。
+
+#### 2.31.9 变异验证（42 条全部被捕获）
+
+新增 **M39~M44（6 条）**，总数 36 → **42**：
+
+| 变异 | 期望捕获 |
+|---|---|
+| M39 一宠一档退回静默读 | `test_no_dead_catch_anywhere` |
+| M40 `getData` 去掉抛错 | `test_get_data_throws_with_server_message` |
+| M41 `getTransfersStrict` 偷偷走 `_get`（**名实不符**） | `test_every_strict_method_delegates_to_getdata` |
+| M42 词法器闭 `}` 原样输出（结构静默截断） | `test_audit_passes_on_every_frontend_file` |
+| M43 `<` 加回正则前导集（失步放大器） | `test_regex_preceder_set_is_exactly_the_standard_heuristic` |
+| M44 正则判否加回「体里有引号」（误杀合法正则） | `test_quoted_regex_is_not_mistaken_for_a_string` |
+
+⚠ **M36 的教训**：本轮把 `getLedger` 重构成委托 `getData` 之后，M36 原来的
+目标串（内联 `fetch` + `throw`）**已经不存在**，预检报「命中 0 次」。
+**重构会悄悄废掉引用具体实现的变异条目** —— 变异表本身也要跟着重构一起改。
+
+⚠ **顺手修了夹具的一处「证据失真」**：`detail` 原先取 `ln.split(' ')[1]`，
+而用 `subTest` 循环的用例会在**同一个用例名**下产生多行失败 ——
+M42 当时打印出四行一模一样的 `test_every_strict_method_delegates_to_getdata`，
+**看不出是哪几个方法红的**。改成保留 subTest 参数后：
+
+```
+M42 词法器闭 `}` 原样输出（结构静默截断）
+     PASS: 捕获=test_every_strict_method_delegates_to_getdata method='getPetsStrict';
+           … method='getHospitalPetsStrict'; … method='getInstitutionsStrict';
+           … method='getOperationLogsStrict'
+```
+
+（subTest 后缀的**真实形态是 `(method='x')`**，不是 `[method=x]` ——
+这是实测出来的，第一版按 `[` 猜的判据不生效，跑了一遍才发现。
+判据逻辑 `hit` 未动，只改打印；改后用单目标冒烟复跑验证过。）
+
+#### 2.31.10 GUI 实测（`gui-test-scripts/67_silent_read_visibility.js`，12 用例 × 2 组）
+
+两组**缺一不可**：
+
+* **A 组（正常路径回归）** —— 正常登录、正常渲染，容器里**不能**出现「加载失败」。
+  没有这一组，「把 `_get` 换成抛错把页面改坏」就没人发现。
+* **B 组（失败可见性）** —— 用 `page.route` 把目标 API 打成 **500**，
+  容器里**必须**出现「加载失败」。没有这一组，修复就只是「源码看起来对」。
+
+结果：**12 用例 / 24 组检查，0 失败**。
+截图归档 `gui-test-screenshots/r25_{a,b}_*.png`（24 张），
+肉眼核对过 `r25_a_hospital-ledger.png`（台账 2/5/23/1 正常）
+与 `r25_b_hospital-ledger.png`（⚠️ 加载失败）、
+`r25_b_shelter-pet-archive.png`（toast「档案加载失败：模拟服务端 500」）。
+
+**GUI 夹具自身踩了两个坑**（都不是产品缺陷，但都会伪装成产品回归）：
+
+1. **`page.unroute(url, handler)` 要求传同一个 handler 引用。** 第一版用工厂函数
+   每次新建闭包 → `unroute` 匹配不到 → **路由残留到下一个用例** →
+   后续 A 组（正常路径）被上一轮的 500 污染，报出 **4 例假失败**。
+   改用「**一次注册 + 可变开关**」，并用 `route.fallback()`（不是 `continue()`）
+   把不拦的请求交给下一个匹配的处理器。
+2. **`page.goto` 会重建文档，装在页面里的 toast 观察器随之消失。**
+   shelter 一宠一档靠 toast 呈现失败，第一版因此被判成「没显示失败」。
+   每次 goto 后必须重跑 `installToastWatch(page)`。
+
+另外 `#settingsContent` / `#treatmentContent` 是**动态注入**的容器，
+必须先导航过去把页面壳层建出来，否则 `getElementById` 拿到 null，
+报错位置还在 render 方法里，看着像产品缺陷。
+
+#### 2.31.11 本轮验证结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **932 OK**（915 → 932） |
+| 死 catch 清点（`scripts/dead_catch_probe.py`） | 修复前 **12 处** → 修复后 **0 处**；「有意降级」9 处保持不变 |
+| 变异验证 | **42/42 全部被捕获** |
+| GUI 实测（67 号脚本） | **12 用例 / 24 组检查，0 失败** |
+| 静态资源版本 | 6 处 `?v=` 同步升到 `20260919c` |
+| 词法器自检 | 6 个前端文件（4 端 portal + `tnr-api.js` + `tnr-common.js`）全部通过三条不变量 |
+
+#### 2.31.12 负结论与已知边界
+
+- **`_get` 的静默语义**整体保留**是设计决定，不是遗留**：列表页降级成空
+  比整页崩掉更可接受。本轮只把「作者已经写了失败提示却兑现不了」的那 12 处
+  改成严格读。**其余 25 个静默读方法语义未变** —— 它们的失败仍会被渲染成「空」。
+- **`_get` 与 `_post` 的差别是判定的分水岭**，第一版分类器搞错方向，
+  多报了 10 处。**`_post` 的失败是可感知的**（调用方查 `res.success`）。
+- **「有意降级」与「承诺落空」的界是「catch 体里有没有向用户呈现失败」**，
+  不是「catch 体是否为空」。`pets = []` 有代码但属于降级。
+- **A/B 两类只覆盖「读接口」**。写接口的可见性（`assertOk` / `res.success`）
+  在前几轮已处理，本轮只做**分类核对**，没有新增写侧修复。
+- **`66_api_status_sweep.js` 的负结论仍然成立**：108 个视图 / 226 次 `/api/` 请求，
+  正常操作下**没有任何页面**拿到非预期的 4xx/5xx 或业务拒绝。
+  也就是说本轮的 12 处死 catch **只在异常路径（服务端 5xx / 权限被拒）才会显形** ——
+  正常走查看不见，所以必须靠 `page.route` 主动打断才验得出来。
+- **`generatePetCodes` 的本地兜底**（`fallback` 类）保持不动：
+  接口不可用时用本地算法生成预览编号，是**有意**的降级，注释已说明。
 
 ---
 
@@ -3624,7 +3889,7 @@ python manage.py migrate
 python manage.py seed_data          # 幂等，可重复执行；同时校准演示账号
 python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
-python manage.py test --parallel 1  # 915 个用例
+python manage.py test --parallel 1  # 932 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
@@ -3687,7 +3952,41 @@ NODE_PATH=/Users/wl/.workbuddy-ai/binaries/node/playwright-env/node_modules \
 变异验证（把判据逐个破坏，确认测试真的会红）：
 
 ```bash
-.venv/bin/python scripts/mutation_check.py     # 36 条变异，全绿即「测试有判别力」
+.venv/bin/python scripts/mutation_check.py     # 42 条变异，全绿即「测试有判别力」
 # ⚠ 别在前台跑到超时 —— 进程被信号杀掉会把变异体留在盘上（脚本已装信号还原，但跑完
 #   仍应 `git status` 复核）。
+# ⚠ **跑的过程中工作区是被污染的**（变异体就在盘上）。这期间：
+#     ① 不要提交；② 不要拿 `git status` / `git diff` 判断「我改了什么」——
+#     实测 `core/tests_audit.py` 会在运行期显示成 `hospital_user_a`（M-变体），
+#     看着像自己改错了，其实是脚本临时改的；③ 不要并行跑别的测试（会读到变异体）。
+```
+
+静默读清点（静态，只读，不依赖 runserver）：
+
+```bash
+.venv/bin/python scripts/dead_catch_probe.py
+# 逐文件列出每个 try/catch 的分类：死 / 半死 / 静默吞（有意降级）/ 活。
+# 当前基线：死 0｜半死 0｜静默吞 9｜活 52。
+# 修复前（c26a74c 前）：死 11｜半死 1 —— 全部是「try{纯静默读} catch{呈现失败}」。
+# ⚠ 判据两条件**缺一不可**：① try 体内的 API 调用**全部**是静默读（`_get` 系）；
+#   ② catch 体里向用户呈现了失败（剥注释后含 `toast(` / `alert(` / `.innerHTML` / `.textContent`）。
+#   只按「catch 体非空」判会把 `catch (e) { pets = []; }` 这种**有意降级**算成缺陷。
+```
+
+词法器自检（`jslex.py` 是所有静态判据的地基，先确认它没失步）：
+
+```bash
+.venv/bin/python -c "
+import sys; sys.path.insert(0, 'scripts')
+from jslex import audit, stripped_kinds
+from dead_catch_probe import PORTALS
+import pathlib
+for p in PORTALS:
+    src = pathlib.Path(p).read_text(encoding='utf-8')
+    print(p, audit(src))
+"
+# 每个文件都必须是 (True, '')。三条不变量：① 长度不变 ② `try {` 偏移一致（跳过注释里的）
+#   ③ 大括号 / 圆括号配平。**只查 ①② 抓不到「位置全对、结构坏了」**（见 §2.31）。
+# ⚠ 定位失步的通用手法：词法器保证长度不变 → 逐字符比对原始与剥离结果，
+#   第一个对不上的偏移就是失步起点。
 ```
