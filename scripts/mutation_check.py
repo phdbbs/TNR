@@ -51,6 +51,7 @@
 """
 import os
 import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -68,6 +69,7 @@ TEST_TARGETS = sys.argv[1:] or [
     'business.tests.test_write_scope',
     'business.tests.test_own_institution_scope',
     'business.tests.test_param_contract',
+    'business.tests.test_silent_read_contract',
     'business.tests.test_transfer_views',
     'business.tests.test_material_views',
     'business.tests.test_endpoint_role_scope',
@@ -163,16 +165,17 @@ MUTATIONS += [
     (
         'M11 只升 4 个门户里的 1 处版本号（漏升 5 处）',
         'templates/portal/hospital/portal.html',
-        "js/tnr-api.js' %}?v=20260919b",
+        "js/tnr-api.js' %}?v=20260919c",
         "js/tnr-api.js' %}?v=20260919a",
         'all_version_query_params_are_identical',
     ),
     (
         # ⚠ M11 / M12 里写死了当前版本号 —— **每次升 `?v=` 都要同步改这两条**，
-        # 否则预检会报「命中 0 次」。第二十四轮升 `20260919a → b` 时就踩到了。
+        # 否则预检会报「命中 0 次」。第二十四轮升 `a → b`、第二十五轮升 `b → c`
+        # 时都踩到了。
         'M12 某个门户的 tnr-api.js 去掉版本号',
         'templates/portal/adopter/portal.html',
-        "js/tnr-api.js' %}?v=20260919b",
+        "js/tnr-api.js' %}?v=20260919c",
         "js/tnr-api.js' %}",
         'versioned_in_every_portal',
     ),
@@ -546,14 +549,14 @@ MUTATIONS += [
         # 服务端的 400「机构必须是数字」于是被渲染成一张**空表**。
         'M36 getLedger 退回 _get（失败被静默渲染成空表）',
         'static/js/tnr-api.js',
-        """    const res = await fetch(url, { credentials: 'same-origin' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success) {
-      throw new Error(data.message || `台账加载失败（HTTP ${res.status}）`);
-    }
-    return data.data;
+        # ⚠ 第二十五轮把状态感知逻辑提成了 `getData()`，`getLedger` 改成委托它 ——
+        # 原来的「内联 fetch + throw」目标串已经不存在了（预检报「命中 0 次」）。
+        # 所以这里改成拦「委托」这一句。
+        """    // 台账接口的失败必须**抛出去**，由调用方决定怎么显示。
+    return this.getData(url);
 """,
-        """    return this._get(url);
+        """    // 台账接口的失败必须**抛出去**，由调用方决定怎么显示。
+    return this._get(url);
 """,
         'test_get_ledger_does_not_use_silent_get',
     ),
@@ -587,6 +590,74 @@ MUTATIONS += [
         'id="ca_petCount" min="1" max="100"',
         'id="ca_petCount" min="1" max="200"',
         'test_frontend_input_max_matches_backend_cap',
+    ),
+    (
+        # 严格读退回软版本 —— catch 又变成「承诺了却兑现不了」。
+        'M39 一宠一档退回静默读（死 catch 复现）',
+        'templates/portal/shelter/portal.html',
+        'data = await TNR_API.getPetLifecycleStrict(petId);',
+        'data = await TNR_API.getPetLifecycle(petId);',
+        'test_no_dead_catch_anywhere',
+    ),
+    (
+        # 严格读内核不抛错 —— 整轮修复的地基没了（`XxxStrict` 全变成软版本）。
+        'M40 getData 去掉抛错（严格读内核失效）',
+        'static/js/tnr-api.js',
+        """    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || `加载失败（HTTP ${res.status}）`);
+    }
+    return data.data;
+  },
+  async getLedger(filters) {""",
+        """    const data = await res.json().catch(() => ({}));
+    return data.success ? data.data : (Array.isArray(data.data) ? data.data : []);
+  },
+  async getLedger(filters) {""",
+        'test_get_data_throws_with_server_message',
+    ),
+    (
+        # `XxxStrict` 偷偷走 `_get` —— 名字是严格读、行为是静默读，最难查的一种。
+        'M41 getTransfersStrict 偷偷走 _get（名实不符）',
+        'static/js/tnr-api.js',
+        "  async getTransfersStrict() { return this.getData('/api/business/transfers/'); },",
+        "  async getTransfersStrict() { return this._get('/api/business/transfers/'); },",
+        'test_every_strict_method_delegates_to_getdata',
+    ),
+    (
+        # 还原「`${` 抹了、闭 `}` 没抹」—— 大括号多一个闭括号，
+        # `match_brace` 提前收尾、方法体被静默截断（位置全对，只有结构坏了）。
+        'M42 词法器闭 `}` 原样输出（结构静默截断）',
+        'scripts/jslex.py',
+        """                    emit(' ', 'template')
+                    stack.pop()          # 回到模板字符串""",
+        """                    emit('}', 'template')
+                    stack.pop()          # 回到模板字符串""",
+        'test_audit_passes_on_every_frontend_file',
+    ),
+    (
+        # `<` 加回正则前导集 —— 它本身不单独出事，但会把「一处失步」
+        # 放大成「整段代码被吞」（第二十五轮实测：13 处 try 吞到只剩 3 处）。
+        'M43 `<` 加回正则前导集（失步放大器）',
+        'scripts/jslex.py',
+        "REGEX_PRECEDERS = set('(,=:[!&|?{};')",
+        "REGEX_PRECEDERS = set('(,=:[!&|?{};<>')",
+        'test_regex_preceder_set_is_exactly_the_standard_heuristic',
+    ),
+    (
+        # 「正则体里出现引号就判否」—— 看着更安全，实际会误杀 `/"/g`，
+        # 于是整段 `.replace(/"/g, '""')` 失步（shelter 第 3462 行实测）。
+        'M44 正则判否加回「体里有引号」（误杀合法正则）',
+        'scripts/jslex.py',
+        """        if d == '\\n':
+            return None
+        if d == '[':""",
+        """        if d == '\\n':
+            return None
+        if d in ('"', "'", '`') and not in_class:
+            return None
+        if d == '[':""",
+        'test_quoted_regex_is_not_mistaken_for_a_string',
     ),
 ]
 
@@ -623,6 +694,30 @@ def run_tests():
     cmd = [str(ROOT / '.venv/bin/python'), 'manage.py', 'test', *TEST_TARGETS, '-v', '0']
     r = subprocess.run(cmd, cwd=ROOT, env=ENV, capture_output=True, text=True)
     return r.returncode, (r.stdout + r.stderr)
+
+
+# `FAIL: <用例名> (<模块.类.用例>)`，后面可能再跟一个 `(subTest 参数)`
+_FAIL_LINE_RE = re.compile(r'^(?:FAIL|ERROR):\s+(\S+)\s+\([^)]*\)(?:\s+\((.*)\))?\s*$')
+
+
+def _short(line):
+    """把 unittest 的失败行压成「用例名 + subTest 标签」。
+
+    原始形态：`FAIL: test_xxx (mod.Cls.test_xxx) (method='getTransfersStrict')`
+
+    ⚠ **必须带上 subTest 标签**：用 `subTest` 循环的用例（本仓库大量使用）
+    会在**同一个用例名**下产生**多行**失败 —— 只取 `split(' ')[1]`
+    会打印出四行一模一样的名字，**看不出是哪一次迭代红的**（M42 实测）。
+    ⚠ 后缀是 `(method='x')`（**圆括号 + repr**），不是 `[method=x]` ——
+    这一点是实测出来的（`TextTestResult.getDescription` 对 `_SubTest` 走
+    `str()`，其形态为 `test (mod.Cls.test) (kwarg=repr)`）。
+    """
+    m = _FAIL_LINE_RE.match(line)
+    if not m:
+        parts = line.split(' ', 2)
+        return parts[1] if len(parts) > 1 else '?'
+    name, sub = m.group(1), m.group(2)
+    return f'{name} {sub}' if sub else name
 
 
 # 信号处理器要用的「原始内容」快照（在 main 里填）
@@ -698,7 +793,7 @@ def main():
                 failed = [ln for ln in out.splitlines()
                           if ln.startswith('FAIL:') or ln.startswith('ERROR:')]
                 hit = any(expect in ln for ln in failed)
-                detail = '; '.join(ln.split(' ')[1] for ln in failed[:4]) or '?'
+                detail = '; '.join(_short(ln) for ln in failed[:4]) or '?'
                 results.append((label, 'PASS' if hit else 'WEAK', f'捕获={detail}'))
     finally:
         for f, text in originals.items():
