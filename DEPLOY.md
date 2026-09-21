@@ -220,24 +220,46 @@ else:
 > 否则 `Success` 表里会长期躺着 `time.sleep` 这类**不是业务产生的**痕迹，
 > 日后排查真任务时会被误当成「有任务跑过」。
 
-### 5.2 定时任务**没有**注册（本项目的已知缺口）
+### 5.2 定时任务：已由数据迁移注册（附历史缺口说明）
 
 `business/tasks.py::auto_promote_to_adoptable`（诊疗完成 5 天后自动转待领养并上架领养大厅）
-在生产上**没有 `Schedule` 注册**：`django_q_schedule` 0 行；清库前的旧库**同样是 0 行**
-（已从备份转储核对）—— 所以**不是**某次部署或清库造成的，是项目自带缺口。
+的**周期调度**由数据迁移
+`business/migrations/0016_register_auto_promote_schedule.py` 注册：
+**每天 03:00（`Asia/Shanghai`）**、`schedule_type='D'`、`repeats=-1`、`cluster=None`。
+它随 `migrate` 自动创建，任何环境（开发 / 测试 / 生产 / 换机器重建）都自带，
+不再依赖运维手工补。
 
-它当前只有三条触发路径：
+**核验**（部署后必做，见 §5.1 的 `Schedule.objects.count()`）：
 
-| 路径 | 位置 | 频率 |
-|---|---|---|
-| 启动补偿 | `business/apps.py`（挂 `request_started`） | 每个 gunicorn 进程**启动后首次请求**一次 |
-| 接口投递 | `business/views_treatment.py::_schedule_auto_promote()` | 诊疗完成流程里投递一次 |
-| 手工命令 | `manage.py promote_adoptable [--force]` | 人工执行 |
+```bash
+cd /opt/tnr
+venv/bin/python manage.py shell -c "
+from django_q.models import Schedule
+for s in Schedule.objects.all():
+    print(s.pk, s.name, s.func, s.schedule_type, s.repeats, s.cluster, s.next_run)
+"
+# 期望恰好一条：... business.tasks.auto_promote_to_adoptable D -1 None 2026-09-22 03:00:00+08:00
+```
 
-源码注释 `business/views_treatment.py:285` 写的是「**部署时配置定时任务即可**」——
-即作者预期运维在部署时补一条 `Schedule`，但从未补过。后果：**服务器长期不重启、
-期间又没人走「诊疗完成」流程时，超期宠物不会被自动转待领养**。
-是否注册、以什么频率注册属业务决策，需与业务方确认后再落地。
+> **历史缺口（2026-09-21 已修，别再重复排查）**：迁移之前 `django_q_schedule`
+> 是 0 行 —— 而且**清库前的旧库同样是 0 行**（已从备份转储 `db-tnr_system.sql` 核对），
+> 所以**不是**某次部署或清库造成的，是项目自带缺口。
+> 当时该任务只有三条**非周期**触发路径：启动补偿（`business/apps.py`，
+> 每进程启动后首次请求一次）、接口投递（`views_treatment.py::_schedule_auto_promote()`，
+> 诊疗完成流程里一次）、手工命令（`manage.py promote_adoptable`）。
+> 源码注释原先写的是「部署时配置定时任务即可」—— 把周期注册当成运维的手工动作，
+> **从未被做过**。后果：服务器长期不重启、期间又没人走「诊疗完成」流程时，
+> 超期宠物不会被自动转待领养。现已固化进迁移，该注释也已同步更正。
+
+**幂等**：`get_or_create` 以 `name` 为键，已存在（运维手工建过 / 迁移重跑）
+**不覆盖** `next_run` / `repeats` / `schedule_type`，不打断运维的既有调整。
+
+> ⚠ **验证「调度循环真的会认领」不必等到凌晨**：临时建一条 `Schedule`
+> （`next_run` 故意设为过去、`func='time.sleep'`、`args='0'`、
+> `schedule_type='O'`、`repeats=1`），django-q2 的调度器每 ~30 秒轮询一次，
+> 实测 25 秒内产生 `Success` 记录，用完删干净。
+> 想验**真实那条**，可临时把它的 `next_run` 改到过去、等它跑完再改回 03:00 ——
+> ⚠ 但此时它会**真的执行转待领养**，务必先确认没有会被改动的记录。
 
 ## 六、常见报错对照
 

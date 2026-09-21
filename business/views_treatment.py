@@ -276,11 +276,21 @@ def _parse_date(date_str):
 
 
 def _schedule_auto_promote():
-    """通过 django-q2 调度自动转待领养任务"""
+    """诊疗完成时**立即**投递一次「自动转待领养」，让结果尽快生效。
+
+    ⚠ 这只是**快路径**，不是周期调度。真正的定时执行由
+    `business/migrations/0016_register_auto_promote_schedule.py` 注册的
+    每天 03:00 那条 `Schedule` 负责。
+
+    这里原先的注释写的是「部署时配置定时任务即可」—— 把周期注册当成运维的
+    手工动作，结果**从未被做过**，该任务长期只靠启动补偿和这条快路径触发
+    （详见 `DEPLOY.md` §5.2）。现已固化进数据迁移，注释同步更正。
+    """
     try:
         from django_q.tasks import async_task
         async_task('business.tasks.auto_promote_to_adoptable')
     except Exception:
-        # django-q2 未运行或未配置，不影响主流程
-        # 部署时配置定时任务即可
+        # 有意静默降级：投递失败不影响「诊疗记录创建成功」这个主流程，
+        # 且周期调度（0016）会在当天凌晨兜底。这里不向用户呈现错误是刻意的，
+        # 不是漏了错误处理 —— 别按「死 catch」当缺陷修。
         pass
