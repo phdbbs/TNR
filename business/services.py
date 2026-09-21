@@ -8,7 +8,7 @@ import random
 import re
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from django.db.models import Q, Sum
 from django.http import JsonResponse
@@ -149,18 +149,37 @@ def parse_date_param(raw, label='日期'):
         return None, f'{label}不是有效日期'
 
 
+def aware_day_start(d):
+    """把 ``date`` 变成**当前时区的当天零点**（带时区的 ``datetime``）。
+
+    ⚠ 直接把 `date` 丢给 `DateTimeField` 做比较，Django 会抛
+
+        RuntimeWarning: DateTimeField xxx received a naive datetime
+        (2026-09-20 00:00:00) while time zone support is active
+
+    结果其实是对的（Django 按 `TIME_ZONE` 解释那个 naive 值），但**每个日期
+    筛选请求都会往日志里刷一条警告** —— 真正的异常会被这类噪音淹掉，
+    这正是本项目一直在防的「失败不可见」的另一种形态。
+
+    这里显式补上时区，**语义完全不变**，警告消失。
+    """
+    return timezone.make_aware(
+        datetime.combine(d, time.min), timezone.get_current_timezone())
+
+
 def date_upper_exclusive(d):
     """日期区间上界：把「含当天」的闭区间上界换成**开区间**上界。
 
-    返回 ``(上界值, 是否开区间)``。
+    返回 ``(上界值, 是否开区间)``。上界是**带时区的 datetime**（见
+    `aware_day_start`）—— 直接返回 `date` 会让 Django 抛 naive datetime 警告。
     `d == date.max`（9999-12-31）时加一天会 `OverflowError`（异常类型 4），
-    此时退回闭区间上界 `d` —— 两者语义等价，因为不可能有比 `date.max`
+    此时退回**当天零点**的闭区间 —— 两者语义等价，因为不可能有比 `date.max`
     更晚的记录。**不要**用 `try: ... except ValueError` 去兜，类型不对。
     """
     try:
-        return d + timedelta(days=1), True
+        return aware_day_start(d + timedelta(days=1)), True
     except OverflowError:
-        return d, False
+        return aware_day_start(d), False
 
 
 # ============================================

@@ -20,7 +20,7 @@ from business.services import (
     get_district_scope, pet_brief, pet_archive_records, with_camel_keys,
     validate_operator_district, cascade_operator_district,
     validate_user_manage_scope, inactive_district_error,
-    parse_int_param, parse_date_param, date_upper_exclusive,
+    parse_int_param, parse_date_param, date_upper_exclusive, aware_day_start,
 )
 from core.audit import ACTION_LABELS
 from core.models import AuditLog, District, Institution
@@ -974,7 +974,9 @@ def ledger_center(request):
 
     def _date_filter(qs, date_field='created_at'):
         if start_date:
-            qs = qs.filter(**{f'{date_field}__gte': start_date})
+            # 下界同样要补时区：`date` 直接比较 DateTimeField 会触发
+            # naive datetime 警告（见 `aware_day_start` 的说明）。
+            qs = qs.filter(**{f'{date_field}__gte': aware_day_start(start_date)})
         if end_date:
             # 结束日期含当天：用次日零点开区间，避免当天非零点记录被排除。
             # `end_date == date.max`（9999-12-31）时加一天会 `OverflowError`

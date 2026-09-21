@@ -30,7 +30,8 @@ import ast
 import inspect
 import re
 import textwrap
-from datetime import date, timedelta
+import warnings
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from django.core.exceptions import ValidationError
@@ -267,18 +268,39 @@ class ParseDateParamTest(SimpleTestCase):
 
 
 class DateUpperExclusiveTest(SimpleTestCase):
-    """第四种异常类型的专用判据：`date.max` 加一天。"""
+    """第四种异常类型的专用判据：`date.max` 加一天。
+
+    上界必须是**带时区的 datetime**：直接返回 `date` 时 Django 比较
+    `DateTimeField` 会抛 `RuntimeWarning: ... received a naive datetime`
+    —— 结果正确（Django 按 `TIME_ZONE` 解释），但每个日期筛选请求都刷一条，
+    把真异常淹掉。这条断言就是那次修复的护栏。
+    """
 
     def test_normal_date_uses_open_interval(self):
-        self.assertEqual(date_upper_exclusive(date(2026, 9, 19)),
-                         (date(2026, 9, 20), True))
+        upper, exclusive = date_upper_exclusive(date(2026, 9, 19))
+        self.assertTrue(exclusive)
+        self.assertTrue(timezone.is_aware(upper),
+                        '上界必须带时区，否则 DateTimeField 会抛 naive datetime 警告')
+        self.assertEqual(timezone.localtime(upper).replace(tzinfo=None),
+                         datetime(2026, 9, 20, 0, 0))
 
     def test_date_max_does_not_raise(self):
         """`date.max + timedelta(days=1)` 会 `OverflowError`
         —— 与 SQLite 那个 `OverflowError` 同名不同源，`except ValueError` 兜不住。"""
         with self.assertRaises(OverflowError):
             date.max + timedelta(days=1)
-        self.assertEqual(date_upper_exclusive(date.max), (date.max, False))
+        upper, exclusive = date_upper_exclusive(date.max)
+        self.assertFalse(exclusive)
+        self.assertTrue(timezone.is_aware(upper))
+        self.assertEqual(timezone.localtime(upper).replace(tzinfo=None),
+                         datetime(9999, 12, 31, 0, 0))
+
+    def test_aware_day_start_is_aware(self):
+        """下界（`__gte`）走同一个 helper，也必须带时区。"""
+        bound = services.aware_day_start(date(2026, 9, 19))
+        self.assertTrue(timezone.is_aware(bound))
+        self.assertEqual(timezone.localtime(bound).replace(tzinfo=None),
+                         datetime(2026, 9, 19, 0, 0))
 
 
 # ============================================================
@@ -554,6 +576,26 @@ class LedgerCenterParamTest(ParamContractMixin, BusinessTestBase):
         self.login_as(self.gov_city)
         resp = self.client.get(SV_LEDGER, {'start_date': 'abc'})
         self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_date_filter_emits_no_naive_datetime_warning(self):
+        """日期筛选不得把裸 `date` 丢给 `DateTimeField`。
+
+        改前 `?start_date=...&end_date=...` 的**每个**请求都会让 Django 抛
+        `RuntimeWarning: DateTimeField ... received a naive datetime` ——
+        筛选结果是对的（Django 按 `TIME_ZONE` 解释），但生产日志被刷满噪音，
+        真异常会被淹掉。修法是上下界都过 `aware_day_start()`。
+        """
+        today = timezone.localdate().isoformat()
+        self.login_as(self.gov_city)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            resp = self.client.get(SV_LEDGER, {'business_type': 'capture',
+                                               'start_date': today,
+                                               'end_date': today})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        naive = [str(w.message) for w in caught if 'naive datetime' in str(w.message)]
+        self.assertEqual(naive, [],
+                         f'日期筛选产生了 naive datetime 警告：{naive}')
 
 
 # ============================================================
