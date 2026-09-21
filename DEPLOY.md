@@ -78,6 +78,18 @@ python manage.py check_data_integrity
 # 账号区县 ≠ 所属机构区县、业务记录区县 ≠ 归属对象区县、捕捉单作废但宠物未作废。
 # 有输出时逐条人工确认后再处理，命令本身不会自动修复。
 
+# 6.2 演示物料有效期订正（**只在存量库上跑一次**）
+python manage.py refresh_demo_material_expiry          # 预演，只打印将改的行
+python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
+# 背景：早期 seed_data 把物料有效期写成绝对日期，现已改成相对今天生成；
+# 但 get_or_create 的 defaults **只在创建时生效**，所以已导入的库修不回来、
+# 重跑 seed_data 也没用，只能靠这条命令订正。
+# 判据 = 名称 ∈ 演示物料清单 + 区县 = 襄城区 + 有效期存在且已过期（三条缺一不可）：
+#   - 不用批号（同一套演示数据在不同环境批号不同，会静默漏掉）
+#   - 必须限定区县（现场 4 个区县各有同名物料，只有襄城区那套是演示数据）
+#   - 必须限定「已过期」（`None` 是「没登记有效期」，不等于过期，不能代填）
+# 非演示物料只报告不改；默认预演，可重复执行（幂等）。
+
 # 7. 按你的部署方式重启（gunicorn/supervisor/systemd 或 runserver）
 ```
 
@@ -152,6 +164,8 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 | **照片上传可用** | 捕捉登记里传一张照片，再**经反代取回** | 上传成功；`media/` 出现文件；`/media/...` 返回 200 且**与原图逐字节一致** |
 | **数据隔离生效** | 用他区账号访问本区宠物生命周期，**再访问一个不存在的 id** | **两者响应完全一致**（都是 404 且文案相同）—— 否则可用枚举 id 扫库 |
 | 数据一致性 | `python manage.py check_data_integrity` | 输出「未发现一致性问题」，退出码 0 |
+| 演示物料未过期 | `python manage.py refresh_demo_material_expiry` | 输出「已订正 0 行」或全部 `[跳过]`；**不应**出现「将改写」 |
+| 过期物料被拦 | 把某物料有效期改成昨天，再用它建诊疗（脚本见 §5.1 同款思路） | HTTP **400** 且文案含「已过期」；**未过期时不得出现该文案** |
 | 定时任务在跑 | **真投一个任务看是否被消费**（脚本见 §5.1），不能只看 `supervisorctl status` | `Success` 出现该任务且 `started`/`stopped` 有值；**清账后** `Success`/`Failure`/`OrmQ` 归零 |
 | 定时注册存在 | `manage.py shell -c "from django_q.models import Schedule; print(Schedule.objects.count())"` | **≥ 1**；若为 0 见 §5.2（「5 天自动转待领养」只剩接口触发 + 启动补偿） |
 | 无未捕获异常 | **只看最后一次重启之后**的 Traceback（见 §5.3），**不要**对整份日志 `grep -c` | 重启后 **0** 处业务异常；`DisallowedHost` 是**正确行为**，不算 |
