@@ -152,7 +152,8 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 | **照片上传可用** | 捕捉登记里传一张照片，再**经反代取回** | 上传成功；`media/` 出现文件；`/media/...` 返回 200 且**与原图逐字节一致** |
 | **数据隔离生效** | 用他区账号访问本区宠物生命周期，**再访问一个不存在的 id** | **两者响应完全一致**（都是 404 且文案相同）—— 否则可用枚举 id 扫库 |
 | 数据一致性 | `python manage.py check_data_integrity` | 输出「未发现一致性问题」，退出码 0 |
-| 定时任务在跑 | `supervisorctl status` | `tnr-qworker` 为 RUNNING |
+| 定时任务在跑 | **真投一个任务看是否被消费**（脚本见 §5.1），不能只看 `supervisorctl status` | `Success` 出现该任务且 `started`/`stopped` 有值；**清账后** `Success`/`Failure`/`OrmQ` 归零 |
+| 定时注册存在 | `manage.py shell -c "from django_q.models import Schedule; print(Schedule.objects.count())"` | **≥ 1**；若为 0 见 §5.2（「5 天自动转待领养」只剩接口触发 + 启动补偿） |
 | 无未捕获异常 | `grep -c Traceback <gunicorn stderr 日志>` | **0** |
 | 非法参数不炸 | 非数字进整型外键 / 非日期进日期字段 / 超大数 | 4xx，**不得 500** |
 | 地图 Key 生效 | `GET /api/business/geocode/reverse/?lng=112.144&lat=32.045`（需登录） | 返回真实地址（不是「未配置地图服务Key」） |
@@ -164,6 +165,79 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 > ⚠ **排查线上配置时先怀疑探针**：`getattr(settings, 'X')` 取不到**不等于**没配
 > （代码可能是 `os.environ.get('X')`，由 `load_dotenv()` 灌入）；
 > `curl --noproxy *` 的 `*` 会被 shell glob 展开成当前目录文件名，**必须写 `--noproxy '*'`**。
+
+### 5.1 `tnr-qworker` 必须「真投真跑」才算过
+
+`supervisorctl status` 显示 `RUNNING` **只证明进程活着**：证明不了 broker 通、
+证明不了 worker 真能消费队列、也证明不了它能 bootstrap Django 跑应用代码。
+实测证据：2026-09-21 首次部署时，生产上 `django_q_task` / `django_q_success` /
+`django_q_failure` / `django_q_ormq` **四张表全是 0 行** —— 那个 `RUNNING` 的 worker
+**从未处理过任何任务**。
+
+```bash
+cd /opt/tnr
+
+# 1) 纯 stdlib 任务：只验「broker + worker 消费」通路，零副作用
+venv/bin/python manage.py shell -c "
+from django_q.models import Success, OrmQ
+from django_q.tasks import async_task
+import time
+before = Success.objects.filter(func='time.sleep').count()
+async_task('time.sleep', 0)
+for _ in range(40):
+    if Success.objects.filter(func='time.sleep').count() > before:
+        s = Success.objects.filter(func='time.sleep').order_by('-stopped').first()
+        print('OK', s.func, s.started, s.stopped); break
+    time.sleep(1)
+else:
+    print('FAIL 40s 未被消费; 残留 OrmQ =', OrmQ.objects.count())
+"
+
+# 2) 真实业务任务：证明 worker 能 import 应用代码并跑通
+venv/bin/python manage.py shell -c "
+from django_q.models import Success
+from django_q.tasks import async_task
+import time
+before = Success.objects.filter(func__contains='auto_promote_to_adoptable').count()
+async_task('business.tasks.auto_promote_to_adoptable')
+for _ in range(60):
+    q = Success.objects.filter(func__contains='auto_promote_to_adoptable')
+    if q.count() > before:
+        print('OK result =', repr(q.order_by('-stopped').first().result)); break
+    time.sleep(1)
+else:
+    print('FAIL 60s 无记录')
+"
+```
+
+> ⚠ **投递真实任务前先数超期记录**：若
+> `Treatment.objects.filter(status='completed', created_at__lte=now-5d)`
+> 里还有 `pet.status == 'in_treatment'` 的行，投递会**真的改生产数据**
+> （这正是该任务的职责，不是 bug）。只想验通路不想动数据时，用第 1 步的 `time.sleep`。
+
+> ⚠ **探针必须清账**：验完删掉 `Success`/`Failure` 中 `func` 含 `time.sleep` /
+> `call_command` / `auto_promote_to_adoptable` 的记录，并确认 `OrmQ` 归零。
+> 否则 `Success` 表里会长期躺着 `time.sleep` 这类**不是业务产生的**痕迹，
+> 日后排查真任务时会被误当成「有任务跑过」。
+
+### 5.2 定时任务**没有**注册（本项目的已知缺口）
+
+`business/tasks.py::auto_promote_to_adoptable`（诊疗完成 5 天后自动转待领养并上架领养大厅）
+在生产上**没有 `Schedule` 注册**：`django_q_schedule` 0 行；清库前的旧库**同样是 0 行**
+（已从备份转储核对）—— 所以**不是**某次部署或清库造成的，是项目自带缺口。
+
+它当前只有三条触发路径：
+
+| 路径 | 位置 | 频率 |
+|---|---|---|
+| 启动补偿 | `business/apps.py`（挂 `request_started`） | 每个 gunicorn 进程**启动后首次请求**一次 |
+| 接口投递 | `business/views_treatment.py::_schedule_auto_promote()` | 诊疗完成流程里投递一次 |
+| 手工命令 | `manage.py promote_adoptable [--force]` | 人工执行 |
+
+源码注释 `business/views_treatment.py:285` 写的是「**部署时配置定时任务即可**」——
+即作者预期运维在部署时补一条 `Schedule`，但从未补过。后果：**服务器长期不重启、
+期间又没人走「诊疗完成」流程时，超期宠物不会被自动转待领养**。
+是否注册、以什么频率注册属业务决策，需与业务方确认后再落地。
 
 ## 六、常见报错对照
 
