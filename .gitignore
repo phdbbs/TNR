@@ -21,6 +21,14 @@ server.log
 tnr-release-*.tar.gz
 .mimosa/
 
+# macOS Finder 元数据与 AI 编码助手的会话计划文件。
+# 这三条曾经被误跟踪（`.DS_Store`、`static/.DS_Store`、
+# `.zcode/plans/*.md`），并随 2026-09-21 的部署进了生产目录 —— 纯噪音，
+# 且 `.DS_Store` 让工作区在每次动 Finder 后都变脏。已 `git rm --cached`
+# 取消跟踪（**文件保留在磁盘上**，不是删除）。
+.DS_Store
+.zcode/
+
 # 本地调试/测试脚本（不推送至仓库）
 tnr_debug*.py
 tnr_e2e*.py
