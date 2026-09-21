@@ -3947,6 +3947,57 @@ Conf.PREFIX = 'tnr'   Conf.CLUSTER_NAME = 'tnr'   两者相等 = True
 > 说不出 broker 通不通、worker 会不会消费、能不能 import 业务代码。
 > `DEPLOY.md` §5.1 已把这条自检换成「真投真跑」脚本。
 
+#### 2.33.6 加强验证：让**真实那条 Schedule** 被调度循环认领（归属铁证）
+
+2.33.5 的「实时点火」用的是**合成** Schedule（`func='time.sleep'`）——
+它证明「调度循环会认领」，但证明不了**注册的那条本身**可被认领
+（`cluster` 填错、`func` 点路径写错，合成行照样能过）。于是再做一次：
+**临时把真实那条的 `next_run` 推到过去**，等它被认领。
+
+⚠ **前置预检**：先数「会被改动的记录」——
+`Treatment.objects.filter(status='completed', created_at__lte=now-5d)` 里
+`pet.status == 'in_treatment'` 的行数，为 0 才点火（否则它会真的转状态）。实测 0。
+
+**归属怎么证明？** 光看「有个 `Success` 记录」不够 —— `Success.name` 是 django-q
+生成的随机可读名（实测 `east-uniform-quebec-red`），**不是** Schedule 名，
+拿它对不上。读 `scheduler.py` 才知道真正的连接点有两处：
+
+```python
+q_options["group"] = q_options.get("group", s.name or s.id)
+s.task = async_task(s.func, *args, **kwargs)     # ← 任务 id 写回 Schedule
+```
+
+于是判据是这两条：
+
+| 判据 | 实测 |
+|---|---|
+| `Schedule.task`（点火后）== `Success.id` | `a67797e4b5be41679f35b90ac1e16386` == `a67797e4b5be41679f35b90ac1e16386` ✅ |
+| `Success.group` == `Schedule.name` | 两边都是 `诊疗完成5天后自动转待领养` ✅ |
+
+（点火前 `Schedule.task` 是 `d49b1265…`，点火后变成 `a67797e4…` —— 变化本身也是证据。）
+
+**执行结果**：`func=business.tasks.auto_promote_to_adoptable`、
+`result='Promoted 0 pets to adoptable'`（0 改动）、
+`started=08:08:42.480419+00:00` / `stopped=…42.783847+00:00`，等待 **15 秒**。
+
+**还原**：调度器对 Daily 类型会把 `next_run` 推到 `+1 天`（实测变成
+`2026-09-22 08:08:42`，**不是** 03:00）—— 所以必须**显式还原**，
+不能指望它自己回到凌晨。还原后 `next_run` 与 `task` 均**精确一致**（都 `True`），
+`Success`/`Failure` 清账，终态 `Schedule=1 / Success=0 / Failure=0 / OrmQ=0`。
+
+#### 2.33.7 收尾：本次改动自己造成的文档漂移
+
+注册落进迁移后，两处**描述旧状态**的文字就变成错的了，一并更正：
+
+| 位置 | 原文（已过时） | 现文 |
+|---|---|---|
+| `business/views_treatment.py::_schedule_auto_promote` 注释 | 「部署时配置定时任务即可」 | 说明它只是**快路径**，周期调度由 `business/0016` 负责；并注明这里的静默降级是**有意**的，别按「死 catch」当缺陷修 |
+| `DEPLOY.md` §5.2 标题与结论 | 「定时任务**没有**注册（本项目的已知缺口）」 | 「已由数据迁移注册」+ 核验命令；历史缺口降级为引用块内的**历史说明**，并标明「2026-09-21 已修，别再重复排查」 |
+
+⚠ 教训：**修复完成后要回头搜一遍「描述旧状态」的文字**。
+「已知缺口」「尚未实现」「需与业务方确认」这类措辞在修复后就变成误导 ——
+下一轮的人（或下一轮的自己）会照着它白排查一遍。
+
 ---
 
 ## 三、GUI 走查结论（四端）
