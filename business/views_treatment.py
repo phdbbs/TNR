@@ -17,7 +17,7 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_ledger_no, get_district_filtered_queryset,
     adjust_stock, use_chip, get_hospital_stock,
-    get_active_pet, get_scoped_object,
+    get_active_pet, get_scoped_object, expired_material_error,
 )
 
 
@@ -109,6 +109,10 @@ def treatment_create(request):
         vaccine_material = Material.objects.filter(id=vac['material_id'], category='vaccine').first()
         if vaccine_material is None:
             return json_fail('疫苗物料不存在')
+        # 过期疫苗不能用于诊疗。判据在 services 里只有一份，与其它接口共用。
+        err = expired_material_error(vaccine_material, '用于诊疗')
+        if err:
+            return json_fail(err)
         if get_hospital_stock(vaccine_material, hospital) < vaccine_qty:
             return json_fail(f'疫苗库存不足（{vaccine_material.name}），请先补充库存')
 
@@ -117,10 +121,14 @@ def treatment_create(request):
         deworming_material = Material.objects.filter(id=dew['material_id'], category='dewormer').first()
         if deworming_material is None:
             return json_fail('驱虫药物料不存在')
+        err = expired_material_error(deworming_material, '用于诊疗')
+        if err:
+            return json_fail(err)
         if get_hospital_stock(deworming_material, hospital) < deworming_qty:
             return json_fail(f'驱虫药库存不足（{deworming_material.name}），请先补充库存')
 
     chip_no = ''
+    chip_material = None
     if items.get('chip') and chip_data:
         chip_no = (chip_data.get('chip_no') or '').strip()
         if chip_no:
@@ -129,6 +137,14 @@ def treatment_create(request):
                 return json_fail(f'芯片 {chip_no} 不存在')
             if chip.status == 'used':
                 return json_fail(f'芯片 {chip_no} 已被使用')
+            # 芯片物料在这里**一并取好并校验**，保持「先全校验 → 再落库」的两段式。
+            # 原先它在下面的事务块内才查询 —— 一次可能失败的 DB 查询落在落库之后，
+            # 且过期判据会漏掉这条路径。
+            chip_material = Material.objects.filter(
+                category='chip', district_id=district_id).first()
+            err = expired_material_error(chip_material, '用于诊疗')
+            if err:
+                return json_fail(err)
 
     # ---- 第二步：校验全部通过后才落库；整体放进事务，避免「库存已扣但记录没存」 ----
     with transaction.atomic():
@@ -203,9 +219,7 @@ def treatment_create(request):
             if chip_no:
                 use_chip(chip_no, pet)
                 treatment.chip_no = chip_no
-                chip_material = Material.objects.filter(
-                    category='chip', district_id=district_id
-                ).first()
+                # chip_material 已在第一步取好并校验过（见上），这里不再查询
                 if chip_material:
                     adjust_stock(
                         material=chip_material,

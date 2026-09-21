@@ -1411,6 +1411,45 @@ def inactive_district_error(district):
     return None
 
 
+def expired_material_error(material, action='使用'):
+    """物料已过有效期时返回错误信息，否则 None。
+
+    **「有效期」必须真的拦住点什么。** 此前 `Material.expiry_date` 在整个后端
+    只有「写入 + 展示」两类读取点：`purchase_create` 写它、医院门户 `formatDate`
+    显示它 —— **没有任何一处把它当判据**。后果是拿一支过期 325 天的疫苗做诊疗，
+    系统照收不误，界面上只多显示一个日期。与 `inactive_institution_error()`
+    同属「字段存在但无人读」。
+
+    与停用判据同一条原则：**已失效的实体不能再用在新业务上**。但拦截面必须
+    逐条想清楚，不能一律禁：
+
+    * **拦「消耗」**（诊疗记录的疫苗 / 驱虫 / 芯片）—— 这才是真正的「使用」。
+    * **不拦「采购入库」** —— 那是录入新数据，新批号的有效期本来就该由操作员填。
+    * **不拦「库存异动」** —— 它正是处理过期物料的正规出口（过期报废）。
+      拦了就没有补救路径，过期物料会**永远卡在库存里**。
+    * **不拦「医院签收」** —— 否则已下发的过期物料会卡在「待签收」，
+      捕捉点扣了库存、医院加不上，台账对不上。
+
+    ⚠ **暂不拦「下发」**：捕捉点角色的 `stock_adjustment` 权限里**没有
+    shelter**（只有 hospital / gov_city / gov_district），拦了下发会让捕捉点的
+    过期物料**没有任何出口**。这是权限模型的缺口，不是本判据能解决的 ——
+    要么给捕捉点开库存异动权限，要么加「捕捉点报废」入口，需另行决策。
+
+    :param material: Material 对象（None 直接放行，便于调用点少写一层判断）
+    :param action: 出现在文案里的动作名，如「用于诊疗」「消耗」
+    :return: 错误文案，或 None
+    """
+    if material is None or material.expiry_date is None:
+        return None
+    today = timezone.localdate()
+    if material.expiry_date < today:
+        overdue = (today - material.expiry_date).days
+        return (f'{material.name} 已于 {material.expiry_date} 过期'
+                f'（超期 {overdue} 天），不能{action}；'
+                f'请先做库存异动（过期报废）处理')
+    return None
+
+
 def resolve_community(district, community_id=None, community_name=None):
     """把「小区」解析成 ``Institution(type='community')``，解析不到返回 None。
 

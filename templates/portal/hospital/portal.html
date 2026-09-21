@@ -527,6 +527,16 @@ const Hospital = {
     const vaccines = materials.filter(m => m.category === 'vaccine');
     const dewormers = materials.filter(m => m.category === 'dewormer');
 
+    /* 过期物料不能用于诊疗（服务端 `expired_material_error` 会拒），
+       界面必须同步把它从下拉里去掉 —— 否则是「界面上能选、服务端要拒」的死胡同。
+       ⚠ 但**当前已选中的那一条必须保留**（置灰）—— 否则编辑存量记录时下拉会退到
+       第一个选项，归属被静默改掉（同区县下拉「保留当前值兜底」的约定）。 */
+    const today = TNR_UI.todayStr();
+    const matExpiry = m => m.expiryDate || m.expiry_date || '';
+    const isExpired = m => !!matExpiry(m) && matExpiry(m) < today;
+    const keepSelected = (list, selectedId) => list.filter(m =>
+      !isExpired(m) || (selectedId != null && String(m.id) === String(selectedId)));
+
     const td = this.state.treatmentData;
     const esc = this.escape.bind(this);
 
@@ -559,7 +569,7 @@ const Hospital = {
       '<input type="checkbox" ' + (td.items.vaccine ? 'checked' : '') + ' data-check="vaccine" style="width:18px;height:18px;accent-color:var(--cinnabar);cursor:pointer;" />' +
       '<div class="treatment-item-icon">💉</div><div style="flex:1;"><div style="font-weight:500;">疫苗接种</div><div style="font-size:var(--fs-sm);color:var(--ink-muted);">勾选后自动扣减医院疫苗库存-1，记录批次</div></div></div>' +
       (td.items.vaccine ? '<div class="treatment-item-body"><div class="form-row"><div class="form-group" style="margin:0;"><label class="form-label">疫苗类型</label><select class="form-select" id="vaccineSelect"><option value="">请选择</option>' +
-        vaccines.map(v => '<option value="' + v.id + '" ' + (td.vaccine && String(td.vaccine.material_id) === String(v.id) ? 'selected' : '') + ' ' + ((v.hospital_stock || 0) <= 0 ? 'disabled' : '') + '>' + esc(v.name) + ' (库存:' + (v.hospital_stock || 0) + (v.unit || '') + ')</option>').join('') +
+        keepSelected(vaccines, td.vaccine && td.vaccine.material_id).map(v => '<option value="' + v.id + '" ' + (td.vaccine && String(td.vaccine.material_id) === String(v.id) ? 'selected' : '') + ' ' + (((v.hospital_stock || 0) <= 0 || isExpired(v)) ? 'disabled' : '') + '>' + esc(v.name) + (isExpired(v) ? '（已过期）' : '') + ' (库存:' + (v.hospital_stock || 0) + (v.unit || '') + ')</option>').join('') +
         '</select></div><div class="form-group" style="margin:0;"><label class="form-label">批号</label><input type="text" class="form-input" id="vaccineBatch" value="' + (td.vaccine ? esc(td.vaccine.batch_no || '') : '') + '" readonly /></div></div>' +
         '<div class="form-group" style="margin:var(--sp-2) 0 0;"><label class="form-label">接种日期</label><input type="date" class="form-input" id="vaccineDate" value="' + (td.vaccine ? td.vaccine.date : TNR_UI.todayStr()) + '" /></div></div>' : '') +
       '</div>';
@@ -569,7 +579,7 @@ const Hospital = {
       '<input type="checkbox" ' + (td.items.deworming ? 'checked' : '') + ' data-check="deworming" style="width:18px;height:18px;accent-color:var(--cinnabar);cursor:pointer;" />' +
       '<div class="treatment-item-icon">💊</div><div style="flex:1;"><div style="font-weight:500;">驱虫护理</div><div style="font-size:var(--fs-sm);color:var(--ink-muted);">勾选后自动扣减医院驱虫药库存-1，留存用药记录</div></div></div>' +
       (td.items.deworming ? '<div class="treatment-item-body"><div class="form-row"><div class="form-group" style="margin:0;"><label class="form-label">驱虫药类型</label><select class="form-select" id="dewormerSelect"><option value="">请选择</option>' +
-        dewormers.map(d => '<option value="' + d.id + '" ' + (td.deworming && String(td.deworming.material_id) === String(d.id) ? 'selected' : '') + ' ' + ((d.hospital_stock || 0) <= 0 ? 'disabled' : '') + '>' + esc(d.name) + ' (库存:' + (d.hospital_stock || 0) + (d.unit || '') + ')</option>').join('') +
+        keepSelected(dewormers, td.deworming && td.deworming.material_id).map(d => '<option value="' + d.id + '" ' + (td.deworming && String(td.deworming.material_id) === String(d.id) ? 'selected' : '') + ' ' + (((d.hospital_stock || 0) <= 0 || isExpired(d)) ? 'disabled' : '') + '>' + esc(d.name) + (isExpired(d) ? '（已过期）' : '') + ' (库存:' + (d.hospital_stock || 0) + (d.unit || '') + ')</option>').join('') +
         '</select></div><div class="form-group" style="margin:0;"><label class="form-label">批号</label><input type="text" class="form-input" id="dewormerBatch" value="' + (td.deworming ? esc(td.deworming.batch_no || '') : '') + '" readonly /></div></div>' +
         '<div class="form-group" style="margin:var(--sp-2) 0 0;"><label class="form-label">用药日期</label><input type="date" class="form-input" id="dewormerDate" value="' + (td.deworming ? td.deworming.date : TNR_UI.todayStr()) + '" /></div></div>' : '') +
       '</div>';

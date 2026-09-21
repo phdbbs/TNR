@@ -20,6 +20,41 @@ from business.models import (
 )
 from core.models import District, Institution
 
+# ============================================
+# 演示物料清单（**单一来源**）
+# ============================================
+# 字段：(mat_id, 名称, 类别, 单位, 规格, 供应商, 批号, 捕捉点库存, 安全库存,
+#        有效期距今天数, 芯片起始号, 芯片结束号, 区县代号)
+#
+# ⚠ 有效期用**距今天数**，不要写绝对日期。
+# 本命令里其它日期（入库 2025-01-05、诊疗 2025-01-14 等）都是**历史事件**，
+# 固定在过去是对的；但「有效期」是**面向未来**的属性 —— 写死绝对日期会让
+# 任何时间点的全新部署一上线就「全部已过期」（实测 2026-09-21 部署时，
+# 三件种子物料分别过期 83 / 264 / 325 天，演示时整列都是过期数据）。
+# 偏移取 90~270 天，使三件物料呈现不同的到期紧迫度。
+#
+# ⚠ `refresh_demo_material_expiry` 命令也读这份清单来订正**存量库**
+# （`get_or_create` 的 defaults 只在创建时生效，已导入的库修不回来）。
+# 两处必须同源 —— 改这里就等于同时改了两边。
+SEED_MATERIALS = [
+    ('MAT001', '狂犬疫苗', 'vaccine', '支', '1ml/支', '国药集团', 'B20250101',
+     120, 50, 270, '', '', 'D001'),
+    ('MAT002', '猫三联疫苗', 'vaccine', '支', '1ml/支', '英特威', 'B20250102',
+     80, 40, 180, '', '', 'D001'),
+    ('MAT003', '体内外驱虫药', 'dewormer', '盒', '6片/盒', '拜耳', 'Q20250101',
+     60, 30, 90, '', '', 'D001'),
+    ('MAT004', '宠物芯片', 'chip', '个', '134.2kHz', '信码科技', 'C20250101',
+     500, 200, None, '1000010001', '1000010500', 'D001'),
+]
+
+# 演示物料所属区县的**实际 code**（与上面清单里的内部代号 'D001' 对应，
+# 见 `_seed_districts`：('D001', '襄城区', 'CY', False)）。
+#
+# ⚠ `refresh_demo_material_expiry` 用它把订正范围**限定在演示区县内**。
+# 别的区县里同名的物料（如现场 4 个区县各有一套「狂犬疫苗」）不是演示数据，
+# 只按名称匹配会误伤它们 —— 那是真实业务数据。
+SEED_MATERIAL_DISTRICT_CODE = 'CY'
+
 
 class Command(BaseCommand):
     help = '填充 TNR 系统种子数据（区县/机构/用户/物资/宠物/业务记录等）'
@@ -223,29 +258,12 @@ class Command(BaseCommand):
     # ============================================
     def _seed_materials(self, districts):
         self.stdout.write('创建物资...')
-        # ⚠ 有效期一律用**相对今天的偏移**生成，不要写绝对日期。
-        #
-        # 本命令里其它日期（入库 2025-01-05、诊疗 2025-01-14 等）都是
-        # **历史事件**，固定在过去是对的；但「有效期」是**面向未来**的
-        # 属性 —— 写死绝对日期会让任何时间点的全新部署一上线就
-        # 「全部已过期」。实测 2026-09-21 部署时，三件种子物料分别
-        # 过期 83 / 264 / 325 天，演示时整列都是过期数据。
-        #
-        # 偏移量取 90~270 天，使三件物料呈现不同的到期紧迫度，
-        # 演示「有效期」列时更有说服力。
         today = timezone.localdate()
-        data = [
-            ('MAT001', '狂犬疫苗', 'vaccine', '支', '1ml/支', '国药集团', 'B20250101',
-             120, 50, today + timedelta(days=270), '', '', 'D001'),
-            ('MAT002', '猫三联疫苗', 'vaccine', '支', '1ml/支', '英特威', 'B20250102',
-             80, 40, today + timedelta(days=180), '', '', 'D001'),
-            ('MAT003', '体内外驱虫药', 'dewormer', '盒', '6片/盒', '拜耳', 'Q20250101',
-             60, 30, today + timedelta(days=90), '', '', 'D001'),
-            ('MAT004', '宠物芯片', 'chip', '个', '134.2kHz', '信码科技', 'C20250101',
-             500, 200, None, '1000010001', '1000010500', 'D001'),
-        ]
         materials = {}
-        for mat_id, name, category, unit, spec, supplier, batch_no, stock, safety, expiry, chip_start, chip_end, district_code in data:
+        for mat_id, name, category, unit, spec, supplier, batch_no, stock, safety, expiry_offset, chip_start, chip_end, district_code in SEED_MATERIALS:
+            # 有效期由**距今天数**换算（见 SEED_MATERIALS 的说明）；
+            # `None` 表示该物料没有有效期（芯片）。
+            expiry = None if expiry_offset is None else today + timedelta(days=expiry_offset)
             m, _ = Material.objects.get_or_create(
                 name=name,
                 defaults={
