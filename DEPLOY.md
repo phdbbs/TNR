@@ -154,7 +154,7 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 | 数据一致性 | `python manage.py check_data_integrity` | 输出「未发现一致性问题」，退出码 0 |
 | 定时任务在跑 | **真投一个任务看是否被消费**（脚本见 §5.1），不能只看 `supervisorctl status` | `Success` 出现该任务且 `started`/`stopped` 有值；**清账后** `Success`/`Failure`/`OrmQ` 归零 |
 | 定时注册存在 | `manage.py shell -c "from django_q.models import Schedule; print(Schedule.objects.count())"` | **≥ 1**；若为 0 见 §5.2（「5 天自动转待领养」只剩接口触发 + 启动补偿） |
-| 无未捕获异常 | `grep -c Traceback <gunicorn stderr 日志>` | **0** |
+| 无未捕获异常 | **只看最后一次重启之后**的 Traceback（见 §5.3），**不要**对整份日志 `grep -c` | 重启后 **0** 处业务异常；`DisallowedHost` 是**正确行为**，不算 |
 | 非法参数不炸 | 非数字进整型外键 / 非日期进日期字段 / 超大数 | 4xx，**不得 500** |
 | 地图 Key 生效 | `GET /api/business/geocode/reverse/?lng=112.144&lat=32.045`（需登录） | 返回真实地址（不是「未配置地图服务Key」） |
 | 静态文件已更新 | 页面上确认 `?v=` 为本次版本号 | 与 `templates/base.html` 一致 |
@@ -260,6 +260,61 @@ for s in Schedule.objects.all():
 > 实测 25 秒内产生 `Success` 记录，用完删干净。
 > 想验**真实那条**，可临时把它的 `next_run` 改到过去、等它跑完再改回 03:00 ——
 > ⚠ 但此时它会**真的执行转待领养**，务必先确认没有会被改动的记录。
+
+### 5.3 ⚠ `grep -c Traceback` 对**整份日志**计数是错的判据
+
+它会把两类**无关**的东西算成「未捕获异常」：
+
+1. **本次重启之前**的历史错误（早就修了，日志还在）；
+2. **外部扫描器**触发的 `DisallowedHost` —— 那是 `ALLOWED_HOSTS` **正确工作**的证据，
+   不是缺陷。
+
+实测（2026-09-21）：整份日志里唯一那处 Traceback 来自 `198.235.24.95` 的
+`GET / HTTP/1.0`，UA 是
+`Hello from Palo Alto Networks, ... Scanning-activity` —— `Host: _` 不是合法域名，
+Django 回 400。**判据若写 `grep -c Traceback == 0` 就会永远红**，
+因为公网 Web 服务必然被扫（本次 nginx 侧 59 条 400 里绝大多数是扫描器）。
+
+正确做法是**按行号划窗口**：
+
+```bash
+LOG=/var/log/tnr/gunicorn-error.log
+LASTBOOT=$(grep -n 'Booting worker' "$LOG" | tail -1 | cut -d: -f1)
+echo "最后一次重启在第 $LASTBOOT 行；之后的新行："
+sed -n "$((LASTBOOT + 1)),\$p" "$LOG"
+```
+
+**判据**：重启之后的新行里**没有** Traceback（或只有 `DisallowedHost`）。
+`django.request: Bad Request / Not Found` 这类 WARNING 是**自己探针触发的 4xx**，正常。
+
+> 同理适用于任何「日志里某关键词计数为 0」的检查 ——
+> **先确定时间窗口（自上次重启以来）与排除项（已知的正常噪音），再数**。
+> 不划窗口的计数会把历史问题和外部噪音混进来，判据必然失效。
+
+### 5.4 公网暴露面（部署后顺手看一眼，不必等出事）
+
+```bash
+ss -lntp | grep -vE '127\.0\.0\.1|::1'     # 谁在 0.0.0.0 上监听
+```
+
+⚠ **本机监听 `0.0.0.0` ≠ 公网可达** —— 真正的门禁是**云安全组**。
+两侧都要看：机器上绑了 `0.0.0.0` 但安全组挡住 → 当前安全，属**纵深防御**隐患；
+安全组放开 → 立刻暴露。**从公网实测一次**才算数（在你自己机器上）：
+
+```bash
+for p in 22 80 3306 24216; do
+  nc -z -G 5 -w 5 <公网IP> $p && echo "$p 开放" || echo "$p 不可达"
+done
+```
+
+本项目实测（2026-09-21，公网 `124.223.41.44`）：**只有 80 开放**，
+22 / 3306 / 24216 / 21115 均被安全组挡住 ✔。但机器上
+`docker-proxy` 把 **MariaDB 绑在 `0.0.0.0:3306`**、`1panel-core` 绑在 `0.0.0.0:24216`
+—— 安全组一旦被放开就会直接暴露。**加固方向**（属安全姿态变更，需单独决策）：
+把这两个绑定收到 `127.0.0.1` 或 Tailscale 地址，而不是 `0.0.0.0`。
+
+> ⚠ 顺带：`ufw` 是 **inactive**，`iptables INPUT` 只有 2 条规则 ——
+> 当前**完全依赖云安全组**这一层。别以为机器上还有一道本地防火墙。
 
 ## 六、常见报错对照
 
