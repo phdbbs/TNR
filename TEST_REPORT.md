@@ -20,7 +20,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **946 个用例，全部通过**（约 66 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **949 个用例，全部通过**（约 67 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
@@ -4047,6 +4047,85 @@ s.task = async_task(s.func, *args, **kwargs)     # ← 任务 id 写回 Schedule
 另：nginx 侧 59 条 400 响应里绝大多数是**互联网扫描器**（UA 为 `-` 47 条、
 `GenomeCrawlerd` 2 条、Palo Alto 1 条），只有 9 条是我自己的 `curl/8.7.1` 探针。
 
+#### 2.33.10 横向审计：还有没有别的「时间驱动规则」没有触发点
+
+「定时任务从未注册」修完后，把它**推广成一个问题**：项目里还有没有
+别的「靠时间流逝自动发生」的业务规则，其实**没有任何触发点**？
+
+扫法：① 后端搜所有 `timedelta` / 日期差算术；② 前端搜毫秒常数 `86400000`；
+③ 把所有「日期字段」逐个找读取点，看有没有被当**判据**用。
+
+结论：后端**唯一**的业务时间阈值就是 `business/tasks.py:21`（`timedelta(days=5)`），
+即已修那处；其余 `timedelta` 全在测试、脚本、查询参数管道里。前端无日期差算术。
+但顺着「日期字段有没有读取点」扫出**三类候选**：
+
+| # | 候选 | 性质 | 处置 |
+|---|---|---|---|
+| 1 | `Message` 的 `checkin_reminder` / `notice` 两种类型**无任何产生点** | 功能未实现 | 留决策 |
+| 2 | `Material.expiry_date` **无任何业务判据** | 功能未实现 | 留决策 |
+| 3 | `seed_data` 的物料有效期写死绝对日期，**已全部过期** | 演示数据缺陷 | **已修** |
+
+**候选 1**：`Message.TYPE_CHOICES` 定义了 4 种，应用代码只产生 2 种 ——
+`approval`（4 处，均在 `views_adoption.py`）与 `system`（1 处）。
+`checkin_reminder` 与 `notice` **从未被任何代码产生**，只存在于
+choices 定义、`seed_data.py` 造的 2 条种子、以及前端图标映射
+（`adopter/portal.html`）。领养人端的「待打卡月份」是**前端自己算**的
+（`adopter/portal.html` 的 `⏰` 标签），所以「提醒」在界面上有，
+但**消息中心**里永远不会出现这两类消息。仓库无需求文档，属「未实现」而非「违反规格」。
+
+**候选 2**：`Material.expiry_date` 全部出现位置为 —— 模型定义、
+`admin.list_display`、`seed_data` 写入、`views_material.py` 的接口示例与写入分支、
+医院门户的展示。**没有任何一处把它当判据**：用过期物料不拦、不预警、
+不出现在统计里。即「字段存在但无人读」，与十八轮 `Institution.status` 同类。
+
+**候选 3（已修）**：`_seed_materials` 把有效期写成绝对日期
+（`2025-12-31` / `2025-10-31` / `2026-06-30`）。本命令里其它日期都是
+**历史事件**（入库 `2025-01-05`、诊疗 `2025-01-14` …），固定在过去是对的；
+但「有效期」是**面向未来**的属性 —— 写死绝对日期，等于让任何时间点的
+全新部署一上线就「全部已过期」。生产实测（2026-09-21）：
+
+```
+- 狂犬疫苗    批次=B20250101  有效期=2025-12-31  已过期 264 天
+- 猫三联疫苗   批次=B20250102  有效期=2025-10-31  已过期 325 天
+- 体内外驱虫药  批次=Q20250101  有效期=2026-06-30  已过期 83 天
+- 宠物芯片    批次=C20250101  有效期=None
+```
+
+修法：改用 `timezone.localdate() + timedelta(days=N)`，偏移取 90 / 180 / 270 天，
+使三件物料呈现不同的到期紧迫度。新增 `SeedMaterialExpiryTest` 三个用例：
+
+| 用例 | 断言 |
+|---|---|
+| `test_materials_have_a_future_expiry_date` | 有效期严格晚于今天 |
+| `test_expiry_offset_stays_in_expected_window` | 偏移落在 30~400 天 |
+| `test_chip_keeps_no_expiry_date` | 芯片无有效期是刻意的 |
+
+> 第二个用例是刻意的：只断言「未过期」**挡不住写死日期** —— 若有人写死
+> `2027-06-30`，2026 年跑测试照样绿。加区间断言后，写死日期会随时间漂出窗口。
+
+**改前改后对比**（`git worktree` 检出修复前 `7a0ebb5` + 新测试文件）：
+
+```
+FAIL: test_expiry_offset_stays_in_expected_window
+  AssertionError: -83 not greater than or equal to 30 :
+  体内外驱虫药 的有效期距今天仅 -83 天，不在预期窗口 30~400 内
+
+FAIL: test_materials_have_a_future_expiry_date
+  AssertionError: datetime.date(2026, 6, 30) not greater than datetime.date(2026, 9, 21) :
+  体内外驱虫药 的有效期 2026-06-30 已过期（今天 2026-09-21）—— 种子数据不应写死绝对日期
+
+Ran 3 tests — FAILED (failures=2)
+```
+
+修复后 3 passed；全量 **946 → 949 OK**。
+
+⚠ 重要限制：`get_or_create(name=..., defaults=...)` 的 `defaults` **只在创建时生效**，
+所以本改动**不影响已导入的存量库** —— 生产那三件物料**仍然是过期状态**，
+重跑 `seed_data` 也修不回来。存量订正需单独执行（已报告，等决策）。
+
+> 推广：判断一个日期字段「是不是历史事件」——历史事件（入库、诊疗、释放）
+> 写死在过去是对的；**面向未来**的属性（有效期、下次到期、计划日）必须相对今天生成。
+
 ---
 
 ## 三、GUI 走查结论（四端）
@@ -4231,7 +4310,7 @@ python manage.py migrate
 python manage.py seed_data          # 幂等，可重复执行；同时校准演示账号
 python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
-python manage.py test --parallel 1  # 946 个用例
+python manage.py test --parallel 1  # 949 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
