@@ -20,7 +20,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **939 个用例，全部通过**（约 66 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **946 个用例，全部通过**（约 66 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
@@ -3829,6 +3829,126 @@ snake**。同一接口两种命名，改前端就会踩。
 
 ---
 
+### 2.33 第二十六轮补充：qworker 取证与定时任务注册（2026-09-21）
+
+§2.32 收尾时我自己指出一个**没验到的缺口**：生产上 `tnr-qworker` 只验了
+`supervisorctl status` = RUNNING，**没验它真的能处理任务**。本轮把它补上，
+并顺着查出第二个缺口 —— 「定时任务从来没有被注册过」。
+
+#### 2.33.1 缺口一：`RUNNING` 不等于「能干活」
+
+生产上 `django_q_task` / `django_q_success` / `django_q_failure` / `django_q_ormq`
+**四张表全是 0 行** —— 那个显示 RUNNING 的 worker **从未处理过任何任务**。
+
+真投真跑，三级递进（证据逐级增强）：
+
+| 探针 | 证明什么 | 结果 |
+|---|---|---|
+| `async_task('time.sleep', 0)` | broker 通 + worker 消费队列 | ✅ `started=07:48:27.804486+00:00` / `stopped=…27.955153+00:00`（0.15s） |
+| `async_task('django.core.management.call_command', 'check')` | worker 能 bootstrap Django 跑应用级代码 | ✅ 产生 `Success` 记录 |
+| `async_task('business.tasks.auto_promote_to_adoptable')` | worker 能 import **业务模块**并跑通 | ✅ `result = 'Promoted 0 pets to adoptable'` |
+
+⚠ 第三条会**真的改生产数据**（这正是该任务的职责，不是 bug）。投递前先数
+`Treatment.objects.filter(status='completed', created_at__lte=now-5d)` 里
+还有没有 `pet.status == 'in_treatment'` 的行 —— 实测为 0 才敢投。
+只验通路不想动数据时用第一条。
+
+**探针必须清账**：`Success`/`Failure`/`OrmQ` 归零后才算完事。否则 `Success`
+表里会长期躺着 `time.sleep` 这种**不是业务产生的**痕迹，
+日后排查真任务时会被误当成「有任务跑过」。
+
+#### 2.33.2 缺口二：定时任务**从来没有被注册过**
+
+`business/tasks.py::auto_promote_to_adoptable`（诊疗完成 5 天后自动转待领养）
+在生产上 `django_q_schedule` **0 行**。关键取证：**清库前的旧库同样是 0 行**
+（从备份转储 `/root/tnr-backup-20260921-150630/db-tnr_system.sql` 核对）——
+所以**不是**本次清库造成的，是项目自带缺口。
+
+它当时只有三条触发路径，没有一条是「定时」：
+
+| 路径 | 位置 | 频率 |
+|---|---|---|
+| 启动补偿 | `business/apps.py`（挂 `request_started`） | 每个 gunicorn 进程**启动后首次请求**一次 |
+| 接口投递 | `business/views_treatment.py::_schedule_auto_promote()` | 诊疗完成流程里投递一次 |
+| 手工命令 | `manage.py promote_adoptable [--force]` | 人工执行 |
+
+源码注释 `views_treatment.py:285` 写的是「**部署时配置定时任务即可**」——
+作者预期运维在部署时补一条 `Schedule`，但**这一步从未被自动化**。
+后果：服务器长期不重启、期间又没人走「诊疗完成」流程时，超期宠物不会自动转待领养。
+
+**修法**：新增数据迁移 `business/migrations/0016_register_auto_promote_schedule.py`，
+`get_or_create` 注册一条每天 03:00（`Asia/Shanghai`）的 Daily Schedule。
+放迁移而不是「后台点一下」，是为了让**任何环境**（开发/测试/生产/换机器重建）
+`migrate` 之后都自带这条注册，不再依赖人记着。
+
+幂等：已存在（运维手工建过 / 迁移重跑）**不覆盖** `next_run`/`repeats`/`schedule_type`。
+
+#### 2.33.3 一个差点写错的细节：`cluster` 该填什么
+
+`scheduler.py` 的过滤条件：
+
+```python
+Q_default = (Q(cluster__isnull=True) if Conf.CLUSTER_NAME == Conf.PREFIX else Q(pk__in=[]))
+... .filter(Q_default | Q(cluster=Conf.CLUSTER_NAME))
+```
+
+第一眼会以为 `PREFIX` 是常量 `'default'`，而本项目 `Q_CLUSTER['name'] = 'tnr'`
+→ `CLUSTER_NAME != PREFIX` → `Q(pk__in=[])` → **`cluster=None` 的 Schedule 永远不会被认领**。
+但读 `conf.py:96,100` 才发现 `PREFIX = conf.get("name", "default")` 是**从 `name` 派生**的：
+
+```
+Conf.PREFIX = 'tnr'   Conf.CLUSTER_NAME = 'tnr'   两者相等 = True
+```
+
+所以走 `Q(cluster__isnull=True)` 分支，`cluster=None` **是对的**。
+**差点按「常量 'default'」这个错误假设把它填成 `'tnr'`** —— 那样反而把记录绑死到
+某个 cluster 名上，将来改 `Q_CLUSTER['name']` 就静默失效。
+（教训：**判据要看取值的来源，不能看名字像什么**。）
+
+#### 2.33.4 新增 7 个用例（939 → 946）
+
+`business/tests/test_schedule_registration.py` —— 断言的是**数据迁移的真实产物**
+（测试库 `migrate` 阶段就会执行该迁移），不是自己造一条再断言自己造的：
+
+| 用例 | 钉住的坑 |
+|---|---|
+| `test_daily_schedule_exists` | 没注册 / `schedule_type` 错 / `repeats` 不是 -1 |
+| `test_next_run_is_in_the_future` | `next_run` 落在过去 → 刚 migrate 完就被立刻触发 |
+| `test_next_run_is_at_three_am_local` | 时区算错（naive → 差 8 小时） |
+| `test_scheduled_func_is_importable` | 点路径写错 → 调度器**只在运行时**报错，迁移静默通过 |
+| `test_migration_function_is_idempotent` | 重跑迁移 / 运维已手工建过 → 产生第二条 |
+| `test_migration_does_not_overwrite_existing_next_run` | 重跑把运维调过的时间改回默认 |
+| `test_reverse_migration_removes_only_own_row` | 回滚误删同名的其它记录 |
+
+#### 2.33.5 本轮复测结果
+
+本地：
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **946 OK**（939 → 946，66 秒） |
+| `makemigrations --check --dry-run` | `No changes detected` |
+
+生产（`76a35d3` → `89830e9`，3 文件 +255/−1，备份 `/root/tnr-backup-20260921-155929`）：
+
+| 项 | 结果 |
+|---|---|
+| 待执行迁移 | 恰好 1 条（`business.0016`），应用成功并打印注册信息 |
+| Schedule 注册 | 由 0 → **1**：`id=1` / `type=D` / `repeats=-1` / `cluster=None` / `next_run=2026-09-21 19:00:00+00:00`（= 本地 `2026-09-22 03:00`） |
+| **调度循环实时点火** | 临时 Schedule（`next_run` 故意设为过去）在 **25 秒**内被认领并执行，`started`/`stopped` 均有值；清账后 `Schedule=1` / `Success=0` / `OrmQ=0` |
+| 门户页 | gov / shelter / hospital / adopter / admin **全 200** |
+| 接口 | pets / dashboard / logs / ledger（区间与极值）/ 地图逆地理 **全 200** |
+| 非法参数不炸 | `institution_id` 非数字 / **24 位超大数** / 负数 / 非法日期 → **400×4**；`end_date=9999-12-31` 走溢出保护 → 200 |
+| 区县隔离 | 他区 pet `1/2/3` 与不存在 `999999` → 全部 **404、107 字节、同一文案**（不可区分） |
+| 修复一/二仍成立 | 最后一次重启在第 **402** 行；最后一条 `app initialization` 在 **367** 行、最后一条 `naive datetime` 在 **332** 行 —— **均在重启之前** |
+| 冒烟后日志增量 | 新增 9 行**全部是我探针自己触发的 4xx**（`django.request: Bad Request/Not Found`），**无 RuntimeWarning、无 Traceback**（`Traceback` 计数 0） |
+
+> **`RUNNING` 是弱证据。** `supervisorctl status` 只说进程活着，
+> 说不出 broker 通不通、worker 会不会消费、能不能 import 业务代码。
+> `DEPLOY.md` §5.1 已把这条自检换成「真投真跑」脚本。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -4011,7 +4131,7 @@ python manage.py migrate
 python manage.py seed_data          # 幂等，可重复执行；同时校准演示账号
 python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
-python manage.py test --parallel 1  # 939 个用例
+python manage.py test --parallel 1  # 946 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
