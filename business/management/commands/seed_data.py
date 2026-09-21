@@ -6,10 +6,11 @@ Django management command: seed_data
     python manage.py seed_data              # 填充数据（跳过已存在）
     python manage.py seed_data --flush      # 先清空再填充
 """
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.utils import timezone
 
 from accounts.models import User
 from business.models import (
@@ -222,13 +223,24 @@ class Command(BaseCommand):
     # ============================================
     def _seed_materials(self, districts):
         self.stdout.write('创建物资...')
+        # ⚠ 有效期一律用**相对今天的偏移**生成，不要写绝对日期。
+        #
+        # 本命令里其它日期（入库 2025-01-05、诊疗 2025-01-14 等）都是
+        # **历史事件**，固定在过去是对的；但「有效期」是**面向未来**的
+        # 属性 —— 写死绝对日期会让任何时间点的全新部署一上线就
+        # 「全部已过期」。实测 2026-09-21 部署时，三件种子物料分别
+        # 过期 83 / 264 / 325 天，演示时整列都是过期数据。
+        #
+        # 偏移量取 90~270 天，使三件物料呈现不同的到期紧迫度，
+        # 演示「有效期」列时更有说服力。
+        today = timezone.localdate()
         data = [
             ('MAT001', '狂犬疫苗', 'vaccine', '支', '1ml/支', '国药集团', 'B20250101',
-             120, 50, date(2025, 12, 31), '', '', 'D001'),
+             120, 50, today + timedelta(days=270), '', '', 'D001'),
             ('MAT002', '猫三联疫苗', 'vaccine', '支', '1ml/支', '英特威', 'B20250102',
-             80, 40, date(2025, 10, 31), '', '', 'D001'),
+             80, 40, today + timedelta(days=180), '', '', 'D001'),
             ('MAT003', '体内外驱虫药', 'dewormer', '盒', '6片/盒', '拜耳', 'Q20250101',
-             60, 30, date(2026, 6, 30), '', '', 'D001'),
+             60, 30, today + timedelta(days=90), '', '', 'D001'),
             ('MAT004', '宠物芯片', 'chip', '个', '134.2kHz', '信码科技', 'C20250101',
              500, 200, None, '1000010001', '1000010500', 'D001'),
         ]

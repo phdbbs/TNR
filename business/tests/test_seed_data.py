@@ -17,10 +17,11 @@ from io import StringIO
 
 from django.core.management import call_command
 from django.test import TestCase
+from django.utils import timezone
 
 from accounts.models import User
 from business.models import (
-    Adoption, Capture, CheckIn, Chip, Message, Pet, Release, Treatment,
+    Adoption, Capture, CheckIn, Chip, Material, Message, Pet, Release, Treatment,
 )
 from core.models import District, Institution
 
@@ -206,3 +207,57 @@ class SeedChipNumberConsistencyTest(SeedDataTestBase):
                          f'芯片号应为 10 位，实际长度集合 {sorted({len(n) for n in nums})}')
         self.assertIn('1000010001', nums)
         self.assertIn('1000010500', nums)
+
+
+class SeedMaterialExpiryTest(SeedDataTestBase):
+    """种子物料的「有效期」必须是**面向未来**的。
+
+    原实现把有效期写成了绝对日期（2025-12-31 / 2025-10-31 / 2026-06-30），
+    而「有效期」不像入库日期那样属于历史事件 —— 它是面向未来的属性。
+    结果是任何时间点的全新部署，演示数据一上线就「全部已过期」
+    （实测 2026-09-21 部署时分别过期 83 / 264 / 325 天）。
+
+    这些断言与「今天」无关，因此在任何日期运行都成立；一旦有人改回
+    绝对日期，它们就会在过期当天开始失败。
+    """
+
+    # 允许的有效期区间（相对今天的天数），与 seed_data 里取的 90~270 对齐，
+    # 留出余量以免边界日抖动。
+    MIN_DAYS = 30
+    MAX_DAYS = 400
+
+    def test_materials_have_a_future_expiry_date(self):
+        self.seed()
+        today = timezone.localdate()
+        dated = [m for m in Material.objects.all() if m.expiry_date is not None]
+        self.assertTrue(dated, '种子物料应至少有一件带有效期（否则本测试形同虚设）')
+        for m in dated:
+            self.assertGreater(
+                m.expiry_date, today,
+                f'{m.name} 的有效期 {m.expiry_date} 已过期（今天 {today}）—— '
+                f'种子数据不应写死绝对日期')
+
+    def test_expiry_offset_stays_in_expected_window(self):
+        """有效期应落在「今天 + 30~400 天」内。
+
+        只断言「未过期」挡不住写死日期：若有人写死 2027-06-30，那么
+        2026 年跑测试照样通过。加上区间断言后，写死日期会随时间漂出窗口。
+        """
+        self.seed()
+        today = timezone.localdate()
+        for m in Material.objects.exclude(expiry_date=None):
+            delta = (m.expiry_date - today).days
+            self.assertGreaterEqual(
+                delta, self.MIN_DAYS,
+                f'{m.name} 的有效期距今天仅 {delta} 天，不在预期窗口 '
+                f'{self.MIN_DAYS}~{self.MAX_DAYS} 内')
+            self.assertLessEqual(
+                delta, self.MAX_DAYS,
+                f'{m.name} 的有效期距今天 {delta} 天，不在预期窗口 '
+                f'{self.MIN_DAYS}~{self.MAX_DAYS} 内')
+
+    def test_chip_keeps_no_expiry_date(self):
+        """芯片无有效期是刻意的，不要顺手给它补一个。"""
+        self.seed()
+        chip = Material.objects.get(name='宠物芯片')
+        self.assertIsNone(chip.expiry_date)
