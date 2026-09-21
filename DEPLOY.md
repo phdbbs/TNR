@@ -1,9 +1,48 @@
 # TNR 系统部署文档
 
+## 〇、⚠ 已有生产服务器（`100.99.98.71`）——**不要在这台上跑 `deploy.sh`**
+
+该服务器 **2026-09-21** 已部署，架构与 `deploy.sh` 的假设**不一致**：
+
+| 项 | 实况 |
+|---|---|
+| 项目目录 | `/opt/tnr`（属主 `ubuntu:ubuntu`） |
+| 应用服务器 | gunicorn 6 worker + master，**全部以 `ubuntu` 运行**（**不是 `www-data`**） |
+| 进程管理 | supervisor：`tnr-gunicorn` + `tnr-qworker`（`user=ubuntu`） |
+| 反向代理 | nginx 1.24.0；`/media/` → `alias /opt/tnr/media/`，`/static/` 同理 |
+| 数据库 | **1Panel Docker 化的 MariaDB**（容器 `1Panel-mariadb-LQ69`），3306 由 docker-proxy 暴露 |
+| venv | `/opt/tnr/venv`（python3.12） |
+| 入口 | `http://100.99.98.71/`（**HTTP**，HTTPS 未配） |
+
+**为什么不能跑 `deploy.sh`**：它会 `apt install mysql-server`（与现成的 Docker MariaDB 冲突）、
+**重写 `.env`**（丢掉现有 `SECRET_KEY`/`DB_PASSWORD`）、`chown root:www-data`
+（而进程实际以 `ubuntu` 跑）。三者都会破坏现状。
+
+**该服务器的更新方式**（手工分阶段，已验证可复用）：
+
+```bash
+# 0. 备份（服务器上执行；容器里没有 mysql 客户端，要用 mariadb-dump）
+mkdir -p /root/tnr-backup-$(date +%Y%m%d-%H%M%S)
+#   mariadb-dump tnr_system > .../db-tnr_system.sql
+#   tar czf .../opt-tnr-code.tar.gz -C / opt/tnr      # ⚠ -C / 之后路径不再带 /opt
+#   cp /opt/tnr/.env /etc/nginx/... /etc/supervisor/... 一并备份
+
+# 1. 发布包（本地）——只含已提交内容，天然干净
+git archive --format=tar.gz --prefix=tnr/ HEAD -o /tmp/tnr-release.tar.gz
+
+# 2. 服务器上解包覆盖 → 3. 校准 .env（保留 SECRET_KEY/DB_PASSWORD，只补 TNR_AMAP_KEY）
+# 4. migrate + seed_data + ensure_superuser → 5. mkdir media + collectstatic
+# 6. supervisorctl restart tnr-gunicorn tnr-qworker
+```
+
+> 属主判据按**进程实际身份**定：先 `ps -o user= -C gunicorn` 确认，再决定 `media/` 归谁。
+> 这台机器上「`www-data` 不可写 `media/`」是**正常**的。
+
 ## 一、新服务器部署步骤（逐项执行）
 
-> **推荐**：直接用 `sudo bash deploy.sh` 一键部署（含 Nginx + Gunicorn + MySQL + Supervisor）。
+> **推荐**：全新服务器用 `sudo bash deploy.sh` 一键部署（含 Nginx + Gunicorn + MySQL + Supervisor）。
 > 下面是手工部署步骤，适用于已有环境或自定义架构。
+> ⚠ **已有环境的机器先看上面第〇节** —— `deploy.sh` 会重写 `.env` 与目录属主。
 
 ```bash
 # 1. 拉取代码
@@ -107,13 +146,24 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 
 | 检查项 | 命令 / 方式 | 期望 |
 |---|---|---|
-| 配置无告警 | `python manage.py check --deploy` | 除 HSTS 子域/预载两项外无警告 |
+| 配置无告警 | `python manage.py check --deploy` | 除 HTTPS 类告警（W004/W008/W012/W016）外无警告 |
 | 超级管理员可登录 | 访问 `/admin/` 用 `ensure_superuser` 输出的口令 | 能进入后台 |
 | 演示账号可用 | 访问 `/login/` 用 `cy_shelter` / `123456` | 能进入捕捉点门户 |
-| 照片上传可用 | 捕捉登记里传一张照片 | 上传成功，`media/` 出现文件 |
-| 数据隔离生效 | 用 `cy_gov` 访问他区宠物生命周期 | 返回 404 |
-| 数据一致性 | `python manage.py check_data_integrity` | 输出「未发现一致性问题」 |
+| **照片上传可用** | 捕捉登记里传一张照片，再**经反代取回** | 上传成功；`media/` 出现文件；`/media/...` 返回 200 且**与原图逐字节一致** |
+| **数据隔离生效** | 用他区账号访问本区宠物生命周期，**再访问一个不存在的 id** | **两者响应完全一致**（都是 404 且文案相同）—— 否则可用枚举 id 扫库 |
+| 数据一致性 | `python manage.py check_data_integrity` | 输出「未发现一致性问题」，退出码 0 |
 | 定时任务在跑 | `supervisorctl status` | `tnr-qworker` 为 RUNNING |
+| 无未捕获异常 | `grep -c Traceback <gunicorn stderr 日志>` | **0** |
+| 非法参数不炸 | 非数字进整型外键 / 非日期进日期字段 / 超大数 | 4xx，**不得 500** |
+| 地图 Key 生效 | `GET /api/business/geocode/reverse/?lng=112.144&lat=32.045`（需登录） | 返回真实地址（不是「未配置地图服务Key」） |
+| 静态文件已更新 | 页面上确认 `?v=` 为本次版本号 | 与 `templates/base.html` 一致 |
+
+> ⚠ **上传那一项必须走真实 HTTP multipart**，不能只用 shell 试写文件 ——
+> shell 试写只证明「磁盘可写」，证明不了「Django 存储 + 反代 `alias` + 目录属主」串起来是对的。
+>
+> ⚠ **排查线上配置时先怀疑探针**：`getattr(settings, 'X')` 取不到**不等于**没配
+> （代码可能是 `os.environ.get('X')`，由 `load_dotenv()` 灌入）；
+> `curl --noproxy *` 的 `*` 会被 shell glob 展开成当前目录文件名，**必须写 `--noproxy '*'`**。
 
 ## 六、常见报错对照
 
