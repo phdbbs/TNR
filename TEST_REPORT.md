@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **932 个用例，全部通过**（约 64 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **939 个用例，全部通过**（约 66 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页） |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -3707,6 +3707,128 @@ M42 词法器闭 `}` 原样输出（结构静默截断）
 
 ---
 
+### 2.32 第二十六轮：首次生产部署带出的三项修复（2026-09-21）
+
+#### 2.32.1 本轮来源：不是「走查」，是**真机部署**
+
+前二十五轮都在本地跑。这一轮第一次把代码部署到真实服务器
+（`ubuntu@100.99.98.71`，Ubuntu 24.04 + nginx + gunicorn + 1Panel Docker
+MariaDB + supervisor），**很多问题只在真机上才显形** —— 下面三项都是
+部署过程或部署后终验里冒出来的，不是读代码读出来的。
+
+#### 2.32.2 修复一：启动补偿不该在 `AppConfig.ready()` 里查库
+
+`business/apps.py` 原实现：
+
+```python
+def ready(self):
+    import os
+    if os.environ.get('RUN_MAIN') != 'true' and 'runserver' not in os.environ.get('DJANGO_COMMAND', ''):
+        pass                                   # ← 空分支，条件怎么写都没效果
+    try:
+        from business.tasks import auto_promote_to_adoptable
+        auto_promote_to_adoptable()            # ← 每次进程启动都写库
+    except Exception:
+        pass                                   # ← 把真实错误永久静默
+```
+
+| 问题 | 后果 |
+|---|---|
+| `ready()` 里查库 | 每个 `manage.py` 命令都打印 `RuntimeWarning: Accessing the database during app initialization` |
+| `migrate` 期间表还不存在 | 异常被 `except Exception: pass` 吞掉，**真实错误永久消失** |
+| `if ...: pass` 空分支 | 那段「跳过 migrate」的意图**从未生效** |
+
+**修法**：`ready()` 只挂信号，补偿改在**首个请求**（`request_started`）执行 ——
+能收到请求就说明 app 已就绪、表已建好；失败走 `logger.exception` 留痕，
+并立即断开信号（每个进程只跑一次）。
+
+**改前改后对照**（`manage.py check`）：
+
+```
+# 改前
+RuntimeWarning: Accessing the database during app initialization is discouraged.
+System check identified no issues (0 silenced).
+# 改后
+System check identified no issues (0 silenced).
+```
+
+新增 5 条用例（`business/tests/test_tasks.py::StartupCompensationTest`）：
+`ready()` 零查询、首个请求触发补偿、**只跑一次**、失败记日志、失败不连累请求。
+
+#### 2.32.3 修复二：日期边界把裸 `date` 丢给 `DateTimeField`
+
+`supervision/views.py` 的 `_date_filter` 用 `date` 直接比较 `created_at`
+（`DateTimeField`），Django 抛：
+
+```
+RuntimeWarning: DateTimeField Capture.created_at received a naive datetime
+(2026-09-21 00:00:00) while time zone support is active.
+```
+
+**结果是对的**（Django 按 `TIME_ZONE` 解释那个 naive 值），但**每个日期筛选
+请求都刷一条**，真异常会被噪音淹掉 —— 这是「失败不可见」的另一种形态。
+
+**修法**：新增 `services.aware_day_start(d)`（`date` → 当前时区的当天零点，
+aware datetime），**上下界都过它**；`date_upper_exclusive()` 改为返回
+aware datetime。**语义零变化**，只去掉警告。
+
+护栏用例：`LedgerCenterParamTest.test_date_filter_emits_no_naive_datetime_warning`
+—— 用 `warnings.catch_warnings(record=True)` 捕获，**实测回退调用点即变红**：
+
+```
+A（旧实现）：FAILED —— 'DateTimeField Capture.created_at received a naive datetime …'
+B（修复后）：OK
+```
+
+#### 2.32.4 修复三：`.DS_Store` 与 AI 会话计划文件被 git 跟踪
+
+`.DS_Store`、`static/.DS_Store`、`.zcode/plans/*.md` 三个文件被跟踪，
+**并随本次部署进了生产目录**（`/opt/tnr/`）。`.DS_Store` 还让工作区
+每次动 Finder 就变脏。
+
+修法：`git rm --cached`（**文件保留在磁盘上**）+ 写进 `.gitignore`。
+
+#### 2.32.5 ⚠ 本轮最值得记住的**测试方法学**教训
+
+**不要在测试套件运行期间修改被测源文件。**
+
+现象：一轮全量测试报 `FAILED (failures=1)`，失败的是「`operation_logs`
+必须有 `@role_required('gov_city','gov_district')`」，而报错里贴出的源码
+**恰好从 `def operation_logs(request):` 开始、丢了装饰器**。
+
+根因：那条用例用 `inspect.getsource()` 取源码 —— 它按**编译时的行号**
+（`co_firstlineno`，在 import 时固定）去**磁盘上现读**文件。我在套件运行的
+同时往 `supervision/views.py` 的 `_date_filter` 里加了一行注释，其后所有
+行号 **+1**，于是 `getsource` 从函数体中间开始读。**这是假失败，代码没问题。**
+
+判据：`getsource` / `linecache` 类断言依赖「文件内容与编译时的行号一致」；
+**改动被测文件后必须重跑**，不要把并发期间的结果当真。
+
+#### 2.32.6 两条负结论（都是「看着像缺陷，实测不是」）
+
+| 疑点 | 结论 |
+|---|---|
+| 台账接口返回 snake_case，而捕捉/医院端读 camelCase | **不是缺陷**。三端**各读各的接口**：gov 调 `ledger_center`（手工聚合，契约就是 snake，`supervision/tests.py` 断言 `records[0]['ledger_no']`）；shelter/hospital 读的是 `serialize_instance()` 的接口（**双键**，camel/snake 都在）。`getLedger()` 唯一调用者就是 gov 端 |
+| `/api/supervision/operation-logs/` 返回 404 | **是查错路径**。真实路由 `/api/supervision/logs/`（`supervision/urls.py`），实测 200 |
+
+⚠ 但留一个**真隐患**（当前不产生故障）：`ledger_center` **内部两套键** ——
+`business_type=pet` 分支走 `pet_archive_records()`（**双键**），其余分支**裸
+snake**。同一接口两种命名，改前端就会踩。
+
+#### 2.32.7 本轮复测结果
+
+| 项 | 结果 |
+|---|---|
+| 全量测试 | **939 OK**（932 → 939） |
+| `manage.py check` | 无 `RuntimeWarning`（改前每个命令一条） |
+| `check --deploy`（生产） | 仅剩 4 条 HTTPS 类告警（W004/W008/W012/W016） |
+| `check_data_integrity`（生产） | 「未发现一致性问题」，退出码 0 |
+| 生产 gunicorn stderr | `Traceback` 计数 **0** |
+| 照片上传（生产实测） | 真实 multipart → 落盘 → 经 nginx `200 image/png` → **逐字节一致** |
+| 区县隔离（生产实测） | 他区账号取本区宠物 **404**，取不存在 id **404 同文案** |
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -3889,7 +4011,7 @@ python manage.py migrate
 python manage.py seed_data          # 幂等，可重复执行；同时校准演示账号
 python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
-python manage.py test --parallel 1  # 932 个用例
+python manage.py test --parallel 1  # 939 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
