@@ -1,4 +1,7 @@
 """core 应用测试：区县与机构模型。"""
+import json
+
+from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import (
     RequestDataTooBig, TooManyFieldsSent, TooManyFilesSent,
@@ -12,6 +15,7 @@ from django.test import (
 from business.tests.base import (
     BusinessTestBase, make_district, make_institution, make_user,
 )
+from core.http import body_dict, body_list, body_str, read_json_body
 from core.models import District, Institution
 from tnr_system.urls import (
     api_aware_bad_request, api_aware_csrf_failure, api_aware_not_found,
@@ -19,15 +23,20 @@ from tnr_system.urls import (
 )
 
 
-def iter_api_routes():
+def iter_api_routes(pk='1'):
     """遍历 URLconf，产出所有 `/api/` 下的**具体路径**。
 
-    `<int:pk>` 这类占位符替换成 `1`；转换器参数一律用 `1`，
-    因为这一层只关心「守卫/契约怎么回」，不关心业务是否存在该 id。
+    `<int:pk>` 这类占位符替换成 `pk`（默认 `1`）。
+
+    ⚠ `pk` 参数是为 **POST 枚举**准备的：`xxx/<pk>/withdraw/` 这类
+    **不读请求体**的动作接口，如果给一个真实存在的 id，就会**真的执行副作用**
+    （在测试事务里虽会回滚，但同一方法内后续请求的行为会被带偏）。
+    给一个**不存在的 id**（如 `99999999`）即可让它们安全地 404。
 
     ⚠ 供多个「枚举式契约闸门」共用（未登录响应 / 信封形状 / 非法参数 /
-    各角色访问）。**不要在各测试类里各写一份** —— 遍历逻辑一旦漂移，
-    就会出现「有的闸门覆盖 78 条、有的覆盖 60 条」而无人察觉。
+    各角色访问 / POST 参数校验）。**不要在各测试类里各写一份** ——
+    遍历逻辑一旦漂移，就会出现「有的闸门覆盖 78 条、有的覆盖 60 条」
+    而无人察觉。
     """
     import re
 
@@ -40,7 +49,7 @@ def iter_api_routes():
             elif isinstance(entry, URLPattern):
                 full = prefix + str(entry.pattern)
                 if full.startswith('api/'):
-                    yield '/' + re.sub(r'<[^>]+>', '1', full)
+                    yield '/' + re.sub(r'<[^>]+>', pk, full)
 
     yield from walk(get_resolver())
 
@@ -609,3 +618,371 @@ class AllApiRoutesContractTest(BusinessTestBase):
                         problems.append('%s → %s %s'
                                         % (path, resp.status_code, ctype))
                 self._assert_all_json(problems, '%s 角色' % role_name)
+
+
+# ============================================
+# POST 请求体契约闸门（第三十五轮）
+# ============================================
+#: 固定畸形 body。前 5 个是**形状**问题（顶层不是 JSON 对象），
+#: 其余是**字段值**问题（每个对应一族实测踩过的解析路径）。
+MALFORMED_BODIES = (
+    '{}',                                          # 空对象（缺参数）
+    '{',                                           # 坏 JSON
+    '[1,2,3]',                                     # 顶层数组
+    '"just a string"',                             # 顶层字符串
+    'null',                                        # 顶层 null
+    '{"id": "abc"}',
+    '{"district_id": "abc"}',
+    '{"institution_id": "abc"}',
+    '{"count": "abc"}',
+    '{"count": 999999999999999999999999}',
+    '{"quantity": "abc"}',
+    '{"quantity": -1}',
+    '{"material_id": "abc"}',
+    '{"lat": "abc", "lng": "abc"}',
+    '{"start_date": "notadate"}',
+    '{"date": "notadate"}',
+    '{"pet_codes": "notalist"}',
+    '{"pet_codes": [1, 2, 3]}',
+    '{"reason": null}',
+    '{"new_password": null}',
+    '{"old_password": null, "new_password": null, "confirm_password": null}',
+    '{"action": "__proto__"}',
+    '{"status": {"$ne": null}}',
+)
+
+#: 逐参数名测试用的畸形值（每个真实参数名各发一次）。
+#: 四种分别对应：非数字字符串（整型外键 / 日期的经典炸点）、
+#: 超大数（`int()` 本身**不报错**，SQLite 绑定时才溢出）、
+#: 数组与对象（非字符串 truthy，`.strip()` / `.get()` 都会炸）。
+MALFORMED_BODY_VALUES = (
+    '"abc"',
+    '999999999999999999999999',
+    '[1,2,3]',
+    '{"$ne": null}',
+)
+
+#: 统计「数据是否被创建」时排除的表：
+#: - 审计日志会因**任何**请求而增长；
+#: - django_q 的表由队列维护；
+#: - `sessions.Session` 是**登录动作本身**的副产品 —— 本闸门要切换 5 个
+#:   角色，每次 `login_as` 都会写一行 session。它与请求体无关，
+#:   不排除的话每次都会报一条 `Session: 0 → 1` 的假阳性。
+_COUNT_EXCLUDE = {'core.AuditLog', 'sessions.Session'}
+
+
+def collect_body_param_names():
+    """从生产代码里抄出**真实**的请求体参数名。
+
+    ⚠ 想当然编的参数名接口根本不读，**等于没测**，而测试照样绿
+    （第三十四轮踩过：第一版 `BAD_QUERIES` 编了 8 个名字，全部无效）。
+
+    ⚠ 必须同时扫两种形态：收口后大多数读取点已经从 `data.get('x')`
+    变成 `body_str(data, 'x')` —— 只扫前者会让参数名从 101 掉到 45，
+    **闸门自己退化成假绿**。这正是「枚举式测试的失败模式」：
+    枚举源写坏了，结果集变小，而测试仍然全绿。
+    """
+    import pathlib
+    import re
+
+    pats = (
+        re.compile(r"""(?:data|payload|body)\.get\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""),
+        re.compile(r"""body_(?:str|int|dict|list)\(\s*data\s*,\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""),
+    )
+    names = set()
+    for path in pathlib.Path('.').rglob('*.py'):
+        if ('.venv' in path.parts or 'migrations' in path.parts
+                or path.name.startswith('tests')):
+            continue
+        try:
+            src = path.read_text(encoding='utf-8')
+        except OSError:
+            continue
+        for pat in pats:
+            names.update(m.group(1) for m in pat.finditer(src))
+    return sorted(names)
+
+
+def model_counts():
+    """当前各业务模型的行数（用于「非法请求不得创建数据」的对比）。"""
+    out = {}
+    for model in apps.get_models():
+        label = model._meta.label
+        if label in _COUNT_EXCLUDE or label.startswith('django_q.'):
+            continue
+        try:
+            out[label] = model.objects.count()
+        except Exception:                       # noqa: BLE001
+            # 少数表在测试库里可能不存在（第三方应用未迁移），跳过即可
+            pass
+    return out
+
+
+class AllApiPostRoutesContractTest(BusinessTestBase):
+    """枚举全部 `/api/` 路由的 **POST 请求体契约闸门**（第三十五轮）。
+
+    第三十四轮把「查询参数契约」做成了枚举闸门（`AllApiRoutesContractTest`），
+    但**请求体**没有对应保障 —— 一扩就炸出一族真缺陷：
+
+        ① 17 个接口 × 3 种非 dict body ≈ **51 处 500**
+           （`[1,2,3]` / `"str"` / `null` → `AttributeError: 'x' object has
+             no attribute 'get'`）
+        ② 整型外键畸形值 → `ValueError: Field 'id' expected a number but got ...`
+           （`pet_id` / `shelter_id` / `from_shelter_id` / `capture_id` /
+             `to_hospital_id` / `district_id` / `institution_id` / `material_id`）
+        ③ 字符串参数是 dict/list → `(data.get('name') or '').strip()` 炸
+        ④ **`SystemConfig` 被写入 16 行** —— 任意顶层 key 都成了配置项
+
+    ⚠ 三个必须遵守的写法（全是踩出来的）：
+
+    **① 必须多角色跑。** 单角色（gov_city）打所有接口时，大量接口会在
+    `role_required` 那层 403 提前返回，**后面的代码根本没执行** ——
+    `/api/business/checkins/create/` 只对 adopter 开放，用市级账号打永远是
+    403，里面 `data.get('month', '').strip()` 的缺陷一次都扫不到。
+    第一版探针就是单角色，漏了一整片。这是这类闸门最隐蔽的假绿来源。
+
+    **② 参数名必须从生产代码抄**，且两种形态都要扫 —— 见
+    `collect_body_param_names()` 的说明。
+
+    **③ `<pk>` 必须给不存在的 id**（`99999999`）。`xxx/<pk>/withdraw/`
+    这类不读请求体的动作接口，给真实 id 会**真的执行副作用**。
+
+    ⚠ 判据是**两件事**，缺一不可：
+      - 状态码 < 500（「可以 4xx、可以 200（忽略），但**不能 500**」）
+      - `Content-Type == application/json`（前端三个封装都是 `res.json()`，
+        非 JSON 会抛 `SyntaxError` → 用户看到「点了没反应」）
+    """
+
+    def setUp(self):
+        # ⚠ `99999999` 不存在 → 动作类接口安全 404，不会真执行副作用
+        self.routes = sorted(set(iter_api_routes(pk='99999999')))
+        self.assertGreater(
+            len(self.routes), 20,
+            '路由枚举结果太少（%d 条），遍历逻辑可能写坏了 —— '
+            '枚举为空时所有 offender 集合都是空的，闸门会**假绿**'
+            % len(self.routes))
+        self.roles = (
+            ('gov_city', self.gov_city),
+            ('gov_district', self.gov_a),
+            ('shelter', self.shelter_user_a),
+            ('hospital', self.hospital_user_a),
+            ('adopter', self.adopter),
+        )
+        # ⚠ 500 默认会让测试客户端**重新抛出异常**，整个枚举在第一处就中断，
+        # 拿不到完整清单。关掉它才能一次看到全部 offender。
+        self.client.raise_request_exception = False
+
+    def _sweep(self, bodies, label):
+        """用 `bodies` 打全部路由 × 全部角色，返回问题清单。"""
+        problems = []
+        for role_name, user in self.roles:
+            self.login_as(user)
+            for path in self.routes:
+                for desc, body in bodies:
+                    resp = self.client.post(
+                        path, data=body, content_type='application/json')
+                    ctype = (resp.get('Content-Type') or '').split(';')[0]
+                    if resp.status_code >= 500:
+                        problems.append('%s %s %s → %s'
+                                        % (role_name, path, desc, resp.status_code))
+                    elif ctype != 'application/json':
+                        problems.append('%s %s %s → %s %s'
+                                        % (role_name, path, desc,
+                                           resp.status_code, ctype))
+        return problems
+
+    def _assert_no_problems(self, problems, label):
+        self.assertEqual(
+            [], problems,
+            '以下「%s」把接口打成了 5xx 或非 JSON 响应：\n  %s\n\n'
+            '前端 `TNR_API` 的三个封装（`_get` / `_post` / `_postForm`）内部都是\n'
+            '`await res.json()`，非 JSON 响应会让它抛 `SyntaxError` —— 用户看到的是\n'
+            '「页面空白」或「点了没反应」，而服务端日志里只有一个 4xx/5xx，\n'
+            '看起来完全正常。\n\n'
+            '读取请求体参数请统一走 `body_str` / `body_int` / `body_dict` /\n'
+            '`body_list`（定义见 `core/http.py` 与 `business/services.py`）。'
+            % (label, '\n  '.join(problems[:40])))
+
+    def test_malformed_bodies_are_rejected_cleanly(self):
+        """固定畸形 body：不得 5xx、不得非 JSON、**不得创建任何业务记录**。
+
+        ⚠ 第三件事（数据是否被创建）是这一轮才补上的维度：探针第一次跑就
+        发现 `supervision.SystemConfig` 从 0 变成 16 —— 非法请求体竟然写库了。
+        只检查状态码的闸门对这类问题**完全无感**。
+        """
+        before = model_counts()
+        problems = self._sweep(
+            [(b[:32], b) for b in MALFORMED_BODIES], '固定畸形 body')
+        self._assert_no_problems(problems, '固定畸形 body')
+
+        after = model_counts()
+        created = ['%s: %d → %d' % (label, before.get(label), n)
+                   for label, n in after.items() if n != before.get(label)]
+        self.assertEqual(
+            [], created,
+            '非法请求体竟然创建了业务数据：\n  %s\n\n'
+            '「静默写入垃圾」比 500 更难查 —— 500 至少留下 Traceback，\n'
+            '而这类数据会被当成真实业务数据渲染出来，且无法与正常数据区分。'
+            % '\n  '.join(created))
+
+    def test_every_body_param_rejects_malformed_values(self):
+        """逐参数名打畸形值：覆盖「接口**真的读了**哪些参数」。
+
+        与固定 body 那组互补 —— 固定 body 只能覆盖**想得到的**字段名，
+        而这里覆盖的是源码里**实际存在**的每一个参数名（含嵌套的
+        `vaccine.material_id` 这类）。
+
+        ⚠ 这里**不**检查「数据是否被创建」：本组用的是真实参数名 +
+        `"abc"` 这种合法字符串，`{"name": "abc"}` 打到创建接口会**合法地**
+        建出记录，混进来就是假阳性。
+        """
+        names = collect_body_param_names()
+        self.assertGreater(
+            len(names), 40,
+            '从源码抄出的请求体参数名只有 %d 个，扫描逻辑可能写坏了 —— '
+            '参数名收窄会让本闸门**假绿**' % len(names))
+        bodies = []
+        for name in names:
+            for value in MALFORMED_BODY_VALUES:
+                bodies.append(('%s=%s' % (name, value[:16]),
+                               '{%s: %s}' % (json.dumps(name), value)))
+        problems = self._sweep(bodies, '逐参数名畸形值')
+        self._assert_no_problems(problems, '逐参数名畸形值')
+
+    def test_non_json_content_type_still_returns_json(self):
+        """`application/x-www-form-urlencoded` 提交也必须回 JSON。
+
+        这条路径走的是 `request.POST` 分支（`read_json_body` 对非
+        multipart 也会去解析 body，失败返回 `{}`），与 JSON 分支是两套代码 ——
+        只测 JSON 分支会漏掉这一半。
+        """
+        problems = []
+        for role_name, user in self.roles:
+            self.login_as(user)
+            for path in self.routes:
+                resp = self.client.post(
+                    path, data='a=b',
+                    content_type='application/x-www-form-urlencoded')
+                ctype = (resp.get('Content-Type') or '').split(';')[0]
+                if resp.status_code >= 500 or ctype != 'application/json':
+                    problems.append('%s %s → %s %s'
+                                    % (role_name, path, resp.status_code, ctype))
+        self._assert_no_problems(problems, 'form-encoded 提交')
+
+    def test_empty_multipart_still_returns_json(self):
+        """空 multipart 提交也必须回 JSON（`request.POST` 为空的边界）。"""
+        problems = []
+        for role_name, user in self.roles:
+            self.login_as(user)
+            for path in self.routes:
+                resp = self.client.post(path, data={})
+                ctype = (resp.get('Content-Type') or '').split(';')[0]
+                if resp.status_code >= 500 or ctype != 'application/json':
+                    problems.append('%s %s → %s %s'
+                                    % (role_name, path, resp.status_code, ctype))
+        self._assert_no_problems(problems, '空 multipart 提交')
+
+
+class ReadJsonBodyNormalisationTest(SimpleTestCase):
+    """`read_json_body` 必须**只**返回 `dict`（第三十五轮收口）。
+
+    此前它的 docstring 写着「返回值可能是 `list` 等非 dict（合法 JSON），
+    **调用方自行判断**」—— 实测这条约定**没有一个调用方遵守**：约 30 处
+    调用点清一色是 `data = parse_json_body(request)` 之后直接 `data.get(...)`。
+    于是顶层非 dict 的 body 一律炸 `AttributeError` → 500。
+
+    为什么必须在这里归一、而不是去 30 个调用点加 `isinstance`：
+    `request.body` 的容错逻辑（`RequestDataTooBig` / 坏 JSON / multipart）
+    **只应该有一份**（第二十六轮就是因为两份实现漂移才漏掉 `RequestDataTooBig`）。
+    散到 30 处去加判断必然再次漂移，而漂移的表现就是「有的接口 500、
+    有的接口正常」这种最难查的形态。
+    """
+
+    def _parse(self, raw, content_type='application/json'):
+        return read_json_body(RequestFactory().post(
+            '/api/x/', data=raw, content_type=content_type))
+
+    def test_top_level_non_dict_is_normalised_to_empty_dict(self):
+        for raw in ('[1,2,3]', '"just a string"', 'null', '123', 'true'):
+            with self.subTest(body=raw):
+                self.assertEqual(
+                    self._parse(raw), {},
+                    '顶层非 dict 的合法 JSON 必须归一成 `{}`，'
+                    '否则调用方的 `data.get(...)` 会抛 AttributeError → 500')
+
+    def test_dict_body_is_preserved(self):
+        self.assertEqual(self._parse('{"a": 1, "b": [1, 2]}'),
+                         {'a': 1, 'b': [1, 2]})
+
+    def test_broken_json_returns_empty_dict(self):
+        for raw in ('{', '', 'not json at all'):
+            with self.subTest(body=raw):
+                self.assertEqual(self._parse(raw), {})
+
+    def test_multipart_does_not_read_body(self):
+        """multipart 一律返回 `{}`（有用数据在 `request.POST` / `request.FILES`）。
+
+        ⚠ 这里不能用 `RequestFactory.post(data={...})` 造 multipart ——
+        那会真的走解析器。用 content_type 直接模拟即可，本用例只关心
+        「不读 `request.body`」这一条分支。
+        """
+        req = RequestFactory().post(
+            '/api/x/', data='whatever',
+            content_type='multipart/form-data; boundary=xxx')
+        self.assertEqual(read_json_body(req), {})
+
+
+class BodyValueGuardTest(SimpleTestCase):
+    """`body_str` / `body_dict` / `body_list` 的类型守卫（第三十五轮）。
+
+    这三个函数的共同点：**`or 默认值` 挡不住非 falsy 的错误类型**。
+    `{"name": [1, 2, 3]}` / `{"name": {"$ne": null}}` / `{"name": 123}`
+    全是 truthy，`or ''` 不生效，于是直接 `.strip()` / `.get()` 炸。
+
+    ⚠ 也**不能**用 `str(value)` 强转来「修」：`str({'$ne': None})` 得到
+    字面量 `"{'$ne': None}"`，会被当成真实业务数据写进库。
+    「静默写入垃圾」比 500 更难查 —— 500 至少留下 Traceback。
+    """
+
+    TRUTHY_WRONG_TYPES = ([1, 2, 3], {'$ne': None}, 123, 1.5, True)
+
+    def test_body_str_rejects_every_non_string(self):
+        for value in self.TRUTHY_WRONG_TYPES:
+            with self.subTest(value=value):
+                self.assertEqual(body_str({'k': value}, 'k'), '',
+                                 '非字符串必须回 default，不能 `str()` 强转 —— '
+                                 '强转会把垃圾值当真实数据写进库')
+
+    def test_body_str_keeps_strings_and_honours_default(self):
+        self.assertEqual(body_str({'k': ' v '}, 'k'), ' v ',
+                         '不 strip —— 要不要 strip 由调用方决定，与原写法等价')
+        self.assertEqual(body_str({'k': ''}, 'k'), '')
+        self.assertEqual(body_str({}, 'k', 'fallback'), 'fallback')
+        self.assertEqual(body_str({'k': None}, 'k', 'fallback'), 'fallback')
+
+    def test_body_dict_rejects_every_non_dict(self):
+        for value in ('abc', [1, 2, 3], 123, None):
+            with self.subTest(value=value):
+                self.assertEqual(body_dict({'k': value}, 'k'), {})
+
+    def test_body_dict_keeps_dicts(self):
+        self.assertEqual(body_dict({'k': {'a': 1}}, 'k'), {'a': 1})
+        self.assertEqual(body_dict({}, 'k'), {})
+
+    def test_body_list_rejects_every_non_list(self):
+        for value in ('abc', {'a': 1}, 123, None):
+            with self.subTest(value=value):
+                self.assertEqual(body_list({'k': value}, 'k'), [])
+
+    def test_body_list_keeps_lists(self):
+        self.assertEqual(body_list({'k': [1, 2]}, 'k'), [1, 2])
+        self.assertEqual(body_list({}, 'k'), [])
+
+    def test_body_list_does_not_return_tuples(self):
+        """JSON 没有 tuple —— 但接口若被 Python 内部调用可能传进来。
+
+        ⚠ 刻意只认 `list`：`isinstance(x, (list, tuple))` 会让
+        「JSON 数组」与「内部 tuple」两种来源混在一起，而 JSON 解析
+        永远不会产出 tuple，放宽只会让守卫的语义变模糊。
+        """
+        self.assertEqual(body_list({'k': (1, 2)}, 'k'), [])

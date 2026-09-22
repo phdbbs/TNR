@@ -1005,3 +1005,141 @@ class InactiveDistrictAssignmentTest(SupervisionBase):
             'username': 'inactive_probe', 'name': '探针', 'role': 'hospital',
             'district_id': self.district_b.id,
             'institution_id': self.hospital_b.id}), message='所选区县已停用')
+
+
+# ============================================
+# 系统配置的写入端契约（第三十五轮）
+# ============================================
+class SystemConfigWriteWhitelistTest(SupervisionBase):
+    """系统配置的**写入端**必须有键白名单。
+
+    此前 POST 是
+
+        for key, value in data.items():
+            SystemConfig.objects.update_or_create(key=key, defaults={'value': str(value)})
+
+    ——**请求体的每个顶层 key 都会变成一行配置**。枚举实测：用 23 种畸形
+    请求体打一遍 78 条 POST 路由，`SystemConfig` 被写入 **16 行**，全是
+    `district_id` / `count` / `old_password` / `status` / `action` 这类垃圾键。
+    这些垃圾随后会被 GET **原样读出来**返回给前端，且无法与真实配置区分 ——
+    有写权限的人手滑一次（或前端 payload 构造出错）就永久污染配置表。
+
+    ⚠ 值必须是字符串：`str(value)` **对任何类型都成功**，
+    `str(None)` = `'None'`、`str({'$ne': None})` = `"{'$ne': None}"` ——
+    畸形值不会报错，只会静默变成垃圾前缀，被拼进之后新生成的所有单据号里。
+    """
+
+    def test_unknown_key_is_rejected_and_not_written(self):
+        self.client.force_login(self.gov_city)
+        before = SystemConfig.objects.count()
+        for key in ('district_id', 'count', 'old_password', 'status', 'action',
+                    'id', 'anything_at_all'):
+            with self.subTest(key=key):
+                resp = self.post_json(f'{API}/config/', {key: 'x'})
+                self.assertEqual(resp.status_code, 400,
+                                 '未知配置项 %r 必须被拒绝' % key)
+                self.assertIn('不支持的配置项', resp.json().get('message', ''))
+        self.assertEqual(SystemConfig.objects.count(), before,
+                         '被拒绝的请求不得写库')
+
+    def test_whitelisted_key_still_works(self):
+        """正向对照：白名单内的键必须照常写入。
+
+        守卫不能做成「一律禁止」—— 那样测试会全绿、功能却废了。
+        这是本项目的固定套路：**每个守卫都要有正向对照**。
+        """
+        self.client.force_login(self.gov_city)
+        self.ok(self.post_json(f'{API}/config/', {'capture_prefix': 'ZB'}))
+        self.assertEqual(SystemConfig.objects.get(key='capture_prefix').value, 'ZB')
+
+    def test_whitelist_matches_read_defaults(self):
+        """白名单与读接口的默认值必须**同源**。
+
+        分成两份必然漂移，漂移的表现恰好是最难查的那种：新加的配置项
+        「读得到、写不进去」，用户点了保存界面还提示成功。
+        这里顺带断言「库里没有白名单外的键」—— 那正是上一版留下的污染形态。
+        """
+        from supervision.views import SYSTEM_CONFIG_DEFAULTS
+        self.client.force_login(self.gov_city)
+        data = self.ok(self.client.get(f'{API}/config/'))['data']
+        self.assertEqual(
+            set(data), set(SYSTEM_CONFIG_DEFAULTS),
+            '读接口返回的键集合与写白名单不一致（或库里存在白名单外的残留键）')
+
+    def test_non_string_values_are_rejected(self):
+        self.client.force_login(self.gov_city)
+        before = SystemConfig.objects.count()
+        for payload in ({'capture_prefix': None},
+                        {'capture_prefix': [1, 2, 3]},
+                        {'capture_prefix': {'$ne': None}},
+                        {'capture_prefix': 123},
+                        {'capture_prefix': '   '},
+                        {'capture_prefix': 'X' * 50}):
+            with self.subTest(payload=payload):
+                resp = self.post_json(f'{API}/config/', payload)
+                self.assertEqual(resp.status_code, 400,
+                                 '%r 应被拒绝，实际 %s：%r'
+                                 % (payload, resp.status_code, resp.content[:200]))
+        self.assertEqual(SystemConfig.objects.count(), before)
+
+    def test_district_admin_cannot_write(self):
+        """锚点：写权限仍然只有市级 —— 白名单不能顺手放宽了角色。"""
+        self.client.force_login(self.gov_a)
+        self.expect_fail(
+            self.post_json(f'{API}/config/', {'capture_prefix': 'ZZ'}), status=403)
+
+
+class DistrictEditStatusEnumTest(SupervisionBase):
+    """区县编辑接口的 `status` 必须与切换接口**同值域**（第三十五轮）。
+
+    `District.status` 是 `CharField` **没有 choices**，而停用判据是
+    `business.services.inactive_district_error()` 里的 `status != 'active'`
+    —— 于是写入**任何**非 `'active'` 的字符串都等价于「停用该区县」，
+    且界面会把那个垃圾值当状态显示出来（无 choices 时
+    `get_status_display()` 返回原值）。
+
+    孪生入口 `district_toggle_status` 只会写 `'active'` / `'inactive'`；
+    编辑接口必须与它同值域 —— 否则前者只是「界面上不容易踩到」，不是约束，
+    直接调接口就能塞进任意状态。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(self.gov_city)
+
+    def test_malformed_status_is_rejected_and_not_written(self):
+        for value in ('zzz', '', '   ', 'ACTIVE', 'active ', None, [1, 2, 3]):
+            with self.subTest(value=value):
+                resp = self.post_json(
+                    f'{API}/districts/{self.district_a.id}/edit/',
+                    {'status': value})
+                self.assertEqual(resp.status_code, 400,
+                                 'status=%r → %s：%r'
+                                 % (value, resp.status_code, resp.content[:200]))
+                self.assertIn('状态', resp.json().get('message', ''))
+        self.district_a.refresh_from_db()
+        self.assertEqual(self.district_a.status, 'active',
+                         '被拒绝的请求不得改库')
+
+    def test_valid_status_values_still_work(self):
+        """正向对照：两个合法值必须照常写入。"""
+        for value in ('inactive', 'active'):
+            with self.subTest(value=value):
+                self.ok(self.post_json(
+                    f'{API}/districts/{self.district_a.id}/edit/',
+                    {'status': value}))
+                self.district_a.refresh_from_db()
+                self.assertEqual(self.district_a.status, value)
+
+    def test_non_active_status_really_disables(self):
+        """锚点：解释为什么 `status` 必须收窄。
+
+        这条断言不是在测 `inactive_district_error`，而是把「为什么这里
+        必须校验」写进测试里 —— 判据一旦变化，这里会先红。
+        """
+        from business.services import inactive_district_error
+        self.district_a.status = 'zzz'
+        self.assertIsNotNone(
+            inactive_district_error(self.district_a),
+            '`status != "active"` 就是停用判据 —— 所以写入任意非 active 值'
+            '都等价于停用该区县')

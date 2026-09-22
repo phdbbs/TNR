@@ -41,11 +41,11 @@ from django.utils import timezone
 from business import services
 from business.models import Capture, Material, MaterialTransaction, OwnerReturn
 from business.services import (
-    MAX_CAPTURE_BATCH, adjust_stock, date_upper_exclusive,
+    MAX_CAPTURE_BATCH, adjust_stock, body_int, date_upper_exclusive,
     parse_date_param, parse_int_param,
 )
 from business.tests.base import (
-    BusinessTestBase, make_capture, make_material,
+    BusinessTestBase, make_capture, make_material, make_pet,
 )
 
 CAPTURES = '/api/business/captures/'
@@ -1127,3 +1127,134 @@ class LedgerApiSurfacesErrorsTest(SimpleTestCase):
                         '截出来的块过大，多半是配对算法写错了')
         self.assertLess(len(self.render), len(self.gov_src) // 4,
                         '截出来的块过大，多半是配对算法写错了')
+
+
+# ============================================================
+# 10. 请求体参数守卫（第三十五轮）
+# ============================================================
+class BodyIntGuardTest(SimpleTestCase):
+    """`body_int` —— 请求体里的整型外键。
+
+    ⚠ 为什么不能直接 `data.get('pet_id')` 再塞进 ORM：会以**两种**方式炸 500
+      - `"abc"` / `[1,2,3]` / `{"$ne": null}`
+        → `ValueError: Field 'id' expected a number but got ...`
+      - `999999999999999999999999`
+        → `int()` **不报错**，是 SQLite 绑定时才 `OverflowError`
+
+    第二种是「随手包一层 `try: int(x) except ValueError`」拦不住的 ——
+    所以必须复用 `parse_int_param`（先按位数挡、再比上限）。
+    """
+
+    def test_malformed_values_return_none(self):
+        for value in ('abc', '', '襄城区', [1, 2, 3], {'$ne': None}, 1.5,
+                      '9' * 24, '0', '-1'):
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    body_int({'k': value}, 'k'),
+                    '非法值必须回 None（= 视为未提供），由调用方的必填校验'
+                    '给出可读的 400')
+
+    def test_valid_values_are_parsed(self):
+        self.assertEqual(body_int({'k': 7}, 'k'), 7)
+        self.assertEqual(body_int({'k': '7'}, 'k'), 7)
+
+    def test_missing_key_returns_none(self):
+        self.assertIsNone(body_int({}, 'k'))
+        self.assertIsNone(body_int({'k': None}, 'k'))
+
+
+class MalformedBodyRejectedTest(BusinessTestBase):
+    """畸形请求体必须被**明确拒绝**（400 + 可读文案），不能 500。
+
+    与枚举闸门（`core.tests.AllApiPostRoutesContractTest`）互补：
+
+    | | 枚举闸门 | 本类 |
+    |---|---|---|
+    | 作用 | **发现**新缺陷（覆盖全部路由 × 全部角色） | 锁住**已修**的那几处不回归 |
+    | 判据 | 状态码 < 500 且是 JSON | 400 **且文案能解释发生了什么** |
+
+    ⚠ 为什么还要断言「文案」：状态码对但文案是「操作失败」等于没告诉用户
+    哪里错了。本项目一直把「错误要可读、要指向具体字段」当硬要求。
+    """
+
+    def post(self, url, payload):
+        """发一个**原始文本** body —— 才能造出 `[1,2,3]` 这种非 dict 顶层。"""
+        return self.client.post(url, data=payload,
+                                content_type='application/json')
+
+    def test_top_level_non_dict_never_500(self):
+        """顶层非 dict 的 body：`read_json_body` 归一成 `{}` → 走必填校验。
+
+        修法在 `core.http.read_json_body`（归一化只有一份）—— 约 30 处
+        调用点因此自动受益。本用例锁住这个约定。
+        """
+        self.login_as(self.gov_city)
+        for payload in ('[1,2,3]', '"just a string"', 'null', '123'):
+            with self.subTest(body=payload):
+                resp = self.post(ADJUSTMENT, payload)
+                self.assertEqual(
+                    resp.status_code, 400,
+                    '顶层非 dict 应被归一成 `{}` 后走必填校验（400），'
+                    '实际 %s：%r' % (resp.status_code, resp.content[:200]))
+                self.assertEqual(
+                    (resp.get('Content-Type') or '').split(';')[0],
+                    'application/json')
+
+    def test_material_id_malformed_is_rejected_with_reason(self):
+        """`{"material_id": "abc"}` 必须报「必须是数字」，而不是 500。
+
+        这是全项目**唯一**一处「畸形整型外键直接进 ORM」—— 同文件的
+        `purchase_create` / `dispatch_create` 早就走了 `parse_int_param`，
+        只有 `stock_adjustment` 漏了。三处同族参数必须同一写法。
+        """
+        self.login_as(self.hospital_user_a)
+        for value in ('"abc"', '[1,2,3]', '{"$ne": null}', '999999999999999999999999'):
+            with self.subTest(value=value):
+                resp = self.post(ADJUSTMENT, '{"material_id": %s}' % value)
+                self.assertEqual(resp.status_code, 400,
+                                 '%s → %s' % (value, resp.status_code))
+                # 文案要**指向具体字段** —— `"abc"` 报「必须是数字」、
+                # 超大数报「超出有效范围」，两种都可接受，共同点是带上字段名。
+                self.assertIn('物料ID', resp.json().get('message', ''),
+                              '文案要指向具体字段，实际：%r'
+                              % resp.json().get('message'))
+
+    def test_transfer_items_malformed_is_rejected(self):
+        """`{"items": [1, 2, 3]}` —— 元素不是 dict，必须被丢弃后走必填校验。
+
+        不处理的话 `for item in items` 里的 `item.get(...)` 会炸
+        `AttributeError: 'int' object has no attribute 'get'` ——
+        **报错点在循环体里**，比参数读取处更难定位。
+        """
+        self.login_as(self.shelter_user_a)
+        for payload in ('{"items": [1, 2, 3]}',
+                        '{"items": {"a": 1}}',
+                        '{"items": "abc"}'):
+            with self.subTest(body=payload):
+                resp = self.post('/api/business/transfers/create/', payload)
+                self.assertEqual(resp.status_code, 400, resp.content[:200])
+                self.assertIn('转运明细', resp.json().get('message', ''))
+
+    def test_nested_material_id_malformed_is_rejected(self):
+        """嵌套 dict 里的整型外键同样要守卫。
+
+        `{"vaccine": {"material_id": [1,2,3]}}` 会走到
+        `Material.objects.filter(id=vac['material_id'])` → 500。
+        外层 `vac` 是 dict（合法），所以只有**逐字段**检查才能发现。
+        """
+        pet = make_pet(code='TNR250990001', status='in_treatment',
+                       district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a)
+        self.login_as(self.hospital_user_a)
+        resp = self.post('/api/business/treatments/create/',
+                         '{"pet_id": %d, "items": {"vaccine": true},'
+                         ' "vaccine": {"material_id": [1,2,3]}}' % pet.id)
+        self.assertEqual(resp.status_code, 400, resp.content[:400])
+        self.assertIn('疫苗物料不存在', resp.json().get('message', ''))
+
+    def test_password_change_non_dict_body_is_rejected(self):
+        """`/api/me/password/` 的三个字段同样不能裸用。"""
+        self.login_as(self.shelter_user_a)
+        resp = self.post('/api/me/password/', '[1,2,3]')
+        self.assertEqual(resp.status_code, 400, resp.content[:200])
+        self.assertIn('密码', resp.json().get('message', ''))
