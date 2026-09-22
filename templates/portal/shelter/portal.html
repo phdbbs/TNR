@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260919c"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260922a"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -1011,13 +1011,17 @@ const Shelter = {
     const groupText = document.getElementById('ca_groupText');
     const groupHint = document.getElementById('ca_groupHint');
     groupSlot.addEventListener('click', () => groupInput.click());
-    groupInput.addEventListener('change', (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (!f) return;
+    groupInput.addEventListener('change', async (e) => {
+      const raw = e.target.files && e.target.files[0];
+      if (!raw) return;
+      groupText.textContent = '处理中…';
+      // 手机原图常有 3~5MB：先在本地压到长边 1600 再上传，
+      // 否则会撞服务端请求体上限 / nginx 20M，且移动网络下传得极慢
+      const f = await TNR_UI.compressImage(raw);
       const reader = new FileReader();
       reader.onload = (ev) => {
         groupIcon.outerHTML = '<img id="ca_groupIcon" src="' + ev.target.result + '" style="width:100%;max-height:180px;object-fit:cover;border-radius:6px;display:block;">';
-        groupText.textContent = '已选择：' + f.name;
+        groupText.textContent = '已选择：' + raw.name + '（' + Math.round(f.size / 1024) + 'KB）';
         groupHint.textContent = '点击可重新选择 / 拍照';
         this._groupPhoto = { file: f };
       };
@@ -1302,7 +1306,20 @@ const Shelter = {
         fd.append('pet_name_' + code, attrOf('name').trim());
       });
       TNR_UI.toast('正在提交，请勿离开页面…', 'info');
-      const res = await TNR_API._postForm('/api/business/captures/create/', fd);
+      /* ⚠ 必须有 try/catch：`_postForm` 内部是 `await res.json()`，只要响应体
+         不是 JSON 就会**抛错**（典型是 nginx 的 413 / 502 —— 超 `client_max_body_size`
+         时 nginx 直接返回一页 HTML）。此前这里没有兜底，异常让整个处理器
+         静默中断，用户看到的就是「点了提交没反应」——
+         线上排查时连一条 toast 都没有，只能去翻 nginx 日志。
+         **任何失败都必须变成用户看得见的一句话。** */
+      let res;
+      try {
+        res = await TNR_API._postForm('/api/business/captures/create/', fd);
+      } catch (err) {
+        TNR_UI.toast('提交失败：网络异常或请求过大，请检查网络后重试'
+          + '（照片已自动压缩，若仍失败请减少数量分批登记）', 'danger');
+        return;
+      }
       if (res && res.success !== false) {
         const data = res.data || {};
         const ledger = (data.capture && (data.capture.ledger_no || data.capture.ledgerNo)) || data.ledger_no || data.ledgerNo || '';
@@ -1453,9 +1470,12 @@ const Shelter = {
       const carried = prevPhotos[code] && prevPhotos[code].file ? prevPhotos[code].file : null;
       this._petPhotos[code] = { input: input, file: carried };
       if (carried) paintSlot(code, carried);
-      input.addEventListener('change', (e) => {
-        const f = e.target.files && e.target.files[0];
-        if (!f) return;
+      input.addEventListener('change', async (e) => {
+        const raw = e.target.files && e.target.files[0];
+        if (!raw) return;
+        // 与合影同一条路径：先本地压缩再入队，避免请求体超限 / 上传过慢。
+        // 一只动物一张，`pet_count` 最多 100 —— 不压的话很容易撞 nginx 20M。
+        const f = await TNR_UI.compressImage(raw);
         this._petPhotos[code].file = f;
         paintSlot(code, f);
       });

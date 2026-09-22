@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime, time, timedelta
 
+from django.core.exceptions import RequestDataTooBig
 from django.db.models import Q, Sum
 from django.http import JsonResponse
 from django.utils import timezone
@@ -41,10 +42,37 @@ def parse_json_body(request):
     解析结果会挂在 `request.audit_payload` 上，供审计中间件在**视图执行完**
     之后回溯这次操作的请求体（例如从中取 `district_id` 判定归属区县）。
     中间件不自己读 `request.body`，是为了复用这里已有的容错逻辑。
+
+    ⚠ **`multipart/form-data` 请求不能走这里读 `request.body`。**
+
+    `request.body` 会把整个请求体读进内存，并受
+    `DATA_UPLOAD_MAX_MEMORY_SIZE`（Django 默认 2.5MB）约束；超限时抛
+    `RequestDataTooBig`，而它是 `SuspiciousOperation` 的子类，**不在**下面
+    的 `except` 里，会一路冒泡成 HTTP 400。
+
+    线上现场（第二十六轮）：微信内置浏览器反复
+    `POST /api/business/captures/create/ → 400（143 字节）`，gunicorn 日志为
+    `RequestDataTooBig: Request body exceeded settings.DATA_UPLOAD_MAX_MEMORY_SIZE`。
+    用户看到的就是「点提交没反应」。手机端上传的是 `capture="environment"`
+    拍的**原图**，单张 3~5MB 很常见，必然超限 —— 而 nginx 那侧放行的是
+    `client_max_body_size 20M`，所以请求确实到了应用层才被拒。
+
+    multipart 的有用数据在 `request.POST` / `request.FILES` 里，它们**流式**
+    解析、大文件落临时文件，且 `DATA_UPLOAD_MAX_MEMORY_SIZE` 按官方定义
+    「不含文件上传部分」计算 —— 所以大图不会触发该限制。视图只需在拿到
+    `{}` 后回退到 `request.POST`（`capture_create` 已经这么写了）。
     """
+    content_type = (request.content_type or '').lower()
+    if content_type.startswith('multipart/form-data'):
+        request.audit_payload = {}
+        return {}
     try:
         data = json.loads(request.body)
     except (json.JSONDecodeError, ValueError, TypeError):
+        data = {}
+    except RequestDataTooBig:
+        # 兜底：其它 content-type 下的超大请求体也不该把接口炸成裸 400。
+        # 返回空字典后由视图给出可读的字段校验错误。
         data = {}
     if isinstance(data, dict):
         request.audit_payload = data

@@ -1113,6 +1113,70 @@ const TNR_UI = {
     return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   },
 
+  /* 上传前压缩图片（手机原相机照片必过这一关）。
+
+   * 为什么必须在**客户端**压：手机 `capture="environment"` 拍出的原图常见
+   * 3~5MB，一张「新增捕捉登记」可以带 1 张合影 + 最多 100 张单只照片。
+   * 不压的话有两道坎，而且**都表现为「点了提交没反应」**：
+   *   1. 服务端 `DATA_UPLOAD_MAX_MEMORY_SIZE`（Django 默认 2.5MB）——
+   *      已在 `parse_json_body` 侧放过 multipart，但请求体仍被整体读入内存；
+   *   2. nginx `client_max_body_size`（本部署 20M）—— 超了直接 413，
+   *      而 413 返回的是 HTML，`res.json()` 会**抛错**，提交处理器里没人接。
+   * 移动网络下传 5MB 也要好几秒，用户会以为卡死。
+   *
+   * 做法：等比缩到长边 `maxEdge`，再编码为 JPEG。
+   *
+   * ⚠ 手机竖拍靠 **EXIF Orientation** 记录方向，canvas 绘制不会自动应用 ——
+   *   不处理就会出现「照片躺倒」。这里用 `<img>` 承载，现代浏览器的
+   *   `image-orientation` 初始值就是 `from-image`，绘制到 canvas 时会按
+   *   EXIF 摆正；再显式设一次以防个别实现默认值不同。
+   *
+   * ⚠ 任何一步失败都**原样返回原文件** —— 宁可传一张大图，也不能因为
+   *   压缩失败让用户传不上去。
+   *
+   * @param {File} file 用户选择的原始文件
+   * @param {{maxEdge?: number, quality?: number}} [opts]
+   * @returns {Promise<File>} 压缩后的 File（失败/无需压缩时为原文件）
+   */
+  async compressImage(file, opts = {}) {
+    const maxEdge = opts.maxEdge || 1600;
+    const quality = opts.quality || 0.82;
+    if (!file || !/^image\//.test(file.type || '')) return file;
+    // GIF 走 canvas 会只剩第一帧；SVG 不是位图。都原样返回。
+    if (file.type === 'image/gif' || file.type === 'image/svg+xml') return file;
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const el = new Image();
+        el.style.imageOrientation = 'from-image';
+        el.onload = () => { URL.revokeObjectURL(url); resolve(el); };
+        el.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片解码失败')); };
+        el.src = url;
+      });
+      const srcW = img.naturalWidth || img.width;
+      const srcH = img.naturalHeight || img.height;
+      if (!srcW || !srcH) return file;
+      const scale = Math.min(1, maxEdge / Math.max(srcW, srcH));
+      // 尺寸已经够小且体积不大：不值得再编码一次（重编码反而可能更糊）
+      if (scale >= 1 && file.size <= 512 * 1024) return file;
+      const w = Math.max(1, Math.round(srcW * scale));
+      const h = Math.max(1, Math.round(srcH * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      const blob = await new Promise((resolve) =>
+        canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (!blob) return file;
+      // 压完反而更大（本来就是高压缩比的小图）→ 用原文件
+      if (blob.size >= file.size) return file;
+      const name = (file.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg';
+      return new File([blob], name, { type: 'image/jpeg' });
+    } catch (e) {
+      return file;
+    }
+  },
+
   /* 照片放大查看：点击图片弹出全屏遮罩，点击遮罩关闭。
      各端共用（一宠一档档案里的捕捉/术前/术后/诊疗照片都走它）。 */
   photoZoom(url) {
