@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **1022 个用例，全部通过**（约 73 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1029 个用例，全部通过**（约 73 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产） |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -4452,6 +4452,102 @@ proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # **追加**式
 
 ---
 
+#### 2.37 日期口径：把 UTC 串当本地日期用（第二十九轮）
+
+修完 §2.36 后继续扫「同类风险面」（这次扫的是**跨门户的重复实现**），
+在**医院端**查出日期处理的缺陷。顺着根因追下去，发现这不是一处，
+而是**一类**：前端把后端 `DateTimeField` 序列化出来的 **UTC 串**当本地日期用。
+
+##### 后端给的是什么
+
+`business/services.py::serialize_instance` 对 `DateTimeField` 用 `value.isoformat()`，
+项目 `TIME_ZONE=Asia/Shanghai` + `USE_TZ=True` → 拿到的是 **UTC 带偏移**的串：
+
+```python
+created_at = '2026-09-22T06:05:50.466168+00:00'   # 实测 GET /api/business/transfers/
+```
+
+而 `DateField`（`released_at` / `adopted_at` / `euthanized_at` / `body_received_at` /
+`received_at` / `MaterialTransaction.date`）给的是**纯日期** `'2026-09-22'`。
+两类字段长得像，处理方式却必须不同 —— 这就是缺陷的温床。
+
+##### 四类表现（全部实测，不靠推理）
+
+| # | 位置 | 写法 | 后果 |
+|---|---|---|---|
+| 1 | 医院端 `formatDateTime` | `s.substr(0, 16).replace('T', ' ')` | 转运台账 / 诊疗详情**时间差 8 小时**；UTC ≥ 16:00（本地已跨日）时**日期差一天** |
+| 2 | `TNR_UI.formatDateTime(r.date)` | 传的是**纯日期** | 凭空长出 `08:00` —— gov 台账 8+ 处、shelter 1 处，**UTC+8 下也可见** |
+| 3 | 医院端 / shelter / gov / adopter 共 10 处筛选 | `.slice(0, 10)` | 拿 **UTC 日期**跟用户选的**本地日期**比，北京时间 00:00–08:00 的记录被算到**前一天**（选「今天」看不到） |
+| 4 | `business/views_portal.py:472` | `r.return_time.isoformat()` | 同一个 `date` 字段「有时纯日期、有时 UTC 时间串」，领养人端时间线 `.substring(0, 10)` 因此**差一天** |
+
+##### 判据不是「我觉得」——后端早就定了口径
+
+后端的筛选与 `date` 字段**一律用本地日期**：
+
+```python
+# business/views_capture.py:822 —— Django 在 USE_TZ 下把 __date 转本地时区再取日期
+qs.filter(Q(return_time__date__gte=start_date) | ...)
+# business/views_portal.py —— 同文件 7 个 date 分支里 6 个都是
+'date': timezone.localdate(cap.created_at).isoformat() ...
+```
+
+**只有 `views_portal.py:472` 那一处例外。** 所以这不是「前端该用哪个时区」的取舍，
+而是**前后端口径不一致** + **同文件内自相矛盾**。
+
+##### 修法
+
+| 层 | 改动 |
+|---|---|
+| `static/js/tnr-common.js` | 新增 `TNR_UI.localDateStr(date)` —— 筛选比较键的唯一实现 |
+| 同上 | `formatDate` 对**纯日期串短路**（负时区下 `new Date('2026-09-22')` 会退一天） |
+| 同上 | `formatDateTime` 对**纯日期串只返回日期**（不再补 `08:00`） |
+| 医院端 | `formatDate`/`formatDateTime` 改为**委托**公共实现（删掉第二份） |
+| 10 处筛选 | `.slice(0, 10)` → `TNR_UI.localDateStr(...)` |
+| `business/views_portal.py:472` | `r.return_time.isoformat()` → `timezone.localdate(r.return_time).isoformat()` |
+
+`localDateStr` 对两类输入都正确：纯日期串**原样返回**（不参与时区换算），
+UTC 串按浏览器本地时区取日期。所以调用点不必先判断字段类型。
+
+##### 改前改后实测（`TZ=Asia/Shanghai`，Node 实跑，脚本直接从权威源加载 `TNR_UI`）
+
+| 输入 | 位置 | 改前 | 改后 |
+|---|---|---|---|
+| `'2026-09-22'`（DateField） | `formatDateTime` | `2026-09-22 08:00` | `2026-09-22` ✔ |
+| `'2026-09-22T06:05:50+00:00'` | 医院端 `formatDateTime` | `2026-09-22 06:05` | `2026-09-22 14:05` ✔ |
+| `'2026-09-22T20:30:00+00:00'` | 医院端 `formatDateTime` | `2026-09-22 20:30` | `2026-09-23 04:30` ✔ |
+| 同上，用户选 `start_date=2026-09-23` | 筛选键 | **被漏掉** | **包含** ✔ |
+| 空值 / 非法串 / 纯日期走 `formatDate` / UTC 串走 `formatDate` | — | — | **逐字不变** ✔ |
+
+额外（`TZ=America/New_York`）：`formatDate('2026-09-22')` 改前 `'2026-09-21'` → 改后 `'2026-09-22'`。
+即**顺带修掉了负时区退一天** —— 这是原实现里一条从未写下的隐含前提（「用户时区必须是正偏移」）。
+
+##### 反向验证：先证明测试会失败
+
+新增用例写完后，**把两处代码临时改回旧实现**再跑：
+
+```
+FF..F..
+AssertionError: Regex didn't match: '^\d{4}-\d{2}-\d{2}$' not found in '2026-09-22T20:30:00+00:00'
+AssertionError: '2026-09-22T20:30:00+00:00' != '2026-09-23'
+FAIL: test_hospital_formatters_delegate_to_shared_implementation
+```
+
+3 个用例准确报错并**指名到具体位置**，改回后全绿 —— 测试确实能抓到缺陷，不是装饰。
+
+##### 用例数
+
+| 新增 | 内容 |
+|---|---|
+| `business/tests/test_portal_views.py::PetLifecycleEventDateTest`（3 例） | 全部事件 `date` 是纯本地日期；UTC 深夜必须落本地那一天；`return_time` 空时退到 `created_at` 同样本地 |
+| `core/tests_frontend_consistency.py::LocalDateInterpretationTest`（4 例） | 全站禁止裸截断（剥注释后静态扫描）；医院端必须委托公共实现；`localDateStr` 存在且含纯日期短路；`formatDateTime` 不得给纯日期补 `08:00` |
+
+全量 **1022 → 1029 OK**（73 秒）。
+
+> 与 §2.33 的 `LocalDateDefaultTest` 是**同源不同点**：那个管「表单默认值不能用
+> `toISOString()`」，这个管「解读后端返回的串」。两者都属「把 UTC 当本地用」。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -4636,7 +4732,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 1022 个用例
+python manage.py test --parallel 1  # 1029 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
