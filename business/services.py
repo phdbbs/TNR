@@ -11,7 +11,6 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime, time, timedelta
 
-from django.core.exceptions import RequestDataTooBig
 from django.db.models import Q, Sum
 from django.http import JsonResponse
 from django.utils import timezone
@@ -21,6 +20,7 @@ from business.models import (
     Pet, Material, MaterialTransaction, Chip, Blacklist, Transfer,
     Release, Adoption,
 )
+from core.http import read_json_body
 from core.models import District, Institution
 
 
@@ -62,19 +62,14 @@ def parse_json_body(request):
     解析、大文件落临时文件，且 `DATA_UPLOAD_MAX_MEMORY_SIZE` 按官方定义
     「不含文件上传部分」计算 —— 所以大图不会触发该限制。视图只需在拿到
     `{}` 后回退到 `request.POST`（`capture_create` 已经这么写了）。
+
+    ⚠ 第二十九轮起，解析逻辑**收口到 `core.http.read_json_body()`** ——
+    `accounts.views.api_change_password` 曾有一份自己的实现，只 catch
+    `(ValueError, TypeError)`、**缺 `RequestDataTooBig`**：实测 3MB 请求体返回
+    `400 text/html`（标题 `RequestDataTooBig at /api/me/password/`、含 Traceback），
+    而同一体积下本接口返回可读 JSON。两份实现必然漂移，所以只留一份。
     """
-    content_type = (request.content_type or '').lower()
-    if content_type.startswith('multipart/form-data'):
-        request.audit_payload = {}
-        return {}
-    try:
-        data = json.loads(request.body)
-    except (json.JSONDecodeError, ValueError, TypeError):
-        data = {}
-    except RequestDataTooBig:
-        # 兜底：其它 content-type 下的超大请求体也不该把接口炸成裸 400。
-        # 返回空字典后由视图给出可读的字段校验错误。
-        data = {}
+    data = read_json_body(request)
     if isinstance(data, dict):
         request.audit_payload = data
     return data

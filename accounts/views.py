@@ -1,5 +1,3 @@
-import json
-
 from django.shortcuts import render, redirect
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
@@ -10,6 +8,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.models import User
+from core.http import read_json_body
 
 
 def _redirect_by_role(user):
@@ -89,10 +88,14 @@ def api_change_password(request):
     if request.method != 'POST':
         return JsonResponse({'success': False, 'message': '仅支持 POST 请求'}, status=405)
 
-    try:
-        data = json.loads(request.body or b'{}')
-    except (ValueError, TypeError):
-        data = {}
+    # ⚠ 必须走 `core.http.read_json_body()`，不能裸读 `request.body`：
+    # `request.body` 超 `DATA_UPLOAD_MAX_MEMORY_SIZE`（默认 2.5MB）会抛
+    # `RequestDataTooBig`，它是 `SuspiciousOperation` 子类、**不是** `ValueError`，
+    # 原来只 catch `(ValueError, TypeError)` 接不住 → 冒泡成 **HTML 400 错误页**
+    # （标题 `RequestDataTooBig at /api/me/password/`，DEBUG 下还带 Traceback）。
+    # 实测 3MB 请求体就是这个结果；而同一体积下 `business` 侧已修的接口
+    # 返回可读 JSON。前端拿到非 JSON 响应体会 `res.json()` 抛错 → 静默中断。
+    data = read_json_body(request)
     if not data and request.POST:
         data = request.POST.dict()
 

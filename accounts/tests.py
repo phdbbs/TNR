@@ -1,4 +1,6 @@
 """accounts 应用测试：登录/登出/角色重定向/api_me/用户模型。"""
+import json
+
 from accounts.models import User
 from business.tests.base import (
     ApiMixin, make_district, make_institution, make_user,
@@ -191,6 +193,41 @@ class ChangePasswordTest(ApiMixin, TestCase):
     def test_get_method_rejected(self):
         self.client.force_login(self.user)
         self.expect_fail(self.client.get(self.URL), status=405, message='仅支持 POST 请求')
+
+    def test_oversized_body_returns_json_not_html(self):
+        """⚠ 回归（第二十九轮）：超大请求体不得把接口炸成 **HTML 错误页**。
+
+        `request.body` 超 `DATA_UPLOAD_MAX_MEMORY_SIZE`（默认 2.5MB）会抛
+        `RequestDataTooBig` —— 它是 `SuspiciousOperation` 子类，**不是**
+        `ValueError` / `TypeError`。原实现只 catch `(ValueError, TypeError)`，
+        异常冒泡成 `400 text/html`（标题 `RequestDataTooBig at /api/me/password/`，
+        `DEBUG` 下还带 Traceback）。前端拿到非 JSON 响应体会 `res.json()` 抛错
+        → **静默中断**，用户看到的就是「点按钮没反应」。
+
+        修法：走 `core.http.read_json_body()`（与 business 侧同一实现）。
+        """
+        self.client.force_login(self.user)
+        big = json.dumps({'old_password': 'a' * 3_000_000,
+                          'new_password': 'newPass2026',
+                          'confirm_password': 'newPass2026'})
+        resp = self.client.post(self.URL, data=big,
+                                content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('application/json', resp['Content-Type'],
+                      '超大请求体返回了非 JSON（HTML 错误页）—— 前端会静默中断')
+        self.assertFalse(resp.json()['success'])
+
+    def test_oversized_body_does_not_change_password(self):
+        """超大请求体被拒时，密码必须**一字未改**（拒绝要发生在写库之前）。"""
+        self.client.force_login(self.user)
+        big = json.dumps({'old_password': '123456',
+                          'new_password': 'HackedPass#2026',
+                          'confirm_password': 'HackedPass#2026',
+                          'pad': 'a' * 3_000_000})
+        self.client.post(self.URL, data=big, content_type='application/json')
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('123456'), '原密码不应被改动')
+        self.assertFalse(self.user.check_password('HackedPass#2026'))
 
 
 class UserModelTest(TestCase):
