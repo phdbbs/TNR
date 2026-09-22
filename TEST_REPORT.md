@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **1056 个用例，全部通过**（约 76 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1059 个用例，全部通过**（约 80 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**）+ 三十一轮 **2 道闸门**（`DATA_UPLOAD_MAX_NUMBER_FILES` 默认 **100**，而产品自己声明「单批最多 100 只」= 100 张单只照片 + 1 张合影 = **101 个文件** → 第 100 只的照片连解析都过不去，`400 **text/html**`；nginx `client_max_body_size` 20M → 100 张手机压缩图约 30–50MB → `413 **text/html**`。两者前端都表现为「点提交没反应」；修法：设置按产品上限推导 + 新增 `handler400` 把 `/api/` 下所有传输层 400 收口成**可读 JSON** + nginx `error_page 413` 同口径）+ 三十二轮 **1 项预防性收口**（CSRF 403 默认也是 **HTML**（`403_csrf.html`）→ 前端静默。⚠ **当前前端够不到**：全站 78 条 `/api/` 路由里只有 3 条非 `csrf_exempt`，而前端对它们**只发 GET**、模板里也无裸 `fetch` POST。但 `HTTPS=on` 后 CSRF 的 Referer/Origin 校验首次生效，`CSRF_TRUSTED_ORIGINS` 为空时就会踩到。⚠ 唯一钩子是 `CSRF_FAILURE_VIEW` —— `CsrfViewMiddleware` **直接返回**响应、不抛异常，`handler403` 接不住）+ 三十三轮 **2 个出口**（① **3 处 `/api/` 接口未登录时 302 到登录页**（`/api/me/password/`、`/api/supervision/institutions/`、`/api/supervision/districts/` —— 都是「所有登录用户可用」所以当初只写了裸 `@login_required`，而它没有 `/api/` 的 JSON 分支）；⚠ 关键在于 **`fetch` 默认 `redirect: 'follow'`**：302 被自动跟随到 `/login/`，最终 status **200** + **HTML 登录页** → `res.json()` 抛 `SyntaxError` → `_get` 的调用点（下拉数据源）**渲染中断、页面空白**，`_post` / `_postForm` 的调用点**「点了没反应」**；② `/api/` 下 **404 / 500 也是 HTML**（前端打错路径、或视图抛未捕获异常 → 同样静默）。修法：新增 `core.http.is_api_request` 统一口径 + `api_login_required` 装饰器 + `handler404` / `handler500`；⚠ **这个 302 缺陷我第三十一轮亲手误判成「正常重定向」**，教训已记入 §2.41） |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**）+ 三十一轮 **2 道闸门**（`DATA_UPLOAD_MAX_NUMBER_FILES` 默认 **100**，而产品自己声明「单批最多 100 只」= 100 张单只照片 + 1 张合影 = **101 个文件** → 第 100 只的照片连解析都过不去，`400 **text/html**`；nginx `client_max_body_size` 20M → 100 张手机压缩图约 30–50MB → `413 **text/html**`。两者前端都表现为「点提交没反应」；修法：设置按产品上限推导 + 新增 `handler400` 把 `/api/` 下所有传输层 400 收口成**可读 JSON** + nginx `error_page 413` 同口径）+ 三十二轮 **1 项预防性收口**（CSRF 403 默认也是 **HTML**（`403_csrf.html`）→ 前端静默。⚠ **当前前端够不到**：全站 78 条 `/api/` 路由里只有 3 条非 `csrf_exempt`，而前端对它们**只发 GET**、模板里也无裸 `fetch` POST。但 `HTTPS=on` 后 CSRF 的 Referer/Origin 校验首次生效，`CSRF_TRUSTED_ORIGINS` 为空时就会踩到。⚠ 唯一钩子是 `CSRF_FAILURE_VIEW` —— `CsrfViewMiddleware` **直接返回**响应、不抛异常，`handler403` 接不住）+ 三十三轮 **2 个出口**（① **3 处 `/api/` 接口未登录时 302 到登录页**（`/api/me/password/`、`/api/supervision/institutions/`、`/api/supervision/districts/` —— 都是「所有登录用户可用」所以当初只写了裸 `@login_required`，而它没有 `/api/` 的 JSON 分支）；⚠ 关键在于 **`fetch` 默认 `redirect: 'follow'`**：302 被自动跟随到 `/login/`，最终 status **200** + **HTML 登录页** → `res.json()` 抛 `SyntaxError` → `_get` 的调用点（下拉数据源）**渲染中断、页面空白**，`_post` / `_postForm` 的调用点**「点了没反应」**；② `/api/` 下 **404 / 500 也是 HTML**（前端打错路径、或视图抛未捕获异常 → 同样静默）。修法：新增 `core.http.is_api_request` 统一口径 + `api_login_required` 装饰器 + `handler404` / `handler500`；⚠ **这个 302 缺陷我第三十一轮亲手误判成「正常重定向」**，教训已记入 §2.41）+ 三十四轮 **0 项缺陷（加固）**（把「动态枚举 URLconf」的手法推到另外三个方向：**信封形状** / **非法查询参数不得 500** / **各角色访问各路由**，探针实测 78 路由 × 23 参数 × 5 角色**零缺陷** —— 证明之前几轮修得扎实；随后固化成 `AllApiRoutesContractTest` 三条闸门，⚠ 参数名是从生产代码 `Grep 'request.GET.get('` **抄出来的真实参数名**，第一版「猜的」8 个等于没测） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -4990,6 +4990,82 @@ async _postForm(…)   { const res = await fetch(url, {…});   return res.json(
 
 ---
 
+#### 2.42 枚举式契约闸门 —— 一次**零缺陷**的加固（第三十四轮）
+
+§2.41 那条「动态枚举 URLconf」的手法很好用，于是把它推到**另外三个方向**。
+结果**没发现新缺陷** —— 这本身是值得记录的结论：说明之前几轮修得扎实，
+而不是「又没查出来」。
+
+##### 一、探针实测结果
+
+| 检查方向 | 规模 | 结果 |
+|---|---|---|
+| ① 响应信封形状（必须有 `success` 字段） | 78 条路由 | **0 缺陷** |
+| ② 非法查询参数不得 500 | 78 路由 × 8 参数 | **0 缺陷** |
+| ③ 各角色访问各路由（不得 5xx / 非 JSON） | 78 路由 × 4 角色 | **0 缺陷** |
+
+##### 二、固化成三条闸门
+
+`core/tests.py::AllApiRoutesContractTest`（3 例），与 §2.41 的未登录测试互补：
+
+| 用例 | 钉住什么 |
+|---|---|
+| `test_every_route_returns_a_success_envelope` | 每个响应都是 `{'success': bool, ...}`。前端普遍写 `if (res.success)`；某接口不回这个字段，前端会把成功当失败，**而且界面上看不出接口错了** |
+| `test_bad_query_params_never_500` | 「可以 4xx、可以 200（忽略），**不能 500**」（第二十四轮契约）。一个非法值会以**四种**不同异常炸接口（`ValueError` / `OverflowError` 超大数 / `ValidationError` 非日期 / `OverflowError` `date.max+1天`），所以「随手包一层 `except ValueError`」是**假修** |
+| `test_no_role_triggers_5xx_or_non_json` | 每个角色访问每条路由。⚠ 这一条最容易抓到 `Model.DISTRICT_LOOKUP` 缺失导致的 `FieldError` —— **市级走 `return all()` 绕过该分支，只测市级账号永远不暴露** |
+
+##### 三、⚠ 参数名必须从代码里抄，不能想当然编
+
+`BAD_QUERIES` 的 23 个参数名是 `Grep 'request.GET.get('` 从生产代码里**抄出来的**：
+
+```python
+BAD_QUERIES = (
+    'id=abc', 'id=999999999999999999999999',       # 主键 / 整型外键
+    'district_id=abc', 'institution_id=abc', 'material_id=abc',
+    'district=abc', 'community=abc', 'shelter=abc',  # 字符串过滤项
+    'count=abc', 'count=999999999999999999999999',   # 数量（有上限）
+    'limit=999999999999999999999999', 'page_size=abc',
+    'date=notadate', 'start_date=notadate', 'end_date=2026-13-45',  # 日期
+    'lat=abc', 'lng=abc', 'lat=999999999999999999999999',           # 浮点
+    'status=<script>', 'type=__proto__', 'role=admin',
+    'business_type=<img src=x>', 'include_deleted=yes', 'q=%00',
+)
+```
+
+**编出来的参数名接口根本不读，等于没测。** 第一版我只写了 8 个「猜的」参数名，
+补全后覆盖 23 个真实参数名，仍然是 0 缺陷 —— 这才是有效覆盖。
+
+##### 四、反向验证（两组，都精确变红）
+
+1. 把 `json_ok` 临时改成不返回 `success` 键 → 信封测试报出 **35 条 offender**，
+   并明确指出 `keys=['data', 'message']`。
+2. 把 `supervision/views.py` 的
+   `institution_id, err = parse_int_param(...)` 临时改回裸 `int()` →
+   非法参数测试 **FAILED (errors=1)**。
+   ⚠ 该处注释里本来就写着它的来历：「原先每处各写一遍
+   `qs.filter(xxx_id=institution_id)`，**一个非法值就能在任意一处把接口打成 500** ——
+   所以必须只解析一次」—— 正好用它做反向验证。
+
+##### 五、顺带核查的两处「写法不统一但行为正确」
+
+- `supervision/views.py` 的 `limit` 是 `int()` + `try/except` + `min(…, 1000)` 上限
+  —— 与 `parse_int_param` 写法不同，但**行为正确**（不 500）。
+- `business/views_capture.py::geocode_reverse` 的 `lat` / `lng` 是裸 `float()`，
+  但**外面有 `except (TypeError, ValueError)`**，且随后有范围校验 —— **安全**。
+
+两处都**不是缺陷**，只是没有统一到共用解析。未改（避免范围蔓延）。
+
+##### 六、用例数
+
+全量 **1056 → 1059 OK**（80 秒）。
+
+> 这一轮没有「修复」，只有「钉住」。它的价值在于：
+> **把「之前修对了」变成「以后不会再改错」** ——
+> 这三条闸门会在下一次有人把 `parse_int_param` 换回裸 `int()`、
+> 或让某个接口漏掉 `success` 字段时立刻变红。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -5174,7 +5250,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 1056 个用例
+python manage.py test --parallel 1  # 1059 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md

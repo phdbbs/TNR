@@ -666,6 +666,15 @@ done
 # 期望：401 application/json / 401 application/json / 404 application/json
 ```
 
+更完整的三条闸门（**信封形状** / **非法参数不 500** / **各角色不 5xx**）
+已固化成单测，部署后可直接跑：
+
+```bash
+python manage.py test core.tests.AllApiRoutesContractTest \
+                      core.tests.AllApiRoutesReturnJsonWhenUnauthenticatedTest
+# 共 4 例，覆盖全部 78 条 /api/ 路由（新增接口自动纳入）
+```
+
 ⚠ **别用 `http://127.0.0.1:8000`** —— 直连 gunicorn 会绕过 nginx，
 测出来的结果不代表真实路径（第三十一轮就因此把一个真实缺陷误判成「正常」）。
 
