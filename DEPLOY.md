@@ -468,6 +468,36 @@ Content-Type: text/html; charset=utf-8
 这正是**生产现场**的响应 —— 用户看不到这段 HTML，只看到「正在提交…」然后什么都没发生。
 所以「`content-type` 是不是 `application/json`」就是**这个修复最直接的一条判据**。
 
+### 5.6 ⚠ 代理头：只认 nginx **覆盖写入**的那些
+
+nginx 会把客户端的请求头**原样透传**，所以「请求头里有某个值」**不等于**
+「这个值是可信的」。区分标准只有一条：**nginx 是覆盖它，还是追加它。**
+
+```nginx
+proxy_set_header X-Real-IP       $remote_addr;                 # 覆盖 → 可信
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # 追加 → 不可信
+proxy_set_header X-Forwarded-Proto $scheme;                    # 覆盖 → 可信
+```
+
+`$proxy_add_x_forwarded_for` 的语义是「**客户端原值** + 我们看到的对端」——
+**客户端伪造的值排在最先**。所以 `X-Forwarded-For.split(',')[0]` 拿到的是
+攻击者写的值。
+
+**实测（2026-09-22）**：带 `X-Forwarded-For: 203.0.113.7` 发一个写请求，
+审计台账 `AuditLog.ip` 记下的就是 `203.0.113.7`（真实出口是 `39.181.5.30`）。
+已改为**只认 `X-Real-IP`**（见 `core/audit.py::client_ip`），
+`X-Forwarded-For` 一律不看。
+
+⚠ **不要改成「取 XFF 最后一段」**：「最后一段」只在「代理一定会追加」时才成立，
+而 nginx 默认透传客户端发来的未知头 —— 一旦哪天这行 `proxy_set_header` 被删掉，
+最后一段就又变成伪造值。**判据不该依赖另一处配置才安全。**
+代价是换代理后审计 IP 会退化成 `127.0.0.1`，这是**可见的降级**，比静默记假值好。
+
+> **加任何「按来源 IP」的逻辑之前**，先确认它读的是哪个头：
+> 本项目里 `request.META['HTTP_X_REAL_IP']` 才可信，
+> `HTTP_X_FORWARDED_FOR` 是客户端可控的。
+> 新增代理头时，也优先用**覆盖式**写法（`$变量`），不要用追加式。
+
 ## 六、常见报错对照
 
 | 报错 | 原因 | 处理 |

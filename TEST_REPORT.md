@@ -20,7 +20,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **1021 个用例，全部通过**（约 73 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1022 个用例，全部通过**（约 73 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
@@ -4375,6 +4375,81 @@ settings.DATA_UPLOAD_MAX_MEMORY_SIZE.
 `RequestDataTooBig`」—— 一旦 Django 改了这个语义它会立刻失败，提醒重新评估修法。
 在 `fcdeb86`（旧代码）上跑该文件：**6 条失败**，报错与生产 gunicorn 日志逐字一致。
 
+#### 2.36 审计来源 IP 可被任意伪造（第二十八轮）
+
+修完 §2.35 的「客户端 IP」后，顺手扫了一遍**同类风险面**（还有谁在信客户端可写的值），
+在 `core/audit.py::client_ip()` 上查出一条**生产可复现**的漏洞。
+
+##### 现场：审计台账的 `ip` 字段由攻击者控制
+
+生产实测（2026-09-22）：
+
+```bash
+curl -H 'X-Forwarded-For: 203.0.113.7' -X POST ... /api/business/captures/create/
+```
+
+台账里记下的 `ip` **就是 `203.0.113.7`**（`AuditLog` id=20），
+而发起方的真实出口 IP 是 `39.181.5.30`（同一批测试里 id=19 记的就是它）。
+
+审计的全部意义就是「**谁、从哪来、做了什么**」——`ip` 能被任意伪造，等于台账失真。
+
+##### 真因：取的是 `X-Forwarded-For` 的**第一段**
+
+本项目 nginx 的配置是：
+
+```nginx
+proxy_set_header X-Real-IP       $remote_addr;                 # 覆盖式
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # **追加**式
+```
+
+`$proxy_add_x_forwarded_for` 的语义是「**客户端原值** + 我们看到的对端」——
+**客户端伪造的值排在最先**。原代码 `.split(',')[0]` 正好取到它。
+
+> ⚠ 原 docstring 的推理是「`REMOTE_ADDR` 是回环 ⇒ 请求确实来自本机 nginx ⇒ XFF 可信」。
+> **前半句对，后半句错**：`REMOTE_ADDR` 是回环只说明**有**代理，
+> 不代表代理**清洗过**这个头。这个区别就是漏洞本身。
+
+##### 修法：只认 `X-Real-IP`，`X-Forwarded-For` 一律不看
+
+| 优先级 | 来源 | 为什么可信 |
+|---|---|---|
+| 1 | `X-Real-IP` | nginx 用 `$remote_addr` **覆盖**写入，客户端改不动 |
+| 2 | `REMOTE_ADDR` | 直连时的对端；回环时即 nginx 自己 |
+
+⚠ **刻意没有采用「取 XFF 最后一段」这种常见写法**：「最后一段」只在
+「代理一定会追加」时才成立，而 nginx **默认会透传客户端发来的未知头** ——
+哪天配置里少了那行 `proxy_set_header X-Forwarded-For`，最后一段就又变成伪造值。
+**判据不该依赖另一处配置才安全。** 代价是换代理后审计 IP 会退化成 `127.0.0.1`，
+这是**可见的降级**，比静默记下伪造值好。
+
+##### 改前改后对照（同一探针，旧 `88f1bff` vs 修复后）
+
+| 场景 | 旧 | 修复后 |
+|---|---|---|
+| nginx 正常（`X-Real-IP`=真实对端，无 XFF） | `127.0.0.1` ❌ **连正常情况都记错**（旧代码根本没看 `X-Real-IP`） | `39.181.5.30` ✔ |
+| **客户端伪造 XFF** | `203.0.113.7` ❌ **伪造成功** | `39.181.5.30` ✔ 被忽略 |
+| 只有 XFF、无 `X-Real-IP` | `203.0.113.7` ❌ | `127.0.0.1` ✔ |
+
+第一行说明旧实现有**两个**缺陷：既信了可伪造的头，又**漏采了唯一可信的头** ——
+它之所以在生产上「看起来能用」，只是因为 nginx 恰好也设了 XFF、
+且没有客户端伪造时 XFF 的第一段恰好就是真实对端。**纯属巧合。**
+
+##### 顺带：收口重复实现
+
+`business/services.py::client_ip()` 与 `core/audit.py::client_ip()` 原本各有一份，
+现已改为**前者委托后者**。两份实现必然漂移 —— 这次就是
+「一处修对了（§2.35）、另一处还是错的」的典型。
+
+##### 用例数
+
+`core.tests_audit.ClientIpTest` 原有 3 例 → **4 例**。其中
+`test_uses_forwarded_for_behind_local_proxy`（期望 `'1.2.3.4, 10.0.0.1'` → `'1.2.3.4'`）
+**把「取第一段」钉成了预期行为**，已改为 `test_forged_forwarded_for_does_not_win`。
+全量 **1021 → 1022 OK**。
+
+> 注：这次探测在生产 `AuditLog` 里留下了 id=20（`ip=203.0.113.7`）。
+> **刻意保留不删** —— 它是「伪造成功」的原始证据，删掉就只剩结论没有凭据。
+
 ---
 
 ## 三、GUI 走查结论（四端）
@@ -4561,7 +4636,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 1021 个用例
+python manage.py test --parallel 1  # 1022 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
