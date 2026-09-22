@@ -82,18 +82,47 @@ _MAX_DEPTH = 4
 # 请求侧解析
 # ============================================
 def client_ip(request):
-    """取来源 IP。
+    """取来源 IP（审计台账用）。
 
-    ``X-Forwarded-For`` 是客户端可伪造的，只有在 ``REMOTE_ADDR`` 是回环地址
-    （即请求确实来自本机 nginx 反代）时才采信它，否则一律用 ``REMOTE_ADDR``。
+    ⚠ **只能取「代理看到的对端地址」，不能取客户端可写的那个值。**
+
+    本项目 nginx 的配置是：
+
+    ```nginx
+    proxy_set_header X-Real-IP       $remote_addr;                 # 覆盖式
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # **追加**式
+    ```
+
+    `$proxy_add_x_forwarded_for` 的语义是「**客户端原值** + 我们看到的对端」——
+    也就是说客户端伪造的值排在**最前面**。所以：
+
+    - 取 `X-Forwarded-For` 的**第一段** = 直接采信攻击者的输入；
+    - 正确做法是 **`X-Real-IP`**（nginx 用 `$remote_addr` **覆盖**写入，
+      客户端改不动它）。
+
+    ⚠ **`X-Forwarded-For` 一律不采信**（哪怕取最后一段）：
+    「取最后一段」只在「代理一定会追加」时才成立，而 nginx **默认会把客户端
+    传来的未知头原样透传** —— 一旦哪天配置里少了
+    `proxy_set_header X-Forwarded-For`，最后一段就又是伪造值了。
+    这种「依赖另一处配置才安全」的判据迟早会烂掉，所以直接不看它。
+    代价：若将来换代理且它只设 XFF 不设 X-Real-IP，审计 IP 会退化成
+    `127.0.0.1` —— 这是**可见的降级**，比「静默记下伪造值」好。
+
+    ⚠ 实测（2026-09-22 生产，第二十七轮）：带 `X-Forwarded-For: 203.0.113.7`
+    发一个写请求，审计台账记下的 `ip` **就是 `203.0.113.7`**，
+    而真实出口 IP 是 `39.181.5.30`。即**任何人都能往审计台账里写假 IP** ——
+    审计的意义正是「谁从哪来」，这个字段被污染等于台账失真。
+
+    仅当 `REMOTE_ADDR` 是回环地址（请求确实来自本机 nginx）时才看 `X-Real-IP`：
+    直连 gunicorn 时它同样由客户端可写，不能采信。
     """
     if request is None:
         return None
     remote = (request.META.get('REMOTE_ADDR') or '').strip()
     candidate = remote
     if _is_loopback(remote):
-        forwarded = (request.META.get('HTTP_X_FORWARDED_FOR') or '').split(',')[0].strip()
-        candidate = forwarded or remote
+        real = (request.META.get('HTTP_X_REAL_IP') or '').strip()
+        candidate = real or remote
     try:
         ipaddress.ip_address(candidate)
     except ValueError:

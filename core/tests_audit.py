@@ -311,7 +311,7 @@ class AuditUnitTest(SimpleTestCase):
 
 
 class ClientIpTest(SimpleTestCase):
-    """X-Forwarded-For 是客户端可伪造的，只在直连来自回环时采信。"""
+    """审计来源 IP 必须取「代理看到的对端」，不能取客户端可写的值。"""
 
     class _Req:
         def __init__(self, meta):
@@ -322,10 +322,25 @@ class ClientIpTest(SimpleTestCase):
                          'HTTP_X_FORWARDED_FOR': '1.2.3.4'})
         self.assertEqual(audit.client_ip(req), '203.0.113.9')
 
-    def test_uses_forwarded_for_behind_local_proxy(self):
+    def test_uses_x_real_ip_behind_local_proxy(self):
+        """nginx 用 `$remote_addr` **覆盖**写 `X-Real-IP`，客户端改不动它。"""
         req = self._Req({'REMOTE_ADDR': '127.0.0.1',
-                         'HTTP_X_FORWARDED_FOR': '1.2.3.4, 10.0.0.1'})
-        self.assertEqual(audit.client_ip(req), '1.2.3.4')
+                         'HTTP_X_REAL_IP': '114.247.50.2',
+                         'HTTP_X_FORWARDED_FOR': '1.2.3.4'})
+        self.assertEqual(audit.client_ip(req), '114.247.50.2')
+
+    def test_forged_forwarded_for_does_not_win(self):
+        """⚠ 回归：伪造的 `X-Forwarded-For` **不得**进审计台账。
+
+        nginx 的 `$proxy_add_x_forwarded_for` 把**客户端原值放在最前**、
+        真实对端追加在最后；而 nginx 默认还会**透传**客户端发来的未知头。
+        所以「取第一段」等于让任何人往台账里写假 IP（生产已实测），
+        「取最后一段」也只是依赖另一处配置不出错 —— 都不够。
+        **一律不看 XFF**，只认 nginx 覆盖写入的 `X-Real-IP`。
+        """
+        req = self._Req({'REMOTE_ADDR': '127.0.0.1',
+                         'HTTP_X_FORWARDED_FOR': '203.0.113.7, 39.181.5.30'})
+        self.assertEqual(audit.client_ip(req), '127.0.0.1')
 
     def test_invalid_ip_returns_none(self):
         req = self._Req({'REMOTE_ADDR': 'not-an-ip'})

@@ -249,18 +249,16 @@ def amap_regeo(lng, lat):
         'district': component.get('district') if isinstance(component.get('district'), str) else '',
     }
 def client_ip(request):
-    """取真实客户端 IP（给 IP 定位用）。
+    """取真实客户端 IP（IP 定位用）。**实现收口在 `core.audit.client_ip()`。**
 
-    nginx 已设 `X-Real-IP $remote_addr`（**覆盖式**，客户端伪造不了），
-    优先用它；没有时退回 `REMOTE_ADDR`。
-
-    ⚠ **不要**改用 `X-Forwarded-For` 的第一段 —— 那是客户端可任意伪造的
-    （nginx 用 `$proxy_add_x_forwarded_for` 会把客户端传的值原样追加在前面）。
+    ⚠ 不要再写第二份。曾经 `core/audit.py` 与这里各有一份，而 core 那份取的是
+    `X-Forwarded-For` 的**第一段** —— 那是客户端可任意伪造的值
+    （nginx 的 `$proxy_add_x_forwarded_for` 把客户端原值放最前、真实对端追加在最后）。
+    结果是**审计台账的 `ip` 字段可以被任何人伪造**，生产已实测。
+    两份实现必然漂移，所以只留一份，另一份委托。
     """
-    if request is None:
-        return ''
-    return (request.META.get('HTTP_X_REAL_IP')
-            or request.META.get('REMOTE_ADDR') or '')
+    from core.audit import client_ip as _impl
+    return _impl(request) or ''
 
 
 # 运营商级 NAT（CGNAT）段。⚠ 必须**显式**列出来：`ipaddress` 的 `is_private`
