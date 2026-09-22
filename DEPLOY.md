@@ -182,7 +182,7 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 | 超级管理员可登录 | 访问 `/admin/` 用 `ensure_superuser` 输出的口令 | 能进入后台 |
 | 演示账号可用 | 访问 `/login/` 用 `cy_shelter` / `123456` | 能进入捕捉点门户 |
 | **照片上传可用**（含手机原图） | 用 **≥3MB 的真实手机照片**提交捕捉登记（或多张合照），再**经反代取回** | 上传成功；`media/` 出现文件；`/media/...` 返回 200 且**与原图逐字节一致**；**不得**出现 `RequestDataTooBig` 的 400 |
-| **请求体上限一致** | 见下方 §5.5 | nginx `client_max_body_size` **20M**；`DATA_UPLOAD_MAX_MEMORY_SIZE` 未被人为调小 |
+| **请求体上限一致** | 见下方 §5.5 / §5.7 | nginx `client_max_body_size` **20M**；`DATA_UPLOAD_MAX_MEMORY_SIZE` 未被人为调小；`DATA_UPLOAD_MAX_NUMBER_FILES` **≥ `MAX_CAPTURE_BATCH + 1`**；`/api/` 的 400 与 413 **都是 JSON**（`handler400` + nginx `error_page 413`） |
 | **超大图被拦且可读** | 见下方 §5.5 的 curl 片段：直接发一个 >10MB 的 multipart 请求 | HTTP **400 且响应体是 JSON**，文案含「超过 10MB 上限」；**不得**是 Django 的 HTML 报错页 |
 | **数据隔离生效** | 用他区账号访问本区宠物生命周期，**再访问一个不存在的 id** | **两者响应完全一致**（都是 404 且文案相同）—— 否则可用枚举 id 扫库 |
 | 数据一致性 | `python manage.py check_data_integrity` | 输出「未发现一致性问题」，退出码 0 |
@@ -498,6 +498,84 @@ proxy_set_header X-Forwarded-Proto $scheme;                    # 覆盖 → 可�
 > `HTTP_X_FORWARDED_FOR` 是客户端可控的。
 > 新增代理头时，也优先用**覆盖式**写法（`$变量`），不要用追加式。
 
+### 5.7 ⚠ 请求体闸门有**三道**，且默认值低于产品自己声明的上限
+
+§5.5 只讲了「体积」那一道。实际上有**三道**互不相干的闸门会拒绝同一个请求，
+而**三道的默认值都卡在本产品自己声明的批量上限附近**
+（`business.services.MAX_CAPTURE_BATCH = 100`）：
+
+| 闸门 | 默认 | 本项目值 | 触发后的响应 |
+|---|---|---|---|
+| nginx `client_max_body_size` | 1M | **20M** | `413` **text/html** |
+| Django `DATA_UPLOAD_MAX_NUMBER_FILES` | **100** | **110** | `400` **text/html** |
+| Django `DATA_UPLOAD_MAX_NUMBER_FIELDS` | 1000 | **2000** | `400` **text/html** |
+
+**为什么 100 这个默认值必须改**：捕捉单在上限那一批（100 只）是
+
+```
+文件：100 张单只照片（pet_photo_<编号>）+ 1 张整体合影 = 101 个
+字段：13 个固定字段 + pet_codes×100 + 每只 4 个属性×100 = 513 个
+```
+
+默认的文件数上限是 100，**比产品自己声明的上限正好少 1** —— 第 100 只的照片
+（第 101 个文件）连解析都过不去。实测：99 只 → `200 OK`；**100 只 → `400 text/html`**。
+
+**部署后判据**（不需要浏览器）：
+
+```bash
+cd /opt/tnr
+venv/bin/python manage.py shell -c "
+from django.conf import settings
+from business.services import MAX_CAPTURE_BATCH
+print('MAX_CAPTURE_BATCH =', MAX_CAPTURE_BATCH)
+print('DATA_UPLOAD_MAX_NUMBER_FILES =', settings.DATA_UPLOAD_MAX_NUMBER_FILES,
+      '（必须 >=', MAX_CAPTURE_BATCH + 1, '）')
+print('DATA_UPLOAD_MAX_NUMBER_FIELDS =', settings.DATA_UPLOAD_MAX_NUMBER_FIELDS,
+      '（必须 >=', 13 + MAX_CAPTURE_BATCH * 5, '）')"
+
+# 另一道：21MB 应当被 nginx 挡下，但**必须是 JSON 而不是 HTML**
+head -c 21000000 /dev/zero | tr '\0' 'a' > /tmp/big.bin
+curl -s -o /tmp/r.txt -w '%{http_code}  %{content_type}\n' \
+  -X POST http://127.0.0.1/api/business/captures/create/ -F "f=@/tmp/big.bin"
+# 期望：413  application/json
+# 若为 text/html → nginx 缺 error_page 413（见下）
+```
+
+**两道闸的响应都必须收口成 JSON**，否则前端 `await res.json()` 抛错、
+用户看到「点提交没反应」：
+
+1. **Django 侧**：`tnr_system/urls.py` 的 `handler400 = api_aware_bad_request`
+   —— `DEBUG=False` 时 `SuspiciousOperation` / `MultiPartParserError` 都经
+   `resolve_error_handler(400)`，它把 `/api/` 前缀的请求转成
+   `{"success": false, "data": null, "message": "…"}`，其余路径保持 HTML 页。
+   ⚠ 按异常类型映射**中文文案**，**不要把 `str(exc)` 回给用户**
+   （那是 Django 的英文内部措辞，既不可读又泄漏实现细节）。
+2. **nginx 侧**：`location /api/` 里加 `error_page 413 = @api_payload_too_large;`
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_redirect off;
+    client_max_body_size 20M;
+    error_page 413 = @api_payload_too_large;
+}
+location @api_payload_too_large {
+    default_type application/json;
+    return 413 '{"success":false,"data":null,"message":"提交的数据过大，请减少照片数量后分批提交"}';
+}
+```
+
+⚠ **`client_max_body_size` 保持 20M 的理由**：20M 约容纳 **~50 张**前端压缩后的
+照片（1600px / JPEG 0.82，约 300–500KB/张）。要跑满 100 只（约 30–50MB）
+需调到 **64M**，那等于让单个请求可以缓冲 64MB —— 属**基础设施姿态**决策，
+不是代码缺陷。当前配置下超出时会给出可读提示，不再是空白页。
+
+⚠ 改完 nginx 必须 `nginx -t && nginx -s reload`；**改前先备份配置**。
+
 ## 六、常见报错对照
 
 | 报错 | 原因 | 处理 |
@@ -511,7 +589,9 @@ proxy_set_header X-Forwarded-Proto $scheme;                    # 覆盖 → 可�
 | 前端定位报 `Only secure origins are allowed` | HTTP 非安全源，浏览器禁止 GPS 定位 | **预期行为**，浏览器**不会弹权限框**（代码绕不过去）。前端已自动降级 IP 定位；如需精确定位请配 HTTPS（见第二节） |
 | 定位总是返回**北京**且 `source` 为 `server_ip` | 拿不到客户端公网 IP，高德按**服务器出口**定位 | 从公网经反代访问再验；本机 `127.0.0.1` 测永远是 `server_ip`。前端对 `server_ip` **不自动填表**，只提示手动定位 |
 | 上传大图报 400，页面是 Django 的 HTML 报错页 | `RequestDataTooBig`（`request.body` 超 `DATA_UPLOAD_MAX_MEMORY_SIZE`） | 见 §5.5。**不要调大阈值**；确认 `parse_json_body()` 对 multipart 不读 `request.body` |
-| 上传大图报 **413** | nginx `client_max_body_size` 不够 | 调到 20M 并 `nginx -s reload`；前端 `compressImage()` 已在源头压缩 |
+| 上传大图报 **413**（HTML） | nginx `client_max_body_size` 不够 | 调到 20M 并 `nginx -s reload`；前端 `compressImage()` 已在源头压缩。**响应应为 JSON**，否则缺 `error_page 413`（见 §5.7） |
+| 提交**正好 100 只**时 400（HTML） | `DATA_UPLOAD_MAX_NUMBER_FILES` 默认 100，而 100 只 = 101 个文件 | 见 §5.7：设为 ≥ `MAX_CAPTURE_BATCH + 1` |
+| `/api/` 的 400 是 Django 的 HTML 报错页 | 未定义 `handler400` | 见 §5.7：`tnr_system/urls.py` 的 `api_aware_bad_request` |
 | 点「提交」没反应、无任何提示 | 响应体非 JSON（413 / 502 / 400 报错页），前端 `await res.json()` 抛错 | 前端必须 `try/catch`；查 nginx access.log 的状态码与响应体大小 |
 | `no such column: business_capture.latitude` | 数据库迁移未执行 | `python manage.py migrate` |
 | 上传照片报 500 / Permission denied | `media/` 属主不是 `www-data` | 见第三节「目录属主」 |

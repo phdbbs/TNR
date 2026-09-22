@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **1031 个用例，全部通过**（约 75 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1041 个用例，全部通过**（约 76 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**） |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**）+ 三十一轮 **2 道闸门**（`DATA_UPLOAD_MAX_NUMBER_FILES` 默认 **100**，而产品自己声明「单批最多 100 只」= 100 张单只照片 + 1 张合影 = **101 个文件** → 第 100 只的照片连解析都过不去，`400 **text/html**`；nginx `client_max_body_size` 20M → 100 张手机压缩图约 30–50MB → `413 **text/html**`。两者前端都表现为「点提交没反应」；修法：设置按产品上限推导 + 新增 `handler400` 把 `/api/` 下所有传输层 400 收口成**可读 JSON** + nginx `error_page 413` 同口径） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -4655,6 +4655,124 @@ ERROR: test_oversized_json_body_degrades_to_readable_error   # business 侧那�
 
 ---
 
+#### 2.39 请求体闸门：默认值**低于产品自己声明的上限**（第三十一轮）
+
+修完 §2.38 后，把「`SuspiciousOperation` 一族」整个枚举了一遍 ——
+`RequestDataTooBig` 只是其中一个。**结果还有两道闸门没验过**，而其中一道
+正好卡在产品自己声明的上限上。
+
+##### 三道闸门，默认值都在上限附近
+
+| 闸门 | Django/nginx 默认 | 触发后的响应 |
+|---|---|---|
+| nginx `client_max_body_size` | 1M（本项目 20M） | `413` **text/html** |
+| Django `DATA_UPLOAD_MAX_NUMBER_FILES` | **100** | `400` **text/html** |
+| Django `DATA_UPLOAD_MAX_NUMBER_FIELDS` | 1000 | `400` **text/html** |
+
+三者返回的都是 **HTML**，而前端 `TNR_API._postForm` 内部是 `await res.json()`
+—— 拿到 HTML 就抛错 → **静默中断**。与 §2.26 的 `RequestDataTooBig`、
+§2.38 的 `api_change_password` 是**同一族缺陷**，只是换了一道闸门。
+
+##### 关键：捕捉单在上限那一批的**真实形态**（逐字段数出来的）
+
+`MAX_CAPTURE_BATCH = 100`（单批最多 100 只），那么上限一批是：
+
+```
+文件：100 张单只照片（pet_photo_<编号>）+ 1 张整体合影 = 101 个   ← 撞上默认的 100
+字段：13 个固定字段 + pet_codes×100 + 每只 4 个属性×100 = 513 个  ← 默认 1000 够用
+```
+
+**「声明支持 100 只」与「文件数上限 100」正好差 1** —— 第 100 只的照片
+（也就是第 101 个文件）连解析都过不去。
+
+##### 实证（端到端，真图夹具）
+
+| 只数 | 文件数 | 修复前 | 修复后 |
+|---|---|---|---|
+| 1 | 2 | `200 OK` ✔ | `200 OK` ✔ |
+| 50 | 51 | `200 OK` ✔ | `200 OK` ✔ |
+| 99 | **100** | `200 OK` ✔ | `200 OK` ✔ |
+| **100** | **101** | **`400 text/html`**（`<title>Bad Request (400)</title>`）✗ | **`200 OK`**，100 只全部落库且**每只都有照片** ✔ |
+
+##### nginx 那道闸门同样回 HTML（实测）
+
+```
+$ curl -X POST http://127.0.0.1/api/business/captures/create/ -F "f=@big.bin"   # 21MB
+  状态 413  Content-Type text/html
+  <html><head><title>413 Request Entity Too Large</title></head>...
+对照：19MB → 到达 Django → 401 application/json（说明 20M 是硬边界）
+```
+
+100 张手机压缩图（1600px / JPEG 0.82，约 300–500KB/张）≈ **30–50MB**，
+**会先在 nginx 被挡下**，用户同样只看到「点提交没反应」。
+
+##### 修法（三层，各司其职）
+
+| 层 | 改动 | 作用 |
+|---|---|---|
+| `tnr_system/settings.py` | `DATA_UPLOAD_MAX_NUMBER_FILES = 110`、`DATA_UPLOAD_MAX_NUMBER_FIELDS = 2000` | 让**声明支持的上限真的能提交**（修 off-by-one） |
+| `tnr_system/urls.py` | 新增 `handler400 = api_aware_bad_request` | `/api/` 下**所有**传输层 400 → **可读 JSON**；非 `/api/` 保持 HTML 页 |
+| nginx `sites-enabled/tnr` | `location /api/` + `error_page 413 = @api_payload_too_large` | 413 → **可读 JSON** |
+
+`handler400` 覆盖的类型（`DEBUG=False` 时 Django 都经 `resolve_error_handler(400)`）：
+
+```python
+RequestDataTooBig     → '提交的数据过大，请减少照片数量或压缩后重试'
+TooManyFilesSent      → '提交的照片数量过多，请减少数量后分批提交'
+TooManyFieldsSent     → '提交的表单字段过多，请减少数量后分批提交'
+MultiPartParserError  → '提交的表单数据无法解析，请重试'
+```
+
+⚠ **不能把 `str(exc)` 直接回给用户** —— 那是 Django 的英文内部措辞
+（`Request body exceeded settings.DATA_UPLOAD_MAX_MEMORY_SIZE.`），既不可读、
+又把框架实现细节暴露给客户端。已有测试钉住不许出现 `exceeded` / `DATA_UPLOAD_MAX`。
+
+⚠ **nginx 的 `client_max_body_size` 本次**没有**调大**：20M → 64M 属于
+基础设施姿态变更（每个请求可缓冲 64MB），留待决策。当前 20M 下约可提交
+**~50 张**压缩图；超过时用户会看到可读的「数据过大，请分批提交」，不再是空白页。
+
+##### 反向验证（两组，都先证明测试会红）
+
+**① 把 `DATA_UPLOAD_MAX_NUMBER_FILES` 改回 100**：
+
+```
+FAIL: test_full_batch_of_100_with_individual_photos_succeeds
+  AssertionError: 400 != 200 : ...{"message": "提交的照片数量过多，请减少数量后分批提交"}
+FAIL: test_file_gate_covers_a_full_capture_batch
+  AssertionError: 100 not greater than or equal to 101 : DATA_UPLOAD_MAX_NUMBER_FILES=100
+  容不下上限一批所需的 101 个文件（100 张单只照片 + 1 张合影）...
+```
+
+顺带证明了 `handler400` 生效 —— 那条 `400` 已经是**可读 JSON** 而不是 HTML。
+
+**② 注释掉 `handler400`**：
+
+```
+FAIL: test_too_many_files_degrades_to_readable_json
+  AssertionError: 'text/html' != 'application/json'
+FAIL: test_handler400_is_wired_into_the_root_urlconf
+  AssertionError: <function bad_request ...> is not <function api_aware_bad_request ...>
+```
+
+##### 用例数
+
+| 新增 | 内容 |
+|---|---|
+| `business/tests/test_multipart_body_limit.py::UploadGateConsistencyTest`（2 例） | **静态关系**：文件数闸门 ≥ `MAX_CAPTURE_BATCH + 1`、字段数闸门 ≥ 上限所需 513。谁把设置调小到覆盖不了上限，立刻红 |
+| 同上 `CaptureBatchAtMaxTest`（2 例） | **端到端**：100 只 × 逐只照片 + 合影 = 101 个文件必须 200，且**每只都真的存下了照片**（用 `bool(p.photo_capture)` 而不是 `exclude(photo_capture='')` —— 后者对 NULL 也成立，是假绿）；99 只正向对照 |
+| `core/tests.py::ApiAwareBadRequestTest`（5 例） | JSON 信封形状 / 四类异常各有中文文案 / **不泄漏框架内部措辞** / 非 `/api/` 仍是 HTML（正向对照）/ `handler400` 真的被接线 |
+| 同上 `ApiTransportLimitEndToEndTest`（1 例） | 端到端：撞上文件数闸门时前端拿到的是 **JSON** 而非 HTML |
+
+全量 **1031 → 1041 OK**（76 秒）。
+
+> §2.26（`RequestDataTooBig` 撞 2.5MB）、§2.38（同一模式两处实现）、
+> 本节（另两道闸门 + 默认值低于声明上限）**是同一族的三次命中**。
+> 教训是：**不要只修「撞到的那一处」，要把这一族的所有闸门都列出来逐个验**。
+> 这一族还有 `DATA_UPLOAD_MAX_MEMORY_SIZE`（已修）、CSRF 403（另经中间件返回，
+> 不经 `handler400`，尚未收口）。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -4839,7 +4957,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 1031 个用例
+python manage.py test --parallel 1  # 1041 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
