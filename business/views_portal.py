@@ -469,7 +469,15 @@ def pet_lifecycle(request, pet_id):
         events.append({
             'type': 'owner_return',
             'type_display': '回收登记',
-            'date': r.return_time.isoformat() if r.return_time else (timezone.localdate(r.created_at).isoformat() if r.created_at else ''),
+            # ⚠ `date` 字段一律是**本地日期**（前端当 `YYYY-MM-DD` 用）。
+            # 本行原来写的是 `r.return_time.isoformat()` —— `return_time` 是
+            # DateTimeField，`.isoformat()` 给的是 **UTC 带偏移**的时间串，于是：
+            #   ① `date` 字段语义不一致（同文件其它 6 处都是纯日期）；
+            #   ② 前端 `.slice(0, 10)` / `formatDate` 拿到 **UTC 日期**，
+            #      北京时间 00:00–08:00 的回收记录会显示成**前一天**。
+            # 与 `created_at` 分支、以及 `views_capture` 里
+            # `return_time__date__gte`（Django 转本地时区）的口径对齐。
+            'date': timezone.localdate(r.return_time).isoformat() if r.return_time else (timezone.localdate(r.created_at).isoformat() if r.created_at else ''),
             'ledger_no': r.ledger_no,
             'owner_name': r.owner_name,
             'owner_phone': r.owner_phone,

@@ -781,16 +781,49 @@ const TNR_UI = {
   },
 
   // === 格式化日期 ===
+  /** 把后端返回的日期/时间串转成**本地** `YYYY-MM-DD`。
+   *
+   * ⚠ 存在的理由：后端 `serialize_instance` 对 `DateTimeField` 用 `isoformat()`，
+   * `USE_TZ=True` 下是 **UTC 带偏移**（`2026-09-22T06:05:50+00:00`）。直接
+   * `.slice(0, 10)` 拿到的是 **UTC 日期**，拿它跟用户选的**本地日期**比较，
+   * 北京时间 00:00–08:00 的记录会被算到**前一天** —— 用户选「今天」看不到它们。
+   * 后端筛选口径已经是本地日期（`timezone.localdate()` / `__date` 查询），前端必须对齐。
+   *
+   * 纯日期串（`DateField` 产物，如 `2026-09-22`）**原样返回**：ES 规范把
+   * date-only form 当 **UTC 午夜**，负时区下 `new Date('2026-09-22')` 会退到 21 日。
+   * 纯日期不参与时区换算。
+   *
+   * 用途：**日期范围筛选**的比较键。
+   */
+  localDateStr(date) {
+    if (!date) return '';
+    const s = String(date);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const d = new Date(s);
+    if (isNaN(d)) return s;   // 解析不了就原样返回（与 formatDate 一致），不假装是日期
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  },
+
   formatDate(date) {
     if (!date) return '—';
-    const d = new Date(date);
+    const s = String(date);
+    // 纯日期串直接返回：date-only 在 ES 里按 **UTC 午夜** 解析，负时区会退一天。
+    // （UTC+8 下与旧行为完全一致，这里只是把这条隐含前提写死。）
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const d = new Date(s);
     if (isNaN(d)) return date;
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   },
 
   formatDateTime(date) {
     if (!date) return '—';
-    const d = new Date(date);
+    const s = String(date);
+    // 纯日期串（DateField 产物）**只返回日期**，不补 `08:00`。
+    // 旧实现把它当 UTC 午夜再按本地取小时 → UTC+8 下渲染成 `2026-09-22 08:00`，
+    // 一个日期字段凭空长出「08:00」。gov 台账有多处 `formatDateTime(r.date)`。
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const d = new Date(s);
     if (isNaN(d)) return date;
     return this.formatDate(date) + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
   },

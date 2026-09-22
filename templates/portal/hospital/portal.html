@@ -67,7 +67,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260922a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260922b"></script>
 <script>
 /* ====================================================
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
@@ -141,19 +141,17 @@ const Hospital = {
   getHospitalId() { const u = this.currentUser(); return u ? u.institution_id : null; },
   getHospitalName() { const u = this.currentUser(); return u ? (u.institution_name || u.name) : ''; },
 
-  formatDate(iso) {
-    if (!iso) return '—';
-    const s = String(iso);
-    if (s.length >= 10) return s.substr(0, 10);
-    return s;
-  },
+  /* ⚠ 一律委托公共实现，不要在这里再写第二份。
+     原来这两处是**裸截断** `substr(0, 10)` / `substr(0, 16)` —— 而后端
+     `serialize_instance` 对 `DateTimeField` 用 `isoformat()`，`USE_TZ=True` 下是
+     **UTC 带偏移**（`2026-09-22T06:05:50+00:00`）。裸截断 = 直接显示 UTC：
+     转运台账 / 诊疗详情的时间**差 8 小时**；UTC ≥ 16:00（本地已跨日）时**日期差一天**。
+     公共实现走 `new Date()` 按浏览器本地时区换算，是对的。
+     实测（TZ=Asia/Shanghai，输入 `2026-09-22T20:30:00+00:00`）：
+       旧 `formatDateTime` → `2026-09-22 20:30`；公共 → `2026-09-23 04:30`。 */
+  formatDate(iso) { return TNR_UI.formatDate(iso); },
 
-  formatDateTime(iso) {
-    if (!iso) return '—';
-    const s = String(iso);
-    if (s.length >= 16) return s.substr(0, 16).replace('T', ' ');
-    return this.formatDate(iso);
-  },
+  formatDateTime(iso) { return TNR_UI.formatDateTime(iso); },
 
   parsePetCodes(codes) {
     if (!codes) return [];
@@ -370,7 +368,10 @@ const Hospital = {
     const bar = document.getElementById('receiveFilterBar');
     const v = TNR_UI.getFilterValues(bar);
     const shown = rows.filter(r => {
-      const d = String(r.created_at || '').slice(0, 10);
+      // ⚠ 用 localDateStr 而不是 `.slice(0, 10)`：`created_at` 是 DateTimeField，
+      // 后端序列化成 **UTC 带偏移**的串，裸截断拿到的是 UTC 日期，跟用户选的
+      // 本地日期比较会把北京时间 00:00–08:00 的记录算到**前一天**。
+      const d = TNR_UI.localDateStr(r.created_at);
       if (v.start_date && d < v.start_date) return false;
       if (v.end_date && d > v.end_date) return false;
       if (!v.keyword) return true;
@@ -804,7 +805,8 @@ const Hospital = {
       const renderTreatTable = () => {
         const v = TNR_UI.getFilterValues(treatBar);
         const list = rows.filter(r => {
-          const d = String(r.created_at || '').slice(0, 10);
+          // 同上：`created_at` 是 UTC 串，必须按本地时区取日期再比较。
+          const d = TNR_UI.localDateStr(r.created_at);
           if (v.start_date && d < v.start_date) return false;
           if (v.end_date && d > v.end_date) return false;
           if (!v.keyword) return true;
@@ -945,7 +947,7 @@ const Hospital = {
     return {
       ok: (hay) => !v.keyword || String(hay || '').toLowerCase().includes(v.keyword),
       inRange: (d) => {
-        const s = String(d || '').slice(0, 10);
+        const s = TNR_UI.localDateStr(d);
         if (v.start_date && s < v.start_date) return false;
         if (v.end_date && s > v.end_date) return false;
         return true;
@@ -1460,7 +1462,8 @@ const Hospital = {
         const list = records.filter(e => {
           if (v.body === 'done' && !e.body_received) return false;
           if (v.body === 'todo' && e.body_received) return false;
-          const d = String(e.euthanized_at || '').slice(0, 10);
+          // `euthanized_at` 是 DateField（纯日期），localDateStr 原样返回 —— 统一口径。
+          const d = TNR_UI.localDateStr(e.euthanized_at);
           if (v.start_date && d < v.start_date) return false;
           if (v.end_date && d > v.end_date) return false;
           if (v.keyword) {
@@ -1613,7 +1616,10 @@ const Hospital = {
     const bar = document.getElementById('ledgerFilterBar');
     const v = TNR_UI.getFilterValues(bar);
     const inRange = (d) => {
-      const s = String(d || '').slice(0, 10);
+      // `d` 各页不同：`MaterialTransaction.date` 是 DateField（纯日期，原样返回），
+      // `Transfer/Treatment.created_at` 是 DateTimeField（UTC 串，需转本地日期）。
+      // `localDateStr` 两种情况都对，故不必按页区分。
+      const s = TNR_UI.localDateStr(d);
       if (v.start_date && s < v.start_date) return false;
       if (v.end_date && s > v.end_date) return false;
       return true;

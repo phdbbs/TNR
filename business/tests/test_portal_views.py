@@ -1,6 +1,10 @@
 """门户页面、门户辅助 API 与宠物全生命周期溯源测试。"""
+import re
+from datetime import datetime, timezone as dt_timezone
+
 from business.models import (
-    Adoption, AdoptionHallListing, Message, Release, Transfer, Treatment,
+    Adoption, AdoptionHallListing, Message, OwnerReturn, Release, Transfer,
+    Treatment,
 )
 from business.tests.base import (
     BusinessTestBase, make_capture, make_institution, make_pet, make_user,
@@ -204,3 +208,67 @@ class PetLifecycleTest(BusinessTestBase):
         pet = make_pet(district=self.district_a)
         self.expect_fail(self.get_json(f'/api/business/pets/{pet.id}/lifecycle/'),
                   status=401)
+
+
+class PetLifecycleEventDateTest(BusinessTestBase):
+    """宠物全生命周期 `events[].date` 一律是**本地日期**串（`YYYY-MM-DD`）。
+
+    前端（捕捉端 timeline、领养人端 timeline）都直接把它当日期用。
+    历史上 `owner_return` 分支写的是 `r.return_time.isoformat()` ——
+    `return_time` 是 DateTimeField，`.isoformat()` 给的是 **UTC 带偏移**的时间串；
+    前端 `.substring(0, 10)` 于是拿到 **UTC 日期**，本地 00:00–08:00 的回收记录
+    会显示成**前一天**。同一字段「有时纯日期、有时 UTC 时间串」本身也是缺陷。
+
+    本类锁死「一律纯本地日期」，与同文件其它 6 个分支
+    （`timezone.localdate(...)` / `DateField.isoformat()`）的口径一致。
+    """
+
+    LOCAL_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+    def _pet_with_capture(self, code):
+        cap = make_capture(district=self.district_a, shelter=self.shelter_a,
+                           pet_codes=[code])
+        return make_pet(code=code, district=self.district_a,
+                        shelter=self.shelter_a, capture=cap)
+
+    def _events(self, pet):
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.get_json(f'/api/business/pets/{pet.id}/lifecycle/'))
+        return body['data']['events']
+
+    def _make_owner_return(self, pet, ledger_no, **kw):
+        return OwnerReturn.objects.create(
+            pet=pet, ledger_no=ledger_no, owner_name='张三', reason='走失',
+            district=self.district_a, **kw)
+
+    def test_every_event_date_is_plain_local_date(self):
+        pet = self._pet_with_capture('TNR-LC-1')
+        self._make_owner_return(
+            pet, 'OR-LC-1',
+            return_time=datetime(2026, 9, 22, 20, 30, tzinfo=dt_timezone.utc))
+        events = self._events(pet)
+        self.assertTrue(events, '时间线不应为空')
+        for ev in events:
+            self.assertRegex(
+                ev['date'], self.LOCAL_DATE_RE,
+                f"{ev['type']} 的 date 不是纯日期：{ev['date']!r}")
+
+    def test_owner_return_date_is_local_not_utc(self):
+        """UTC 深夜（本地已跨日）：`date` 必须落在**本地**那一天。"""
+        pet = self._pet_with_capture('TNR-LC-2')
+        # 2026-09-22T20:30Z == 北京时间 2026-09-23 04:30
+        self._make_owner_return(
+            pet, 'OR-LC-2',
+            return_time=datetime(2026, 9, 22, 20, 30, tzinfo=dt_timezone.utc))
+        ev = next(e for e in self._events(pet) if e['type'] == 'owner_return')
+        self.assertEqual(
+            ev['date'], '2026-09-23',
+            '`date` 用了 UTC 日期 —— 本地是 9/23，UTC 才是 9/22。')
+
+    def test_owner_return_without_return_time_falls_back_to_created_at(self):
+        """`return_time` 为空时退到 `created_at`，同样必须是本地日期。"""
+        pet = self._pet_with_capture('TNR-LC-3')
+        self._make_owner_return(pet, 'OR-LC-3')      # 不传 return_time
+        ev = next(e for e in self._events(pet) if e['type'] == 'owner_return')
+        self.assertRegex(ev['date'], self.LOCAL_DATE_RE,
+                         f"退到 created_at 的 date 不是纯日期：{ev['date']!r}")

@@ -71,7 +71,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260922a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260922b"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -221,7 +221,10 @@ const GovPortal = {
   _dashInRange(dateStr) {
     const { start, end } = this._dashRange || {};
     if (!dateStr) return !start && !end ? true : false;
-    const d = String(dateStr).substring(0, 10);
+    // `dateStr` 常来自 `x[dateKey] || x.created_at`，而 `created_at` 是
+    // DateTimeField（UTC 串）。裸截断得到 UTC 日期，跟本地日期比较会把
+    // 北京时间 00:00–08:00 的记录算到**前一天**。localDateStr 对纯日期串原样返回。
+    const d = TNR_UI.localDateStr(dateStr);
     if (start && d < start) return false;
     if (end && d > end) return false;
     return true;
@@ -1468,7 +1471,8 @@ const GovPortal = {
         const v = TNR_UI.getFilterValues(matTxnBar);
         const rows = txns.filter(t => {
           if (v.type && String(t.type) !== v.type) return false;
-          const d = String(t.date || '').slice(0, 10);
+          // `t.date` 是 DateField（纯日期），localDateStr 原样返回 —— 统一口径。
+          const d = TNR_UI.localDateStr(t.date);
           if (v.start_date && d < v.start_date) return false;
           if (v.end_date && d > v.end_date) return false;
           if (!v.keyword) return true;

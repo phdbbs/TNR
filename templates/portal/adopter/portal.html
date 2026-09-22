@@ -658,7 +658,7 @@
 {% endblock %}
 
 {% block extra_js %}
-<script src="{% static 'js/tnr-api.js' %}?v=20260922a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260922b"></script>
 <script>
 /* ============================================
    领养人端 H5 门户 - 应用逻辑（对接 Django API）
@@ -1141,7 +1141,8 @@ async function renderMyAdoption() {
         const petName = pet ? pet.code : '';
         const petCode = pet ? pet.code : (app.pet_code || '');
         const statusBadge = getApplyStatusBadge(app.status);
-        const appliedAt = app.applied_at ? app.applied_at.substring(0, 10) : '—';
+        // `applied_at` 是 DateTimeField（UTC 串），裸截断会让日期**差一天**。
+        const appliedAt = app.applied_at ? TNR_UI.localDateStr(app.applied_at) : '—';
         html += `
           <div class="adoption-card" style="margin-bottom:10px;">
             <div class="adoption-card-header">
@@ -1181,7 +1182,8 @@ async function renderMyAdoption() {
       if (!pet) return;
       const photoClass = getPhotoClass(pet.species);
       const emoji = getPetEmoji(pet.species);
-      const adoptedAt = adoption.adopted_at ? adoption.adopted_at.substring(0, 10) : '—';
+      // `adopted_at` 是 DateField（纯日期），localDateStr 原样返回 —— 统一口径。
+      const adoptedAt = adoption.adopted_at ? TNR_UI.localDateStr(adoption.adopted_at) : '—';
 
       html += `
         <div class="adoption-card" onclick="showLifecycle('${adoption.id}')">
@@ -1253,7 +1255,7 @@ async function showLifecycle(adoptionId) {
   const events = (lifecycleData && lifecycleData.events) || [];
   if (events.length === 0) {
     // 降级：至少展示领养记录
-    const adoptedAt = adoption.adopted_at ? adoption.adopted_at.substring(0, 10) : '—';
+    const adoptedAt = adoption.adopted_at ? TNR_UI.localDateStr(adoption.adopted_at) : '—';
     html += `<div class="timeline-item done">
       <div class="timeline-time">${TNR_UI.escape(adoptedAt)}</div>
       <div class="timeline-title">领养完成</div>
@@ -1261,7 +1263,11 @@ async function showLifecycle(adoptionId) {
     </div>`;
   } else {
     events.forEach(ev => {
-      const dateStr = ev.date ? ev.date.substring(0, 10) : '—';
+      // 后端 `ev.date` 统一给**本地日期**串；这里仍走 localDateStr 兜底 ——
+      // 历史上 `owner_return` 事件返回的是 UTC 时间串（`return_time.isoformat()`），
+      // 裸 `substring(0, 10)` 会让「回收登记」的日期**差一天**。
+      // localDateStr 对纯日期串原样返回，对 UTC 串转本地。
+      const dateStr = ev.date ? TNR_UI.localDateStr(ev.date) : '—';
       let desc = '';
       if (ev.type === 'capture') {
         desc = `捕捉点：${TNR_UI.escape(ev.shelter_name || '—')}<br>小区：${TNR_UI.escape(ev.community_name || '—')}<br>地址：${TNR_UI.escape(ev.address || '—')}`;

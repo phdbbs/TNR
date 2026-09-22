@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260922a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260922b"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -377,7 +377,10 @@ const Shelter = {
     const start = this._rangeStart(range);
     if (!start) return true;
     if (!iso) return false;
-    return String(iso).slice(0, 10) >= start;
+    // ⚠ `iso` 多为 `createdAt`（DateTimeField → UTC 串），裸截断会拿到 UTC 日期，
+    // 与用户选的本地日期比较会把北京时间 00:00–08:00 的记录算到**前一天**。
+    // 后端筛选口径是本地日期（`__date` 查询），前端必须对齐。
+    return TNR_UI.localDateStr(iso) >= start;
   },
 
   async render_dashboard() {
@@ -1873,8 +1876,8 @@ const Shelter = {
           rows = rows.filter(r => (r.petCodes || []).some(
             c => String(c).toLowerCase().indexOf(v.pet_code) !== -1));
         }
-        if (v.start_date) rows = rows.filter(r => (r.createdAt || '').slice(0, 10) >= v.start_date);
-        if (v.end_date) rows = rows.filter(r => (r.createdAt || '').slice(0, 10) <= v.end_date);
+        if (v.start_date) rows = rows.filter(r => TNR_UI.localDateStr(r.createdAt) >= v.start_date);
+        if (v.end_date) rows = rows.filter(r => TNR_UI.localDateStr(r.createdAt) <= v.end_date);
         TNR_UI.mountTable('[data-mt="shelter.transfers.detail"]', {
           id: 'shelter.transfers.detail',
           columns, data: rows, emptyText: '没有符合条件的转运单据', rowActions
@@ -2052,7 +2055,8 @@ const Shelter = {
               .filter(Boolean).join(' ').toLowerCase();
             if (!hay.includes(v.keyword)) return false;
           }
-          const d = String(t.date || '').slice(0, 10);
+          // `t.date` 是 DateField（纯日期），localDateStr 原样返回 —— 统一口径。
+          const d = TNR_UI.localDateStr(t.date);
           if (v.start_date && d < v.start_date) return false;
           if (v.end_date && d > v.end_date) return false;
           return true;
@@ -2138,7 +2142,8 @@ const Shelter = {
               .filter(Boolean).join(' ').toLowerCase();
             if (!hay.includes(v.keyword)) return false;
           }
-          const d = String(t.date || '').slice(0, 10);
+          // 同采购页：`t.date` 是 DateField，统一走 localDateStr。
+          const d = TNR_UI.localDateStr(t.date);
           if (v.start_date && d < v.start_date) return false;
           if (v.end_date && d > v.end_date) return false;
           return true;
@@ -2361,13 +2366,15 @@ const Shelter = {
         }
         if (vals.start_date) {
           filtered = filtered.filter(r => {
-            const t = (r.returnTime || r.createdAt || '').slice(0, 10);
+            // `returnTime` / `createdAt` 都是 DateTimeField（UTC 串），
+            // 裸截断得到 UTC 日期，跟本地日期比会把 00:00–08:00 的记录算到前一天。
+            const t = TNR_UI.localDateStr(r.returnTime || r.createdAt);
             return t >= vals.start_date;
           });
         }
         if (vals.end_date) {
           filtered = filtered.filter(r => {
-            const t = (r.returnTime || r.createdAt || '').slice(0, 10);
+            const t = TNR_UI.localDateStr(r.returnTime || r.createdAt);
             return t <= vals.end_date;
           });
         }

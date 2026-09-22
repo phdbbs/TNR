@@ -1495,6 +1495,89 @@ class LocalDateDefaultTest(SimpleTestCase):
             + '\n请改用 TNR_UI.todayStr() / TNR_UI.nowLocalStr()。')
 
 
+class LocalDateInterpretationTest(SimpleTestCase):
+    """把后端返回的日期串当日期用时，必须按**本地时区**取日期。
+
+    与上一个类同源（都是「把 UTC 当本地用」），但触发点不同：
+    `LocalDateDefaultTest` 管**表单默认值**（`toISOString()`）；
+    这里管**解读后端返回的串**。
+
+    后端 `serialize_instance` 对 `DateTimeField` 用 `isoformat()`，`USE_TZ=True`
+    下是 **UTC 带偏移**（`2026-09-22T06:05:50+00:00`）。裸截断
+    （`.slice(0, 10)` / `.substr(0, 10)` / `.substring(0, 10)`）拿到的是
+    **UTC 日期**，后果分两类：
+
+      * **显示**：医院端转运台账 / 诊疗详情原来自己实现 `formatDateTime`，
+        裸截断 → 时间差 8 小时；UTC ≥ 16:00（本地已跨日）时**日期差一天**。
+        实测：`2026-09-22T20:30:00+00:00` 旧实现给 `2026-09-22 20:30`，
+        正确是 `2026-09-23 04:30`。
+      * **筛选**：跟用户选的**本地日期**比较时，北京时间 00:00–08:00 的记录
+        会被算到**前一天** —— 用户选「今天」看不到它们。而后端筛选口径是
+        `timezone.localdate()` / `__date` 查询（本地日期），两边必须一致。
+
+    正确写法：`TNR_UI.localDateStr()`（筛选键）/ `TNR_UI.formatDate()`（显示）。
+    两者对 `DateField` 的纯日期串**原样返回**，对 `DateTimeField` 的 UTC 串
+    按浏览器本地时区换算。
+
+    ⚠ 对纯日期串短路是**必需的**：ES 规范把 date-only form
+    （`new Date('2026-09-22')`）当 **UTC 午夜**，负时区下会退到 21 日。
+    """
+
+    # 任何「取前 10 位当日期」的写法
+    NAKED_DATE_CUT = re.compile(
+        r'\.\s*(?:substr|substring|slice)\s*\(\s*0\s*,\s*10\s*\)')
+    # date-only form 的短路判断（纯日期不参与时区换算）
+    DATE_ONLY_GUARD = r'\d{4}-\d{2}-\d{2}'
+
+    def test_no_naked_utc_date_truncation(self):
+        problems = []
+        for rel in FRONTEND_FILES:
+            source = strip_js_comments(read(rel))
+            for m in self.NAKED_DATE_CUT.finditer(source):
+                line = source[:m.start()].count('\n') + 1
+                problems.append(f'{rel}:{line}')
+        self.assertFalse(
+            problems,
+            '以下位置直接截取日期串前 10 位 —— 后端 `DateTimeField` 序列化出来的是 '
+            '**UTC 带偏移**的串，裸截断得到 UTC 日期：显示差 8 小时（UTC ≥ 16:00 连'
+            '日期都差一天），筛选会把本地 00:00–08:00 的记录算到前一天。\n  '
+            + '\n  '.join(problems)
+            + '\n请改用 TNR_UI.localDateStr()（筛选键）或 TNR_UI.formatDate()（显示）。')
+
+    def test_hospital_formatters_delegate_to_shared_implementation(self):
+        """医院端不得再自己实现 formatDate/formatDateTime（裸截断 UTC）。"""
+        source = strip_js_comments(read(PORTALS['hospital']))
+        self.assertIn(
+            'formatDate(iso) { return TNR_UI.formatDate(iso); }', source,
+            '医院端 formatDate 应委托公共实现 —— 自己写就是又一份裸截断。')
+        self.assertIn(
+            'formatDateTime(iso) { return TNR_UI.formatDateTime(iso); }', source,
+            '医院端 formatDateTime 应委托公共实现 —— 自己写会显示 UTC（差 8 小时）。')
+
+    def test_shared_local_date_helper_exists_with_date_only_guard(self):
+        """`TNR_UI.localDateStr` 是筛选口径的唯一实现，且必须对纯日期串短路。"""
+        source = strip_js_comments(read('static/js/tnr-common.js'))
+        self.assertIn('localDateStr(date) {', source,
+                      'TNR_UI.localDateStr 不见了 —— 日期筛选口径会退回裸截断。')
+        self.assertIn(
+            self.DATE_ONLY_GUARD, source,
+            '`localDateStr` / `formatDate` 缺少 `YYYY-MM-DD` 短路判断 —— '
+            'ES 把 date-only form 当 UTC 午夜，负时区下 `new Date("2026-09-22")` '
+            '会退到 21 日。')
+
+    def test_format_date_time_does_not_invent_time_for_date_only(self):
+        """`formatDateTime` 收到纯日期串时不得补出 `08:00`。"""
+        source = strip_js_comments(read('static/js/tnr-common.js'))
+        m = re.search(r'formatDateTime\(date\)\s*\{', source)
+        self.assertIsNotNone(m, '找不到 TNR_UI.formatDateTime')
+        body = source[m.end():m.end() + 600]
+        self.assertIn(
+            self.DATE_ONLY_GUARD, body,
+            '`formatDateTime` 收到 `DateField` 的纯日期串时，旧实现会按 UTC 午夜再取'
+            '本地小时 → UTC+8 下渲染成 `2026-09-22 08:00`（一个日期字段凭空多出 '
+            '08:00）。必须在函数开头对 date-only form 短路。')
+
+
 # ---------------------------------------------------------------------------
 # 筛选条（搜索条件）的取值来源与选项覆盖
 #
