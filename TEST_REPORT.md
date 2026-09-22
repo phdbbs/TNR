@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **1029 个用例，全部通过**（约 73 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1031 个用例，全部通过**（约 75 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**） |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -4548,6 +4548,113 @@ FAIL: test_hospital_formatters_delegate_to_shared_implementation
 
 ---
 
+#### 2.38 请求体解析：同一缺陷模式两份实现，只修了一处（第三十轮）
+
+§2.37 修完后继续扫「跨文件重复实现」，用脚本把全库**同名函数定义**列出来
+（15 个文件、21 个跨文件重名）。逐个判读的结果是：**21 个里 21 个都是分层或委托**，
+没有一个是真正的第二份实现 —— 也就是说，**前端这一侧是干净的**。
+
+但「重复实现」这个模式本身值得往后端套一遍。于是查了一件事：
+
+```
+Grep 'request\.body' 全库 *.py
+```
+
+生产代码里**只有两处**真正裸读 `request.body`：
+
+| # | 位置 | 状态 |
+|---|---|---|
+| 1 | `business/services.py::parse_json_body` | 二十×轮已修（multipart 不读 body） |
+| 2 | `accounts/views.py::api_change_password` | **未修** ← 本轮命中 |
+
+##### 为什么第二处是缺陷
+
+`request.body` 会按 `CONTENT_LENGTH` 校验 `settings.DATA_UPLOAD_MAX_MEMORY_SIZE`
+（Django 默认 **2.5MB**），超限抛 `RequestDataTooBig`。关键在于：
+
+```python
+RequestDataTooBig.__mro__  →  (RequestDataTooBig, SuspiciousOperation, Exception)
+```
+
+它是 **`SuspiciousOperation` 的子类，不是 `ValueError` / `TypeError`**。而 `accounts`
+那处写的是：
+
+```python
+try:
+    data = json.loads(request.body)
+except (ValueError, TypeError):     # ← 接不住 RequestDataTooBig
+    data = {}
+```
+
+于是异常冒泡，Django 返回 **HTML 400 错误页**（`<title>RequestDataTooBig at
+/api/me/password/</title>`，DEBUG 下还带 Traceback）。前端拿到非 JSON 响应体，
+`res.json()` 抛错 → **静默中断**，用户看到的就是「点按钮没反应」。
+
+##### 实证（探针直接打接口，不靠推理）
+
+| 请求体 | `/api/me/password/` 修复前 | 修复后 | `/api/business/captures/create/`（已修） |
+|---|---|---|---|
+| ~50 B | `400 application/json` ✔ | ✔ | — |
+| 3 MB | `400 **text/html**`，标题 `RequestDataTooBig at /api/me/password/`，**含 Traceback** ✗ | `400 application/json`「请填写原密码与新密码」✔ | `400 application/json` ✔ |
+
+**同一个缺陷模式，business 侧已修、accounts 侧没修** —— 这就是「两份实现」的代价：
+修的人只会修自己看到的那一份。
+
+##### 修法：能力下沉，收口到一处
+
+| 层 | 改动 |
+|---|---|
+| `core/http.py`（**新建**） | `read_json_body(request)` —— 请求体解析的**唯一入口** |
+| `business/services.py` | `parse_json_body` 改为**委托** `read_json_body`，删掉自己的 `RequestDataTooBig` import 与内联实现 |
+| `accounts/views.py` | `api_change_password` 改用 `read_json_body`，删掉 `import json` |
+
+`read_json_body` 的三条语义：
+
+```python
+content_type = (request.content_type or '').lower()
+if content_type.startswith('multipart/form-data'):
+    return {}                      # ① multipart 不读 body（有用数据在 POST/FILES）
+try:
+    return json.loads(request.body)
+except (json.JSONDecodeError, ValueError, TypeError):
+    return {}                      # ② 解析失败 → {}
+except RequestDataTooBig:
+    return {}                      # ③ 超限 → {}（兜底，不冒泡成 HTML 页）
+```
+
+**为什么返回 `{}` 是安全的**：`core/audit.py` 的 `sniff_district_id` / `sniff_object_repr`
+里 `{}` 与 `None` **完全等价**（`_walk(None)` 直接 return，`_walk({})` 取不到任何键），
+中间件读的是 `getattr(request, 'audit_payload', None)` —— 语义一字不变。
+`business` 侧原本就是这个行为，所以**默认语义零变化**，只多了 accounts 这一处的兜底。
+
+##### 反向验证：先证明测试会失败
+
+新增用例后**临时删掉 `except RequestDataTooBig` 分支**再跑：
+
+```
+FAIL: test_oversized_body_returns_json_not_html
+  AssertionError: 'application/json' not found in 'text/html; charset=utf-8'
+ERROR: test_oversized_json_body_degrades_to_readable_error   # business 侧那条也一起被抓到
+```
+
+2 个测试失败、报错精确，且**跨文件的两条一起被命中** —— 恰好证明了它们现在共用同一份实现。
+改回即全绿；相关 24 个用例（`accounts.tests.ChangePasswordTest` +
+`business.tests.test_multipart_body_limit`）OK。
+
+##### 用例数
+
+| 新增 | 内容 |
+|---|---|
+| `accounts/tests.py`（2 例） | 3MB 请求体必须返回 `application/json` 而非 HTML；且**密码不得被改动** |
+
+全量 **1029 → 1031 OK**（74.7 秒）。
+
+> 与 §2.37 是**同一个教训的两个实例**：一处逻辑写了两次，早晚漂移。
+> §2.37 是「日期解读」写了 4 份，这节是「请求体解析」写了 2 份。
+> 收口成共用函数 + 加一条静态/回归测试，是唯一能防住复发的做法。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -4732,7 +4839,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 1029 个用例
+python manage.py test --parallel 1  # 1031 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
