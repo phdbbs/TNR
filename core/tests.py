@@ -1,9 +1,16 @@
 """core 应用测试：区县与机构模型。"""
+from django.core.exceptions import (
+    RequestDataTooBig, TooManyFieldsSent, TooManyFilesSent,
+)
 from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.http.multipartparser import MultiPartParserError
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 
-from business.tests.base import make_district, make_institution, make_user
+from business.tests.base import (
+    BusinessTestBase, make_district, make_institution, make_user,
+)
 from core.models import District, Institution
+from tnr_system.urls import api_aware_bad_request
 
 
 class DistrictModelTest(TestCase):
@@ -135,3 +142,101 @@ class ProductionConfigFailFastTest(TestCase):
     def test_debug_mode_without_secret_key_still_boots(self):
         proc = self._run_check(DEBUG='True', SECRET_KEY='', ALLOWED_HOSTS='')
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+
+
+class ApiAwareBadRequestTest(SimpleTestCase):
+    """`/api/` 下的 400 必须是**可读 JSON**（第三十一轮）。
+
+    默认的 `django.views.defaults.bad_request` 渲染 HTML，而前端
+    `TNR_API._postForm` 内部是 `await res.json()` —— 拿到 HTML 就抛错，
+    表现为「**点提交没反应**」。这一族（`RequestDataTooBig` /
+    `TooManyFilesSent` / `TooManyFieldsSent` / `MultiPartParserError`）
+    都经 `handler400`，所以在这里一次性收口。
+    """
+
+    def _resp(self, path, exc):
+        return api_aware_bad_request(RequestFactory().post(path), exc)
+
+    @staticmethod
+    def _body(resp):
+        """⚠ 直接调用 handler 拿到的是 `JsonResponse` 本体，**没有** `.json()`
+        （那是测试客户端包装后的响应才有的方法）。"""
+        import json
+        return json.loads(resp.content)
+
+    def test_api_path_returns_json_envelope(self):
+        resp = self._resp('/api/business/captures/create/', TooManyFilesSent())
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp['Content-Type'].split(';')[0], 'application/json')
+        body = self._body(resp)
+        self.assertFalse(body['success'])
+        self.assertIsNone(body['data'])
+        self.assertTrue(body['message'])
+
+    def test_each_transport_exception_has_a_readable_chinese_message(self):
+        cases = {
+            RequestDataTooBig: '提交的数据过大',
+            TooManyFilesSent: '照片数量过多',
+            TooManyFieldsSent: '表单字段过多',
+            MultiPartParserError: '无法解析',
+        }
+        for exc_type, fragment in cases.items():
+            with self.subTest(exc=exc_type.__name__):
+                resp = self._resp('/api/x/', exc_type('boom'))
+                self.assertIn(fragment, self._body(resp)['message'])
+
+    def test_message_never_leaks_framework_internals(self):
+        """绝不能把 Django 的英文原文回给用户。
+
+        `str(RequestDataTooBig())` 是
+        `Request body exceeded settings.DATA_UPLOAD_MAX_MEMORY_SIZE.` ——
+        既不可读，又把框架实现细节暴露给客户端。
+        （`business/tests/test_multipart_body_limit.py` 里有同口径的断言。）
+        """
+        for exc_type in (RequestDataTooBig, TooManyFilesSent,
+                         TooManyFieldsSent, MultiPartParserError):
+            with self.subTest(exc=exc_type.__name__):
+                text = self._resp('/api/x/', exc_type('x')).content.decode()
+                self.assertNotIn('exceeded', text.lower())
+                self.assertNotIn('DATA_UPLOAD_MAX', text)
+                self.assertNotIn('settings.', text)
+
+    def test_non_api_path_keeps_the_default_html_page(self):
+        """正向对照：页面导航仍拿到 HTML 错误页，不能被改成 JSON。"""
+        resp = self._resp('/login/', RequestDataTooBig('x'))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('text/html', resp['Content-Type'])
+
+    def test_handler400_is_wired_into_the_root_urlconf(self):
+        """证明 `handler400` 真的被 Django 用上了（不是写了个没人调的函数）。"""
+        from django.urls import get_resolver
+
+        self.assertIs(get_resolver(None).resolve_error_handler(400),
+                      api_aware_bad_request)
+
+
+class ApiTransportLimitEndToEndTest(BusinessTestBase):
+    """端到端：撞上传输层闸门时，前端拿到的是 **JSON** 而不是 HTML。
+
+    这是「点提交没反应」这一族缺陷的最终防线 —— 只要响应是 JSON，
+    前端就能把 `message` 显示出来，用户至少知道发生了什么。
+    """
+
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FILES=2)
+    def test_too_many_files_degrades_to_readable_json(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        png = (b'\x89PNG\r\n\x1a\n' + b'\x00' * 64)
+        self.login_as(self.shelter_user_a)
+        resp = self.client.post('/api/business/captures/create/', {
+            'district_id': str(self.district_a.id),
+            'shelter_id': str(self.shelter_a.id),
+            'a.png': SimpleUploadedFile('a.png', png, content_type='image/png'),
+            'b.png': SimpleUploadedFile('b.png', png, content_type='image/png'),
+            'c.png': SimpleUploadedFile('c.png', png, content_type='image/png'),
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp['Content-Type'].split(';')[0], 'application/json',
+                         '传输层闸门不得把接口炸成 HTML 错误页')
+        self.assertFalse(resp.json()['success'])
+        self.assertIn('照片数量过多', resp.json()['message'])

@@ -280,6 +280,33 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# ---------------------------------------------------------------------------
+# 请求体闸门：默认值**低于本产品自己声明的上限**（第三十一轮）
+# ---------------------------------------------------------------------------
+# 线上有三道互不相干的闸门会拒绝同一个请求，而**三道的默认值都卡在产品
+# 自己声明的批量上限附近**（`business.services.MAX_CAPTURE_BATCH = 100`）：
+#
+#   | 闸门                                  | 默认 | 触发后的响应        |
+#   |---------------------------------------|------|---------------------|
+#   | nginx  `client_max_body_size`         | 1M   | 413 **text/html**   |
+#   | Django `DATA_UPLOAD_MAX_NUMBER_FILES` | 100  | 400 **text/html**   |
+#   | Django `DATA_UPLOAD_MAX_NUMBER_FIELDS`| 1000 | 400 **text/html**   |
+#
+# 三者返回的都是 **HTML**，而前端 `TNR_API._postForm` 内部是 `await res.json()`
+# —— 拿到 HTML 就抛错 → **静默中断**，用户看到的是「点提交没反应」。
+# 与 §2.26 的 `RequestDataTooBig` 是**同一族缺陷**，只是换了一道闸门；
+# `tnr_system/urls.py` 的 `handler400` 负责把 Django 侧那两道变成可读 JSON。
+#
+# 捕捉单在**上限**（100 只）时的实际形态（逐字段数出来的）：
+#   文件：100 张单只照片 + 1 张整体合影 = **101 个** → 撞上默认的 100（off-by-one）
+#   字段：13 个固定字段 + `pet_codes`×100 + 每只 4 个属性×100 = **513 个**
+#
+# ⚠ 这里只调 Django 侧。nginx 的 `client_max_body_size` 是**基础设施姿态**，
+#   不在本文件控制范围内，见 `DEPLOY.md` §5.7（20M 约容纳 ~50 张压缩图；
+#   要跑满 100 只需调到 64M）。两侧不一致时，前端会先撞 nginx 拿到 HTML 413。
+DATA_UPLOAD_MAX_NUMBER_FILES = 110    # ≥ MAX_CAPTURE_BATCH(100) + 整体合影 + 余量
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 2000  # ≥ 上限所需的 513，留一倍余量
+
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

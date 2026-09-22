@@ -41,12 +41,13 @@ import io
 import random
 from unittest import mock
 
+from django.conf import settings
 from django.core.exceptions import RequestDataTooBig
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import RequestFactory, override_settings
+from django.test import RequestFactory, SimpleTestCase, override_settings
 
 from business.models import Capture, Pet
-from business.services import parse_json_body
+from business.services import MAX_CAPTURE_BATCH, parse_json_body
 from business.tests.base import BusinessTestBase, make_pet
 
 CAPTURE_CREATE_URL = '/api/business/captures/create/'
@@ -75,6 +76,21 @@ def make_big_image(name='big.png', min_bytes=200 * 1024):
     data = buf.getvalue()
     assert len(data) >= min_bytes, f'夹具图只有 {len(data)} 字节，不足以触发该路径'
     return SimpleUploadedFile(name, data, content_type='image/png')
+
+
+def make_tiny_png(name='tiny.png'):
+    """造一张**体积很小但格式合法**的 PNG。
+
+    上限批次用例要提交 101 个文件，用 `make_big_image`（200KB+）会慢且没必要
+    —— 这条路径要验的是**文件个数**，不是体积。但必须是**真图**：
+    `validate_image_upload` 走 Pillow `verify()`，假 PNG 会被判成
+    「不是有效的图片文件」而提前返回，用例就测不到文件数闸门了（假绿）。
+    """
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new('RGB', (4, 4), (200, 30, 30)).save(buf, format='PNG')
+    return SimpleUploadedFile(name, buf.getvalue(), content_type='image/png')
 
 
 class RequestDataTooBigMechanismTest(BusinessTestBase):
@@ -261,6 +277,98 @@ class LargeUploadEndToEndTest(BusinessTestBase):
         payload.pop('group_photo')
         payload['pet_codes'] = ['TNR260922901']
         resp = self.post_json(CAPTURE_CREATE_URL, payload)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.json().get('success'), resp.content)
+
+
+class UploadGateConsistencyTest(SimpleTestCase):
+    """三道请求体闸门必须**覆盖产品自己声明的上限**（第三十一轮）。
+
+    `MAX_CAPTURE_BATCH = 100` 是「单批最多 100 只」，那么上限那一批的请求
+    就**必须**能被收下。默认值恰好卡在它附近（文件数默认 100，而上限一批
+    是 101 个文件），于是「声明支持 100 只、实际第 100 只就崩」。
+    这两条把关系钉死：谁把设置调小到覆盖不了上限，立刻红。
+    """
+
+    def test_file_gate_covers_a_full_capture_batch(self):
+        """文件数闸门 ≥ 每只 1 张照片 + 1 张整体合影。"""
+        need = MAX_CAPTURE_BATCH + 1        # +1 = 整体合影
+        self.assertGreaterEqual(
+            settings.DATA_UPLOAD_MAX_NUMBER_FILES, need,
+            f'DATA_UPLOAD_MAX_NUMBER_FILES={settings.DATA_UPLOAD_MAX_NUMBER_FILES} '
+            f'容不下上限一批所需的 {need} 个文件（{MAX_CAPTURE_BATCH} 张单只照片 + 1 张合影）'
+            '——超出的请求会在解析层被拒，返回 **HTML 400**，前端表现为「点提交没反应」')
+
+    def test_field_gate_covers_a_full_capture_batch(self):
+        """字段数闸门 ≥ 固定字段 + `pet_codes`×N + 每只 4 个属性×N。"""
+        fixed = 13          # district_id/shelter_id/community_id/community_name/address/
+                            # latitude/longitude/geo_address/property_name/contact_person/
+                            # contact_phone/pet_count/signature
+        per_pet = 1 + 4     # pet_codes（重复字段算 N 个）+ 物种/性别/品种/昵称
+        need = fixed + MAX_CAPTURE_BATCH * per_pet
+        self.assertGreaterEqual(
+            settings.DATA_UPLOAD_MAX_NUMBER_FIELDS, need,
+            f'DATA_UPLOAD_MAX_NUMBER_FIELDS={settings.DATA_UPLOAD_MAX_NUMBER_FIELDS} '
+            f'容不下上限一批所需的 {need} 个字段')
+
+
+class CaptureBatchAtMaxTest(BusinessTestBase):
+    """端到端：**上限那一批**（100 只 × 每只 1 张照片 + 整体合影）必须能提交。
+
+    修复前这里是 `TooManyFilesSent` → **HTML 400**（`<title>Bad Request (400)</title>`），
+    前端 `res.json()` 抛错 → 用户看到「点提交没反应」。
+    与 §2.26 的 `RequestDataTooBig` 是同一族缺陷，只是换了一道闸门。
+    """
+
+    def _payload(self, n, base):
+        codes = ['TNR2609%05d' % (base + i) for i in range(n)]
+        payload = {
+            'district_id': str(self.district_a.id),
+            'shelter_id': str(self.shelter_a.id),
+            'community_name': '上限批次小区',
+            'property_name': '上限批次物业',
+            'contact_person': '王经理',
+            'contact_phone': '13800001111',
+            'pet_count': str(n),
+            'pet_codes': codes,
+            'signature': 'data:image/png;base64,iVBORw0KGgo=',
+            'group_photo': make_tiny_png('group.png'),
+        }
+        for code in codes:
+            payload['pet_species_' + code] = '猫'
+            payload['pet_photo_' + code] = make_tiny_png(code + '.png')
+        return payload, codes
+
+    def test_full_batch_of_100_with_individual_photos_succeeds(self):
+        """101 个文件（100 张单只照片 + 1 张合影）必须 200 且**真的落库 100 只**。"""
+        self.login_as(self.shelter_user_a)
+        payload, codes = self._payload(MAX_CAPTURE_BATCH, 30000)
+        resp = self.client.post(CAPTURE_CREATE_URL, payload)
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp['Content-Type'].split(';')[0], 'application/json',
+                         '上限一批不得退化成 HTML 错误页')
+        body = resp.json()
+        self.assertTrue(body.get('success'), body)
+        capture = Capture.objects.get(ledger_no=body['data']['capture']['ledgerNo'])
+        self.assertEqual(capture.pet_count, MAX_CAPTURE_BATCH)
+        self.assertEqual(
+            Pet.objects.filter(capture=capture, is_deleted=False).count(),
+            MAX_CAPTURE_BATCH)
+        # 每只的照片都要真的存下来（不只是「数量对」）。
+        # ⚠ 用 Python 侧 `bool()` 而不是 `exclude(photo_capture='')`：
+        # `ImageField` 空值是 `''`，而 SQL 的 `NOT (col = '')` 对 **NULL 也成立**，
+        # 用 `exclude` 会把「没存照片」的行一起算进来 —— 那是假绿。
+        pets = list(Pet.objects.filter(capture=capture, is_deleted=False))
+        with_photo = sum(1 for p in pets if p.photo_capture)
+        self.assertEqual(with_photo, MAX_CAPTURE_BATCH,
+                         f'{MAX_CAPTURE_BATCH} 只里只有 {with_photo} 只存下了单只照片')
+
+    def test_one_below_the_max_still_succeeds(self):
+        """正向对照：99 只（100 个文件）本来就能过，不能因为修法把它改坏。"""
+        self.login_as(self.shelter_user_a)
+        payload, _ = self._payload(MAX_CAPTURE_BATCH - 1, 40000)
+        resp = self.client.post(CAPTURE_CREATE_URL, payload)
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertTrue(resp.json().get('success'), resp.content)
 
