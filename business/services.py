@@ -20,7 +20,7 @@ from business.models import (
     Pet, Material, MaterialTransaction, Chip, Blacklist, Transfer,
     Release, Adoption,
 )
-from core.http import read_json_body
+from core.http import body_dict, body_list, body_str, read_json_body  # noqa: F401
 from core.models import District, Institution
 
 
@@ -68,10 +68,14 @@ def parse_json_body(request):
     `(ValueError, TypeError)`、**缺 `RequestDataTooBig`**：实测 3MB 请求体返回
     `400 text/html`（标题 `RequestDataTooBig at /api/me/password/`、含 Traceback），
     而同一体积下本接口返回可读 JSON。两份实现必然漂移，所以只留一份。
+
+    ⚠ 第三十五轮起，`read_json_body()` **保证返回 dict**（顶层非 dict 的
+    合法 JSON 归一成 `{}`），所以这里不再需要 `isinstance` 判断。
+    **不要在这里再加回类型判断** —— 归一化点只能有一个，两处判断必然漂移，
+    而漂移的表现就是「有的接口 500、有的接口正常」这种最难查的形态。
     """
     data = read_json_body(request)
-    if isinstance(data, dict):
-        request.audit_payload = data
+    request.audit_payload = data
     return data
 
 
@@ -171,6 +175,26 @@ def parse_date_param(raw, label='日期'):
         return datetime.strptime(m.group(0), '%Y-%m-%d').date(), None
     except (TypeError, ValueError):
         return None, f'{label}不是有效日期'
+
+
+def body_int(data, key, minimum=1, maximum=MAX_SQLITE_INT):
+    """从**请求体** dict 里安全地取一个整数（主键 id 用）。
+
+    ⚠ 直接 `data.get('pet_id')` 再塞进 ORM 主键查询会以两种方式炸 500：
+      - `{"pet_id": "abc"}` / `{"pet_id": [1,2,3]}` / `{"pet_id": {"$ne": null}}`
+        → `ValueError: Field 'id' expected a number but got ...`
+      - `{"pet_id": 999999999999999999999999}`
+        → `int()` **不报错**，是 SQLite 绑定时才 `OverflowError`
+
+    所以必须走 `parse_int_param`（它先按位数挡、再比上限），而不是
+    `int(raw)` 包一层 `try`。非数字 / 越界一律返回 `None`（= 视为未提供）。
+
+    配套的 `body_str` 定义在 `core.http`（纯类型守卫、不依赖业务逻辑），
+    本模块 import 进来 re-export，让调用方一处 import 拿齐两个守卫。
+    """
+    value, _err = parse_int_param(data.get(key), '参数',
+                                  minimum=minimum, maximum=maximum)
+    return value
 
 
 def aware_day_start(d):

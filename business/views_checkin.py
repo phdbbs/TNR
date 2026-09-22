@@ -14,6 +14,7 @@ from accounts.decorators import role_required
 from business.models import CheckIn, Blacklist, Pet
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
+    body_str, body_int,
     get_district_filtered_queryset, check_blacklist,
     validate_image_upload, resolve_district_scope,
 )
@@ -73,7 +74,7 @@ def checkin_create(request):
 
     user = request.user
 
-    pet_id = data.get('pet_id')
+    pet_id = body_int(data, 'pet_id')
     if not pet_id:
         return json_fail('缺少宠物ID')
 
@@ -86,7 +87,7 @@ def checkin_create(request):
     if pet.adoptions.filter(adopter=user).exists() is False:
         return json_fail('无权为该宠物打卡')
 
-    month = data.get('month', '').strip()
+    month = body_str(data, 'month').strip()
     if not month:
         from django.utils import timezone
         # 用 localdate()：now() 是 UTC，月初凌晨会把月份记成上一个月
@@ -108,7 +109,7 @@ def checkin_create(request):
         adopter=user,
         adopter_name=user.get_full_name() or user.username,
         month=month,
-        note=data.get('note', ''),
+        note=body_str(data, 'note'),
         status='pending',
     )
 
@@ -216,11 +217,11 @@ def blacklist_create(request):
     data = parse_json_body(request)
     user = request.user
 
-    name = data.get('name', '').strip()
+    name = body_str(data, 'name').strip()
     if not name:
         return json_fail('姓名不能为空')
 
-    reason = data.get('reason', '').strip()
+    reason = body_str(data, 'reason').strip()
     if not reason:
         return json_fail('拉黑原因不能为空')
 
@@ -228,15 +229,15 @@ def blacklist_create(request):
     # 两个捕捉点操作员都挂在「全市（市级）」下，而前端不提交 district_id，
     # 直接取操作员区县会让黑名单记录全部落到市级，本区县政府看不到。
     anchor = getattr(user, 'institution', None)
-    district, err = resolve_district_scope(user, anchor, data.get('district_id'))
+    district, err = resolve_district_scope(user, anchor, body_int(data, 'district_id'))
     if err:
         return json_fail(err)
     district_id = district.id
 
     bl = Blacklist.objects.create(
         name=name,
-        id_card=data.get('id_card', ''),
-        phone=data.get('phone', ''),
+        id_card=body_str(data, 'id_card'),
+        phone=body_str(data, 'phone'),
         reason=reason,
         violation_date=_parse_date(data.get('violation_date')),
         operator=user,
@@ -266,13 +267,13 @@ def blacklist_update(request, pk):
         data = request.POST.dict()
 
     for field, label in (('name', '姓名'), ('phone', '电话'), ('reason', '拉黑原因')):
-        if field in data and not (data.get(field) or '').strip():
+        if field in data and not body_str(data, field).strip():
             return json_fail(f'{label}不能为空')
 
     changed = []
     for field in ('name', 'phone', 'id_card', 'reason'):
         if field in data:
-            setattr(bl, field, (data.get(field) or '').strip())
+            setattr(bl, field, body_str(data, field).strip())
             changed.append(field)
     if 'violation_date' in data:
         bl.violation_date = _parse_date(data.get('violation_date'))

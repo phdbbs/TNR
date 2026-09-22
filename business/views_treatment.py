@@ -15,6 +15,7 @@ from accounts.decorators import role_required
 from business.models import Treatment, Pet, Material, Chip
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
+    body_int, body_dict,
     generate_ledger_no, get_district_filtered_queryset,
     adjust_stock, use_chip, get_hospital_stock,
     get_active_pet, get_scoped_object, expired_material_error,
@@ -65,7 +66,7 @@ def treatment_create(request):
     data = parse_json_body(request)
     user = request.user
 
-    pet_id = data.get('pet_id')
+    pet_id = body_int(data, 'pet_id')
     if not pet_id:
         return json_fail('缺少宠物ID')
 
@@ -77,7 +78,10 @@ def treatment_create(request):
     if pet.status not in ('in_treatment', 'pending_adopt'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可诊疗')
 
-    items = data.get('items', {}) or {}
+    # ⚠ 这几个都是**嵌套 dict** 参数，必须走 `body_dict`（第三十五轮）：
+    # `data.get('sterilization', {}) or {}` 挡不住 `{"sterilization": "abc"}`
+    # ——`"abc"` 是 truthy，`or {}` 不生效 → 下游 `ster.get(...)` 炸 500。
+    items = body_dict(data, 'items')
     hospital = pet.hospital or getattr(user, 'institution', None)
     if not hospital:
         return json_fail('缺少医院信息')
@@ -88,10 +92,10 @@ def treatment_create(request):
 
     status = data.get('status', 'in_progress')
 
-    ster = data.get('sterilization', {}) or {}
-    vac = data.get('vaccine', {}) or {}
-    dew = data.get('deworming', {}) or {}
-    chip_data = data.get('chip', {}) or {}
+    ster = body_dict(data, 'sterilization')
+    vac = body_dict(data, 'vaccine')
+    dew = body_dict(data, 'deworming')
+    chip_data = body_dict(data, 'chip')
 
     try:
         # 注意不能写 `vac.get('quantity', 1) or 1`——那会把显式传入的 0 变成 1，
@@ -106,7 +110,12 @@ def treatment_create(request):
     # ---- 第一步：把所有前置校验做完，任一不通过就整体拒绝，不产生任何副作用 ----
     vaccine_material = None
     if items.get('vaccine') and vac and vac.get('material_id'):
-        vaccine_material = Material.objects.filter(id=vac['material_id'], category='vaccine').first()
+        # ⚠ `vac['material_id']` 是**嵌套 dict 里的值**，同样必须走解析器：
+        # 传 `{"vaccine": {"material_id": [1,2,3]}}` 会抛
+        # `ValueError: Field 'id' expected a number but got [1, 2, 3]` → 500。
+        # 解析失败返回 None → `filter(id=None)` 不匹配 → 走下面的「物料不存在」400。
+        vaccine_material = Material.objects.filter(
+            id=body_int(vac, 'material_id'), category='vaccine').first()
         if vaccine_material is None:
             return json_fail('疫苗物料不存在')
         # 过期疫苗不能用于诊疗。判据在 services 里只有一份，与其它接口共用。
@@ -118,7 +127,8 @@ def treatment_create(request):
 
     deworming_material = None
     if items.get('deworming') and dew and dew.get('material_id'):
-        deworming_material = Material.objects.filter(id=dew['material_id'], category='dewormer').first()
+        deworming_material = Material.objects.filter(
+            id=body_int(dew, 'material_id'), category='dewormer').first()
         if deworming_material is None:
             return json_fail('驱虫药物料不存在')
         err = expired_material_error(deworming_material, '用于诊疗')

@@ -13,6 +13,7 @@ from accounts.decorators import role_required
 from business.models import Euthanasia, Pet
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
+    body_str, body_int,
     generate_ledger_no, get_district_filtered_queryset,
     get_active_pet, get_scoped_object,
 )
@@ -53,7 +54,7 @@ def euthanasia_create(request):
     data = parse_json_body(request)
     user = request.user
 
-    pet_id = data.get('pet_id')
+    pet_id = body_int(data, 'pet_id')
     if not pet_id:
         return json_fail('缺少宠物ID')
 
@@ -66,7 +67,7 @@ def euthanasia_create(request):
     if pet.status not in ('in_treatment', 'pending_adopt'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可安乐死，仅诊疗中/待领养宠物可登记')
 
-    reason = data.get('reason', '').strip()
+    reason = body_str(data, 'reason').strip()
     if not reason:
         return json_fail('安乐死原因不能为空')
 
@@ -93,7 +94,7 @@ def euthanasia_create(request):
         hospital=hospital,
         hospital_name=hospital.name,
         reason=reason,
-        condition=data.get('condition', ''),
+        condition=body_str(data, 'condition'),
         euthanized_at=euthanized_at,
         body_received=False,
         operator=user,
@@ -132,7 +133,8 @@ def body_receive(request, pk):
     record.body_received = True
     record.body_received_at = timezone.localdate()
     record.body_received_by = request.user
-    record.body_received_by_name = data.get('receiver_name', request.user.get_full_name() or request.user.username)
+    record.body_received_by_name = body_str(
+        data, 'receiver_name', request.user.get_full_name() or request.user.username)
     record.save(update_fields=[
         'body_received', 'body_received_at', 'body_received_by', 'body_received_by_name',
     ])

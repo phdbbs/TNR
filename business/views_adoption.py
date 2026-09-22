@@ -19,6 +19,7 @@ from business.models import (
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
+    body_str, body_int,
     generate_ledger_no, get_district_filtered_queryset,
     check_blacklist, get_active_pet, get_scoped_object,
     pet_has_pending_release, pet_has_active_adoption,
@@ -190,7 +191,7 @@ def adoption_register(request):
     data = parse_json_body(request)
     user = request.user
 
-    pet_id = data.get('pet_id')
+    pet_id = body_int(data, 'pet_id')
     if not pet_id:
         return json_fail('缺少宠物ID')
 
@@ -208,9 +209,9 @@ def adoption_register(request):
     if pet_has_active_adoption(pet):
         return json_fail('该宠物已有未完结的领养记录，请勿重复登记')
 
-    adopter_name = data.get('adopter_name', '').strip()
-    adopter_phone = data.get('adopter_phone', '').strip()
-    adopter_id_card = data.get('adopter_id_card', '')
+    adopter_name = body_str(data, 'adopter_name').strip()
+    adopter_phone = body_str(data, 'adopter_phone').strip()
+    adopter_id_card = body_str(data, 'adopter_id_card')
 
     if not adopter_name:
         return json_fail('领养人姓名不能为空')
@@ -252,10 +253,10 @@ def adoption_register(request):
         adopter_name=adopter_name,
         adopter_phone=adopter_phone,
         adopter_id_card=adopter_id_card,
-        adopter_address=data.get('adopter_address', ''),
-        qualification=data.get('qualification', ''),
-        commitment_letter=data.get('commitment_letter', ''),
-        adoption_agreement=data.get('adoption_agreement', ''),
+        adopter_address=body_str(data, 'adopter_address'),
+        qualification=body_str(data, 'qualification'),
+        commitment_letter=body_str(data, 'commitment_letter'),
+        adoption_agreement=body_str(data, 'adoption_agreement'),
         hospital=hospital,
         hospital_name=hospital.name if hospital else '',
         status='pending_claim',
@@ -365,7 +366,7 @@ def adoption_reclaim(request, pk):
     if adoption.status == 'cancelled':
         return json_fail('该领养记录已撤销，请勿重复操作')
 
-    reason = (data.get('reason') or '').strip()
+    reason = body_str(data, 'reason').strip()
     if not reason:
         return json_fail('请填写收回原因')
 
@@ -497,7 +498,7 @@ def adoption_apply(request):
     """
     data = parse_json_body(request)
 
-    pet_id = data.get('pet_id')
+    pet_id = body_int(data, 'pet_id')
     if not pet_id:
         return json_fail('缺少宠物ID')
 
@@ -519,7 +520,7 @@ def adoption_apply(request):
         return json_fail('该宠物已有待放养记录，暂不可申请领养')
 
     # 黑名单检查
-    bl = check_blacklist(data.get('applicant_id_card', ''), data.get('applicant_phone', ''))
+    bl = check_blacklist(body_str(data, 'applicant_id_card'), body_str(data, 'applicant_phone'))
     if bl:
         return json_fail(f'您已被列入领养黑名单，无法申请：{bl.reason}')
 
@@ -529,8 +530,8 @@ def adoption_apply(request):
     ).exclude(status='rejected').exists():
         return json_fail('您已提交过该宠物的领养申请，请勿重复提交')
 
-    applicant_name = data.get('applicant_name', '').strip()
-    applicant_phone = data.get('applicant_phone', '').strip()
+    applicant_name = body_str(data, 'applicant_name').strip()
+    applicant_phone = body_str(data, 'applicant_phone').strip()
     if not applicant_name:
         return json_fail('请填写姓名')
     if not applicant_phone:
@@ -543,10 +544,10 @@ def adoption_apply(request):
         applicant=request.user,
         applicant_name=applicant_name,
         applicant_phone=applicant_phone,
-        applicant_id_card=data.get('applicant_id_card', ''),
-        applicant_address=data.get('applicant_address', ''),
-        qualification=data.get('qualification', ''),
-        reason=data.get('reason', ''),
+        applicant_id_card=body_str(data, 'applicant_id_card'),
+        applicant_address=body_str(data, 'applicant_address'),
+        qualification=body_str(data, 'qualification'),
+        reason=body_str(data, 'reason'),
         status='pending',
         hospital=hospital,
         hospital_name=hospital.name if hospital else '',
@@ -636,7 +637,7 @@ def adoption_application_review(request, pk):
     if application.status != 'pending':
         return json_fail(f'该申请已处理（{application.get_status_display()}）')
 
-    action = data.get('action', '')
+    action = body_str(data, 'action')
     if action not in ('approve', 'reject'):
         return json_fail('无效的审核操作')
 
@@ -653,7 +654,7 @@ def adoption_application_review(request, pk):
             return json_fail('该宠物已有待放养记录，无法通过领养申请')
 
     application.status = 'approved' if action == 'approve' else 'rejected'
-    application.review_note = data.get('review_note', '')
+    application.review_note = body_str(data, 'review_note')
     application.reviewed_by = user
     application.reviewed_at = timezone.now()
     application.save(update_fields=['status', 'review_note', 'reviewed_by', 'reviewed_at'])

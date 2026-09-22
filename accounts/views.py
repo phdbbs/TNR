@@ -9,7 +9,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import api_login_required
 from accounts.models import User
-from core.http import read_json_body
+from core.http import body_str, read_json_body
 
 
 def _redirect_by_role(user):
@@ -104,9 +104,9 @@ def api_change_password(request):
     if not data and request.POST:
         data = request.POST.dict()
 
-    old_password = data.get('old_password', '')
-    new_password = data.get('new_password', '')
-    confirm_password = data.get('confirm_password', '')
+    old_password = body_str(data, 'old_password')
+    new_password = body_str(data, 'new_password')
+    confirm_password = body_str(data, 'confirm_password')
 
     if not old_password or not new_password:
         return JsonResponse({'success': False, 'message': '请填写原密码与新密码'}, status=400)

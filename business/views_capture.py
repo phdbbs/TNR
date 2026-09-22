@@ -16,6 +16,7 @@ from accounts.decorators import role_required
 from business.models import Capture, Pet, OwnerReturn
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
+    body_str, body_int,
     generate_pet_codes, generate_ledger_no, get_district_scope,
     get_district_filtered_queryset, check_blacklist, amap_regeo,
     amap_ip_location, client_ip, capture_transfer_state, capture_states_bulk,
@@ -76,33 +77,33 @@ def _parse_pet_attrs(data, key, partial=False):
     if partial:
         attrs = {}
         if ('pet_species_' + key) in data:
-            species = (data.get('pet_species_' + key) or '').strip()
+            species = body_str(data, 'pet_species_' + key).strip()
             if species not in PET_SPECIES:
                 return None, f'物种「{species}」无效，只能是猫或狗'
             attrs['species'] = species
         if ('pet_gender_' + key) in data:
-            gender = (data.get('pet_gender_' + key) or '').strip()
+            gender = body_str(data, 'pet_gender_' + key).strip()
             if gender and gender not in PET_GENDERS:
                 return None, f'性别「{gender}」无效，只能是公或母'
             attrs['gender'] = gender
         for field in ('breed', 'name'):
             field_key = f'pet_{field}_{key}'
             if field_key in data:
-                attrs[field] = (data.get(field_key) or '').strip()[:50]
+                attrs[field] = body_str(data, field_key).strip()[:50]
         return attrs, None
 
-    species = ((data.get('pet_species_' + key) or '').strip()
-               or (data.get('species') or '').strip() or '猫')
+    species = (body_str(data, 'pet_species_' + key).strip()
+               or body_str(data, 'species').strip() or '猫')
     if species not in PET_SPECIES:
         return None, f'物种「{species}」无效，只能是猫或狗'
-    gender = (data.get('pet_gender_' + key) or '').strip()
+    gender = body_str(data, 'pet_gender_' + key).strip()
     if gender and gender not in PET_GENDERS:
         return None, f'性别「{gender}」无效，只能是公或母'
     return {
         'species': species,
         'gender': gender,
-        'breed': (data.get('pet_breed_' + key) or '').strip()[:50],
-        'name': (data.get('pet_name_' + key) or '').strip()[:50],
+        'breed': body_str(data, 'pet_breed_' + key).strip()[:50],
+        'name': body_str(data, 'pet_name_' + key).strip()[:50],
     }, None
 
 
@@ -428,7 +429,7 @@ def capture_create(request):
         # 兼容 multipart/form-data 提交（合照/单只照片上传）
         data = request.POST.dict()
 
-    shelter_id = data.get('shelter_id') or getattr(request.user, 'institution_id', None)
+    shelter_id = body_int(data, 'shelter_id') or getattr(request.user, 'institution_id', None)
     if not shelter_id:
         return json_fail('缺少捕捉点信息')
 
@@ -437,7 +438,7 @@ def capture_create(request):
     except Institution.DoesNotExist:
         return json_fail('捕捉点不存在')
 
-    district, err = _resolve_district_scope(request.user, shelter, data.get('district_id'))
+    district, err = _resolve_district_scope(request.user, shelter, body_int(data, 'district_id'))
     if err:
         return json_fail(err)
 
@@ -455,7 +456,7 @@ def capture_create(request):
     inst_err = inactive_institution_error(shelter, '捕捉点')
     if inst_err:
         return json_fail(inst_err)
-    if data.get('district_id'):
+    if body_int(data, 'district_id'):
         # 只在**显式提交**时校验：未提交时 district 由捕捉点/操作员推导，
         # 那是存量事实，不该被状态拦住。
         district_err = inactive_district_error(district)
@@ -474,22 +475,22 @@ def capture_create(request):
         return json_fail('单批捕捉数量不能超过100只，请分批登记')
 
     # 与前端表单必填项保持一致，避免脏数据落库
-    property_name = (data.get('property_name') or '').strip()
+    property_name = body_str(data, 'property_name').strip()
     if not property_name:
         return json_fail('物业名称不能为空')
-    community_name = (data.get('community_name') or '').strip()
+    community_name = body_str(data, 'community_name').strip()
     if not community_name:
         return json_fail('所在小区不能为空')
-    contact_person = (data.get('contact_person') or '').strip()
+    contact_person = body_str(data, 'contact_person').strip()
     if not contact_person:
         return json_fail('物业交接人不能为空')
-    contact_phone = (data.get('contact_phone') or '').strip()
+    contact_phone = body_str(data, 'contact_phone').strip()
     if not contact_phone:
         return json_fail('联系电话不能为空')
 
     # 定位地址作为默认地址：前端未手填 address 时用 geo_address 兜底
-    geo_address = (data.get('geo_address') or '').strip()
-    address = (data.get('address') or '').strip() or geo_address
+    geo_address = body_str(data, 'geo_address').strip()
+    address = body_str(data, 'address').strip() or geo_address
 
     # 批量生成宠物编号：优先沿用前端预览后提交的编号，保证逐只属性/照片
     # 的字段名（pet_species_<编号> 等）与最终落库的编号一致
@@ -523,7 +524,7 @@ def capture_create(request):
         # 匹配已有的小区机构。不回填的话 `Capture.community` 永远是 None，
         # 后续「放养」只认这个外键 → 放养流程在界面上完全走不通。
         community = resolve_community(
-            district, data.get('community_id'), community_name)
+            district, body_int(data, 'community_id'), community_name)
 
         capture = Capture.objects.create(
             district=district,
@@ -540,7 +541,7 @@ def capture_create(request):
             contact_phone=contact_phone,
             pet_count=pet_count,
             pet_codes=','.join(pet_codes),
-            signature=data.get('signature', ''),
+            signature=body_str(data, 'signature'),
             status='pending',  # 新建捕捉单尚未转运，状态由转运情况自动推导
             operator=request.user,
             operator_name=request.user.get_full_name() or request.user.username,
@@ -618,7 +619,7 @@ def capture_update(request, pk):
         'contact_phone': '联系电话',
     }
     for field, label in required.items():
-        if field in data and not (data.get(field) or '').strip():
+        if field in data and not body_str(data, field).strip():
             return json_fail(f'{label}不能为空')
 
     updatable = ('property_name', 'community_name', 'address', 'geo_address',
@@ -635,11 +636,11 @@ def capture_update(request, pk):
             setattr(capture, field, _to_float(data.get(field)))
             changed.append(field)
 
-    if 'district_id' in data and data.get('district_id'):
+    if 'district_id' in data and body_int(data, 'district_id'):
         # 编辑同样要走区县解析/校验：否则可以把本区捕捉单改判到他区，
         # 或改判到「全市（市级）」从而让本区县政府看不到它。
         new_district, err = _resolve_district_scope(
-            request.user, capture.shelter, data['district_id'])
+            request.user, capture.shelter, body_int(data, 'district_id'))
         if err:
             return json_fail(err)
         if capture.district_id != new_district.id:
@@ -671,7 +672,7 @@ def capture_update(request, pk):
     # 放养时会把动物放回**改名前的那个小区**（或外键仍为空而彻底无法放养）。
     if 'community_name' in data or 'district_id' in data:
         community = resolve_community(
-            capture.district, data.get('community_id'), capture.community_name)
+            capture.district, body_int(data, 'community_id'), capture.community_name)
         if capture.community_id != (community.id if community else None):
             capture.community = community
             changed.append('community')
@@ -884,7 +885,7 @@ def owner_return_create(request, pk=None):
     """
     data = parse_json_body(request)
 
-    pet_id = data.get('pet_id')
+    pet_id = body_int(data, 'pet_id')
     if not pet_id:
         return json_fail('缺少宠物ID')
 
@@ -904,12 +905,12 @@ def owner_return_create(request, pk=None):
     if pet.status != 'in_transit':
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可领回')
 
-    owner_name = data.get('owner_name', '').strip()
+    owner_name = body_str(data, 'owner_name').strip()
     if not owner_name:
         return json_fail('主人姓名不能为空')
 
-    owner_phone = data.get('owner_phone', '')
-    owner_id_card = data.get('owner_id_card', '')
+    owner_phone = body_str(data, 'owner_phone')
+    owner_id_card = body_str(data, 'owner_id_card')
 
     # 黑名单检查
     bl = check_blacklist(owner_id_card, owner_phone)
@@ -918,7 +919,7 @@ def owner_return_create(request, pk=None):
 
     # 主人领回记录的区县以宠物档案的区县为准（动物就是从那个区县捕捉来的），
     # 而不是操作员所属区县——操作员可能挂在「全市（市级）」下。
-    district, err = _resolve_district_scope(request.user, pet, data.get('district_id'))
+    district, err = _resolve_district_scope(request.user, pet, body_int(data, 'district_id'))
     if err:
         return json_fail(err)
 
@@ -928,10 +929,10 @@ def owner_return_create(request, pk=None):
         owner_name=owner_name,
         owner_phone=owner_phone,
         owner_id_card=owner_id_card,
-        owner_address=data.get('owner_address', '').strip(),
+        owner_address=body_str(data, 'owner_address').strip(),
         return_time=_parse_return_time(data.get('return_time')),
-        reason=data.get('reason', ''),
-        signature=data.get('signature', ''),
+        reason=body_str(data, 'reason'),
+        signature=body_str(data, 'signature'),
         operator=request.user,
         operator_name=request.user.get_full_name() or request.user.username,
         ledger_no=generate_ledger_no('RET'),

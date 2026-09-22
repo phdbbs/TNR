@@ -16,6 +16,7 @@ from accounts.decorators import role_required
 from business.models import Material, MaterialTransaction, Chip
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
+    body_str, body_int,
     generate_ledger_no, get_district_filtered_queryset,
     adjust_stock, get_hospital_stock, get_scoped_object,
     get_own_institution_object, parse_int_param,
@@ -90,7 +91,7 @@ def purchase_create(request):
     if not quantity:
         return json_fail('采购数量必须大于0')
 
-    material_id = data.get('material_id')
+    material_id = body_int(data, 'material_id')
     material = None
     if material_id:
         # 按区县范围取物料，避免跨区县对他人物料做采购入库
@@ -98,8 +99,8 @@ def purchase_create(request):
 
     if material is None:
         # 前端直接以名称/类别新增物料（如采购入库表单未选择已有物料）
-        name = str(data.get('name', '')).strip()
-        category = str(data.get('category', '')).strip()
+        name = str(body_str(data, 'name')).strip()
+        category = str(body_str(data, 'category')).strip()
         if not name or category not in dict(Material.CATEGORY_CHOICES):
             return json_fail('缺少物料ID或物料名称/类别')
         shelter = user.institution if user.institution and user.institution.type == 'shelter' else None
@@ -111,10 +112,10 @@ def purchase_create(request):
             material = Material.objects.create(
                 name=name,
                 category=category,
-                unit=str(data.get('unit', '') or '支'),
-                specification=str(data.get('specification', '') or ''),
-                supplier=str(data.get('supplier', '') or ''),
-                batch_no=str(data.get('batch_no', '') or ''),
+                unit=str(body_str(data, 'unit') or '支'),
+                specification=body_str(data, 'specification'),
+                supplier=body_str(data, 'supplier'),
+                batch_no=body_str(data, 'batch_no'),
                 safety_stock=0,
                 district_id=district_id,
             )
@@ -132,10 +133,10 @@ def purchase_create(request):
             txn_type='purchase',
             operator=user,
             operator_name=user.get_full_name() or user.username,
-            supplier=data.get('supplier', ''),
-            batch_no=data.get('batch_no', ''),
-            from_to=data.get('supplier', ''),
-            note=data.get('note', '采购入库'),
+            supplier=body_str(data, 'supplier'),
+            batch_no=body_str(data, 'batch_no'),
+            from_to=body_str(data, 'supplier'),
+            note=body_str(data, 'note', '采购入库'),
             ledger_no=generate_ledger_no('PUR'),
             district_id=district_id,
         )
@@ -159,8 +160,8 @@ def purchase_create(request):
 
         # 芯片采购：创建芯片号段（兼容前端 chip_start/chip_end 与后端 chip_range_* 两种命名）
         if material.category == 'chip':
-            range_start = data.get('chip_range_start', '') or data.get('chip_start', '')
-            range_end = data.get('chip_range_end', '') or data.get('chip_end', '')
+            range_start = body_str(data, 'chip_range_start') or body_str(data, 'chip_start')
+            range_end = body_str(data, 'chip_range_end') or body_str(data, 'chip_end')
             if range_start and range_end:
                 _create_chip_range(range_start, range_end, material)
                 material.chip_range_start = range_start
@@ -187,8 +188,8 @@ def dispatch_create(request):
     data = parse_json_body(request)
     user = request.user
 
-    material_id = data.get('material_id')
-    hospital_id = data.get('hospital_id') or data.get('to_hospital_id')
+    material_id = body_int(data, 'material_id')
+    hospital_id = body_int(data, 'hospital_id') or body_int(data, 'to_hospital_id')
     if not material_id or not hospital_id:
         return json_fail('缺少物料或医院信息')
 
@@ -218,10 +219,16 @@ def dispatch_create(request):
         return json_fail(f'捕捉点库存不足（当前库存 {material.shelter_stock}）')
 
     # 检查芯片号是否可用
+    # ⚠ 必须挡非字符串 / 非列表（第三十五轮）：`{"chip_numbers": 123}` 会让
+    # `Chip.objects.filter(number__in=123)` 抛 `TypeError: 'int' object is not
+    # iterable` → 500；`{"chip_numbers": {"a": 1}}` 更隐蔽 —— dict 可迭代，
+    # Django 会拿**字典的键**去查，不报错但语义完全错。
     chip_numbers = data.get('chip_numbers', [])
     if isinstance(chip_numbers, str):
         # 兼容逗号分隔字符串，避免被当成字符串逐字符迭代
         chip_numbers = [c.strip() for c in chip_numbers.split(',') if c.strip()]
+    elif not isinstance(chip_numbers, list):
+        chip_numbers = []
     if material.category == 'chip' and chip_numbers:
         unavailable = Chip.objects.filter(
             number__in=chip_numbers, status='used'
@@ -231,7 +238,7 @@ def dispatch_create(request):
 
     # 兼容前端 chip_range（如 "1000010001-1000010010"）号段输入
     note = f'下发至 {hospital.name}（待签收）'
-    chip_range = str(data.get('chip_range', '') or '').strip()
+    chip_range = body_str(data, 'chip_range').strip()
     if material.category == 'chip' and chip_range:
         note += f'，芯片号段 {chip_range}'
 
@@ -329,7 +336,15 @@ def stock_adjustment(request):
     data = parse_json_body(request)
     user = request.user
 
-    material_id = data.get('material_id')
+    # ⚠ `material_id` 必须走共用解析器（第三十五轮）。原先直接
+    # `material_id = data.get('material_id')` 后塞进 ORM 主键查询，传 `"abc"`
+    # 会抛 `ValueError: Field 'id' expected a number but got 'abc'` → **500**。
+    # 枚举实测：这是全项目**唯一**一处「畸形整型外键直接进 ORM」——
+    # 同文件 `purchase_create` / `dispatch_create` 早就走了 `parse_int_param`，
+    # 只有这里漏了。三处同族参数必须同一写法，否则就是孪生漂移。
+    material_id, err = parse_int_param(data.get('material_id'), '物料ID')
+    if err:
+        return json_fail(err)
     if not material_id:
         return json_fail('缺少物料ID')
 

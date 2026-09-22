@@ -17,6 +17,7 @@ from business.models import (
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
+    body_str, body_int,
     get_district_scope, pet_brief, pet_archive_records, with_camel_keys,
     validate_operator_district, cascade_operator_district,
     validate_user_manage_scope, inactive_district_error,
@@ -206,7 +207,7 @@ def institution_create(request):
     """创建机构"""
     data = parse_json_body(request)
 
-    name = (data.get('name') or '').strip()
+    name = body_str(data, 'name').strip()
     if not name:
         return json_fail('机构名称不能为空')
     if len(name) > 100:
@@ -216,7 +217,7 @@ def institution_create(request):
     if inst_type not in ('shelter', 'hospital', 'community'):
         return json_fail('机构类型无效')
 
-    district_id = data.get('district_id')
+    district_id = body_int(data, 'district_id')
     if district_id and _district_out_of_scope(request, district_id):
         # 与 institution_edit 同一条判据：区级管理员只能在本区县建机构。
         # 少了这一步，区级管理员 POST 一个他区 district_id 就能把机构种到
@@ -244,7 +245,7 @@ def institution_create(request):
     if inst_type == 'hospital' and district.is_city:
         return json_fail('医院必须挂具体区县，不能挂市级')
 
-    phone = (data.get('phone') or '').strip()
+    phone = body_str(data, 'phone').strip()
     if phone and not phone.replace('-', '').replace('+', '').isdigit():
         return json_fail('联系电话格式不正确')
 
@@ -253,8 +254,8 @@ def institution_create(request):
         name=name,
         type=inst_type,
         district=district,
-        address=(data.get('address') or '').strip(),
-        contact=(data.get('contact') or '').strip(),
+        address=body_str(data, 'address').strip(),
+        contact=body_str(data, 'contact').strip(),
         phone=phone,
         status='active',
     )
@@ -296,10 +297,10 @@ def institution_edit(request, pk):
     new_type = (data['type'] if data.get('type') in ('shelter', 'hospital', 'community')
                 else inst.type)
     new_district = inst.district
-    if data.get('district_id'):
-        if _district_out_of_scope(request, data['district_id']):
+    if body_int(data, 'district_id'):
+        if _district_out_of_scope(request, body_int(data, 'district_id')):
             return json_fail('无权将机构调整到其他区县')
-        new_district = District.objects.filter(id=data['district_id']).first()
+        new_district = District.objects.filter(id=body_int(data, 'district_id')).first()
         if new_district is None:
             return json_fail('区县不存在')
         # 只拦「搬到停用区县」。原地改名（不换区县）必须放行 ——
@@ -318,7 +319,7 @@ def institution_edit(request, pk):
     if data.get('type') in ('shelter', 'hospital', 'community'):
         inst.type = data['type']
         update_fields.append('type')
-    if data.get('district_id'):
+    if body_int(data, 'district_id'):
         inst.district = new_district
         update_fields.append('district')
     if 'address' in data:
@@ -398,11 +399,11 @@ def district_create(request):
     """创建区县（仅市级管理员）"""
     data = parse_json_body(request)
 
-    name = (data.get('name') or '').strip()
+    name = body_str(data, 'name').strip()
     if not name:
         return json_fail('区县名称不能为空')
 
-    code = (data.get('code') or '').strip()
+    code = body_str(data, 'code').strip()
     if not code:
         return json_fail('区县代码不能为空')
 
@@ -435,11 +436,11 @@ def district_edit(request, pk):
     data = parse_json_body(request)
     update_fields = []
 
-    name = (data.get('name') or '').strip()
+    name = body_str(data, 'name').strip()
     if name:
         district.name = name
         update_fields.append('name')
-    code = (data.get('code') or '').strip()
+    code = body_str(data, 'code').strip()
     if code:
         if District.objects.filter(code=code).exclude(id=pk).exists():
             return json_fail('区县代码已存在')
@@ -464,7 +465,19 @@ def district_edit(request, pk):
             district.is_city = new_is_city
             update_fields.append('is_city')
     if 'status' in data:
-        district.status = data.get('status')
+        # ⚠ `status` 必须走枚举校验（第三十五轮）。`District.status` 是
+        # `CharField` **没有 choices**，而停用判据是
+        # `inactive_district_error()` 里的 `status != 'active'` —— 于是写入
+        # **任何**非 'active' 的字符串都等价于「停用该区县」，且界面会把那个
+        # 垃圾值当状态显示出来（无 choices 时 `get_status_display()` 返回原值）。
+        #
+        # 孪生入口 `district_toggle_status` 只会写 'active' / 'inactive' 两个值；
+        # 编辑接口必须与它**同值域**，否则前者只是「界面上不容易踩到」，
+        # 不是约束 —— 直接调接口就能塞进任意状态。
+        new_status = body_str(data, 'status')
+        if new_status not in ('active', 'inactive'):
+            return json_fail('区县状态只能是启用（active）或停用（inactive）')
+        district.status = new_status
         update_fields.append('status')
 
     if update_fields:
@@ -580,13 +593,13 @@ def user_create(request):
     """
     data = parse_json_body(request)
 
-    username = (data.get('username') or '').strip()
+    username = body_str(data, 'username').strip()
     if not username:
         return json_fail('用户名不能为空')
     if User.objects.filter(username=username).exists():
         return json_fail('用户名已存在')
 
-    password = (data.get('password') or '').strip() or '123456'
+    password = body_str(data, 'password').strip() or '123456'
     if len(password) < 6:
         return json_fail('密码长度不能少于6位')
 
@@ -597,12 +610,12 @@ def user_create(request):
     if role not in ('gov_city', 'gov_district', 'shelter', 'hospital'):
         return json_fail('角色无效')
 
-    name = (data.get('name') or '').strip()
+    name = body_str(data, 'name').strip()
     if not name:
         return json_fail('姓名不能为空')
 
-    district_id = data.get('district_id')
-    institution_id = data.get('institution_id')
+    district_id = body_int(data, 'district_id')
+    institution_id = body_int(data, 'institution_id')
 
     # 区县逻辑校验
     if not district_id:
@@ -663,7 +676,7 @@ def user_create(request):
         password=password,
     )
     user.role = role
-    user.phone = (data.get('phone') or '').strip()
+    user.phone = body_str(data, 'phone').strip()
     user.status = 'active'
     user.first_name = name
     user.district = district
@@ -1323,6 +1336,31 @@ def operation_logs(request):
 # ============================================
 # 15. 系统配置
 # ============================================
+#: 允许写入的系统配置项（键 → 默认值）。
+#:
+#: ⚠ **写接口的键白名单与读接口的默认值必须同源**（第三十五轮）。
+#: 分成两份必然漂移，而漂移的表现恰好是最难查的那种：新加的配置项
+#: 「读得到、写不进去」，用户点了保存界面还提示成功。
+SYSTEM_CONFIG_DEFAULTS = {
+    'pet_code_prefix': 'TNR',
+    'ledger_no_format': 'PREFIX-YYMMDD-SSS',
+    'capture_prefix': 'CAP',
+    'transfer_prefix': 'TRF',
+    'treatment_prefix': 'TRE',
+    'release_prefix': 'REL',
+    'adoption_prefix': 'ADP',
+    'euthanasia_prefix': 'EUT',
+    'purchase_prefix': 'PUR',
+    'dispatch_prefix': 'DIS',
+    'consume_prefix': 'CON',
+}
+
+#: 配置值的长度上限。配置值是编号前缀，会被拼进单据号；`SystemConfig.value`
+#: 是 `TextField`（无长度约束），不设上限就能塞进 1MB 的字符串，而它会被
+#: 每个读配置的请求原样返回。
+SYSTEM_CONFIG_VALUE_MAX = 20
+
+
 @csrf_exempt
 @role_required('gov_city', 'gov_district')
 @login_required
@@ -1340,25 +1378,28 @@ def system_config(request):
     `[]`，界面把真实的 CAP/TRF/… 前缀渲染成**空串** —— 用户看到的是
     「编号规则没配置」。这与「兜底谎报业务状态」同族：无权限时不能拿空值
     冒充真实值。
+
+    ⚠⚠ **写入端必须有键白名单（第三十五轮）。** 此前 POST 是
+
+        for key, value in data.items():
+            SystemConfig.objects.update_or_create(key=key, defaults={'value': str(value)})
+
+    ——**请求体的每个顶层 key 都会变成一行配置**。枚举实测：用 23 种畸形
+    请求体打一遍 78 条 POST 路由，`SystemConfig` 被写入 **16 行**，全是
+    `district_id` / `count` / `old_password` / `status` / `action` 这类垃圾键。
+    这些垃圾随后会被 GET **原样读出来**返回给前端，且无法与真实配置区分 ——
+    有写权限的人手滑一次（或前端 payload 构造出错）就永久污染配置表。
+
+    ⚠ 值必须是非空短字符串。原先的 `str(value)` **对任何类型都成功**：
+    `str(None)` = `'None'`、`str([1,2,3])` = `'[1, 2, 3]'`、
+    `str({'$ne': None})` = `"{'$ne': None}"`。畸形值不会报错，只会**静默**
+    变成垃圾前缀，然后被拼进新生成的所有单据号里。
     """
     if request.method == 'GET':
         configs = SystemConfig.objects.all()
         data = {c.key: c.value for c in configs}
-        # 默认配置
-        defaults = {
-            'pet_code_prefix': 'TNR',
-            'ledger_no_format': 'PREFIX-YYMMDD-SSS',
-            'capture_prefix': 'CAP',
-            'transfer_prefix': 'TRF',
-            'treatment_prefix': 'TRE',
-            'release_prefix': 'REL',
-            'adoption_prefix': 'ADP',
-            'euthanasia_prefix': 'EUT',
-            'purchase_prefix': 'PUR',
-            'dispatch_prefix': 'DIS',
-            'consume_prefix': 'CON',
-        }
-        for k, v in defaults.items():
+        # 默认值兜底：库里没这一项时给默认值（不是空串 —— 空串等于谎报「没配置」）
+        for k, v in SYSTEM_CONFIG_DEFAULTS.items():
             if k not in data:
                 data[k] = v
         return json_ok(data)
@@ -1367,13 +1408,28 @@ def system_config(request):
     if request.user.role != 'gov_city':
         return json_fail('仅市级管理员可修改系统配置', status=403)
     data = parse_json_body(request)
+
+    # ① 键必须在白名单内 —— 否则任意 key 都能写进配置表
+    unknown = sorted(k for k in data if k not in SYSTEM_CONFIG_DEFAULTS)
+    if unknown:
+        return json_fail('不支持的配置项：%s' % '、'.join(unknown))
+
+    # ② 值必须是非空短字符串 —— 挡住 `null` / 数组 / 对象 / 超长串
+    for key, value in data.items():
+        if not isinstance(value, str):
+            return json_fail('配置项 %s 的值必须是字符串' % key)
+        if not value.strip():
+            return json_fail('配置项 %s 的值不能为空' % key)
+        if len(value) > SYSTEM_CONFIG_VALUE_MAX:
+            return json_fail('配置项 %s 的值不能超过 %d 个字符'
+                             % (key, SYSTEM_CONFIG_VALUE_MAX))
+
+    # ③ 全校验通过后再落库（两段式：避免校验到一半留下已写入的行）
     updated = []
     for key, value in data.items():
-        if key in ('id',):
-            continue
-        obj, created = SystemConfig.objects.update_or_create(
+        SystemConfig.objects.update_or_create(
             key=key,
-            defaults={'value': str(value)},
+            defaults={'value': value.strip()},
         )
         updated.append(key)
 

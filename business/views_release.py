@@ -11,6 +11,7 @@ from accounts.decorators import role_required
 from business.models import Release, Pet, Capture
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
+    body_str, body_int,
     generate_ledger_no, get_district_filtered_queryset,
     get_active_pet, get_scoped_object, pet_has_active_adoption,
     resolve_community,
@@ -50,7 +51,7 @@ def release_create(request):
     data = parse_json_body(request)
     user = request.user
 
-    pet_id = data.get('pet_id')
+    pet_id = body_int(data, 'pet_id')
     if not pet_id:
         return json_fail('缺少宠物ID')
 
@@ -83,13 +84,13 @@ def release_create(request):
     # 现在：小区名以**捕捉单登记的文本**为准（可显式覆盖），
     # 能匹配到机构档案就顺带回填外键（`Release.community` 本身 nullable）。
     capture = pet.capture
-    community_name = (data.get('community_name') or '').strip()
+    community_name = body_str(data, 'community_name').strip()
     if not community_name and capture is not None:
         community_name = (capture.community_name or '').strip()
 
     community = resolve_community(
         pet.district,
-        data.get('community_id') or (capture.community_id if capture else None),
+        body_int(data, 'community_id') or (capture.community_id if capture else None),
         community_name,
     )
     if community and not community_name:
@@ -107,8 +108,8 @@ def release_create(request):
         pet_code=pet.code,
         community=community,
         community_name=community_name,
-        receiver_name=data.get('receiver_name', ''),
-        receiver_phone=data.get('receiver_phone', ''),
+        receiver_name=body_str(data, 'receiver_name'),
+        receiver_phone=body_str(data, 'receiver_phone'),
         status='pending',
         operator=user,
         operator_name=user.get_full_name() or user.username,
@@ -145,9 +146,9 @@ def release_confirm(request, pk):
     if release.pet_id and release.pet.is_deleted:
         return json_fail('该宠物档案已作废，无法确认放养')
 
-    release.receiver_name = data.get('receiver_name', release.receiver_name)
-    release.receiver_phone = data.get('receiver_phone', release.receiver_phone)
-    release.signature = data.get('signature', '')
+    release.receiver_name = body_str(data, 'receiver_name', release.receiver_name)
+    release.receiver_phone = body_str(data, 'receiver_phone', release.receiver_phone)
+    release.signature = body_str(data, 'signature')
     release.status = 'released'
     release.released_at = timezone.localdate()
     release.save(update_fields=[

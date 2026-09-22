@@ -11,6 +11,7 @@ from accounts.decorators import role_required
 from business.models import Transfer, Pet, Capture
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
+    body_str, body_int, body_list,
     generate_ledger_no, get_district_filtered_queryset,
     resolve_district_scope, recalc_capture_status, get_scoped_object,
     busy_transfer_codes, inactive_institution_error,
@@ -75,7 +76,7 @@ def transfer_create(request):
     user = request.user
 
     # 获取来源捕捉点
-    shelter_id = data.get('from_shelter_id') or getattr(user, 'institution_id', None)
+    shelter_id = body_int(data, 'from_shelter_id') or getattr(user, 'institution_id', None)
     if not shelter_id:
         return json_fail('缺少捕捉点信息')
 
@@ -88,7 +89,7 @@ def transfer_create(request):
     # 现场两个捕捉点操作员都挂在「全市（市级）」下，而前端并不提交 district_id，
     # 取操作员区县会让转运单全部落到市级 —— 本区县政府在区县隔离下看不到本区
     # 转运单（捕捉单当初就是这么错的）。
-    district, err = resolve_district_scope(user, shelter, data.get('district_id'))
+    district, err = resolve_district_scope(user, shelter, body_int(data, 'district_id'))
     if err:
         return json_fail(err)
     district_id = district.id
@@ -99,17 +100,26 @@ def transfer_create(request):
     if shelter_err:
         return json_fail(shelter_err)
 
-    capture_id = data.get('capture_id')
+    capture_id = body_int(data, 'capture_id')
     capture = Capture.objects.filter(id=capture_id).first() if capture_id else None
 
     # 统一构造 items 列表：支持两种格式
-    items = data.get('items')
+    # ⚠ 元素必须是 dict（第三十五轮）：`{"items": [1, 2, 3]}` 会让下游
+    # `item.get('pet_codes')` 炸 `AttributeError: 'int' object has no attribute
+    # 'get'` —— 报错点在**循环体里**，比参数读取处更难定位。非 dict 元素
+    # 直接丢弃，等价于「这一项未提供」；全被丢光则退到下面的格式二。
+    items = [it for it in body_list(data, 'items') if isinstance(it, dict)]
     if not items:
         # 格式二：单医院 + pet_codes（字符串编号）
-        to_hospital_id = data.get('to_hospital_id')
+        to_hospital_id = body_int(data, 'to_hospital_id')
         pet_codes_raw = data.get('pet_codes', [])
         if isinstance(pet_codes_raw, str):
             pet_codes_raw = [c.strip() for c in pet_codes_raw.split(',') if c.strip()]
+        if not isinstance(pet_codes_raw, list):
+            # `{"pet_codes": {"a": 1}}` 既不是字符串也不是列表 → 按「未提供」处理。
+            # 不处理的话 `not pet_codes_raw` 为 False（非空 dict 是 truthy），
+            # 会带着一个 dict 继续往下走。
+            pet_codes_raw = []
         if not to_hospital_id or not pet_codes_raw:
             return json_fail('缺少转运明细（items 或 to_hospital_id+pet_codes）')
         items = [{'hospital_id': to_hospital_id, 'pet_codes': pet_codes_raw}]
@@ -202,7 +212,7 @@ def transfer_create(request):
             status='pending',
             # 备注：前端表单一直提交 note（接口文档也声明接受），此前模型没有这一列，
             # 用户填的内容被静默丢弃。拆分场景允许每个 item 各自带备注。
-            note=item.get('note') or data.get('note', '') or '',
+            note=item.get('note') or body_str(data, 'note') or '',
             operator=user,
             operator_name=user.get_full_name() or user.username,
             ledger_no=generate_ledger_no('TRF'),
@@ -274,7 +284,7 @@ def transfer_reject(request, pk):
         return json_fail(f'当前状态({transfer.status})不可驳回')
 
     transfer.status = 'rejected'
-    transfer.reject_reason = data.get('reason', '')
+    transfer.reject_reason = body_str(data, 'reason')
     transfer.save(update_fields=['status', 'reject_reason'])
 
     # 医院退回：宠物回退为在途，并解除医院归属，
