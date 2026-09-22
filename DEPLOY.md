@@ -576,6 +576,34 @@ location @api_payload_too_large {
 
 ⚠ 改完 nginx 必须 `nginx -t && nginx -s reload`；**改前先备份配置**。
 
+### 5.8 ⚠ CSRF 403 也是 HTML，且**只能靠 `CSRF_FAILURE_VIEW` 收口**
+
+`CsrfViewMiddleware.process_view()` 是**直接 `return self._reject(...)`**
+（返回 `HttpResponseForbidden`），**不抛异常** —— 所以它既不经 `handler400`
+也不经 `handler403`。唯一的钩子是：
+
+```python
+# tnr_system/settings.py
+CSRF_FAILURE_VIEW = 'tnr_system.urls.api_aware_csrf_failure'
+```
+
+`/api/` 前缀回 `{"success": false, "data": null, "message": "安全校验未通过，请刷新页面后重试"}`
+（**不回 `reason`**，那是 Django 的内部判定原因）；其余路径仍是 HTML 403 页。
+
+**当前前端够不到这条路径**（实测：78 条 `/api/` 路由里只有 3 条非 `csrf_exempt`
+—— `/api/me/`、`adoptions/hall/`、`adoptions/hall/<pk>/` —— 而前端对它们**只发 GET**；
+模板里也没有裸 `fetch` POST）。**但 `HTTPS=on` 之后会变活**：
+
+- `request.is_secure()` 变真 → CSRF 的 **Referer/Origin 校验首次生效**；
+- `CSRF_TRUSTED_ORIGINS` 来自 `.env`，**上 HTTPS 时必须填对**，否则 POST 被 403；
+- 症状与体积闸门一样：**「点提交没反应」，且只在 HTTPS 环境复现**。
+
+```bash
+# 上 HTTPS 后自检：确认 .env 里的来源与访问域名一致
+grep CSRF_TRUSTED_ORIGINS /opt/tnr/.env
+# 期望形如 CSRF_TRUSTED_ORIGINS=https://your.domain（含协议，不含路径）
+```
+
 ## 六、常见报错对照
 
 | 报错 | 原因 | 处理 |
@@ -596,3 +624,4 @@ location @api_payload_too_large {
 | `no such column: business_capture.latitude` | 数据库迁移未执行 | `python manage.py migrate` |
 | 上传照片报 500 / Permission denied | `media/` 属主不是 `www-data` | 见第三节「目录属主」 |
 | 提交表单报 403 CSRF | 通过域名访问但未配 `CSRF_TRUSTED_ORIGINS` | 按第二节填入 `https://域名` |
+| 提交表单报 403 CSRF，且响应是 **HTML** | 未配 `CSRF_FAILURE_VIEW`（接口会静默） | 见 §5.8；`HTTPS=on` 后尤其要确认 `CSRF_TRUSTED_ORIGINS` |

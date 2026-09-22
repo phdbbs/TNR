@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **1041 个用例，全部通过**（约 76 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1046 个用例，全部通过**（约 76 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**）+ 三十一轮 **2 道闸门**（`DATA_UPLOAD_MAX_NUMBER_FILES` 默认 **100**，而产品自己声明「单批最多 100 只」= 100 张单只照片 + 1 张合影 = **101 个文件** → 第 100 只的照片连解析都过不去，`400 **text/html**`；nginx `client_max_body_size` 20M → 100 张手机压缩图约 30–50MB → `413 **text/html**`。两者前端都表现为「点提交没反应」；修法：设置按产品上限推导 + 新增 `handler400` 把 `/api/` 下所有传输层 400 收口成**可读 JSON** + nginx `error_page 413` 同口径） |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**）+ 三十一轮 **2 道闸门**（`DATA_UPLOAD_MAX_NUMBER_FILES` 默认 **100**，而产品自己声明「单批最多 100 只」= 100 张单只照片 + 1 张合影 = **101 个文件** → 第 100 只的照片连解析都过不去，`400 **text/html**`；nginx `client_max_body_size` 20M → 100 张手机压缩图约 30–50MB → `413 **text/html**`。两者前端都表现为「点提交没反应」；修法：设置按产品上限推导 + 新增 `handler400` 把 `/api/` 下所有传输层 400 收口成**可读 JSON** + nginx `error_page 413` 同口径）+ 三十二轮 **1 项预防性收口**（CSRF 403 默认也是 **HTML**（`403_csrf.html`）→ 前端静默。⚠ **当前前端够不到**：全站 78 条 `/api/` 路由里只有 3 条非 `csrf_exempt`，而前端对它们**只发 GET**、模板里也无裸 `fetch` POST。但 `HTTPS=on` 后 CSRF 的 Referer/Origin 校验首次生效，`CSRF_TRUSTED_ORIGINS` 为空时就会踩到。⚠ 唯一钩子是 `CSRF_FAILURE_VIEW` —— `CsrfViewMiddleware` **直接返回**响应、不抛异常，`handler403` 接不住） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -4769,7 +4769,107 @@ FAIL: test_handler400_is_wired_into_the_root_urlconf
 > 本节（另两道闸门 + 默认值低于声明上限）**是同一族的三次命中**。
 > 教训是：**不要只修「撞到的那一处」，要把这一族的所有闸门都列出来逐个验**。
 > 这一族还有 `DATA_UPLOAD_MAX_MEMORY_SIZE`（已修）、CSRF 403（另经中间件返回，
-> 不经 `handler400`，尚未收口）。
+> 不经 `handler400`，见 §2.40）。
+
+---
+
+#### 2.40 CSRF 403 也收口成 JSON —— 但先说清它**当前够不到**（第三十二轮）
+
+⚠ **定性：这是潜在风险面的预防性收口，不是复现出来的用户可见缺陷。**
+先说清「为什么够不到」，再说「为什么仍然要修」。
+
+##### 一、实测：哪些接口在 CSRF 失败时回 HTML
+
+用 `Client(enforce_csrf_checks=True)` 把**全部 78 条 `/api/` 路由**逐个 POST 一遍：
+
+```
+---- 403 且是 HTML（前端会静默）----
+    /api/business/adoptions/hall/       [text/html]
+    /api/business/adoptions/hall/1/     [text/html]
+    /api/me/                            [text/html]
+    小计 3
+---- 403 但已是 JSON ----（32 条，均为 csrf_exempt + 角色校验返回的业务 403）
+```
+
+全站只有 **3 个** `/api/` 接口没有 `@csrf_exempt`。
+
+##### 二、为什么当前够不到
+
+1. 前端 `TNR_API` **只发 POST**（`_post` / `_postForm`），且**所有**调用都带
+   `X-CSRFToken`（`_getCSRF()` 从隐藏域或 `csrftoken` Cookie 取）。
+2. 4 个门户模板 + `login.html` **都渲染了 token**（`{% csrf_token %}` 或
+   `<input name="csrfmiddlewaretoken">`），且 `CSRF_COOKIE_HTTPONLY = False`
+   （JS 读得到 Cookie）。
+3. 那 3 个非豁免接口，前端**只发 GET**：
+   - `/api/me/` → `TNR_API.getCurrentUser()`
+   - `/api/business/adoptions/hall/`（+ `<pk>/`）→ `TNR_API.getData(...)` / `get(...)`
+   CSRF 只校验**非安全方法**，GET 不触发。
+4. 模板里**没有任何裸 `fetch` POST**（3 处 `fetch` 全是 GET，无 `method` 选项）。
+
+所以现状下这条路径走不通。**不把它写成「已复现的缺陷」**。
+
+##### 三、为什么仍然要修
+
+⚠ **`HTTPS=on` 之后这条路径会变活。** `settings.SECURE_PROXY_SSL_HEADER`
+已配，一旦上 HTTPS：
+
+- `request.is_secure()` 变真 → CSRF 的 **Referer/Origin 校验首次生效**
+  （HTTP 下这段代码根本不执行）；
+- 而 `CSRF_TRUSTED_ORIGINS` 来自 env（可能为空）——域名、端口、
+  反代改写 Host 任一不匹配，POST 就会被 403 掉；
+- 默认的 403 是 **HTML**（`403_csrf.html`）→ 前端 `res.json()` 抛错 →
+  又是「点提交没反应」，且**只在 HTTPS 环境复现**，最难排查。
+
+##### 四、⚠ 为什么不能用 `handler403`
+
+读 Django 源码确认：`CsrfViewMiddleware.process_view()` 是
+**直接 `return self._reject(request, reason)`**（返回 `HttpResponseForbidden`），
+**不抛异常** —— 所以它既不经 `handler400`，也不经 `handler403`。
+**唯一可用的钩子是 `settings.CSRF_FAILURE_VIEW`。**
+
+```python
+# settings.py
+CSRF_FAILURE_VIEW = 'tnr_system.urls.api_aware_csrf_failure'
+
+# urls.py
+def api_aware_csrf_failure(request, reason=''):
+    if not (request.path or '').startswith('/api/'):
+        return csrf_failure(request, reason=reason)      # 页面仍走 HTML 403 页
+    return JsonResponse(
+        {'success': False, 'data': None,
+         'message': '安全校验未通过，请刷新页面后重试'}, status=403)
+```
+
+⚠ **不回 `reason`**：它是 Django 的内部判定原因（`CSRF cookie not set.` /
+`Origin checking failed - ... does not match ...`），属实现细节。
+⚠ 与 §2.39 的 `handler400` **同一口径**：`/api/` 走 JSON，页面导航走 HTML。
+
+##### 五、反向验证
+
+注释掉 `CSRF_FAILURE_VIEW`：
+
+```
+FAIL: test_real_csrf_rejection_on_api_path_is_json
+  AssertionError: 'text/html' != 'application/json'
+FAIL: test_csrf_failure_view_setting_is_wired
+  AssertionError: <function csrf_failure ...> is not <function api_aware_csrf_failure ...>
+```
+
+改回即全绿。
+
+##### 六、用例数
+
+| 新增 | 内容 |
+|---|---|
+| `core/tests.py::ApiAwareCsrfFailureTest`（4 例） | JSON 信封形状 / **不泄漏 `reason`** / 非 `/api/` 仍是 HTML（正向对照）/ `CSRF_FAILURE_VIEW` 真的接线 |
+| 同上 `ApiAwareCsrfFailureEndToEndTest`（1 例） | 端到端：`enforce_csrf_checks=True` 不带 token POST `/api/me/` → **JSON 403** |
+
+全量 **1041 → 1046 OK**。
+
+> ⚠ 端到端那条**必须用 `TestCase` 而不是 `SimpleTestCase`**：走完整请求栈会触发
+> `business.apps` 挂在 `request_started` 上的**启动补偿**（它要查库），
+> 在 `SimpleTestCase` 里会被禁库拦下并记一条 ERROR 堆栈 —— 那只是测试环境噪音，
+> 但会盖住真正的失败信号。
 
 ---
 
@@ -4957,7 +5057,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 1041 个用例
+python manage.py test --parallel 1  # 1046 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
