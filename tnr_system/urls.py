@@ -10,6 +10,7 @@ from django.http.multipartparser import MultiPartParserError
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
+from django.views.csrf import csrf_failure
 from django.views.defaults import bad_request
 from django.views.generic import TemplateView
 
@@ -84,3 +85,35 @@ def api_aware_bad_request(request, exception=None, template_name='400.html'):
 
 
 handler400 = api_aware_bad_request
+
+
+# ---------------------------------------------------------------------------
+# `/api/` 下的 CSRF 失败也回**可读 JSON**（第三十二轮）
+# ---------------------------------------------------------------------------
+# ⚠ **不能用 `handler403`**：`CsrfViewMiddleware.process_view()` 是**直接返回**
+#   `HttpResponseForbidden`（`self._reject(...)`），**不抛异常** ——
+#   所以它既不经 `handler400` 也不经 `handler403`。唯一可用的钩子是
+#   `settings.CSRF_FAILURE_VIEW`。
+#
+# 当前前端**够不到**这条路径（实测：所有 `/api/` 路由里只有 3 个没 `@csrf_exempt`
+# —— `/api/me/`、`/api/business/adoptions/hall/`、`.../hall/<pk>/` ——
+# 而前端对它们**只发 GET**，CSRF 只校验非安全方法；模板里也没有裸 `fetch` POST）。
+#
+# 但这是**潜在**风险面，且 `HTTPS=on` 之后会变活：届时 `request.is_secure()`
+# 为真，CSRF 的 **Referer/Origin 校验首次生效**，而 `CSRF_TRUSTED_ORIGINS`
+# 来自 env（可能为空）—— 一旦域名/端口对不上，POST 就会被 403 掉，
+# 而默认的 403 是 **HTML**（`403_csrf.html`）→ 前端 `res.json()` 抛错 →
+# 又是「点提交没反应」。所以提前收口。
+def api_aware_csrf_failure(request, reason=''):
+    """`/api/` 前缀 → JSON；其余路径 → 保持 Django 默认的 HTML 403 页。
+
+    ⚠ 不回 `reason`：它是 Django 的内部判定原因（如
+    `CSRF cookie not set.` / `Origin checking failed`），属实现细节。
+    """
+    if not (getattr(request, 'path', '') or '').startswith('/api/'):
+        return csrf_failure(request, reason=reason)
+
+    return JsonResponse(
+        {'success': False, 'data': None,
+         'message': '安全校验未通过，请刷新页面后重试'},
+        status=403)

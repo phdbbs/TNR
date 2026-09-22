@@ -210,6 +210,12 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 # 未列入的域名提交表单会 403。多个用逗号分隔。
 CSRF_TRUSTED_ORIGINS = _env_list('CSRF_TRUSTED_ORIGINS')
 
+# CSRF 失败时 `/api/` 必须回**可读 JSON**，不能是 Django 的 HTML 403 页。
+# ⚠ 只能在这里配 —— `CsrfViewMiddleware` 是**直接返回** `HttpResponseForbidden`
+#   （不抛异常），所以 `handler400` / `handler403` 都接不住它。
+# 详见 `tnr_system/urls.py::api_aware_csrf_failure` 的说明（含「何时会真的触发」）。
+CSRF_FAILURE_VIEW = 'tnr_system.urls.api_aware_csrf_failure'
+
 # 生产环境把请求日志落到 stderr，由 supervisor 收进 /var/log/tnr/*.log
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 LOGGING = {

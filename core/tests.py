@@ -1,16 +1,19 @@
 """core 应用测试：区县与机构模型。"""
+from django.conf import settings
 from django.core.exceptions import (
     RequestDataTooBig, TooManyFieldsSent, TooManyFilesSent,
 )
 from django.db import IntegrityError, transaction
 from django.http.multipartparser import MultiPartParserError
-from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
+from django.test import (
+    Client, RequestFactory, SimpleTestCase, TestCase, override_settings,
+)
 
 from business.tests.base import (
     BusinessTestBase, make_district, make_institution, make_user,
 )
 from core.models import District, Institution
-from tnr_system.urls import api_aware_bad_request
+from tnr_system.urls import api_aware_bad_request, api_aware_csrf_failure
 
 
 class DistrictModelTest(TestCase):
@@ -213,6 +216,79 @@ class ApiAwareBadRequestTest(SimpleTestCase):
 
         self.assertIs(get_resolver(None).resolve_error_handler(400),
                       api_aware_bad_request)
+
+
+class ApiAwareCsrfFailureTest(SimpleTestCase):
+    """`/api/` 下的 CSRF 失败也必须是**可读 JSON**（第三十二轮）。
+
+    ⚠ 只能靠 `settings.CSRF_FAILURE_VIEW` 收口 —— `CsrfViewMiddleware` 是
+    **直接返回** `HttpResponseForbidden`（不抛异常），`handler400` / `handler403`
+    都接不住它。这条与 `ApiAwareBadRequestTest` 是同一个口径的两半。
+    """
+
+    def _resp(self, path, reason='CSRF cookie not set.'):
+        return api_aware_csrf_failure(RequestFactory().post(path), reason=reason)
+
+    @staticmethod
+    def _body(resp):
+        import json
+        return json.loads(resp.content)
+
+    def test_api_path_returns_json_envelope(self):
+        resp = self._resp('/api/me/')
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp['Content-Type'].split(';')[0], 'application/json')
+        body = self._body(resp)
+        self.assertFalse(body['success'])
+        self.assertIsNone(body['data'])
+        self.assertTrue(body['message'])
+
+    def test_reason_is_not_leaked_to_the_client(self):
+        """Django 的判定原因（`CSRF cookie not set.` / `Origin checking failed`）
+        属实现细节，不能回给客户端。"""
+        for reason in ('CSRF cookie not set.', 'Origin checking failed - x does not match y',
+                       'Referer checking failed - no Referer.'):
+            with self.subTest(reason=reason):
+                text = self._resp('/api/me/', reason).content.decode()
+                self.assertNotIn('CSRF cookie', text)
+                self.assertNotIn('Origin checking', text)
+                self.assertNotIn('Referer', text)
+                self.assertNotIn('does not match', text)
+
+    def test_non_api_path_keeps_the_default_html_page(self):
+        """正向对照：页面导航仍拿到 HTML 403 页，不能被改成 JSON。"""
+        resp = self._resp('/shelter/')
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn('text/html', resp['Content-Type'])
+
+    def test_csrf_failure_view_setting_is_wired(self):
+        """证明 `CSRF_FAILURE_VIEW` 真的指向我们的实现。"""
+        from django.utils.module_loading import import_string
+
+        self.assertIs(import_string(settings.CSRF_FAILURE_VIEW),
+                      api_aware_csrf_failure)
+
+
+class ApiAwareCsrfFailureEndToEndTest(TestCase):
+    """端到端：打开真实 CSRF 校验，不带 token POST 非豁免接口 → JSON 403。
+
+    `/api/me/` 是**没有** `@csrf_exempt` 的（全站 `/api/` 里只有 3 个这样，
+    另两个是 `adoptions/hall/` 与 `adoptions/hall/<pk>/`）。CSRF 中间件在
+    `process_view` 阶段就返回，所以不必登录也能触发。
+
+    ⚠ 用 `TestCase`（允许访问数据库）而不是 `SimpleTestCase`：走完整请求栈会
+    触发 `business.apps` 挂在 `request_started` 上的**启动补偿**，它要查库；
+    在 `SimpleTestCase` 里会被禁库拦下并记一条 ERROR 堆栈 ——
+    那只是测试环境噪音，但会盖住真正的失败信号。
+    """
+
+    def test_real_csrf_rejection_on_api_path_is_json(self):
+        c = Client(enforce_csrf_checks=True, SERVER_NAME='localhost')
+        resp = c.post('/api/me/', data='{}', content_type='application/json')
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp['Content-Type'].split(';')[0], 'application/json',
+                         'CSRF 失败不得把接口炸成 HTML 403 页')
+        self.assertIn('安全校验', resp.json()['message'])
 
 
 class ApiTransportLimitEndToEndTest(BusinessTestBase):
