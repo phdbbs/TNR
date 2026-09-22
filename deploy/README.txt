@@ -102,8 +102,29 @@
   # 备份数据库
   mysqldump -u tnr -p tnr_system > tnr_backup_$(date +%Y%m%d).sql
 
+  ⚠⚠ 【2026-09-22 实测补充】上面这条命令只适用于「MySQL 与站点装在同一台机器」
+     的那种部署（即本 README 配套的 deploy.sh 场景）。
+     **当前生产不是这种形态** —— 库是 Docker 容器里的 MariaDB，
+     而宿主机上的客户端是 Oracle 版 mysql-client 8.0，两者不兼容：
+         mysqldump: Couldn't execute 'SELECT ... JSON_EXTRACT(HISTOGRAM, ...)
+                     FROM information_schema.COLUMN_STATISTICS ...':
+                     Unknown table 'COLUMN_STATISTICS' in information_schema (1109)
+     它在**导出第一张表之后就 exit=2 退出**，而输出文件已经写出来了 ——
+     如果只 `> 文件` 不检查退出码，会得到一份**看着有内容、实际只有 1 张表**的
+     备份，比彻底失败更危险。
+     实测对比：坏备份 2KB / 1 张表 vs 正确备份 220KB / 33 张表。
+
+     当前生产请改用**容器内的 mariadb-dump**（版本与服务端一致）：
+         docker exec 1Panel-mariadb-LQ69 mariadb-dump -utnr -p<PASS> \
+             --single-transaction --routines --triggers tnr_system > backup.sql
+     完整可用脚本见 `DEPLOY.md` 的「该服务器的更新方式」一节。
+
   # 备份媒体文件
   tar -czf media_backup_$(date +%Y%m%d).tar.gz /opt/tnr/media/
+
+  ⚠ 代码包同理要留神：`tar ... -C /opt opt/tnr` 是**错的**（等于 /opt/opt/tnr），
+    tar 会 exit=2 并产出 45 字节的空包；正确写法是 `-C / opt/tnr`。
+    归档后必须做**大小闸门**（正常 8MB 量级），否则「备份成功」只是句空话。
 
   建议配置 crontab 定时备份并同步到对象存储。
 
