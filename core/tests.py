@@ -19,6 +19,32 @@ from tnr_system.urls import (
 )
 
 
+def iter_api_routes():
+    """遍历 URLconf，产出所有 `/api/` 下的**具体路径**。
+
+    `<int:pk>` 这类占位符替换成 `1`；转换器参数一律用 `1`，
+    因为这一层只关心「守卫/契约怎么回」，不关心业务是否存在该 id。
+
+    ⚠ 供多个「枚举式契约闸门」共用（未登录响应 / 信封形状 / 非法参数 /
+    各角色访问）。**不要在各测试类里各写一份** —— 遍历逻辑一旦漂移，
+    就会出现「有的闸门覆盖 78 条、有的覆盖 60 条」而无人察觉。
+    """
+    import re
+
+    from django.urls import URLPattern, URLResolver, get_resolver
+
+    def walk(resolver, prefix=''):
+        for entry in resolver.url_patterns:
+            if isinstance(entry, URLResolver):
+                yield from walk(entry, prefix + str(entry.pattern))
+            elif isinstance(entry, URLPattern):
+                full = prefix + str(entry.pattern)
+                if full.startswith('api/'):
+                    yield '/' + re.sub(r'<[^>]+>', '1', full)
+
+    yield from walk(get_resolver())
+
+
 class DistrictModelTest(TestCase):
     def test_create_defaults(self):
         district = make_district(name='测试区', code='X001')
@@ -436,31 +462,9 @@ class AllApiRoutesReturnJsonWhenUnauthenticatedTest(TestCase):
     接口照样漏网。这里从 URLconf **动态枚举**，新增接口自动被覆盖。
     """
 
-    @staticmethod
-    def _iter_api_routes():
-        """遍历 URLconf，产出所有 `/api/` 下的**具体路径**。
-
-        `<int:pk>` 这类占位符替换成 `1`；转换器参数一律用 `1`，
-        因为这一层只关心「守卫怎么回」，不关心业务是否存在该 id。
-        """
-        import re
-
-        from django.urls import URLPattern, URLResolver, get_resolver
-
-        def walk(resolver, prefix=''):
-            for entry in resolver.url_patterns:
-                if isinstance(entry, URLResolver):
-                    yield from walk(entry, prefix + str(entry.pattern))
-                elif isinstance(entry, URLPattern):
-                    full = prefix + str(entry.pattern)
-                    if full.startswith('api/'):
-                        yield '/' + re.sub(r'<[^>]+>', '1', full)
-
-        yield from walk(get_resolver())
-
     def test_every_api_route_answers_json_when_unauthenticated(self):
         c = Client(SERVER_NAME='localhost')
-        routes = sorted(set(self._iter_api_routes()))
+        routes = sorted(set(iter_api_routes()))
         self.assertGreater(len(routes), 20,
                            '路由枚举结果太少，说明遍历逻辑坏了（会变成假绿）')
 
@@ -483,3 +487,125 @@ class AllApiRoutesReturnJsonWhenUnauthenticatedTest(TestCase):
             '以下 /api/ 路由在未登录时没有回 JSON —— 前端 res.json() 会抛错：\n  '
             + '\n  '.join(offenders),
         )
+
+
+class AllApiRoutesContractTest(BusinessTestBase):
+    """枚举全部 `/api/` 路由的**契约闸门**（第三十三轮）。
+
+    与 `AllApiRoutesReturnJsonWhenUnauthenticatedTest`（未登录那一面）互补，
+    这里钉的是**已登录之后**的三条契约：
+
+    ① **响应信封形状** —— 每个响应都必须是 `{'success': bool, ...}`。
+       前端普遍写 `if (res.success)`；某个接口不回这个字段，前端就会
+       把成功当成失败（或反之），而且**界面上看不出接口错了**。
+    ② **非法查询参数不得 500** —— 「可以 4xx、可以 200（忽略），
+       但**不能 500**」（见 `MEMORY.md` 的查询参数契约，第二十四轮）。
+       一个非法值会以四种不同异常炸接口：`ValueError` / `OverflowError`
+       （超大数）/ `ValidationError`（非日期）/ `OverflowError`
+       （`date.max + 1天`，同名不同源），所以「随手包一层 `except ValueError`」
+       是假修 —— 必须走 `services.parse_int_param()` 等共用解析。
+    ③ **每个角色访问每条路由都不得 500、不得非 JSON** —— 这一条最容易抓到
+       `Model.DISTRICT_LOOKUP` 缺失（模型无 `district` 外键却忘了声明派生路径）
+       导致的 `FieldError`：⚠ **市级走 `return all()` 绕过该分支，
+       只测市级账号永远不暴露**，必须把低权限角色也跑一遍。
+
+    ⚠ 全部是 GET。GET 语义上幂等，且整个方法跑在 `TestCase` 的事务里，
+    结束即回滚 —— 不会污染夹具。**POST 不在这里枚举**：那会真的写库，
+    且方法内部后续请求的行为会被前面写过的数据带偏（已有
+    `AllApiRoutesReturnJsonWhenUnauthenticatedTest` 覆盖未登录 POST）。
+    """
+
+    # ⚠ 参数名是从生产代码里 `Grep 'request.GET.get('` 抄出来的**真实参数名**，
+    # 不是想当然编的 —— 编出来的参数名接口根本不读，等于没测。
+    BAD_QUERIES = (
+        # 整型外键 / 主键（`parse_int_param` 或直接 int()）
+        'id=abc',
+        'id=999999999999999999999999',
+        'district_id=abc',
+        'institution_id=abc',
+        'material_id=abc',
+        # 字符串过滤项（区县 / 小区 / 捕捉点名）
+        'district=abc',
+        'community=abc',
+        'shelter=abc',
+        # 数量类（有上限，见 MAX_CAPTURE_BATCH）
+        'count=abc',
+        'count=999999999999999999999999',
+        'limit=999999999999999999999999',
+        'page_size=abc',
+        # 日期类（parse_date_param）
+        'date=notadate',
+        'start_date=notadate',
+        'end_date=2026-13-45',
+        # 浮点（经纬度，裸 float() + 范围校验）
+        'lat=abc',
+        'lng=abc',
+        'lat=999999999999999999999999',
+        # 枚举 / 文本注入 / 布尔类
+        'status=<script>',
+        'type=__proto__',
+        'role=admin',
+        'business_type=<img src=x>',
+        'include_deleted=yes',
+        'q=%00',
+    )
+
+    def setUp(self):
+        self.routes = sorted(set(iter_api_routes()))
+        self.assertGreater(
+            len(self.routes), 20,
+            '路由枚举结果太少，说明遍历逻辑坏了（会变成假绿）')
+
+    def _assert_all_json(self, problems, label):
+        self.assertEqual(
+            problems, [],
+            '%s 发现以下问题：\n  ' % label + '\n  '.join(problems))
+
+    def test_every_route_returns_a_success_envelope(self):
+        self.login_as(self.gov_city)
+        problems = []
+        for path in self.routes:
+            resp = self.client.get(path)
+            ctype = (resp.get('Content-Type') or '').split(';')[0]
+            if resp.status_code >= 500:
+                problems.append('5xx  %s %s' % (path, resp.status_code))
+                continue
+            if ctype != 'application/json':
+                problems.append('%s %s %s' % (path, resp.status_code, ctype))
+                continue
+            body = resp.json()
+            if not isinstance(body, dict) or 'success' not in body:
+                problems.append('%s 响应体缺少 success 字段（keys=%s）'
+                                % (path, list(body)[:6]))
+        self._assert_all_json(problems, '信封形状')
+
+    def test_bad_query_params_never_500(self):
+        self.login_as(self.gov_city)
+        problems = []
+        for path in self.routes:
+            for query in self.BAD_QUERIES:
+                resp = self.client.get(path + '?' + query)
+                if resp.status_code >= 500:
+                    problems.append('%s ?%s → %s'
+                                    % (path, query, resp.status_code))
+        self._assert_all_json(problems, '非法查询参数')
+
+    def test_no_role_triggers_5xx_or_non_json(self):
+        roles = (
+            ('gov_district', self.gov_a),
+            ('shelter', self.shelter_user_a),
+            ('hospital', self.hospital_user_a),
+            ('adopter', self.adopter),
+        )
+        for role_name, user in roles:
+            with self.subTest(role=role_name):
+                self.client.logout()
+                self.login_as(user)
+                problems = []
+                for path in self.routes:
+                    resp = self.client.get(path)
+                    ctype = (resp.get('Content-Type') or '').split(';')[0]
+                    if resp.status_code >= 500 or ctype != 'application/json':
+                        problems.append('%s → %s %s'
+                                        % (path, resp.status_code, ctype))
+                self._assert_all_json(problems, '%s 角色' % role_name)
