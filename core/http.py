@@ -24,6 +24,29 @@ import json
 from django.core.exceptions import RequestDataTooBig
 
 
+def is_api_request(request):
+    """`/api/` 前缀判定 —— **全项目唯一口径**。
+
+    前端 `TNR_API` 的三个封装（`_get` / `_post` / `_postForm`）内部都是
+    `await res.json()`。所以**任何** `/api/` 响应只要不是 JSON，前端就会
+    抛 `SyntaxError` —— 表现为「页面空白」或「点了没反应」，而服务端日志里
+    只有一个 4xx/5xx，看起来完全正常。
+
+    因此所有「错误响应形状」的收口点都必须按**同一个口径**分流：
+
+        `handler400` / `handler404` / `handler500`
+        `settings.CSRF_FAILURE_VIEW`
+        `accounts.decorators.role_required` / `api_login_required`
+
+    任何一处写成 `request.path_info`、`startswith('api/')`（漏斜杠）、
+    `'/api' in path`（会误命中 `/api-docs/`），就会留下「有的接口回 JSON、
+    有的回 HTML」的裂缝 —— 而且**测试很难发现**，因为裂缝只在特定路径上出现。
+
+    ⚠ 用 `getattr` 兜底：`handler500` 拿到的 request 可能是残缺对象。
+    """
+    return (getattr(request, 'path', '') or '').startswith('/api/')
+
+
 def read_json_body(request):
     """安全地把 `request.body` 解析出来 —— **任何失败都返回 `{}`**。
 

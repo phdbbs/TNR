@@ -9,7 +9,7 @@ from django.db.models import Sum, Count, Q, Prefetch
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
-from accounts.decorators import role_required
+from accounts.decorators import api_login_required, role_required
 from accounts.models import User
 from business.models import (
     Pet, Capture, Transfer, Treatment, Material, MaterialTransaction,
@@ -153,11 +153,14 @@ def dashboard_stats(request):
 # 2. 机构列表
 # ============================================
 @csrf_exempt
-@login_required
+@api_login_required
 def institution_list(request):
     """机构列表（支持 ?type 过滤，按区县范围过滤）
 
     基础数据，所有登录用户均可查询（用于下拉选择等）。
+
+    ⚠ 未登录必须回 **401 JSON**（不能用裸 `@login_required` —— 它 302 到登录页，
+    前端 fetch 跟随后拿到 200 + HTML，`res.json()` 抛错 → 下拉渲染中断）。
     """
     qs = _scope_filter(Institution.objects.all(), request)
     inst_type = request.GET.get('type')
@@ -374,9 +377,12 @@ def institution_toggle_status(request, pk):
 # 6. 区县列表
 # ============================================
 @csrf_exempt
-@login_required
+@api_login_required
 def district_list(request):
-    """区县列表（基础数据，所有登录用户可查询）"""
+    """区县列表（基础数据，所有登录用户可查询）
+
+    ⚠ 同 `institution_list`：未登录必须回 401 JSON，不能用裸 `@login_required`。
+    """
     qs = District.objects.all()
     data = [serialize_instance(d) for d in qs]
     return json_ok(data)

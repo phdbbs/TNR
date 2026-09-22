@@ -223,9 +223,17 @@ class AuditLogViewScopeTest(BusinessTestBase):
             self.assertIn(key, row)
 
     def test_adopter_cannot_read_logs(self):
+        """领养人（非政府角色）读操作日志 → **403 JSON**。
+
+        ⚠ 原来断言的是 `assertIn(status, (302, 403, 404))` —— 把三种结果都算通过。
+        其中 **302 是没有道理的**：已登录用户不该被重定向到登录页
+        （那正是第三十三轮修掉的 `/api/` 未登录缺陷形态）。宽松断言会让
+        「装饰器被写回裸 `@login_required`」这类回归悄悄溜过去。
+        """
         self.login_as(self.adopter)
         resp = self.get_json('/api/supervision/logs/')
-        self.assertIn(resp.status_code, (302, 403, 404))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp['Content-Type'].split(';')[0], 'application/json')
 
 
 class AuditLogSearchFieldContractTest(BusinessTestBase):

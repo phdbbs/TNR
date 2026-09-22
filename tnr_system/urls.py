@@ -11,13 +11,14 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from django.views.csrf import csrf_failure
-from django.views.defaults import bad_request
+from django.views.defaults import bad_request, page_not_found, server_error
 from django.views.generic import TemplateView
 
 from business.views_portal import (
     adopter_portal, adoption_hall_public, hospital_portal, shelter_portal,
     gov_portal,
 )
+from core.http import is_api_request
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -71,7 +72,7 @@ def api_aware_bad_request(request, exception=None, template_name='400.html'):
     **只按路径前缀分流**：页面导航拿到的仍是可读的 HTML 错误页，
     接口调用拿到的是能 `res.json()` 的 JSON 信封。
     """
-    if not (getattr(request, 'path', '') or '').startswith('/api/'):
+    if not is_api_request(request):
         return bad_request(request, exception, template_name)
 
     message = '请求被拒绝'
@@ -110,10 +111,55 @@ def api_aware_csrf_failure(request, reason=''):
     ⚠ 不回 `reason`：它是 Django 的内部判定原因（如
     `CSRF cookie not set.` / `Origin checking failed`），属实现细节。
     """
-    if not (getattr(request, 'path', '') or '').startswith('/api/'):
+    if not is_api_request(request):
         return csrf_failure(request, reason=reason)
 
     return JsonResponse(
         {'success': False, 'data': None,
          'message': '安全校验未通过，请刷新页面后重试'},
         status=403)
+
+
+# ---------------------------------------------------------------------------
+# `/api/` 下的 404 / 500 也回**可读 JSON**（第三十三轮）
+# ---------------------------------------------------------------------------
+# 同一条链路（前端 `res.json()`）上的另外两个出口：
+#
+#   404  前端打了一个不存在的接口 —— 后端下线了接口而前端没同步、
+#        或契约守卫没覆盖到的路径。默认是 **HTML**（`404.html`）。
+#   500  视图抛了未捕获异常。默认是 **HTML**（`500.html`）。
+#
+# 两者的后果与 400 / 413 / CSRF 403 完全一样：前端 `res.json()` 抛错 →
+# 用户看到「页面空白」或「点了没反应」，而**服务端只留一个 4xx/5xx 日志**。
+#
+# ⚠ `handler500` 的签名**只有一个参数** `(request)`（`handler400` / `handler404`
+#   是 `(request, exception)`）。写错会在 500 时**再抛一次异常**，
+#   而那次异常没有任何 handler 能接 —— 用户看到的是裸连接断开。
+# ⚠ `handler500` 里**不要碰数据库**：500 的成因很可能就是数据库不可用。
+#   所以这里只拼常量字符串，不做任何查询。
+# ⚠ 不要回 `str(exception)` 或 `request.path`：前者泄漏实现细节，
+#   后者把用户输入原样回显（反射型 XSS 的常见入口）。
+def api_aware_not_found(request, exception=None):
+    """`/api/` 前缀 → JSON；其余路径 → 保持 Django 默认的 HTML 404 页。"""
+    if not is_api_request(request):
+        return page_not_found(request, exception)
+
+    return JsonResponse({'success': False, 'data': None, 'message': '接口不存在'},
+                        status=404)
+
+
+def api_aware_server_error(request):
+    """`/api/` 前缀 → JSON；其余路径 → 保持 Django 默认的 HTML 500 页。
+
+    ⚠ 签名只有 `request` 一个参数（与 `handler400` / `handler404` 不同）。
+    """
+    if not is_api_request(request):
+        return server_error(request)
+
+    return JsonResponse(
+        {'success': False, 'data': None, 'message': '服务器内部错误，请稍后重试'},
+        status=500)
+
+
+handler404 = api_aware_not_found
+handler500 = api_aware_server_error

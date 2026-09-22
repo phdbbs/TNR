@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from accounts.decorators import api_login_required
 from accounts.models import User
 from core.http import read_json_body
 
@@ -79,11 +80,15 @@ def api_me(request):
 
 
 @csrf_exempt
-@login_required
+@api_login_required
 def api_change_password(request):
     """修改当前登录用户的密码。
 
     POST JSON: {"old_password": "...", "new_password": "...", "confirm_password": "..."}
+
+    ⚠ 未登录时必须回 **401 JSON**，不能用 Django 自带的 `@login_required`
+    （它 302 到登录页 → fetch 跟随后拿到 200 + HTML → `res.json()` 抛错
+    → 用户看到「点提交没反应」）。详见 `accounts.decorators.api_login_required`。
     """
     if request.method != 'POST':
         return JsonResponse({'success': False, 'message': '仅支持 POST 请求'}, status=405)

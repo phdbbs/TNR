@@ -139,9 +139,20 @@ class ChangePasswordTest(ApiMixin, TestCase):
         cls.user = make_user("pwd_user", role="shelter",
                              district=cls.district, institution=cls.institution)
 
-    def test_anonymous_redirected(self):
+    def test_anonymous_gets_json_401(self):
+        """未登录必须回 **401 JSON**，不能 302 到登录页。
+
+        ⚠ 这条断言原来写的是 `assertIn(resp.status_code, (302, 403))` ——
+        **把缺陷本身当成了正确行为**（连测试名都叫 `..._redirected`）。
+        但 `fetch` 的默认 `redirect` 是 `'follow'`：302 会被自动跟随到
+        `/login/`，最终 status 是 **200**、body 是 **HTML 登录页** ——
+        前端 `res.json()` 抛 `SyntaxError` → 用户看到「点提交没反应」。
+        所以 302 正是第三十三轮修掉的缺陷，不能再被断言钉住。
+        """
         resp = self.client.post(self.URL, data='{}', content_type='application/json')
-        self.assertIn(resp.status_code, (302, 403))
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp['Content-Type'].split(';')[0], 'application/json')
+        self.assertFalse(resp.json()['success'])
 
     def test_change_success_and_session_kept(self):
         self.client.force_login(self.user)

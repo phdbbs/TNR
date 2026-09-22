@@ -13,7 +13,10 @@ from business.tests.base import (
     BusinessTestBase, make_district, make_institution, make_user,
 )
 from core.models import District, Institution
-from tnr_system.urls import api_aware_bad_request, api_aware_csrf_failure
+from tnr_system.urls import (
+    api_aware_bad_request, api_aware_csrf_failure, api_aware_not_found,
+    api_aware_server_error,
+)
 
 
 class DistrictModelTest(TestCase):
@@ -316,3 +319,167 @@ class ApiTransportLimitEndToEndTest(BusinessTestBase):
                          '传输层闸门不得把接口炸成 HTML 错误页')
         self.assertFalse(resp.json()['success'])
         self.assertIn('照片数量过多', resp.json()['message'])
+
+
+class ApiAwareNotFoundTest(SimpleTestCase):
+    """`/api/` 下的 404 必须是**可读 JSON**（第三十三轮）。
+
+    前端打了一个不存在的接口（后端下线了接口而前端没同步、路径拼错），
+    默认拿到的是 HTML 404 页 → `res.json()` 抛错 → 页面空白。
+    """
+
+    def _resp(self, path, exc=None):
+        return api_aware_not_found(RequestFactory().get(path), exc)
+
+    @staticmethod
+    def _body(resp):
+        import json
+        return json.loads(resp.content)
+
+    def test_api_path_returns_json_envelope(self):
+        resp = self._resp('/api/business/nope/')
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp['Content-Type'].split(';')[0], 'application/json')
+        body = self._body(resp)
+        self.assertFalse(body['success'])
+        self.assertIsNone(body['data'])
+        self.assertTrue(body['message'])
+
+    def test_message_does_not_echo_the_request_path(self):
+        """⚠ 不能把 `request.path` 原样回显 —— 那是反射型 XSS 的常见入口。
+
+        路径里可以塞 `/<script>alert(1)</script>`，回显就等于把用户输入
+        当成了响应内容。这里只回固定文案。
+        """
+        evil = '/api/<script>alert(1)</script>/'
+        text = self._resp(evil).content.decode()
+        self.assertNotIn('<script>', text)
+        self.assertNotIn('alert(1)', text)
+
+    def test_non_api_path_keeps_the_default_html_page(self):
+        """正向对照：页面导航仍拿到 HTML 404 页，不能被改成 JSON。"""
+        resp = self._resp('/nope-page/')
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn('text/html', resp['Content-Type'])
+
+    def test_handler404_is_wired_into_the_root_urlconf(self):
+        from django.urls import get_resolver
+
+        self.assertIs(get_resolver(None).resolve_error_handler(404),
+                      api_aware_not_found)
+
+
+class ApiAwareServerErrorTest(SimpleTestCase):
+    """`/api/` 下的 500 也必须是**可读 JSON**（第三十三轮）。
+
+    ⚠ 与 400 / 404 的关键差别：`handler500` 的签名**只有一个参数**。
+    写错会在 500 时**再抛一次异常**，而那次异常没有任何 handler 能接 ——
+    用户看到的是裸连接断开，比 HTML 错误页更难排查。
+    """
+
+    def _resp(self, path):
+        return api_aware_server_error(RequestFactory().get(path))
+
+    @staticmethod
+    def _body(resp):
+        import json
+        return json.loads(resp.content)
+
+    def test_handler500_takes_exactly_one_argument(self):
+        """把「签名只有一个参数」钉死，防止有人照着 handler400 改成两个。"""
+        import inspect
+
+        params = inspect.signature(api_aware_server_error).parameters
+        self.assertEqual(list(params), ['request'],
+                         'handler500 的签名只能是 (request)')
+
+    def test_api_path_returns_json_envelope(self):
+        resp = self._resp('/api/business/captures/')
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(resp['Content-Type'].split(';')[0], 'application/json')
+        body = self._body(resp)
+        self.assertFalse(body['success'])
+        self.assertIsNone(body['data'])
+        self.assertTrue(body['message'])
+
+    def test_message_never_leaks_internals(self):
+        text = self._resp('/api/x/').content.decode()
+        for leak in ('Traceback', 'Exception', 'settings.', 'site-packages'):
+            self.assertNotIn(leak, text)
+
+    def test_non_api_path_keeps_the_default_html_page(self):
+        resp = self._resp('/portal/')
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn('text/html', resp['Content-Type'])
+
+    def test_handler500_is_wired_into_the_root_urlconf(self):
+        from django.urls import get_resolver
+
+        self.assertIs(get_resolver(None).resolve_error_handler(500),
+                      api_aware_server_error)
+
+
+class AllApiRoutesReturnJsonWhenUnauthenticatedTest(TestCase):
+    """**枚举全部 `/api/` 路由**：未登录访问时响应必须是 JSON。
+
+    这条是第三十三轮那个缺陷的**防回归闸门**。当时的形态是：
+    三处接口写的是 Django 自带的 `@login_required`（而不是 `role_required`
+    或 `api_login_required`），未登录时 `redirect_to_login()` → **302**；
+    而 `fetch` 默认 `redirect: 'follow'` → 跟随到 `/login/` → 最终 **200**
+    + **HTML** → `res.json()` 抛 `SyntaxError`。
+
+    ⚠ 注意**不能**只断言「状态码不是 302」：跟随后是 200，状态码看着完全正常。
+    必须断言 **`Content-Type` 是 `application/json`**，并且**跟随重定向**
+    （`Client` 默认就跟随）。
+
+    ⚠ 也不能只测「已知的那三个接口」—— 那样下一个新写的裸 `@login_required`
+    接口照样漏网。这里从 URLconf **动态枚举**，新增接口自动被覆盖。
+    """
+
+    @staticmethod
+    def _iter_api_routes():
+        """遍历 URLconf，产出所有 `/api/` 下的**具体路径**。
+
+        `<int:pk>` 这类占位符替换成 `1`；转换器参数一律用 `1`，
+        因为这一层只关心「守卫怎么回」，不关心业务是否存在该 id。
+        """
+        import re
+
+        from django.urls import URLPattern, URLResolver, get_resolver
+
+        def walk(resolver, prefix=''):
+            for entry in resolver.url_patterns:
+                if isinstance(entry, URLResolver):
+                    yield from walk(entry, prefix + str(entry.pattern))
+                elif isinstance(entry, URLPattern):
+                    full = prefix + str(entry.pattern)
+                    if full.startswith('api/'):
+                        yield '/' + re.sub(r'<[^>]+>', '1', full)
+
+        yield from walk(get_resolver())
+
+    def test_every_api_route_answers_json_when_unauthenticated(self):
+        c = Client(SERVER_NAME='localhost')
+        routes = sorted(set(self._iter_api_routes()))
+        self.assertGreater(len(routes), 20,
+                           '路由枚举结果太少，说明遍历逻辑坏了（会变成假绿）')
+
+        offenders = []
+        for path in routes:
+            for method in ('get', 'post'):
+                resp = getattr(c, method)(path, data={})
+                ctype = (resp.get('Content-Type') or '').split(';')[0]
+                if ctype != 'application/json':
+                    offenders.append(
+                        '%s %s → %s %s%s' % (
+                            method.upper(), path, resp.status_code, ctype,
+                            ' (重定向到 %s)' % resp['Location']
+                            if resp.get('Location') else '',
+                        )
+                    )
+
+        self.assertEqual(
+            offenders, [],
+            '以下 /api/ 路由在未登录时没有回 JSON —— 前端 res.json() 会抛错：\n  '
+            + '\n  '.join(offenders),
+        )
