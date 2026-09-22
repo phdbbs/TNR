@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **1046 个用例，全部通过**（约 76 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1056 个用例，全部通过**（约 76 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**）+ 三十一轮 **2 道闸门**（`DATA_UPLOAD_MAX_NUMBER_FILES` 默认 **100**，而产品自己声明「单批最多 100 只」= 100 张单只照片 + 1 张合影 = **101 个文件** → 第 100 只的照片连解析都过不去，`400 **text/html**`；nginx `client_max_body_size` 20M → 100 张手机压缩图约 30–50MB → `413 **text/html**`。两者前端都表现为「点提交没反应」；修法：设置按产品上限推导 + 新增 `handler400` 把 `/api/` 下所有传输层 400 收口成**可读 JSON** + nginx `error_page 413` 同口径）+ 三十二轮 **1 项预防性收口**（CSRF 403 默认也是 **HTML**（`403_csrf.html`）→ 前端静默。⚠ **当前前端够不到**：全站 78 条 `/api/` 路由里只有 3 条非 `csrf_exempt`，而前端对它们**只发 GET**、模板里也无裸 `fetch` POST。但 `HTTPS=on` 后 CSRF 的 Referer/Origin 校验首次生效，`CSRF_TRUSTED_ORIGINS` 为空时就会踩到。⚠ 唯一钩子是 `CSRF_FAILURE_VIEW` —— `CsrfViewMiddleware` **直接返回**响应、不抛异常，`handler403` 接不住） |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**）+ 三十一轮 **2 道闸门**（`DATA_UPLOAD_MAX_NUMBER_FILES` 默认 **100**，而产品自己声明「单批最多 100 只」= 100 张单只照片 + 1 张合影 = **101 个文件** → 第 100 只的照片连解析都过不去，`400 **text/html**`；nginx `client_max_body_size` 20M → 100 张手机压缩图约 30–50MB → `413 **text/html**`。两者前端都表现为「点提交没反应」；修法：设置按产品上限推导 + 新增 `handler400` 把 `/api/` 下所有传输层 400 收口成**可读 JSON** + nginx `error_page 413` 同口径）+ 三十二轮 **1 项预防性收口**（CSRF 403 默认也是 **HTML**（`403_csrf.html`）→ 前端静默。⚠ **当前前端够不到**：全站 78 条 `/api/` 路由里只有 3 条非 `csrf_exempt`，而前端对它们**只发 GET**、模板里也无裸 `fetch` POST。但 `HTTPS=on` 后 CSRF 的 Referer/Origin 校验首次生效，`CSRF_TRUSTED_ORIGINS` 为空时就会踩到。⚠ 唯一钩子是 `CSRF_FAILURE_VIEW` —— `CsrfViewMiddleware` **直接返回**响应、不抛异常，`handler403` 接不住）+ 三十三轮 **2 个出口**（① **3 处 `/api/` 接口未登录时 302 到登录页**（`/api/me/password/`、`/api/supervision/institutions/`、`/api/supervision/districts/` —— 都是「所有登录用户可用」所以当初只写了裸 `@login_required`，而它没有 `/api/` 的 JSON 分支）；⚠ 关键在于 **`fetch` 默认 `redirect: 'follow'`**：302 被自动跟随到 `/login/`，最终 status **200** + **HTML 登录页** → `res.json()` 抛 `SyntaxError` → `_get` 的调用点（下拉数据源）**渲染中断、页面空白**，`_post` / `_postForm` 的调用点**「点了没反应」**；② `/api/` 下 **404 / 500 也是 HTML**（前端打错路径、或视图抛未捕获异常 → 同样静默）。修法：新增 `core.http.is_api_request` 统一口径 + `api_login_required` 装饰器 + `handler404` / `handler500`；⚠ **这个 302 缺陷我第三十一轮亲手误判成「正常重定向」**，教训已记入 §2.41） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -4873,6 +4873,123 @@ FAIL: test_csrf_failure_view_setting_is_wired
 
 ---
 
+#### 2.41 未登录的 `/api/` 请求 302 到登录页 · 404/500 是 HTML（第三十三轮）
+
+§2.40 收的是 CSRF 403。修完后我把「前端 `res.json()` 拿到非 JSON」这条链路上
+**剩下的出口**逐个枚举了一遍 —— 发现还漏两个，而且**其中一个我上一轮亲手误判过**。
+
+##### 一、实测：改前（同一个探针，改前改后各跑一次）
+
+| 用例 | 改前 | 改后 |
+|---|---|---|
+| 未登录 `POST /api/me/password/` | **302 → `/login/?next=…`** | **401 JSON** |
+| 未登录 `GET /api/supervision/institutions/` | **302 → `/login/?next=…`** | **401 JSON** |
+| 未登录 `GET /api/supervision/districts/` | **302 → `/login/?next=…`** | **401 JSON** |
+| 未登录 `GET /api/business/captures/` | 401 JSON（本来就对） | 401 JSON |
+| `GET /api/business/nope-nope/`（不存在） | **404 text/html** | **404 JSON** |
+| `GET /api/nope/`（不存在） | **404 text/html** | **404 JSON** |
+
+##### 二、根因：`fetch` 的默认 `redirect: 'follow'` 把 302 变成了「200 + HTML」
+
+前端三个封装全是 `await res.json()`：
+
+```js
+async _get(url)      { const res = await fetch(url);        const data = await res.json(); … }
+async _post(url, b)  { const res = await fetch(url, {…});   return res.json(); }
+async _postForm(…)   { const res = await fetch(url, {…});   return res.json(); }
+```
+
+`fetch` 默认**自动跟随重定向**。于是未登录时：
+
+```
+302 → 自动跟随到 /login/ → 最终 status **200**、body 是 **HTML 登录页**
+    → res.json() 抛 SyntaxError
+```
+
+⚠ **关键点：这不是「非 2xx 返回 `[]`」那条路径**（跟随后是 **200**）。
+所以 **`_get` 也会抛错**，不只是 `_post`。后果分两种：
+
+- `_get` 的调用点（`getInstitutions` / `getDistricts` 这类**下拉数据源**）
+  → 渲染函数中断 → **页面空白**；
+- `_post` / `_postForm` 的调用点（提交）→ **「点了没反应」**。
+
+##### 三、⚠ 这个缺陷我上一轮亲手误判过，必须记下来
+
+第三十一轮验证 nginx 413 时，我用**直连 gunicorn 的 8000 端口**打
+`POST /api/me/password/`，拿到 `302 text/html`，当时的结论是
+「这是 `login_required` 的**正常**重定向」。**那个归因是错的** ——
+它正是本节的缺陷。当时错在两处：
+
+1. 直连 8000 绕过 nginx，测的本来就不是真实路径（该打 80 端口）；
+2. 把「302 到登录页」当成了页面导航的正常行为，**没意识到 `/api/` 路径上
+   它会被 `fetch` 跟随成 200 + HTML**。
+
+教训：**「看起来合理的解释」比「无法解释」更危险** —— 它会让人停止追问。
+
+##### 四、修法：把 `/api/` 的未登录判定收成共用能力
+
+三处接口写的是 Django 自带的 `@login_required`（因为它们是「所有登录用户可用」，
+没有角色限制，所以当初没写 `role_required`）—— 而 `role_required`
+**本来就自带** `/api/` 的 401 JSON 分支，裸 `login_required` 没有。
+
+| 改动 | 位置 |
+|---|---|
+| 新增 `is_api_request(request)` —— **全项目唯一**的 `/api/` 口径 | `core/http.py` |
+| 新增 `api_unauthorized()` / `api_forbidden()` —— 401/403 响应形状唯一 | `accounts/decorators.py` |
+| 新增 `api_login_required` —— 「只要求登录」的接口专用 | `accounts/decorators.py` |
+| 3 处 `@login_required` → `@api_login_required` | `accounts/views.py`、`supervision/views.py`×2 |
+| 新增 `handler404` / `handler500`（与 `handler400` 同口径） | `tnr_system/urls.py` |
+| `handler400` / `CSRF_FAILURE_VIEW` 也改用 `is_api_request` | `tnr_system/urls.py` |
+
+⚠ `handler500` 的签名**只有一个参数** `(request)`（`handler400` / `handler404`
+是 `(request, exception)`）。写错会在 500 时**再抛一次异常**，而那次异常
+**没有任何 handler 能接** —— 用户看到裸连接断开，比 HTML 错误页更难排查。
+已用 `inspect.signature` 把这条钉死。
+
+⚠ `handler500` 里**不碰数据库**（500 的成因很可能就是数据库不可用），
+也不回 `str(exception)` / `request.path`（前者泄漏实现细节，后者是反射型 XSS 入口）。
+
+##### 五、反向验证（两组，都精确变红）
+
+1. 把 `api_login_required` 里的 `/api/` 拦截临时去掉 → 枚举测试报出
+   **6 条 offender**（3 处接口 × GET/POST），全是
+   `302 text/html (重定向到 /login/?next=…)`。
+2. 注释掉 `handler404` / `handler500` 的赋值 → **2 个接线测试**精确失败
+   （`page_not_found is not api_aware_not_found`、
+   `server_error is not api_aware_server_error`）。
+
+> ⚠ 第 2 组暴露了一个**测试设计要点**：注释掉 handler 后，
+> **「内容测试」全绿、只有「接线测试」红**。
+> 因为内容测试是**直接调用 handler 函数**，不依赖接线 ——
+> 如果只写内容测试，即使 handler 压根没被 Django 用上，测试也是绿的（**假绿**）。
+> 所以两组必须成对写。
+
+##### 六、用例数
+
+| 新增 | 内容 |
+|---|---|
+| `core/tests.py::ApiAwareNotFoundTest`（4 例） | JSON 信封 / **不回显 `request.path`**（反射 XSS）/ 非 `/api/` 仍是 HTML / `handler404` 真的接线 |
+| `core/tests.py::ApiAwareServerErrorTest`（5 例） | **签名只有一个参数** / JSON 信封 / 不泄漏内部信息 / 非 `/api/` 仍是 HTML / `handler500` 真的接线 |
+| `core/tests.py::AllApiRoutesReturnJsonWhenUnauthenticatedTest`（1 例） | **动态枚举 URLconf 里全部 78 条 `/api/` 路由**，未登录 GET+POST 逐个请求，断言 `Content-Type` 必须是 `application/json` |
+
+同时**修正两条把缺陷当成正确行为的存量断言**：
+
+- `accounts/tests.py::ChangePasswordTest::test_anonymous_redirected`
+  （连名字都叫 `redirected`）原本 `assertIn(status, (302, 403))` → 改为断言 401 JSON；
+- `core/tests_audit.py::AuditLogApiTest::test_adopter_cannot_read_logs`
+  原本 `assertIn(status, (302, 403, 404))` → 收紧为精确 403 JSON
+  （已登录用户**不该**被 302 到登录页）。
+
+全量 **1046 → 1056 OK**（76 秒）。
+
+> 那条枚举测试是本轮最有价值的产出：它**从 URLconf 动态取路由**，
+> 而不是硬编码「已知的那三个接口」—— 下一个新写的裸 `@login_required`
+> 接口会自动被覆盖，不需要有人记得来加用例。
+> 它也自带一条防呆断言（`assertGreater(len(routes), 20)`），
+> 防止遍历逻辑写坏后「枚举到 0 条 → 无 offender → 假绿」。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -5057,7 +5174,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 1046 个用例
+python manage.py test --parallel 1  # 1056 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md

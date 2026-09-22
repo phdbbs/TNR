@@ -183,6 +183,7 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 | 演示账号可用 | 访问 `/login/` 用 `cy_shelter` / `123456` | 能进入捕捉点门户 |
 | **照片上传可用**（含手机原图） | 用 **≥3MB 的真实手机照片**提交捕捉登记（或多张合照），再**经反代取回** | 上传成功；`media/` 出现文件；`/media/...` 返回 200 且**与原图逐字节一致**；**不得**出现 `RequestDataTooBig` 的 400 |
 | **请求体上限一致** | 见下方 §5.5 / §5.7 | nginx `client_max_body_size` **20M**；`DATA_UPLOAD_MAX_MEMORY_SIZE` 未被人为调小；`DATA_UPLOAD_MAX_NUMBER_FILES` **≥ `MAX_CAPTURE_BATCH + 1`**；`/api/` 的 400 与 413 **都是 JSON**（`handler400` + nginx `error_page 413`） |
+| **`/api/` 响应形状一致** | 见下方 §5.8 / §5.9 | 五类非 2xx **全是 JSON**：400（`handler400`）/ 403 CSRF（`CSRF_FAILURE_VIEW`）/ **404（`handler404`）** / **500（`handler500`）** / 413（nginx）；**未登录不得 302 到登录页**（用 `api_login_required` 或 `role_required`）。⚠ 自检必须**经 nginx（80 端口）**，直连 8000 结果不可信 |
 | **超大图被拦且可读** | 见下方 §5.5 的 curl 片段：直接发一个 >10MB 的 multipart 请求 | HTTP **400 且响应体是 JSON**，文案含「超过 10MB 上限」；**不得**是 Django 的 HTML 报错页 |
 | **数据隔离生效** | 用他区账号访问本区宠物生命周期，**再访问一个不存在的 id** | **两者响应完全一致**（都是 404 且文案相同）—— 否则可用枚举 id 扫库 |
 | 数据一致性 | `python manage.py check_data_integrity` | 输出「未发现一致性问题」，退出码 0 |
@@ -604,6 +605,70 @@ grep CSRF_TRUSTED_ORIGINS /opt/tnr/.env
 # 期望形如 CSRF_TRUSTED_ORIGINS=https://your.domain（含协议，不含路径）
 ```
 
+### 5.9 ⚠ 未登录的 `/api/` 请求会 302 到登录页 · 404 / 500 也是 HTML
+
+同一条链路（前端 `await res.json()`）上剩下的三个出口。
+
+**① 未登录 → 302（最容易漏，也最容易被误判成「正常」）**
+
+Django 自带的 `@login_required` 未登录时 `redirect_to_login()` → **302**。
+而 `fetch` 的默认 `redirect` 是 **`'follow'`**：
+
+```
+302 → 自动跟随到 /login/ → 最终 status **200**、body 是 **HTML 登录页**
+    → res.json() 抛 SyntaxError
+```
+
+⚠ **注意这不是「非 2xx 返回 `[]`」那条路径**（跟随后是 200）——
+所以 `_get` 也会抛错，不只是 `_post`：
+
+| 前端封装 | 典型调用点 | 后果 |
+|---|---|---|
+| `_get` | `getInstitutions()` / `getDistricts()` 等**下拉数据源** | 渲染函数中断 → **页面空白** |
+| `_post` / `_postForm` | 各类提交按钮 | **「点了没反应」** |
+
+**修法**：`/api/` 的接口一律用 `accounts.decorators.api_login_required`
+（而不是裸 `@login_required`）；有角色要求的用 `role_required`（它自带该分支）。
+
+```python
+# 正确写法（两种都行，取决于要不要限角色）
+@csrf_exempt
+@api_login_required                     # 「所有登录用户可用」
+def view(request): ...
+
+@csrf_exempt
+@role_required('gov_city', 'gov_district')   # 限角色；⚠ 它已含未登录判断
+@login_required                              # 内层，被外层短路
+def view(request): ...
+```
+
+⚠ **装饰器顺序**：`role_required` **必须在外层**。写反了
+（`@login_required` 在外）就会先 302 —— 正是本节这个缺陷。
+
+**② `/api/` 下 404 是 HTML**（前端打错路径、或后端下线了接口而前端没同步）
+**③ `/api/` 下 500 是 HTML**（视图抛未捕获异常）
+
+**修法**：`tnr_system/urls.py` 里的 `handler404` / `handler500`
+（与 `handler400` 同口径，都走 `core.http.is_api_request`）。
+
+⚠ `handler500` 的签名**只有一个参数** `(request)`（`handler400` / `handler404`
+是 `(request, exception)`）。写错会在 500 时**再抛一次异常**，
+而那次异常**没有任何 handler 能接** —— 用户看到裸连接断开。
+
+**自检（部署后跑一次，三条都应是 `application/json`）**：
+
+```bash
+B=http://127.0.0.1          # ⚠ 必须经 nginx（80 端口），不要直连 8000
+for p in /api/me/password/ /api/supervision/districts/ /api/nope/; do
+  printf '%-36s ' "$p"
+  curl -s -o /dev/null -w '%{http_code}  %{content_type}\n' "$B$p"
+done
+# 期望：401 application/json / 401 application/json / 404 application/json
+```
+
+⚠ **别用 `http://127.0.0.1:8000`** —— 直连 gunicorn 会绕过 nginx，
+测出来的结果不代表真实路径（第三十一轮就因此把一个真实缺陷误判成「正常」）。
+
 ## 六、常见报错对照
 
 | 报错 | 原因 | 处理 |
@@ -625,3 +690,6 @@ grep CSRF_TRUSTED_ORIGINS /opt/tnr/.env
 | 上传照片报 500 / Permission denied | `media/` 属主不是 `www-data` | 见第三节「目录属主」 |
 | 提交表单报 403 CSRF | 通过域名访问但未配 `CSRF_TRUSTED_ORIGINS` | 按第二节填入 `https://域名` |
 | 提交表单报 403 CSRF，且响应是 **HTML** | 未配 `CSRF_FAILURE_VIEW`（接口会静默） | 见 §5.8；`HTTPS=on` 后尤其要确认 `CSRF_TRUSTED_ORIGINS` |
+| 会话过期后点提交「没反应」 | 接口未登录时 **302 到 `/login/`**，`fetch` 跟随成 **200 + HTML** | 见 §5.9：`/api/` 的接口用 `api_login_required` / `role_required`，**不要用裸 `@login_required`** |
+| `/api/` 返回 **HTML 404** | 未定义 `handler404` | 见 §5.9：`tnr_system/urls.py` 的 `api_aware_not_found` |
+| `/api/` 返回 **HTML 500** | 未定义 `handler500` | 见 §5.9：`api_aware_server_error`（⚠ 签名只有 `(request)` 一个参数） |
