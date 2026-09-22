@@ -264,8 +264,21 @@ class Command(BaseCommand):
             # 有效期由**距今天数**换算（见 SEED_MATERIALS 的说明）；
             # `None` 表示该物料没有有效期（芯片）。
             expiry = None if expiry_offset is None else today + timedelta(days=expiry_offset)
+            # ⚠ 幂等键必须是 **(name, district)**，不能只用 name。
+            #
+            # `Material.name` **没有唯一约束**（`models.py` 里就是普通 CharField）：
+            # 同一件物资在多个区县各有一条是**正常业务状态**（本地与生产库都是
+            # 4 个区县 × 4 件同名物资）。此时 `get_or_create(name=name)` 会在
+            # `self.get(**kwargs)` 上抛 `MultipleObjectsReturned` ——
+            # 而整个 `handle()` 包在 `transaction.atomic()` 里，异常会让**全部
+            # 种子数据回滚**，`deploy.sh` 第 6 步随之失败。
+            #
+            # 种子定义的是「**演示区县**要有这 4 件物资」，所以自然键就是
+            # 名称 + 区县；同名物资落在别的区县时应当新建一条，而不是复用。
+            district = districts[district_code]
             m, _ = Material.objects.get_or_create(
                 name=name,
+                district=district,
                 defaults={
                     'category': category,
                     'unit': unit,
@@ -277,7 +290,6 @@ class Command(BaseCommand):
                     'expiry_date': expiry,
                     'chip_range_start': chip_start,
                     'chip_range_end': chip_end,
-                    'district': districts[district_code],
                 }
             )
             materials[mat_id] = m

@@ -10,6 +10,10 @@
 2. `_seed_users` 只在 created 分支写属性，账号一旦被停用或改了归属，
    重跑 seed_data 修不回来（现场 aixin_hosp、hd_shelter 就是被停用后
    无法登录，而部署流程看起来是"成功"的）。
+3. `_seed_materials` 用 `name` 作去重键，而 `Material.name` 没有唯一约束：
+   同名物资分布在多个区县时（本地与生产库都是 4 区县 × 4 件）会抛
+   `MultipleObjectsReturned`，因 `handle()` 整体在事务里而让**全部种子
+   数据回滚** —— 部署到第 6 步直接失败。
 
 这些测试把上述承诺钉死，避免再次退化。
 """
@@ -20,6 +24,9 @@ from django.test import TestCase
 from django.utils import timezone
 
 from accounts.models import User
+from business.management.commands.seed_data import (
+    SEED_MATERIALS, SEED_MATERIAL_DISTRICT_CODE,
+)
 from business.models import (
     Adoption, Capture, CheckIn, Chip, Material, Message, Pet, Release, Treatment,
 )
@@ -261,3 +268,95 @@ class SeedMaterialExpiryTest(SeedDataTestBase):
         self.seed()
         chip = Material.objects.get(name='宠物芯片')
         self.assertIsNone(chip.expiry_date)
+
+
+class SeedMaterialMultiDistrictTest(SeedDataTestBase):
+    """同名物资存在于多个区县时，seed_data 仍必须幂等（**不能崩**）。
+
+    现场缺陷：`_seed_materials` 用 `get_or_create(name=name)` 去重，而
+    `Material.name` **没有唯一约束** —— 同一件物资在多个区县各有一条是
+    正常业务状态（本地与生产库都是 4 区县 × 4 件同名物资）。此时
+    `get_or_create` 内部的 `self.get(name=...)` 会抛 `MultipleObjectsReturned`。
+
+    后果比"报个错"严重得多：`handle()` 整体包在 `transaction.atomic()` 里，
+    异常让**全部种子数据回滚**，而 `deploy.sh` 第 6 步就是这条命令 ——
+    等于部署到一半失败，且演示账号也不会被校准。
+
+    已改为按 **(name, district)** 取键；下面把两个方向都钉住：
+      - 别的区县有同名物资 → 演示区县仍要**自己新建**一条，而不是复用它；
+      - 反复执行 → 行数不变。
+    """
+
+    def _make_same_named_material_elsewhere(self, name):
+        """在**非演示区县**造一条同名物资（模拟现场的多区县分布）。
+
+        会先执行一次 `seed_data` 把区县建出来，再插入同名物资 ——
+        场景等价于「库里已经跑过一次种子、后来别的区县也有了同名物资，
+        现在再次部署」。
+        """
+        self.seed()
+        other = District.objects.exclude(code=SEED_MATERIAL_DISTRICT_CODE).first()
+        self.assertIsNotNone(other, '需要至少一个非演示区县才能构造该场景')
+        return Material.objects.create(
+            name=name, category='vaccine', unit='支', district=other,
+        )
+
+    def test_same_named_material_in_other_district_does_not_crash(self):
+        """别的区县有同名物资时，seed_data 不能抛 MultipleObjectsReturned。"""
+        name = SEED_MATERIALS[0][1]
+        other_material = self._make_same_named_material_elsewhere(name)
+
+        out = self.seed()   # 修复前这里直接抛异常
+
+        self.assertIn('种子数据填充完成', out)
+        demo = District.objects.get(code=SEED_MATERIAL_DISTRICT_CODE)
+        self.assertTrue(
+            Material.objects.filter(name=name, district=demo).exists(),
+            f'演示区县应有一条自己的「{name}」')
+        # 别区县那条不能被"认领"或改写
+        other_material.refresh_from_db()
+        self.assertNotEqual(other_material.district_id, demo.id,
+                            '演示区县之外的同名物资不应被挪走')
+
+    def test_repeated_runs_do_not_duplicate_materials(self):
+        """存在跨区县同名物资时，连续执行仍不产生重复。"""
+        name = SEED_MATERIALS[0][1]
+        self._make_same_named_material_elsewhere(name)
+
+        self.seed()
+        snapshot = Material.objects.count()
+        self.seed()
+
+        self.assertEqual(Material.objects.count(), snapshot,
+                         '重跑 seed_data 产生了重复物资')
+
+    def test_each_demo_material_is_created_exactly_once(self):
+        """演示区县里，每件种子物资恰好一条（不能多也不能少）。"""
+        for _id, name, *_rest in SEED_MATERIALS:
+            self._make_same_named_material_elsewhere(name)
+
+        self.seed()
+        self.seed()
+
+        demo = District.objects.get(code=SEED_MATERIAL_DISTRICT_CODE)
+        for _id, name, *_rest in SEED_MATERIALS:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    Material.objects.filter(name=name, district=demo).count(), 1,
+                    f'演示区县「{name}」应恰好一条')
+
+    def test_material_lookup_key_is_not_name_alone(self):
+        """回归防线：取键必须带区县。
+
+        直接盯住"用 name 单独取"这个写法 —— 它在多区县同名时会抛
+        `MultipleObjectsReturned`，是本次缺陷的根因。
+        """
+        name = SEED_MATERIALS[0][1]
+        self._make_same_named_material_elsewhere(name)
+        self.seed()
+
+        with self.assertRaises(Material.MultipleObjectsReturned):
+            Material.objects.get(name=name)   # 说明确实存在多条同名
+        # 而按 (name, district) 取是安全的 —— 这正是 seed_data 现在用的键
+        demo = District.objects.get(code=SEED_MATERIAL_DISTRICT_CODE)
+        self.assertIsNotNone(Material.objects.get(name=name, district=demo))
