@@ -20,7 +20,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **1059 个用例，全部通过**（约 80 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1090 个用例，全部通过**（约 320 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
@@ -5066,6 +5066,138 @@ BAD_QUERIES = (
 
 ---
 
+#### 2.43 请求体参数契约 —— 一扩就炸出一族真缺陷（第三十五轮）
+
+§2.42 的闸门覆盖的是**查询参数**。这一轮把它对称地推到**请求体**，
+第一次跑就炸出真缺陷 —— **这一轮不是加固，是修复。**
+
+##### 一、探针的三个关键设计（每个都是踩出来的）
+
+**① 必须多角色跑。** 第一版只用 `gov_city` 一个账号打全部路由。结果
+`/api/business/checkins/create/`（只对 `adopter` 开放）永远是 **403 提前返回**，
+里面 `data.get('month', '').strip()` 的缺陷**一次都没被扫到**。
+
+这是这类闸门最隐蔽的假绿来源 —— 覆盖面看起来是「78 条路由全覆盖」，
+实际上**大多数接口只走到了 `role_required` 那一层**，视图函数体一行没执行。
+改成五角色（市级 / 区县 / 捕捉点 / 医院 / 领养人）后立刻多出 2 处：
+
+```
+shelter  /api/business/captures/create/   {"district_id": "abc"}  500
+shelter  /api/business/transfers/create/  {"district_id": "abc"}  500
+```
+
+（`resolve_district_scope()` 里 `District.objects.filter(pk='abc')` —— 单角色跑时
+这两条路径根本走不到。）
+
+**② `<pk>` 必须给不存在的 id**（`99999999`）。`xxx/<pk>/withdraw/` 这类
+**不读请求体**的动作接口，给真实 id 会真的执行副作用。
+
+**③ 参数名必须从生产代码抄**（第三十四轮的教训），且**两种形态都要扫**：
+收口后大多数读取点从 `data.get('x')` 变成 `body_str(data, 'x')`，
+只扫前者会让参数名从 **101 掉到 45** —— **闸门自己退化成假绿**。
+
+##### 二、实测发现的四族缺陷
+
+| # | 形态 | 规模 | 根因 |
+|---|---|---|---|
+| ① | 顶层非 dict body（`[1,2,3]` / `"str"` / `null`） | **17 个接口 × 3 种 ≈ 51 处 500** | `read_json_body` 原样返回 `json.loads()` 结果，调用方直接 `data.get(...)` |
+| ② | 整型外键畸形值 | `pet_id` / `shelter_id` / `from_shelter_id` / `capture_id` / `to_hospital_id` / `district_id` / `institution_id` / `material_id` / `vaccine.material_id` | 直接塞进 ORM 主键查询 |
+| ③ | 字符串参数是 dict/list/数字 | `name` / `username` / `reason` / `note` / `receiver_name` | `(data.get('x') or '').strip()` —— `or ''` 只挡 **falsy** |
+| ④ | **非法请求体竟然写库** | `supervision.SystemConfig: 0 → 16` | config 的 POST 把请求体**每个顶层 key** 都当配置项写 |
+
+异常形态：`AttributeError: 'list' / 'str' / 'NoneType' object has no attribute 'get'`
+（还有 `'items'` / `'strip'` 变体）、`ValueError: Field 'id' expected a number but got 'abc'`。
+
+第 ④ 族是最值得记的一条：**只检查状态码的闸门对它完全无感**。
+`SystemConfig` 被写了 16 行垃圾键（`district_id` / `count` / `old_password` /
+`status` / `action` / `receiver_name` / `lat` / `lng` / `pet_codes` / `reason` /
+`old_password` / `confirm_password` / `new_password` / `date` / `start_date` /
+`institution_id`），而这些键随后会被 GET **原样读出来**返回给前端 ——
+**无法与真实配置区分**，且会一直留着。
+
+##### 三、修法：一处归一 + 四个守卫 + 一处白名单
+
+**① 归一化只做一次** —— `core/http.py::read_json_body`
+
+```python
+return data if isinstance(data, dict) else {}
+```
+
+原 docstring 写的是「返回值可能是 `list` 等非 dict（合法 JSON），**调用方自行判断**」
+—— 实测这条约定**没有一个调用方遵守**。修在共用入口而不是 30 个调用点：
+`request.body` 的容错逻辑（`RequestDataTooBig` / 坏 JSON / multipart）**只应该有一份**
+（第二十六轮就是两份实现漂移才漏掉 `RequestDataTooBig`）。
+
+**② 四个读取守卫** —— `core/http.py` + `business/services.py`
+
+| 函数 | 非目标类型时 | 为什么不能用 `str()` 强转 |
+|---|---|---|
+| `body_str(data, key, default='')` | 返回 `default` | `str({'$ne': None})` = `"{'$ne': None}"` → **写进库** |
+| `body_int(data, key)` | 返回 `None` | 复用 `parse_int_param`（先按位数挡、再比上限）—— `int('9'*24)` **本身不报错** |
+| `body_dict(data, key)` | 返回 `{}` | 下游 `ster.get(...)` 会炸 |
+| `body_list(data, key)` | 返回 `[]` | 下游 `for item in items` 会去**遍历字典的键** |
+
+替换面：**44 处** `(data.get('x') or '').strip()` 模式 + **16 处**整型外键 +
+嵌套参数（`items` / `vaccine` / `deworming` / `sterilization` / `chip`）。
+
+**③ config 写接口加键白名单** —— `supervision/views.py`
+
+把 GET 的默认值提成模块级 `SYSTEM_CONFIG_DEFAULTS`，POST 用它做**同源白名单**，
+并校验值必须是**非空短字符串**（≤ 20 字符）。
+「白名单与读接口默认值同源」是关键：分成两份必然漂移，而漂移的表现恰好是
+最难查的那种 —— 新加的配置项「读得到、写不进去」，用户点了保存界面还提示成功。
+
+**④ 顺带修的两处同族**
+
+- `materials/adjustment` 的 `material_id`：全项目**唯一**一处「畸形整型外键直接进 ORM」。
+  同文件的 `purchase_create` / `dispatch_create` 早就走了 `parse_int_param`。
+- `district_edit` 的 `status`：`District.status` 是 `CharField` **没有 choices**，
+  而停用判据是 `inactive_district_error()` 里的 `status != 'active'` ——
+  于是写入**任何**非 `'active'` 字符串都等价于「停用该区县」。
+  孪生入口 `district_toggle_status` 只写 `'active'` / `'inactive'`，
+  编辑接口必须与它**同值域**，否则前者只是「界面上不容易踩到」，不是约束。
+
+##### 四、反向验证（两组，都精确变红）
+
+1. 把 `read_json_body` 的归一化撤掉（`return data`）→
+   `AllApiPostRoutesContractTest.test_malformed_bodies_are_rejected_cleanly`
+   **FAILED**，报出 `Lists differ: [] != [...]`（含 `gov_city
+   /api/business/adoptions/apply/ ... 500`）。
+2. 把 config 的键白名单改成 `if unknown and False:` →
+   `SystemConfigWriteWhitelistTest.test_unknown_key_is_rejected_and_not_written`
+   在 5 个键上 **FAILED**，报 `AssertionError: 200 != 400`。
+
+##### 五、新增测试（32 例）
+
+| 测试类 | 位置 | 例数 | 作用 |
+|---|---|---|---|
+| `ReadJsonBodyNormalisationTest` | `core/tests.py` | 4 | 归一化：顶层非 dict / 坏 JSON / multipart |
+| `BodyValueGuardTest` | `core/tests.py` | 7 | `body_str` / `body_dict` / `body_list` 的类型守卫 |
+| `AllApiPostRoutesContractTest` | `core/tests.py` | 4 | **枚举闸门**：78 路由 × 5 角色 × 23 种固定 body + 396 种逐参数名 + 2 种内容类型 |
+| `BodyIntGuardTest` | `business/tests/test_param_contract.py` | 3 | `body_int` 的三态与边界 |
+| `MalformedBodyRejectedTest` | 同上 | 5 | 5 个接口的畸形 body 必须 **400 且文案指向字段** |
+| `SystemConfigWriteWhitelistTest` | `supervision/tests.py` | 5 | 键白名单 / 值类型 / 与读接口同源 / 正向对照 |
+| `DistrictEditStatusEnumTest` | `supervision/tests.py` | 3 | status 枚举 + 正向对照 + 「为什么必须收窄」锚点 |
+
+⚠ 枚举闸门里有**两处防呆断言**（缺了它们闸门会静默假绿）：
+
+```python
+self.assertGreater(len(self.routes), 20, '路由枚举结果太少…')
+self.assertGreater(len(names), 40, '从源码抄出的请求体参数名只有 %d 个…')
+```
+
+##### 六、用例数
+
+全量 **1059 → 1090 OK**。
+
+> 这一轮的性质与 §2.42 相反：§2.42 是**零缺陷加固**，这一轮是**真缺陷修复**。
+> 共同点是手法 —— **枚举 URLconf + 从源码抄参数名**，
+> 把「人工想得到的地方」换成「代码里真实存在的地方」。
+> 同一套手法在查询参数上零缺陷，在请求体上炸出 4 族 ——
+> 说明「这一族修干净了」不能推广到「相邻那一族也干净」。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -5250,7 +5382,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 1059 个用例
+python manage.py test --parallel 1  # 1090 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md

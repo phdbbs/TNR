@@ -678,6 +678,55 @@ python manage.py test core.tests.AllApiRoutesContractTest \
 ⚠ **别用 `http://127.0.0.1:8000`** —— 直连 gunicorn 会绕过 nginx，
 测出来的结果不代表真实路径（第三十一轮就因此把一个真实缺陷误判成「正常」）。
 
+### 5.10 ⚠ 请求体参数必须走守卫函数 —— `or ''` 挡不住 `[1,2,3]`
+
+**现象**：某些接口在特定请求体下返回 **500**，而用正常前端提交完全正常 ——
+所以 GUI 巡检、冒烟脚本（走的都是正常表单）**全都抓不到**。
+典型堆栈最后一行是：
+
+```
+AttributeError: 'list' / 'str' / 'NoneType' object has no attribute 'get'
+AttributeError: 'list' object has no attribute 'strip'
+ValueError: Field 'id' expected a number but got 'abc'
+```
+
+**四个守卫**（读取请求体参数的唯一入口）：
+
+| 函数 | 用途 | 非目标类型时 |
+|---|---|---|
+| `body_str(data, key, default='')` | 字符串 | 返回 `default` |
+| `body_int(data, key)` | 整型外键 / 数量 | 返回 `None` |
+| `body_dict(data, key)` | 嵌套对象（`{"vaccine": {...}}`） | 返回 `{}` |
+| `body_list(data, key)` | 数组（`{"items": [...]}`） | 返回 `[]` |
+
+`body_str` / `body_dict` / `body_list` 定义在 `core/http.py`，
+`body_int` 在 `business/services.py`（它复用 `parse_int_param` 的位数与上限判据）。
+
+⚠ **不能用 `str(value)` 强转来「修」**：`str({'$ne': None})` 得到字面量
+`"{'$ne': None}"`，会被**当成真实业务数据写进库**（区县名、用户名、编号前缀……）。
+「静默写入垃圾」比 500 更难查 —— 500 至少留下 Traceback。
+
+⚠ **`or 默认值` 挡不住错误类型**：`{"name": [1,2,3]}` / `{"name": {"$ne": null}}` /
+`{"name": 123}` 全是 **truthy**，`or ''` 不生效，下一行 `.strip()` 就炸。
+
+⚠ **归一化只做一次**：顶层非 dict 的合法 JSON（`[1,2,3]` / `"str"` / `null`）
+在 `core.http.read_json_body()` 里统一归一成 `{}`。
+**不要**在 30 个调用点各加一个 `isinstance` —— 那正是第二十六轮
+`RequestDataTooBig` 漏网的原因（两份实现必然漂移）。
+
+**自检**（部署后跑一次，覆盖全部 78 条路由 × 5 个角色）：
+
+```bash
+python manage.py test core.tests.AllApiPostRoutesContractTest \
+                      business.tests.test_param_contract.MalformedBodyRejectedTest \
+                      supervision.tests.SystemConfigWriteWhitelistTest \
+                      supervision.tests.DistrictEditStatusEnumTest
+```
+
+**排障入口**：`/var/log/tnr/gunicorn-error.log` 里搜
+`Internal Server Error: /api/`，Traceback 最后一行若出现
+`object has no attribute 'get'` / `expected a number`，就是这个族的问题。
+
 ## 六、常见报错对照
 
 | 报错 | 原因 | 处理 |
