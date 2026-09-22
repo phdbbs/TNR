@@ -109,6 +109,12 @@ python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
 
 ## 二、启用 HTTPS（强烈建议）
 
+> ⚠ **HTTPS 是「弹 GPS 权限框」的硬前提，不是优化项。**
+> `navigator.geolocation.getCurrentPosition()` 只在**安全上下文**（HTTPS / `localhost` /
+> `127.0.0.1`）下可用。当前生产是 `http://公网IP` → 浏览器**直接拒绝且不弹任何权限框**，
+> **网页代码绕不过去**。所以磊哥要的「询问是否授予浏览器/微信 GPS 权限」，
+> **必须先有域名 + 证书**；在此之前只能降级 IP 定位（城市级），这不是前端缺陷。
+
 nginx 只监听 80，且 Django 在反代后必须显式被告知原始协议，否则
 `request.is_secure()` 恒为 `False`，所有 HTTPS 相关判断都会失真。
 
@@ -150,9 +156,23 @@ curl -s -b /tmp/c.txt -c /tmp/c.txt -d "username=cy_shelter&password=123456&csrf
 # 逆地理编码（应返回 success:true 与地址）
 curl -s -b /tmp/c.txt 'http://127.0.0.1:8000/api/business/geocode/reverse/?lat=30.25&lng=119.90'
 
-# IP 定位兜底（应返回城市/区级地址）
+# IP 定位兜底（应返回城市/区级地址，且带 source 字段）
 curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 ```
+
+返回体里的 **`source` 决定这个地址能不能当「客户所在位置」用**：
+
+| `source` | 含义 | 前端该怎么做 |
+|---|---|---|
+| `client_ip` | 按**客户端公网 IP** 定位，地址反映用户大概在哪 | 可以自动填表 |
+| `server_ip` | 拿不到客户端公网 IP（内网访问、IPv6、CGNAT 等），退化成**服务器所在城市** | **绝不可自动填表**，只能提示「请手动定位」 |
+
+> ⚠ 从**本机 `127.0.0.1`** 调这个接口，永远得到 `server_ip` —— 这是**正确行为**，不是缺陷。
+> 要验证 `client_ip` 分支，必须从**带公网出口的机器**经反代访问，或直接单测
+> `business/tests/test_ip_location.py`（已覆盖 CGNAT / XFF 伪造 / IPv6 等）。
+>
+> ⚠ **`X-Forwarded-For` 一律不采信**：nginx 用 `$proxy_add_x_forwarded_for` 追加，
+> 客户端可以自己伪造一个前缀。只认 nginx 覆盖写入的 `X-Real-IP`，退回 `REMOTE_ADDR`。
 
 ## 五、部署后自检清单
 
@@ -161,7 +181,9 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 | 配置无告警 | `python manage.py check --deploy` | 除 HTTPS 类告警（W004/W008/W012/W016）外无警告 |
 | 超级管理员可登录 | 访问 `/admin/` 用 `ensure_superuser` 输出的口令 | 能进入后台 |
 | 演示账号可用 | 访问 `/login/` 用 `cy_shelter` / `123456` | 能进入捕捉点门户 |
-| **照片上传可用** | 捕捉登记里传一张照片，再**经反代取回** | 上传成功；`media/` 出现文件；`/media/...` 返回 200 且**与原图逐字节一致** |
+| **照片上传可用**（含手机原图） | 用 **≥3MB 的真实手机照片**提交捕捉登记（或多张合照），再**经反代取回** | 上传成功；`media/` 出现文件；`/media/...` 返回 200 且**与原图逐字节一致**；**不得**出现 `RequestDataTooBig` 的 400 |
+| **请求体上限一致** | 见下方 §5.5 | nginx `client_max_body_size` **20M**；`DATA_UPLOAD_MAX_MEMORY_SIZE` 未被人为调小 |
+| **超大图被拦且可读** | 见下方 §5.5 的 curl 片段：直接发一个 >10MB 的 multipart 请求 | HTTP **400 且响应体是 JSON**，文案含「超过 10MB 上限」；**不得**是 Django 的 HTML 报错页 |
 | **数据隔离生效** | 用他区账号访问本区宠物生命周期，**再访问一个不存在的 id** | **两者响应完全一致**（都是 404 且文案相同）—— 否则可用枚举 id 扫库 |
 | 数据一致性 | `python manage.py check_data_integrity` | 输出「未发现一致性问题」，退出码 0 |
 | 演示物料未过期 | `python manage.py refresh_demo_material_expiry` | 输出「已订正 0 行」或全部 `[跳过]`；**不应**出现「将改写」 |
@@ -330,6 +352,122 @@ done
 > ⚠ 顺带：`ufw` 是 **inactive**，`iptables INPUT` 只有 2 条规则 ——
 > 当前**完全依赖云安全组**这一层。别以为机器上还有一道本地防火墙。
 
+### 5.5 上传体积：nginx 与 Django 是**两道**闸，且限制方式不同
+
+现场：2026-09-22 手机端「新增捕捉任务」提交无效。nginx 访问日志里
+`POST /api/business/captures/create/` **连续 8 次 400**，gunicorn 错误日志：
+
+```
+django.core.exceptions.RequestDataTooBig: Request body exceeded settings.DATA_UPLOAD_MAX_MEMORY_SIZE.
+  File "/opt/tnr/business/views_capture.py", line 410, in capture_create
+    data = parse_json_body(request)
+  File "/opt/tnr/business/services.py", line 46, in parse_json_body
+    data = json.loads(request.body)
+```
+
+**两道闸的语义完全不同，必须分别确认**：
+
+```bash
+# ① nginx：整个请求体的硬上限，超了直接 413，请求进不到 Django
+grep -rn 'client_max_body_size' /etc/nginx/ /etc/nginx/sites-enabled/ 2>/dev/null
+# 期望：20M（本项目值）。缺失则为 nginx 默认 1M —— 手机原图必然被拒。
+
+# ② Django：只有**读 request.body 时**才校验，且**不含文件上传部分**
+cd /opt/tnr && venv/bin/python manage.py shell -c \
+  "from django.conf import settings; print('DATA_UPLOAD_MAX_MEMORY_SIZE =', settings.DATA_UPLOAD_MAX_MEMORY_SIZE)"
+# 期望：2500000（Django 默认 2.5MB）。**不要调大它来"修"上传问题** —— 见下。
+```
+
+**关键机制**（决定了正确的修法）：
+
+- `settings.DATA_UPLOAD_MAX_MEMORY_SIZE` 由 `request.body` 触发校验，按
+  `CONTENT_LENGTH` 判定，**整个请求体都算在内**。
+- 但 `multipart/form-data` 的**文件部分不计入** `request.POST` / `request.FILES`：
+  `MultiPartParser` 只对**非文件字段**累加字节数
+  （`django/http/multipartparser.py` 的 `num_bytes_read`）。
+- 所以**大图上传本来不该撞这个限制** —— 撞上纯粹是因为 `parse_json_body()`
+  在 multipart 请求上也去读了 `request.body`（把整个体读进内存）。
+- `RequestDataTooBig` 是 `SuspiciousOperation` 的子类，**不是** `ValueError`，
+  原来那个 `except (JSONDecodeError, ValueError, TypeError)` **接不住它**。
+
+**因此修法是两处，而不是调大阈值**：
+
+1. `business/services.py::parse_json_body()` —— **multipart 直接返回 `{}`**，不碰 `request.body`；
+   并补 `except RequestDataTooBig` 兜底（其它 content-type 的超大请求体也不该炸成裸 400）。
+2. `static/js/tnr-common.js::TNR_UI.compressImage()` —— 前端先把照片压到长边 1600 / JPEG 0.82，
+   从源头避免撞 nginx 的 20M（100 只猫 × 手机原图 3~5MB = 必然超）。
+
+> ⚠ **不要靠调大 `DATA_UPLOAD_MAX_MEMORY_SIZE` 来修**：它会把整个请求体读进内存，
+> 调大等于把内存占用交给客户端决定（移动端多图场景可以直接打爆 worker）。
+> 正确做法是**根本不读它**（multipart 走流式解析）。
+>
+> ⚠ **`RequestDataTooBig` 的 400 是 Django 的 HTML 报错页**，响应体不是 JSON。
+> 前端 `_postForm` 内部 `await res.json()` 会**抛错**，若不 `try/catch`，
+> 用户看到的只是「正在提交…」然后**什么都没发生** —— 这就是「点了提交没反应」的表象。
+> 凡是有可能返回非 JSON 的提交，调用方**必须** `try/catch` 并给出可读提示。
+
+**部署后实测**（不需要浏览器，直接打接口）：
+
+```bash
+cd /opt/tnr
+
+# 1) 造一个 >10MB 的文件（内容无所谓，体积才是变量）
+/opt/tnr/venv/bin/python -c "
+import os; os.makedirs('/tmp/tnr-big', exist_ok=True)
+open('/tmp/tnr-big/big.jpg','wb').write(b'\xff\xd8\xff\xe0' + os.urandom(11*1024*1024))
+print('已生成', os.path.getsize('/tmp/tnr-big/big.jpg') // 1024, 'KB')"
+
+# 2) 登录拿会话与 CSRF
+curl -s -c /tmp/c.txt -o /dev/null http://127.0.0.1:8000/login/
+CSRF=$(grep csrftoken /tmp/c.txt | awk '{print $7}')
+curl -s -b /tmp/c.txt -c /tmp/c.txt -o /dev/null \
+  -d "username=cy_shelter&password=123456&csrfmiddlewaretoken=$CSRF" \
+  -H 'Referer: http://127.0.0.1:8000/login/' http://127.0.0.1:8000/login/
+
+# 3) 发超大 multipart，看状态码与 Content-Type
+#    ⚠ 用 `-w` 取状态码，**不要** `head -1 /tmp/hdr.txt` ——
+#    11MB 请求会带 `Expect: 100-continue`，头部第一行是信息响应 `HTTP/1.1 100 Continue`，
+#    真正的状态码在它后面，`head -1` 会读到错的那行。
+curl -s -b /tmp/c.txt -X POST \
+  -H "X-CSRFToken: $CSRF" -H 'Referer: http://127.0.0.1:8000/' \
+  -F 'pet_count=1' -F 'group_photo=@/tmp/tnr-big/big.jpg;type=image/jpeg' \
+  -o /tmp/body.txt \
+  -w 'HTTP %{http_code}  content-type=%{content_type}  上传体积=%{size_upload} 字节\n' \
+  http://127.0.0.1:8000/api/business/captures/create/
+
+cat /tmp/body.txt                             # 可读 JSON；**不得**出现 <title>…at /api/…</title>
+```
+
+本项目实测（2026-09-22，本地 `127.0.0.1:8000`，修复后）：
+
+```
+HTTP 400  content-type=application/json  上传体积=11534649 字节
+{"success": false, "data": null, "message": "物业名称不能为空"}
+```
+
+**判据**：
+
+- **`content-type` 必须是 `application/json`** —— 这一条最关键。
+  它证明请求**进到了应用层**（修复生效）。
+- 状态码 **400 是正常的**：这里故意只传了最小字段集，应用据此报「物业名称不能为空」。
+  要紧的是这个 400 是**应用给出的 JSON**，而不是 Django 的 HTML 报错页。
+- 响应体里**不得**出现 `RequestDataTooBig`，也不得出现 `<title>…at /api/…</title>`
+  （后者是 Django 的 HTML 报错页特征）。
+- `上传体积` 应当**接近 11MB**（约 `11534649` 字节）。若它只有几百 KB，
+  说明 curl 没把文件真发出去，这个检查是**假绿**。
+
+**改前对照**（同一段 curl、同一张图，在修复前的提交 `fcdeb86` 上跑）：
+
+```
+Content-Type: text/html; charset=utf-8
+<!DOCTYPE html>
+  <title>RequestDataTooBig
+          at /api/business/captures/create/</title>
+```
+
+这正是**生产现场**的响应 —— 用户看不到这段 HTML，只看到「正在提交…」然后什么都没发生。
+所以「`content-type` 是不是 `application/json`」就是**这个修复最直接的一条判据**。
+
 ## 六、常见报错对照
 
 | 报错 | 原因 | 处理 |
@@ -340,7 +478,11 @@ done
 | `地图服务返回错误：INVALID_USER_KEY` | Key 拼写错误或不是"Web服务"类型 | 高德控制台核对 Key 及其绑定服务平台 |
 | `地图服务返回错误：USERKEY_PLAT_NOMATCH (10009)` | Key 绑定的是"Web端(JS API)"而非"Web服务" | 同一应用下添加"Web服务"类型 Key |
 | `地图服务请求失败：...timeout/Connection refused` | 服务器出网被墙/无外网 | 开放对 `restapi.amap.com:443` 的出网访问 |
-| 前端定位报 `Only secure origins are allowed` | HTTP 非安全源，浏览器禁止 GPS 定位 | 正常现象，前端已自动降级 IP 定位（城市/区级）；如需精确定位请配 HTTPS |
+| 前端定位报 `Only secure origins are allowed` | HTTP 非安全源，浏览器禁止 GPS 定位 | **预期行为**，浏览器**不会弹权限框**（代码绕不过去）。前端已自动降级 IP 定位；如需精确定位请配 HTTPS（见第二节） |
+| 定位总是返回**北京**且 `source` 为 `server_ip` | 拿不到客户端公网 IP，高德按**服务器出口**定位 | 从公网经反代访问再验；本机 `127.0.0.1` 测永远是 `server_ip`。前端对 `server_ip` **不自动填表**，只提示手动定位 |
+| 上传大图报 400，页面是 Django 的 HTML 报错页 | `RequestDataTooBig`（`request.body` 超 `DATA_UPLOAD_MAX_MEMORY_SIZE`） | 见 §5.5。**不要调大阈值**；确认 `parse_json_body()` 对 multipart 不读 `request.body` |
+| 上传大图报 **413** | nginx `client_max_body_size` 不够 | 调到 20M 并 `nginx -s reload`；前端 `compressImage()` 已在源头压缩 |
+| 点「提交」没反应、无任何提示 | 响应体非 JSON（413 / 502 / 400 报错页），前端 `await res.json()` 抛错 | 前端必须 `try/catch`；查 nginx access.log 的状态码与响应体大小 |
 | `no such column: business_capture.latitude` | 数据库迁移未执行 | `python manage.py migrate` |
 | 上传照片报 500 / Permission denied | `media/` 属主不是 `www-data` | 见第三节「目录属主」 |
 | 提交表单报 403 CSRF | 通过域名访问但未配 `CSRF_TRUSTED_ORIGINS` | 按第二节填入 `https://域名` |

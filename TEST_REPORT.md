@@ -20,7 +20,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **977 个用例，全部通过**（约 68 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1021 个用例，全部通过**（约 73 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
@@ -4201,6 +4201,182 @@ Ran 3 tests — FAILED (failures=2)
 
 ---
 
+#### 2.35 手机端两个现场问题（第二十七轮）
+
+磊哥报的两条：**①「新增捕捉任务提交无效」**（点了没反应）、
+**②「定位都是北京固定位置」**。两条都在本轮定位到根因并落库，
+另外顺带查出一条**部署阻断级**的既有缺陷（`seed_data` 崩溃）。
+第 ① 条**我一开始诊断错了**，这里把错的那条也如实记下来。
+
+##### ② 定位固定北京 —— 高德按「服务器出口 IP」定位
+
+`services.amap_ip_location()` 调高德 `/v3/ip` 时**没传 `ip` 参数**。该参数可选，
+不传时高德按「**发起这次 HTTP 请求的一方**」定位 —— 而请求是**服务器**发出的，
+于是永远返回机房所在城市。线上实测：客户端在襄阳，接口稳定返回
+
+```
+{"address": "北京市东城区交道口街道辛安里南锣鼓巷",
+ "province": "北京市", "district": "东城区", "precision": "city"}
+```
+
+原 docstring 的假设是「手机与服务器通常同一网络、同一公网出口 IP」——
+那在**局域网部署**下成立；本项目是**公网部署**，该假设不成立，
+「降级路径」就退化成了「永远给一个错误的城市」。
+
+修法（`business/services.py` + `views_capture.geocode_ip` +
+`templates/portal/shelter/portal.html`）：
+
+| 层 | 改动 |
+|---|---|
+| `client_ip(request)` | 取 `X-Real-IP`（nginx **覆盖式**设置，伪造不了）→ 退回 `REMOTE_ADDR`。**明确不认 `X-Forwarded-For`** —— nginx 用 `$proxy_add_x_forwarded_for` 会把客户端传的值原样追加在最前，采信它等于让攻击者操纵定位 |
+| `public_ipv4(value)` | 只放行**国内公网 IPv4**。⚠ 见下面的 CGNAT 坑 |
+| `amap_ip_location(client_ip=…)` | 可用才写进 `ip` 参数；回传 `source`（`client_ip` / `server_ip`） |
+| 前端 | `source === 'server_ip'` 时 **`pendingLocation = null`，绝不自动填表**（宁可留空）；GPS 成功/失败文案区分「已精确定位」/「未取得精确定位…改用网络定位」 |
+
+> ⚠ **`is_private` 拦不住 CGNAT**。`100.64.0.0/10` 的 `is_private` 是 **False**
+> （Python 3.10~3.14 一致），而 Tailscale 就在这一段、生产服务器自身是
+> `100.99.98.71`。只判 `is_private` 会把它当公网 IP 传给高德，换回一个必然为空的
+> 结果。已加显式网段判断。
+> 也**不能用 `is_global` 代替**：它在 Python 3.13 前后语义不同
+> （3.13 起对齐 IANA 特别用途登记表，之前等价于 `not is_private`），换台机器结论就变。
+
+> ⚠ **HTTPS 是「弹 GPS 权限框」的硬前提**。`navigator.geolocation` 只在安全上下文
+> （HTTPS / localhost / 127.0.0.1）可用；在 `http://公网IP` 下浏览器**直接拒绝且
+> 不弹权限框**，网页代码绕不过去。当前生产 nginx 是 `listen 80` + `server_name _`、
+> 无域名无证书，**所以「询问是否授予 GPS 权限」暂时做不到**，需要域名才能上 HTTPS。
+
+##### ① 提交无效 —— 真因是 `RequestDataTooBig`（**我先诊断错了**）
+
+**我最初的推断（错的）**：各门户是模板渲染 SPA、`.page-view` 常驻 DOM 靠 `.active`
+切显隐 → 初始化签名板时页面是 `display:none` → `canvas.offsetWidth === 0` →
+画布 0×0 → 提交时 `sigPad.isEmpty()` 里 `getImageData(0,0,0,0)` 抛 `IndexSizeError`
+→ 处理器中断、连 toast 都没有。
+
+**实测否掉了它**（`gui-test-scripts/68b_probe_signature_pads.js`）：
+
+| 位置 | 实测 |
+|---|---|
+| 新建页 `#ca_signature` | `canvas.width=600 / offsetWidth=300`（**不是 0**） |
+| 弹窗内 `#ed_signature` | `318×200`（**不是 0**） |
+
+原因是 `Shelter.navigate()` **先**加 `.active` **再**调 renderer，所以
+`render_capture_add()` 里 `initSignaturePad()` 执行时页面已经可见；`modal()` 也是在
+调用 `body()` **之前**就 `appendChild`。
+顺带查清：`.signature-pad { touch-action: none }` 让浏览器**自动把 touch 监听视为
+非 passive**，所以「加 `{passive:false}`」与「`isEmpty` 加 0 尺寸保护」都**修不了任何
+东西** —— 我据此把 `initSignaturePad` 的改动**整体回退**了（不留「修一个不存在的问题」
+的改动）。
+
+**真因（有生产日志）**：nginx 访问日志里用户（微信内置浏览器 / Android /
+MicroMessenger 8.0.78）连续 8 次：
+
+```
+POST /api/business/captures/create/ HTTP/1.1" 400 143
+```
+
+gunicorn 日志给出确切原因：
+
+```
+File "/opt/tnr/business/views_capture.py", line 410, in capture_create
+    data = parse_json_body(request)
+  File "/opt/tnr/business/services.py", line 46, in parse_json_body
+    data = json.loads(request.body)
+  File ".../django/http/request.py", line 338, in body
+    raise RequestDataTooBig(
+django.core.exceptions.RequestDataTooBig: Request body exceeded
+settings.DATA_UPLOAD_MAX_MEMORY_SIZE.
+```
+
+`parse_json_body()` **无条件**读 `request.body`，而 `request.body` 把整个请求体读进
+内存并按 `CONTENT_LENGTH` 校验 `DATA_UPLOAD_MAX_MEMORY_SIZE`（Django 默认 **2.5MB**）。
+手机端 `capture="environment"` 拍的是**原图**，单张 3~5MB 很常见 → 必然超限。
+`RequestDataTooBig` 是 `SuspiciousOperation` 的子类，**不在**原来的
+`except (JSONDecodeError, ValueError, TypeError)` 里 → 冒泡成裸 400。
+
+**为什么本地/桌面测试发现不了**：不带照片时请求体只有几 KB；桌面选的文件通常也小。
+只有「手机原相机 + 真机上传」才稳定触发。
+
+**修法（三层，缺一不可）**：
+
+1. **服务端**（`business/services.py::parse_json_body`）：`multipart/form-data`
+   **一律不读 `request.body`**，直接返回 `{}`，由视图回退到 `request.POST`。
+   依据：`DATA_UPLOAD_MAX_MEMORY_SIZE` 按官方定义「**不含文件上传部分**」，
+   `MultiPartParser` 只对**非文件字段**累加 `num_bytes_read`
+   （`django/http/multipartparser.py:220-249`），大图不会触发该限制。
+   另加 `except RequestDataTooBig` 兜底（其它 content-type 下的超大请求体
+   也不该炸成裸 400）。
+2. **前端压缩**（`TNR_UI.compressImage`，`static/js/tnr-common.js`）：
+   手机原图 3~5MB × 最多 100 只，只修服务端仍会撞 nginx `client_max_body_size 20M`
+   （而 413 返回 HTML，`res.json()` 抛错 → 又一次「点了没反应」）。选择文件后先在本地
+   等比缩到长边 1600 再编码 JPEG。用 `<img>` 承载（现代浏览器 `image-orientation`
+   初始值即 `from-image`，绘制到 canvas 会按 EXIF 摆正，避免「照片躺倒」）；
+   **任何失败都原样返回原文件**（宁可传大图，不能传不上去）。
+3. **失败可见性**（`templates/portal/shelter/portal.html`）：提交处补 `try/catch`。
+   `_postForm` 内部是 `await res.json()`，响应体不是 JSON 就抛错 ——
+   此前没有兜底，异常让处理器**静默中断**。任何失败都必须变成用户看得见的一句话。
+
+**改前改后对比**（同一脚本、同一张 11.11MB 原图，`gui-test-scripts/68_mobile_capture_submit.js`）：
+
+| 场景 | 上传体积 | 响应 | 用户可见 |
+|---|---|---|---|
+| 修复前 | 11,377KB | **400** `<title>RequestDataTooBig at /api/business/captures/create/</title>` | 只有「正在提交，请勿离开页面…」，**之后什么都没有** |
+| 修复后 | **667KB** | **200** | `✓捕捉登记成功！单号：CAP-260922-5650` |
+| 修复后（禁用客户端压缩，单独验证服务端） | 11,377KB | 400 **JSON** | `✕提交失败：整体合影大小 11.1MB 超过 10MB 上限，请压缩后再上传` |
+
+第三行是关键对照：**服务端修复让请求进得来**（不再 `RequestDataTooBig`），
+应用自己的校验得以执行并返回**可读的 JSON**；客户端压缩则让用户**根本撞不到上限**。
+
+**不依赖浏览器的 HTTP 级对照**（判据更硬，也不用起前端）：同一段 curl
+（见 `DEPLOY.md` §5.5）向 `captures/create` 发一张 11MB 的 multipart 图：
+
+| 代码 | `Content-Type` | 响应体 |
+|---|---|---|
+| `fcdeb86`（修复前） | `text/html; charset=utf-8` | `<title>RequestDataTooBig at /api/business/captures/create/</title>` |
+| 本轮（修复后） | `application/json` | `{"success": false, "data": null, "message": "物业名称不能为空"}` |
+
+`curl -w` 实测：`HTTP 400  content-type=application/json  上传体积=11534649 字节`。
+旧代码那一行**就是生产现场**（用户看不到 HTML，只看到「正在提交…」然后什么都没发生）。
+所以「`content-type` 是不是 `application/json`」是这个修复**最直接的一条判据**。
+
+##### 顺带查出：`seed_data` 会崩（既有缺陷，**部署阻断级**）
+
+跑本地启动流程时 `seed_data` 报
+`Material.MultipleObjectsReturned: get() returned more than one Material -- it returned 4!`。
+
+`_seed_materials` 用 `get_or_create(name=name)` 去重，而 `Material.name`
+**没有唯一约束** —— 同一件物资在多个区县各有一条是**正常业务状态**
+（本地与生产库都是 4 区县 × 4 件同名物资）。而 `handle()` 整体包在
+`transaction.atomic()` 里，异常让**全部种子数据回滚** —— `deploy.sh` 第 6 步就是这条命令，
+等于**下次部署必然失败**。
+
+> 确认是**既有缺陷**：worktree 检出我改动前的 `3940ef6^`，在同一个库上崩溃完全一致。
+
+修法：幂等键改为 **(name, district)**（种子定义的是「**演示区县**要有这 4 件物资」，
+同名物资落在别的区县时应当**新建**而不是复用）。
+配套审计了该命令**全部 16 处 `get_or_create`** 的键：
+
+| 键 | 库中重复组数 | 判定 |
+|---|---|---|
+| `Material(name)` | **4** | ⚠ 崩溃点 |
+| `Material(name, district)` | 0 | ✔ 改用它 |
+| `Message(title, content)` | 5 | 真实使用产生；种子自身的键未撞上，暂不动 |
+| `MaterialTransaction(ledger_no)` | 5（含 `''`×66） | 同上 |
+| 其余（`ledger_no` / `code` / `pet` / `(pet,month)`） | 0 | ✔ |
+
+改后连跑 3 次 `seed_data`，**行数完全一致**（幂等成立）。
+
+##### 本轮用例数
+
+新增 **44 个用例**：`test_ip_location.py`（26）、`test_multipart_body_limit.py`（14）、
+`test_seed_data.py::SeedMaterialMultiDistrictTest`（4）。全量 **977 → 1021 OK**。
+
+其中 `test_multipart_body_limit.py` 的第一层是**机制回归防线**：
+`test_reading_body_of_large_multipart_raises` 直接断言「读 `request.body` 会抛
+`RequestDataTooBig`」—— 一旦 Django 改了这个语义它会立刻失败，提醒重新评估修法。
+在 `fcdeb86`（旧代码）上跑该文件：**6 条失败**，报错与生产 gunicorn 日志逐字一致。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -4385,7 +4561,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 977 个用例
+python manage.py test --parallel 1  # 1021 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md
