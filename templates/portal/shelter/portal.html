@@ -1096,8 +1096,13 @@ const Shelter = {
       document.getElementById('ca_locInfo').textContent = tip;
     }
 
-    // 判断当前是否处于浏览器允许 GPS 精确定位的安全上下文
-    // Chrome/Safari 规则：HTTPS、localhost/127.0.0.1 视为安全；其他 HTTP（如局域网 IP 192.168.x.x）一律拒绝
+    // 判断当前是否处于浏览器允许 GPS 精确定位的安全上下文。
+    //
+    // ⚠ 这是**浏览器厂商强制**的规则，不是本项目能绕开的：
+    //   - HTTPS / localhost / 127.0.0.1 → 安全上下文，getCurrentPosition 会**弹权限框**
+    //   - `http://公网IP`（如 http://124.223.41.44）→ 非安全上下文，
+    //     浏览器**直接拒绝且不弹框**，连询问用户的机会都没有
+    // 所以「手机端询问是否授予 GPS 权限」的前提，是站点先跑在 HTTPS 上。
     function _canGpsLocate() {
       if (window.isSecureContext) return true;              // HTTPS 或 localhost → 允许
       const host = location.hostname;
@@ -1145,9 +1150,12 @@ const Shelter = {
       const locInfo = document.getElementById('ca_locInfo');
       locBtn.disabled = true;
 
-      // 预检：非安全上下文 → 浏览器会立刻拒绝 Geolocation，直接静默走 IP 兜底。
-      // 不向用户展示「HTTP 环境禁用 GPS」这类技术细节——现场操作员用不上，
-      // 展示出来只会让「点定位」看起来像出错了。
+      // 非安全上下文（HTTP）下浏览器**不会弹 GPS 权限框**，getCurrentPosition
+      // 会直接失败 —— 这是浏览器强制的，网页代码绕不过去。此时直接走网络定位。
+      //
+      // ⚠ 但要**如实告知**「只是城市级、且原因是 HTTP」：此前这里刻意隐藏技术细节，
+      // 结果用户以为拿到的是精确位置，把服务器机房所在的「北京市东城区…」
+      // 当成自己的地址提交了。想让「点定位」能弹权限框，只能先把站点放到 HTTPS 上。
       if (!_canGpsLocate()) {
         _doIpLocate();
         return;
@@ -1158,7 +1166,7 @@ const Shelter = {
         return;
       }
 
-      locInfo.textContent = '定位中…';
+      locInfo.textContent = '正在请求定位权限…';
       navigator.geolocation.getCurrentPosition(async (pos) => {
         const wgs = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         const gcj = wgs84ToGcj02(wgs.lat, wgs.lng);
@@ -1167,15 +1175,18 @@ const Shelter = {
           const info = await reverseGeocode(lat, lng);
           const addr = (info.address || '').trim();
           applyLocation(lat, lng, addr,
-            addr ? '已定位：' + addr : '已获取经纬度：' + lat + ', ' + lng);
+            addr ? '已精确定位：' + addr : '已精确定位（经纬度）：' + lat + ', ' + lng);
         } catch (e) {
           // 地址解析失败仍保留经纬度；提示保持中性，不暴露接口错误原文
           pendingLocation = { latitude: lat, longitude: lng, geoAddress: '' };
-          locInfo.textContent = '已获取经纬度：' + lat + ', ' + lng;
+          locInfo.textContent = '已精确定位（经纬度）：' + lat + ', ' + lng;
         }
         locBtn.disabled = false;
       }, async () => {
-        // 授权被拒 / 超时 / 室内无信号 → 静默降级到网络定位，不展示失败原因
+        // 授权被拒 / 超时 / 室内无信号 → 降级到网络定位。
+        // 这里**要**如实告知降级了：静默降级会让人以为拿到的是精确位置，
+        // 于是不再核对地址 —— 数据就这么错的。
+        locInfo.textContent = '未取得精确定位（未授权或信号弱），改用网络定位…';
         _doIpLocate();
       }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
     });
@@ -1190,8 +1201,23 @@ const Shelter = {
       try {
         const info = await ipLocate();
         const addr = (info.address || '').trim();
-        applyLocation(info.latitude, info.longitude, addr,
-          '已定位：' + (addr || info.city || info.province || '当前位置'));
+        if (info.source === 'server_ip') {
+          /* ⚠ 拿不到客户端的网络位置时，退回的是**服务器机房**所在城市。
+             这个地址与用户所在位置毫无关系，**绝不能**自动填进表单 ——
+             线上就出现过：襄阳的手机点「定位」，详细地址被填成
+             「北京市东城区交道口街道辛安里南锣鼓巷」，用户直接提交。
+             宁可留空让用户手填，也不要给一个看起来合理的错地址。 */
+          pendingLocation = null;
+          locInfo.textContent = '未能获取您的网络位置（当前为服务器所在城市：'
+            + (info.city || info.province || '未知') + '），请手动填写详细地址';
+        } else {
+          // 为什么只是「城市级」要说清楚：静默降级会让用户以为这就是
+          // 精确位置，从而不去补门牌号 —— 数据就这么错了。
+          const why = _canGpsLocate() ? '' : '（当前为 HTTP 访问，浏览器不允许精确定位）';
+          applyLocation(info.latitude, info.longitude, addr,
+            '已定位（城市级）：' + (addr || info.city || info.province || '当前位置')
+            + why + '，请补全门牌号');
+        }
       } catch (e) {
         pendingLocation = null;
         locInfo.textContent = '定位失败，请手动填写详细地址';

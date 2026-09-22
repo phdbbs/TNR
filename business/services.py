@@ -2,6 +2,7 @@
 TNR 业务系统 - 共享服务层
 提供编号生成、芯片管理、库存调整、黑名单检查、区县过滤等通用功能。
 """
+import ipaddress
 import json
 import os
 import random
@@ -247,23 +248,84 @@ def amap_regeo(lng, lat):
         'city': component.get('city') if isinstance(component.get('city'), str) else '',
         'district': component.get('district') if isinstance(component.get('district'), str) else '',
     }
-def amap_ip_location():
-    """高德 IP 定位：按服务器出口公网 IP 粗略定位（城市/区级精度）。
+def client_ip(request):
+    """取真实客户端 IP（给 IP 定位用）。
 
-    使用场景：浏览器 Geolocation 仅允许在 HTTPS 或 localhost 下使用，
-    本系统常通过 http://局域网IP:8000 访问，前端 GPS 定位会被浏览器
-    拒绝（"Only secure origins are allowed"）。手机与服务器通常处于
-    同一网络（同一公网出口 IP），因此由服务端调用 IP 定位可得到
-    与手机一致的城市级位置。
+    nginx 已设 `X-Real-IP $remote_addr`（**覆盖式**，客户端伪造不了），
+    优先用它；没有时退回 `REMOTE_ADDR`。
 
-    成功返回 dict（province/city/adcode/latitude/longitude，
-    经纬度取城市范围 rectangle 的中心点，GCJ-02 坐标），
+    ⚠ **不要**改用 `X-Forwarded-For` 的第一段 —— 那是客户端可任意伪造的
+    （nginx 用 `$proxy_add_x_forwarded_for` 会把客户端传的值原样追加在前面）。
+    """
+    if request is None:
+        return ''
+    return (request.META.get('HTTP_X_REAL_IP')
+            or request.META.get('REMOTE_ADDR') or '')
+
+
+# 运营商级 NAT（CGNAT）段。⚠ 必须**显式**列出来：`ipaddress` 的 `is_private`
+# 对它返回 **False**（Python 3.10~3.14 都是），所以只判 `is_private` 拦不住。
+# Tailscale 就工作在这一段，而生产服务器本身是 `100.99.98.71` —— 一旦有人
+# 经 Tailscale 访问，`X-Real-IP` 就是 `100.x.x.x`，不排掉就会拿一个高德必然
+# 查不到的 IP 去请求，白换一个 400。
+_CGNAT_NETWORKS = (ipaddress.ip_network('100.64.0.0/10'),)
+
+
+def public_ipv4(value):
+    """把候选字符串规整成「可用于高德 IP 定位的公网 IPv4」，否则返回 None。
+
+    高德 `/v3/ip` 只支持**国内 IPv4**：局域网 IP 返回「局域网」、
+    IPv6 / 非法 IP / 国外 IP 返回空。所以内网、回环、CGNAT、链路本地、
+    组播一律不传 —— 与其拿一个无效 IP 去换一个空结果，不如退回服务器出口。
+
+    ⚠ 不用 `is_global` 做判据：它在 Python 3.13 前后语义**不一样**
+    （3.13 起对齐 IANA 特别用途登记表，之前等价于 `not is_private`），
+    换台机器跑就得出不同结论。这里只用跨版本稳定的属性 + 显式网段。
+    """
+    if not value:
+        return None
+    # X-Forwarded-For 可能是 "client, proxy1, proxy2" 形式，取第一段
+    candidate = str(value).split(',')[0].strip()
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+    if addr.version != 4:
+        return None
+    if (addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_multicast or addr.is_reserved or addr.is_unspecified):
+        return None
+    if any(addr in net for net in _CGNAT_NETWORKS):
+        return None
+    return str(addr)
+
+
+def amap_ip_location(client_ip=None):
+    """高德 IP 定位：把**客户端**公网 IP 转成城市级位置。
+
+    ⚠ **必须传客户端 IP。** 高德 `/v3/ip` 的 `ip` 参数是可选的：不传时它按
+    「发起这次 HTTP 请求的一方」定位 —— 而请求是**服务器**发出的，于是永远
+    返回**机房所在城市**。线上实测：客户端在襄阳，接口稳定返回
+    「北京市东城区交道口街道辛安里南锣鼓巷」（腾讯云机房）。
+
+    原 docstring 假设「手机与服务器通常同一网络、同一公网出口 IP」——
+    那在**局域网部署**下成立；本项目是**公网部署**，该假设不成立，
+    降级路径就退化成了「永远给一个错误的城市」。
+
+    成功返回 dict（province/city/adcode/latitude/longitude/source，
+    经纬度取城市范围 rectangle 的中心点，GCJ-02 坐标）。
+    `source` 标明这次定位是依据**客户端 IP** 还是**服务器出口 IP**：
+    后者只说明服务器在哪，前端应当明确警告而不是当成用户位置。
     失败抛 ValueError（中文错误信息）。
     """
     key = os.environ.get('TNR_AMAP_KEY', '').strip()
     if not key:
         raise ValueError('未配置地图服务Key，请在 .env 中设置 TNR_AMAP_KEY（高德开放平台申请）')
-    url = 'https://restapi.amap.com/v3/ip?' + urllib.parse.urlencode({'key': key})
+    ip = public_ipv4(client_ip)
+    params = {'key': key}
+    if ip:
+        params['ip'] = ip
+    url = 'https://restapi.amap.com/v3/ip?' + urllib.parse.urlencode(params)
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'TNR-System/1.0'})
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -290,6 +352,9 @@ def amap_ip_location():
         except (ValueError, IndexError):
             pass
     if lat is None or lng is None:
+        if ip:
+            raise ValueError(
+                '未能根据您的网络位置（IP %s）定位，该 IP 可能不在高德数据库中' % ip)
         raise ValueError('IP定位未获取到有效位置范围（服务器可能处于内网或运营商无法识别）')
     return {
         'province': province,
@@ -297,6 +362,9 @@ def amap_ip_location():
         'adcode': data.get('adcode') or '',
         'latitude': lat,
         'longitude': lng,
+        # 让前端能区分「按你的网络定位」与「只是服务器在哪」——后者绝不能
+        # 当成用户位置自动填进表单（线上就出现过襄阳手机拿到北京地址）。
+        'source': 'client_ip' if ip else 'server_ip',
     }
 
 

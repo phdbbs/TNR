@@ -18,7 +18,7 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     generate_pet_codes, generate_ledger_no, get_district_scope,
     get_district_filtered_queryset, check_blacklist, amap_regeo,
-    amap_ip_location, capture_transfer_state, capture_states_bulk,
+    amap_ip_location, client_ip, capture_transfer_state, capture_states_bulk,
     recalc_capture_status, get_active_pet, validate_uploaded_images,
     resolve_district_scope, resolve_community,
     inactive_district_error, inactive_institution_error,
@@ -366,15 +366,27 @@ def geocode_reverse(request):
 def geocode_ip(request):
     """IP 定位兜底（浏览器精确定位不可用时的降级方案）。
 
-    浏览器 Geolocation 仅允许在 HTTPS 或 localhost（安全源）下使用，
-    通过 http://局域网IP:8000 访问时前端定位报错
-    "Only secure origins are allowed"。手机与服务器通常处于同一网络
-    （同一公网出口 IP），故由服务端调用高德 IP 定位，得到城市/区级
-    粗略位置（rectangle 中心点），再逆地理出地址名称一并返回。
-    data.precision = 'city' 标识粗定位，前端应提示用户核对详细地址。
+    ⚠ **浏览器 Geolocation 只在安全上下文（HTTPS / localhost）下才可用**，
+    这是浏览器强制的，网页代码无法绕过：在 `http://公网IP` 上
+    `navigator.geolocation.getCurrentPosition` 会**直接失败，连权限框都不弹**。
+    所以只要站点还是 HTTP，「询问用户是否授予 GPS 权限」就做不到 ——
+    要真正拿到精确定位，必须先把站点放到 HTTPS 上。
+
+    本接口是**兜底**：由服务端调高德 IP 定位，得到城市级粗略位置
+    （rectangle 中心点），再逆地理出地址名称一并返回。
+
+    ⚠ **必须按客户端 IP 定位**（`client_ip(request)`）。此前不传 IP，
+    高德就按「发起请求的一方」——也就是**服务器机房**——来定位，
+    线上稳定返回「北京市东城区…」，与客户端所在城市毫无关系。
+
+    返回里带 `source`：
+      - `client_ip`  —— 按客户端网络位置定位（城市级）
+      - `server_ip`  —— 拿不到可用的客户端公网 IP，退回服务器出口。
+                        **这只说明服务器在哪，前端不得当作客户位置自动填表。**
+    `precision = 'city'` 标识粗定位。
     """
     try:
-        loc = amap_ip_location()
+        loc = amap_ip_location(client_ip=client_ip(request))
     except ValueError as e:
         return json_fail(str(e))
     lat = loc.pop('latitude')
@@ -388,11 +400,15 @@ def geocode_ip(request):
             'address': '', 'province': loc.get('province', ''),
             'city': loc.get('city', ''), 'district': '',
             'latitude': lat, 'longitude': lng, 'precision': 'city',
+            'source': loc.get('source', ''),
         }, message='已获取大致位置坐标，但地址解析失败：%s' % e)
 
     info['latitude'] = lat
     info['longitude'] = lng
     info['precision'] = 'city'
+    info['source'] = loc.get('source', '')
+    if info['source'] == 'server_ip':
+        return json_ok(info, message='未能获取您的网络位置，当前为服务器所在城市，请手动填写详细地址')
     return json_ok(info, message='IP定位成功（城市/区级精度，请核对并完善详细地址）')
 
 
