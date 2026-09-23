@@ -134,6 +134,29 @@ def make_chip(number=None, status="available", pet=None):
     )
 
 
+def make_adoption(adopter, district=None, pet=None, status="completed", **kw):
+    """造一条领养记录。
+
+    ⚠ **领养人的区县归属由领养记录表达，不由 `User.district` 表达。**
+    领养人账号自身没有区县（注册流程不采集，生产实测 1/1 为空），
+    凡是要「按区县找领养人」的地方都必须经由 `Adoption.district` 推导 ——
+    见 `supervision.views._notice_recipients()`。
+    夹具若图省事直接给 `make_user(role='adopter', district=...)`，
+    就等于让用例跑在一个**生产上不存在**的数据形态上。
+    """
+    from business.models import Adoption
+    pet = pet or make_pet(district=district or make_district())
+    return Adoption.objects.create(
+        pet=pet,
+        pet_code=pet.code,
+        adopter=adopter,
+        adopter_name=kw.pop("adopter_name", adopter.username),
+        status=status,
+        district=district or pet.district,
+        **kw,
+    )
+
+
 def make_hospital_txn(material, hospital, type="receive", quantity=10, **kw):
     """直接造一条医院侧流水（receive 增加医院库存，consume 减少）。"""
     from business.models import MaterialTransaction

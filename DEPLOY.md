@@ -822,6 +822,81 @@ django-q2 的 MONTHLY 是按 `next_run` 的**日号**每月重复，
 python manage.py test business.tests.test_tasks.CheckinReminderTest
 ```
 
+### 5.14 ⚠⚠ 公告的区县归属必须从 `Adoption` 推导 —— **不要**读 `User.district`
+
+**这一条是生产实测打回来的**（第三十七轮续），不是推理。
+
+**现象**：`cy_gov`（襄城区）发公告一律 400「该范围内没有可接收公告的用户」。
+
+**根因**：领养人账号**没有区县**。生产实测 `adopter` 总数 1、`district` 为空 **1**，
+`seed_data` 里 `('adopter1', …, 'adopter', None, None, …)` 区县那栏本来就是 `None`。
+而收件人原实现读的是 `User.district` → 区级收件人恒为空集 → **功能 100% 不可用**。
+
+| 收敛口径 | 襄城区可触达领养人 |
+|---|---|
+| `User.district`（错） | **0 人** |
+| `Adoption.district`（对） | **1 人** |
+
+**修法**：
+- 迁移 `0018` 给 `Message` 补 `district`（公告自带发布方区县）；
+- `supervision.views._notice_recipients()` 走 `adoptions__district_id`（**必须 `.distinct()`**）；
+- `notice_list` 按**发布方**收敛：区级可见 = 本区县 + 市级（`district IS NULL`）。
+
+**部署后自检**（必须真跑，不能只看状态码）：
+
+```bash
+# 以 cy_gov 登录后：
+#   发公告 → 期望 200 且 sent >= 1（**不是** 400）
+#   列表   → 能看到自己发的那条
+# 以 hd_gov 登录后：
+#   列表   → **不该**出现 cy_gov 发的那条
+python manage.py test supervision.tests_notice
+```
+
+⚠ 本地单测**发现不了这一类**：夹具里领养人「恰好」带了区县，
+用例就跑在一个生产上不存在的数据形态上。判据不能停在状态码 ——
+要问「**这条业务路径到底能不能成功**」。
+
+### 5.15 ⚠⚠ `collectstatic` 必须以 **root** 跑（`staticfiles/` 属主是 `www-data`）
+
+**实测踩到**（第三十七轮）：
+
+```
+PermissionError: [Errno 13] Permission denied: '/opt/tnr/staticfiles/js/tnr-common.js'
+```
+
+`staticfiles/` 属主是 `www-data`，而 `collectstatic` 若以 `ubuntu` 跑，
+**删不掉已有的旧文件** → 报错退出，旧 JS 原样留着。
+
+⚠ 危险之处在于**它不是彻底失败**：`/login/` 里的 `?v=` 已经升到新版本号，
+但 `nginx` 返回的 `tnr-api.js` 仍是**旧内容** —— 浏览器按新 URL 取到旧文件并缓存，
+于是「改了代码、部署了、功能没生效」。
+
+正确顺序：
+
+```bash
+# ① 以 root 跑（root 才能删 www-data 属主的旧文件）
+/opt/tnr/venv/bin/python /opt/tnr/manage.py collectstatic --noinput
+# ② 再把属主改回 www-data
+chown -R www-data:www-data /opt/tnr/staticfiles
+```
+
+**判据**（不能只看 `collectstatic` 的退出码，要看 nginx 实际吐出来的内容）：
+
+```bash
+# 产物时间必须是本次部署时间
+stat -c '%y' /opt/tnr/staticfiles/js/tnr-api.js
+# nginx 实际返回的内容里必须有本次新增的标识符（按本次改动替换）
+curl -s http://127.0.0.1/static/js/tnr-api.js | grep -c '_handleUnauthorized'
+```
+
+⚠ 若窗口期已有客户端按**新** URL 缓存过旧内容，就必须再升一位 `?v=`。
+判断方式（读访问日志，别猜）：
+
+```bash
+grep -c 'v=20260923a' /var/log/nginx/access.log   # 为 0 才不用再升位
+```
+
 
 ## 六、常见报错对照
 

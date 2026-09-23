@@ -1454,6 +1454,36 @@ NOTICE_CONTENT_MAX = 2000
 NOTICE_TARGET_ROLES = ('adopter',)
 
 
+def _notice_recipients(request, target_role):
+    """公告的收件人：启用中、角色匹配、且**归属**落在发布者区县范围内。
+
+    ⚠⚠ **区县归属从业务对象（`Adoption`）推导，绝不能读 `User.district`。**
+
+    生产实测（第三十七轮）：领养人账号的 `district` **恒为空**（1/1 为空）——
+    注册流程根本没有采集区县。按 `User.district` 收敛的直接后果是
+    **区级 gov 的收件人集合永远为空**：
+
+    | 收敛口径 | 襄城区可触达领养人 |
+    |---|---|
+    | `User.district`（错误） | **0 人** |
+    | `Adoption.district`（正确） | **1 人** |
+
+    于是 `gov_district` 发公告一律回 400「该范围内没有可接收公告的用户」，
+    而角色闸门却明确允许它调用 —— 典型「**功能实现了、但到不了**」。
+
+    领养人的归属 = **他领养的动物属于哪个区县**。这与本项目既有的三次同口径
+    教训（捕捉单区县 / 操作日志 / 账号区县↔机构区县）是同一条纪律：
+    **归属要从业务对象推导，不能从账号自身字段推导。**
+
+    市级（`scope is None`）不做收敛：全市领养人都是受众。
+    """
+    qs = User.objects.filter(role=target_role, is_active=True, status='active')
+    scope = get_district_scope(request)
+    if scope is None:
+        return qs
+    return qs.filter(adoptions__district_id=scope).distinct()
+
+
 @csrf_exempt
 @role_required('gov_city', 'gov_district')
 @login_required
@@ -1467,6 +1497,10 @@ def notice_publish(request):
     权限边界：市级可向全部区县发布；**区级只能发给本区县**（按 `district`
     收敛）。否则区级管理员就能向全市广播 —— 与「账号只能管本区县」
     是同一条边界，不能在批量接口上单独放宽。
+
+    ⚠ 「本区县」的判定走 `_notice_recipients()`：领养人的区县**由他的领养
+    记录（`Adoption.district`）推导**，不是读账号的 `district` 字段 ——
+    后者对领养人恒为空，会把区级公告的收件人收敛成空集。
 
     ⚠ 这是**批量写**接口：一次请求创建 N 条 `Message`。因此校验必须
     **全部前置**（两段式），否则「标题超长」这类错误会在已经建了 300 条
@@ -1490,18 +1524,23 @@ def notice_publish(request):
         return json_fail('不支持的目标角色：%s（可选：%s）'
                          % (target_role, '、'.join(NOTICE_TARGET_ROLES)))
 
-    # 目标用户：启用中、角色匹配、且**落在发布者的区县范围内**
-    recipients = User.objects.filter(
-        role=target_role, is_active=True, status='active')
-    recipients = list(_scope_filter(recipients, request, field='district'))
+    # 目标用户：启用中、角色匹配、且**归属落在发布者的区县范围内**。
+    # ⚠ 归属走 `_notice_recipients()`（从 `Adoption` 推导），**不要**改回
+    # `_scope_filter(..., field='district')` —— 那读的是 `User.district`，
+    # 领养人账号没有区县，会让区级公告的收件人恒为空集。
+    recipients = list(_notice_recipients(request, target_role))
 
     if not recipients:
         return json_fail('该范围内没有可接收公告的用户')
 
     # 校验全过之后再落库（两段式）
+    # 公告**自带发布方区县**：市级发的是全市公告（None），区级发的是本区县公告。
+    # `notice_list` 靠这个字段做区县收敛，不靠接收人反查（见该视图注释）。
+    scope = get_district_scope(request)
     with transaction.atomic():
         Message.objects.bulk_create([
-            Message(user=u, type='notice', title=title, content=content)
+            Message(user=u, type='notice', title=title, content=content,
+                    district_id=scope)
             for u in recipients
         ])
 
@@ -1513,15 +1552,34 @@ def notice_publish(request):
 @role_required('gov_city', 'gov_district')
 @login_required
 def notice_list(request):
-    """已发布公告列表（按标题聚合）。
+    """已发布公告列表（按标题聚合，且**按发布方区县收敛**）。
 
     ⚠ `Message` 表里「一条公告」其实是 **N 行**（每个接收人一行）。
     直接列出来会看到同一标题重复 N 次，运营无法阅读。所以按
     `title` + `content` 分组，用 `sent_count` 表示触达人数 ——
     那也正是发布方真正关心的数字。
+
+    ⚠⚠ **区县收敛按「发布方」判定（`Message.district`），不按接收人反查。**
+    接收人反查（`user__adoptions__district_id`）有两个问题：
+    ① 多表 join 会扇出，`Count` 必须加 `distinct=True`，容易写错；
+    ② 领养记录一旦变动，**历史公告的归属会跟着漂移**。
+    发布方区县是「公告这条事实」自带的属性，不会变。
+
+    可见性规则：
+
+    | 角色 | 可见范围 |
+    |---|---|
+    | `gov_city`（scope=None） | 全部 |
+    | `gov_district` | 本区县发布的 + 市级发布的（`district IS NULL`） |
+
+    市级公告对区级可见是有意的：那类公告**本来就发给了本区县的领养人**，
+    对区级隐藏只会让「已发布公告」列表与实际触达情况不一致。
     """
-    rows = (Message.objects.filter(type='notice')
-            .values('title', 'content')
+    scope = get_district_scope(request)
+    rows = Message.objects.filter(type='notice')
+    if scope is not None:
+        rows = rows.filter(Q(district_id=scope) | Q(district__isnull=True))
+    rows = (rows.values('title', 'content')
             .annotate(sent_count=Count('id'), last_at=Max('created_at'))
             .order_by('-last_at')[:200])
     return json_ok(with_camel_keys(list(rows)))

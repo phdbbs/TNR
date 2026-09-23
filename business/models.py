@@ -538,6 +538,21 @@ class Message(models.Model):
     title = models.CharField('标题', max_length=200)
     content = models.TextField('内容')
     is_read = models.BooleanField('已读', default=False)
+    # ⚠⚠ 公告（`type='notice'`）**必须自带区县**，不能靠接收人的 `User.district` 推导。
+    #
+    # 生产实测：领养人账号的 `district` **恒为空**（1/1 为空）—— 注册时就没有区县。
+    # 按 `User.district` 收敛的直接后果是**区级 gov 的收件人集合永远为空**
+    # （襄城区 0 人）→ `notice_publish` 一律回 400「该范围内没有可接收公告的用户」，
+    # 而角色闸门却明确允许 `gov_district` 调用 —— 典型「功能实现了、但到不了」。
+    #
+    # 归属必须从**业务对象**推导（领养人的归属 = 他领养的动物属于哪个区县），
+    # 这与本项目既有的三次同口径教训（捕捉单区县 / 操作日志 / 账号区县↔机构区县）
+    # 是同一条纪律。
+    #
+    # 点对点消息（`approval` / `checkin_reminder` / `system`）走 `my_messages`
+    # 按接收人取，不需要区县，故留空。
+    district = models.ForeignKey('core.District', on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name='messages', verbose_name='所属区县')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     class Meta:
