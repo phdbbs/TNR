@@ -28,11 +28,49 @@ const TNR_API = {
    * 场景都不能用它** —— 403 会变成「配置为空」、500 会变成「暂无数据」，
    * 用户看到的是错误结论而不是错误提示。这类场景一律用 `get()`（失败抛错）。
    * 第十九轮政府端「系统配置」页就是栽在这里：区级拿 403 后前缀全渲染成空串。
+   *
+   * ⚠ **401 是唯一的例外**（第三十七轮）：它不代表「这条数据取不到」，
+   * 而代表**整个会话已经失效**。此时返回 `[]` 会让界面上每一个列表都变成
+   * 空表、每一个统计都变成 0，用户看到「系统里什么都没有了」而不是
+   * 「请重新登录」。所以 401 一律交给 `_handleUnauthorized()` 统一处理。
    */
   async _get(url) {
-    const res = await fetch(url);
-    const data = await res.json();
+    const res = await fetch(url, { credentials: 'same-origin' });
+    let data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
+    if (res.status === 401) { this._handleUnauthorized(data.message); return []; }
     return data.success ? data.data : (Array.isArray(data.data) ? data.data : []);
+  },
+  /* === 会话失效（401）统一处理：**先提示原因，再跳登录页** ===
+   *
+   * 为什么必须「先提示」：直接跳转的话，用户只看到自己回到了登录页，
+   * **无法判断**是会话过期、还是自己点错了、还是服务端出问题 —— 也就不知道
+   * 该不该重新登录。提示文案直接用**服务端返回的 message**
+   * （`accounts.decorators.api_unauthorized` 固定返回「请先登录」），
+   * 而不是前端另编一句，保证前后端口径同源。
+   *
+   * ⚠⚠ **必须防重入**。门户首屏会**并发**发出多个请求（5~9 个），会话过期时
+   * 它们**同时**拿到 401。不设闸门就会连弹 N 个提示、触发 N 次跳转，
+   * 而 `next` 参数还可能互相覆盖成最后一个请求的地址。
+   * 用 `_redirecting` 保证「只提示一次、只跳一次」。
+   */
+  _redirecting: false,
+  _handleUnauthorized(message) {
+    if (this._redirecting) return;
+    this._redirecting = true;
+    const msg = message || '登录已过期，请重新登录';
+    const go = () => {
+      const next = encodeURIComponent(location.pathname + location.search);
+      location.href = '/login/?next=' + next;
+    };
+    if (window.TNR_UI && typeof window.TNR_UI.toast === 'function') {
+      // 留 1.8 秒让用户看清原因，再跳 —— 太快等于没提示
+      window.TNR_UI.toast(msg + '，正在跳转登录页…', 'warning', 1800);
+      setTimeout(go, 1800);
+    } else {
+      alert(msg);
+      go();
+    }
   },
   async _post(url, body) {
     const res = await fetch(url, {
@@ -40,7 +78,12 @@ const TNR_API = {
       headers: {'Content-Type': 'application/json', 'X-CSRFToken': this._getCSRF()},
       body: JSON.stringify(body)
     });
-    return res.json();
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      this._handleUnauthorized(data.message);
+      return {success: false, message: data.message || '请先登录'};
+    }
+    return data;
   },
   async _postForm(url, formData) {
     const res = await fetch(url, {
@@ -48,7 +91,12 @@ const TNR_API = {
       headers: {'X-CSRFToken': this._getCSRF()},
       body: formData
     });
-    return res.json();
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      this._handleUnauthorized(data.message);
+      return {success: false, message: data.message || '请先登录'};
+    }
+    return data;
   },
   _getCSRF() {
     return document.querySelector('[name=csrfmiddlewaretoken]')?.value ||
@@ -86,6 +134,11 @@ const TNR_API = {
     let json;
     try { json = text ? JSON.parse(text) : {}; }
     catch (e) { throw new Error('服务器返回格式错误'); }
+    // 401 先于「通用失败」判断 —— 它需要触发跳转，不只是抛个错
+    if (res.status === 401) {
+      this._handleUnauthorized(json.message);
+      throw new Error(json.message || '请先登录');
+    }
     if (!res.ok || json.success === false) {
       throw new Error(json.message || '操作失败 (' + res.status + ')');
     }
@@ -242,6 +295,10 @@ const TNR_API = {
   async getData(url) {
     const res = await fetch(url, { credentials: 'same-origin' });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      this._handleUnauthorized(data.message);
+      throw new Error(data.message || '请先登录');
+    }
     if (!res.ok || !data.success) {
       throw new Error(data.message || `加载失败（HTTP ${res.status}）`);
     }

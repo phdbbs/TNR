@@ -5,7 +5,21 @@
 const TNR_UI = {
 
   // === Toast 通知 ===
+  /* 短时间内的**同文案** toast 只弹一次（第三十七轮）。
+   *
+   * 场景：会话过期时门户首屏的多个并发请求同时拿到 401，
+   * `TNR_API._handleUnauthorized()` 与各调用点的 `catch` 会各弹一次，
+   * 用户看到同一句话叠 2~3 个。
+   *
+   * 窗口取 1 秒：足够吞掉并发重复，又不至于把「用户连续两次同样的操作失败」
+   * 这种**真实**的第二次反馈吃掉。
+   */
+  _recentToasts: {},
   toast(message, type = 'success', duration = 3000) {
+    const key = type + '|' + message;
+    const now = Date.now();
+    if (this._recentToasts[key] && now - this._recentToasts[key] < 1000) return;
+    this._recentToasts[key] = now;
     let container = document.querySelector('.toast-container');
     if (!container) {
       container = document.createElement('div');
