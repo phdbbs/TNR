@@ -1927,7 +1927,8 @@ const GovPortal = {
     const tabs = [
       { id: 'prefix', label: '编号规则配置' },
       { id: 'logs', label: '操作日志' },
-      { id: 'params', label: '系统参数' }
+      { id: 'params', label: '系统参数' },
+      { id: 'notice', label: '公告发布' }
     ];
     el.innerHTML = `
       <div class="tabs">
@@ -2056,6 +2057,105 @@ const GovPortal = {
           </div>
         </div>
       `;
+    } else if (tab === 'notice') {
+      /* 公告发布（第三十七轮）。
+       *
+       * ⚠ 读历史列表走 `getNotices()`（失败**抛错**）而不是 `_get()`：
+       * 加载失败若被渲染成「还没发过公告」，发布方会以为公告没发出去、
+       * 于是**重复广播** —— 而广播是不可撤回的。
+       */
+      let notices = [];
+      try {
+        notices = (await TNR_API.getNotices()) || [];
+      } catch (e) {
+        el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⚠️</div>'
+          + '<div class="table-empty-text">加载公告列表失败：' + TNR_UI.escape(e.message) + '</div></div>';
+        return;
+      }
+      el.innerHTML = `
+        <div class="card">
+          <div class="card-header"><div class="card-title"><span class="card-title-bar"></span>发布公告</div></div>
+          <div class="card-body">
+            <div class="form-group">
+              <label class="form-label">标题<span class="req">*</span></label>
+              <input class="form-input" id="noticeTitle" maxlength="100" placeholder="如：关于加强秋季防疫工作的通知">
+            </div>
+            <div class="form-group">
+              <label class="form-label">内容<span class="req">*</span></label>
+              <textarea class="form-textarea" id="noticeContent" maxlength="2000" rows="5" placeholder="请填写公告正文"></textarea>
+            </div>
+            <div class="form-group">
+              <label class="form-label">接收对象</label>
+              <select class="form-select" id="noticeTarget">
+                <option value="adopter">全部领养人</option>
+              </select>
+            </div>
+            <div class="form-hint">${this.isCityLevel() ? '将发送给全市符合条件的用户。' : '将发送给本区县符合条件的用户。'}</div>
+            <div style="display:flex;justify-content:flex-end;margin-top:var(--sp-4);">
+              <button class="btn btn-primary" id="btnPublishNotice">发布公告</button>
+            </div>
+          </div>
+        </div>
+        <div class="card mt-5">
+          <div class="card-header"><div class="card-title"><span class="card-title-bar"></span>已发布公告</div></div>
+          <div class="card-body card-body-flush">
+            ${notices.length
+              ? '<div id="noticeTable"></div>'
+              : '<div class="table-empty"><div class="table-empty-icon">📜</div><div class="table-empty-text">暂无公告</div></div>'}
+          </div>
+        </div>`;
+      if (notices.length) {
+        TNR_UI.mountTable('noticeTable', {
+          id: 'gov.notice.list',
+          columns: [
+            { title: '标题', key: 'title' },
+            { title: '内容', render: r => {
+              const c = String(r.content || '');
+              return TNR_UI.escape(c.slice(0, 40)) + (c.length > 40 ? '…' : '');
+            }},
+            { title: '触达人数', render: r => (r.sentCount ?? r.sent_count ?? 0) + ' 人' },
+            { title: '发布时间', render: r => String(r.lastAt || r.last_at || '').replace('T', ' ').slice(0, 16) }
+          ],
+          data: notices, emptyText: '暂无公告'
+        });
+      }
+      el.querySelector('#btnPublishNotice')
+        ?.addEventListener('click', () => this.publishNotice());
+    }
+  },
+
+  /* 发布公告。
+   *
+   * 服务端会做**全部**校验（长度 / 角色白名单 / 区县范围），前端只拦
+   * 「空字段」——避免用户白填一次表单，但**不重复实现业务判据**：
+   * 两处各写一份长度上限，迟早会漂移成「前端放行、后端拒绝」。
+   */
+  async publishNotice() {
+    const title = (document.getElementById('noticeTitle')?.value || '').trim();
+    const content = (document.getElementById('noticeContent')?.value || '').trim();
+    const targetRole = document.getElementById('noticeTarget')?.value || 'adopter';
+    if (!title) { TNR_UI.toast('请填写公告标题', 'warning'); return; }
+    if (!content) { TNR_UI.toast('请填写公告内容', 'warning'); return; }
+
+    const ok = await TNR_UI.confirm(
+      '确定发布公告 <b>' + TNR_UI.escape(title) + '</b> 吗？<br>'
+      + '<span style="color:var(--ink-muted);font-size:13px;">'
+      + '公告一经发布**无法撤回**，接收人会立即在消息中心看到。</span>',
+      '发布确认');
+    if (!ok) return;
+
+    try {
+      const res = await TNR_API.publishNotice({
+        title: title, content: content, target_role: targetRole
+      });
+      if (res && res.success) {
+        TNR_UI.toast(res.message || '公告已发布', 'success');
+        this.render_settings();
+      } else {
+        TNR_UI.toast((res && res.message) || '发布失败', 'danger');
+      }
+    } catch (e) {
+      TNR_UI.toast(e.message || '发布失败', 'danger');
     }
   },
 

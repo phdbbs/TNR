@@ -20,11 +20,11 @@
 
 | 项 | 结果 |
 |---|---|
-| 全新自动化测试套件 | **1090 个用例，全部通过**（约 320 秒，不依赖 seed_data） |
+| 全新自动化测试套件 | **1144 个用例，全部通过**（约 383 秒，不依赖 seed_data） |
 | 旧测试套件（参考基线） | 36 个用例，通过后作为契约参考，已被新套件取代 |
 | 浏览器 GUI 黑盒走查 | 四端核心流程全部走通；六轮补齐真实渲染层实测（捕捉端 31 项 + 四端巡检 12 项）；九轮再验 10 项需求改造；十二轮逐页逐标签审计 **80 个视图 0 报错 0 空白**；二十二轮 81 视图复测干净；二十三轮新增 `64` **26 项**（含真实按钮签收 + 四端回归）；二十四轮新增 `65` **29 项**（查询参数投毒 / 正向对照 / 界面路径 / 界面失败态 + 负向对照）；二十五轮新增 `66` **108 视图 / 226 次 API 请求 0 处非预期失败**（状态码全端扫描）+ `67` **12 用例 × 2 组**（正常路径回归 + `page.route` 打断接口验失败可见性） |
 | 真实 HTTP 冒烟测试 | **72 项检查全部通过**（二轮 37 项 + 三轮 35 项，见第 2.7 / 2.8 节）+ 五轮端到端可见性验证 + 八轮权限矩阵穷举 |
-| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**）+ 三十一轮 **2 道闸门**（`DATA_UPLOAD_MAX_NUMBER_FILES` 默认 **100**，而产品自己声明「单批最多 100 只」= 100 张单只照片 + 1 张合影 = **101 个文件** → 第 100 只的照片连解析都过不去，`400 **text/html**`；nginx `client_max_body_size` 20M → 100 张手机压缩图约 30–50MB → `413 **text/html**`。两者前端都表现为「点提交没反应」；修法：设置按产品上限推导 + 新增 `handler400` 把 `/api/` 下所有传输层 400 收口成**可读 JSON** + nginx `error_page 413` 同口径）+ 三十二轮 **1 项预防性收口**（CSRF 403 默认也是 **HTML**（`403_csrf.html`）→ 前端静默。⚠ **当前前端够不到**：全站 78 条 `/api/` 路由里只有 3 条非 `csrf_exempt`，而前端对它们**只发 GET**、模板里也无裸 `fetch` POST。但 `HTTPS=on` 后 CSRF 的 Referer/Origin 校验首次生效，`CSRF_TRUSTED_ORIGINS` 为空时就会踩到。⚠ 唯一钩子是 `CSRF_FAILURE_VIEW` —— `CsrfViewMiddleware` **直接返回**响应、不抛异常，`handler403` 接不住）+ 三十三轮 **2 个出口**（① **3 处 `/api/` 接口未登录时 302 到登录页**（`/api/me/password/`、`/api/supervision/institutions/`、`/api/supervision/districts/` —— 都是「所有登录用户可用」所以当初只写了裸 `@login_required`，而它没有 `/api/` 的 JSON 分支）；⚠ 关键在于 **`fetch` 默认 `redirect: 'follow'`**：302 被自动跟随到 `/login/`，最终 status **200** + **HTML 登录页** → `res.json()` 抛 `SyntaxError` → `_get` 的调用点（下拉数据源）**渲染中断、页面空白**，`_post` / `_postForm` 的调用点**「点了没反应」**；② `/api/` 下 **404 / 500 也是 HTML**（前端打错路径、或视图抛未捕获异常 → 同样静默）。修法：新增 `core.http.is_api_request` 统一口径 + `api_login_required` 装饰器 + `handler404` / `handler500`；⚠ **这个 302 缺陷我第三十一轮亲手误判成「正常重定向」**，教训已记入 §2.41）+ 三十四轮 **0 项缺陷（加固）**（把「动态枚举 URLconf」的手法推到另外三个方向：**信封形状** / **非法查询参数不得 500** / **各角色访问各路由**，探针实测 78 路由 × 23 参数 × 5 角色**零缺陷** —— 证明之前几轮修得扎实；随后固化成 `AllApiRoutesContractTest` 三条闸门，⚠ 参数名是从生产代码 `Grep 'request.GET.get('` **抄出来的真实参数名**，第一版「猜的」8 个等于没测） |
+| 发现并修复的真实缺陷 | 首轮 17 项 + 二轮 14 项 + 三轮 13 项 + 四轮 8 项 + 五轮 8 项 + 六轮 1 项 + 八轮 1 项 + 九轮 6 项 + 十轮 6 项 + 十二轮 3 项 + 十五轮 1 项越权 + 十六轮 4 项越权/越界 + 十七轮 3 项越权/越界 + 十八轮 3 项控制失效 + 十九轮 1 项权限/契约不一致 + 二十轮 3 项横向越权（读侧）+ 二十一轮 1 项横向越权（写侧）+ 二十二轮 3 项（1 项越权读 + 1 项静默失败 + 1 项整页不可达）+ 二十三轮 3 项存在性预言机 + 二十四轮 **13 处未捕获异常**（4 个接口 5 个参数）+ **2 处数量无上限**（资源耗尽型）+ **2 处孤儿记录** + **1 处功能从未生效**（「按区县名筛选」）+ 二十五轮 **12 处「死 catch」**（作者写了失败提示却永远兑现不了：11 处全静默 + 1 处半静默，含**审计面**的操作日志页）+ 二十六轮 **3 项**（① 启动补偿在 `AppConfig.ready()` 里查库、空 `if` 分支 + `except: pass` 吞异常；② 日期筛选把裸 `date` 丢给 `DateTimeField` → 每请求一条 naive datetime 警告；③ `.DS_Store` / `.zcode` 被跟踪并随部署进生产）+ 二十九轮 **10 处日期口径**（把后端 `DateTimeField` 的 UTC 串当本地日期用：医院端时间**差 8 小时**、UTC ≥ 16:00 **连日期差一天**；`formatDateTime` 给 `DateField` 的纯日期串**凭空补 `08:00`**（UTC+8 下就可见，gov 台账 8+ 处）；10 处日期筛选把本地 00:00–08:00 的记录**算到前一天**；`views_portal` 的 `date` 字段**同文件内自相矛盾**）+ 三十轮 **1 项**（`api_change_password` 裸读 `request.body`，3MB 请求体把接口炸成 **HTML 400 错误页**（含 Traceback）→ 前端静默中断；同一缺陷模式在 `business` 侧已修、这里没修 —— **两份实现必然漂移**）+ 三十一轮 **2 道闸门**（`DATA_UPLOAD_MAX_NUMBER_FILES` 默认 **100**，而产品自己声明「单批最多 100 只」= 100 张单只照片 + 1 张合影 = **101 个文件** → 第 100 只的照片连解析都过不去，`400 **text/html**`；nginx `client_max_body_size` 20M → 100 张手机压缩图约 30–50MB → `413 **text/html**`。两者前端都表现为「点提交没反应」；修法：设置按产品上限推导 + 新增 `handler400` 把 `/api/` 下所有传输层 400 收口成**可读 JSON** + nginx `error_page 413` 同口径）+ 三十二轮 **1 项预防性收口**（CSRF 403 默认也是 **HTML**（`403_csrf.html`）→ 前端静默。⚠ **当前前端够不到**：全站 78 条 `/api/` 路由里只有 3 条非 `csrf_exempt`，而前端对它们**只发 GET**、模板里也无裸 `fetch` POST。但 `HTTPS=on` 后 CSRF 的 Referer/Origin 校验首次生效，`CSRF_TRUSTED_ORIGINS` 为空时就会踩到。⚠ 唯一钩子是 `CSRF_FAILURE_VIEW` —— `CsrfViewMiddleware` **直接返回**响应、不抛异常，`handler403` 接不住）+ 三十三轮 **2 个出口**（① **3 处 `/api/` 接口未登录时 302 到登录页**（`/api/me/password/`、`/api/supervision/institutions/`、`/api/supervision/districts/` —— 都是「所有登录用户可用」所以当初只写了裸 `@login_required`，而它没有 `/api/` 的 JSON 分支）；⚠ 关键在于 **`fetch` 默认 `redirect: 'follow'`**：302 被自动跟随到 `/login/`，最终 status **200** + **HTML 登录页** → `res.json()` 抛 `SyntaxError` → `_get` 的调用点（下拉数据源）**渲染中断、页面空白**，`_post` / `_postForm` 的调用点**「点了没反应」**；② `/api/` 下 **404 / 500 也是 HTML**（前端打错路径、或视图抛未捕获异常 → 同样静默）。修法：新增 `core.http.is_api_request` 统一口径 + `api_login_required` 装饰器 + `handler404` / `handler500`；⚠ **这个 302 缺陷我第三十一轮亲手误判成「正常重定向」**，教训已记入 §2.41）+ 三十四轮 **0 项缺陷（加固）**（把「动态枚举 URLconf」的手法推到另外三个方向：**信封形状** / **非法查询参数不得 500** / **各角色访问各路由**，探针实测 78 路由 × 23 参数 × 5 角色**零缺陷** —— 证明之前几轮修得扎实；随后固化成 `AllApiRoutesContractTest` 三条闸门，⚠ 参数名是从生产代码 `Grep 'request.GET.get('` **抄出来的真实参数名**，第一版「猜的」8 个等于没测）+ 三十五轮 **4 族真缺陷**（把枚举闸门推到**请求体**：① 17 接口 × 3 种非 dict body（`[1,2,3]` / `"str"` / `null`）≈ **51 处 500**；② 整型外键畸形值（`pet_id` / `shelter_id` / `to_hospital_id` / `district_id` / `material_id` / 嵌套 `vaccine.material_id`…）→ `ValueError: Field 'id' expected a number`；③ 字符串字段传 dict/list/数字 → `(data.get('x') or '').strip()` 炸（`or ''` 只挡 falsy）；④ **`SystemConfig` 被写入 16 行** —— config 的 POST 把请求体每个顶层 key 都当配置项写。修法：`read_json_body` 归一化 + 四个类型守卫 `body_str`/`body_int`/`body_dict`/`body_list`；⚠ **闸门必须多角色跑**（单角色时大量接口在 `role_required` 层 403 提前返回，视图体一行没执行）+ **参数名要扫两种形态**（收口后只扫 `data.get(` 会让参数名从 101 掉到 45，闸门自己退化成假绿）+ **判据加第三个维度**（POST 要统计各表行数变化，只查状态码对「非法请求体写库」完全无感））+ 三十六轮 **48 处响应体键缺失**（把枚举闸门推到**输出侧**：约定「每个记录字典同时含 snake_case 与 camelCase」是既有的（政府端读 snake、捕捉端读 camel），实测 78 路由 × 5 角色命中 **48 处「前端读 camel、接口只给 snake」**，**全部在嵌套层** —— 根因三条：① `with_camel_keys` **只补顶层**（`records[].detail` 里的 `contactPerson`/`geoAddress`/`propertyName`/`groupPhoto`/`petCodes` 全缺）；② `pet_brief()` 返回 snake-only 字典被塞进 `detail.pet`（`photoCapture`/`districtName`/`shelterName`/`hospitalName`/`districtId` 全缺）；③ **同一响应里两套口径**（`/api/business/captures/` 外层手写 `canDelete` 而嵌套 `transferState` 写 `can_delete`，两边各缺一半）；另有 `accounts.api_me` **裸 `JsonResponse` 绕过统一信封** → `/api/me/` 的 `districtId`/`districtName` 一直是 undefined。修法：`with_camel_keys` **改递归** + 在 `json_ok`/`json_fail` **一处归一** + **消灭 `serialize_instance` 里那份重复的 `_to_camel`** + `views_capture` 改为只写 snake（反向补键有歧义，不能自动生成）；⚠ 这类缺陷**没有任何报错** —— 接口照样 200、日志照样干净，只能靠枚举闸门兜住）  + 三十六轮 **48 处响应体键缺失**（`with_camel_keys` 只补顶层，嵌套值原样透传 —— 枚举 78 条路由 × 5 角色，命中全部落在嵌套层：`pet_brief()` 的 `photoCapture`/`districtName`、`records[].detail` 的 `contactPerson`/`geoAddress`，以及**同一响应里两套口径**（外层 `canDelete`、嵌套 `can_delete`）；`/api/me/` 的 `districtId` 因裸 `JsonResponse` 绕过漏斗而长期 undefined） + 三十七轮 **3 处功能缺口 + 1 项部署缺陷**（① `_get` 忽略 HTTP 状态 → 401 会话过期被渲染成「所有列表都空了」，用户既不知道原因也没有重新登录入口；② `Message.notice` 与 `checkin_reminder` **两个枚举值都没有任何写入路径** —— 界面上有图标有文案，真实业务里永远不会出现；③ 捕捉点**没有库存异动权限**，叠加 `expiry_date` 判据后，其过期物料既不能报废也不能下发，成了死库存；④ `ensure_superuser` 在无启用超管时**随机生成口令且不落盘** → 生产 `admin/123456` 与 `admin/admin123456` 均不匹配） |
 | 测试数据清理 | 测试痕迹 **41 条记录 + 5 个媒体文件**已清除，演示数据完整保留（见 2.12） |
 
 新测试套件结构（替代原单文件 `business/tests.py`）：
@@ -5198,6 +5198,341 @@ self.assertGreater(len(names), 40, '从源码抄出的请求体参数名只有 %
 
 ---
 
+#### 2.44 响应体键契约 —— 输入修完了，输出还漏着（第三十六轮）
+
+§2.42 修**查询参数**、§2.43 修**请求体**，两轮都在**输入侧**。
+这一轮把同一套枚举手法推到**输出侧**：接口返回的每个记录字典，是否
+**同时含 snake_case 与 camelCase 两套键**。
+
+这个约定是项目既有的（`serialize_instance` 的 docstring 明写），
+它存在的原因也很实在：**政府端读 snake、捕捉端读 camel**，同一个接口
+两端共用。缺哪一套，读那一套的那一端就是 undefined —— 而**接口照样 200**。
+
+##### 一、探针设计
+
+复用 `iter_api_routes()`（§2.42 建的，全项目唯一一份枚举逻辑），
+枚举 78 条 `/api/` 路由 × 5 角色，对每个 200 且 `success` 的响应做：
+
+```python
+def walk_key_twins(node, path, out):
+    """递归遍历 JSON，两个方向都收。"""
+    if isinstance(node, dict):
+        keys = set(node.keys())
+        for key in keys:
+            if '_' in key:                       # 有 a_b 没有 aB → snake_only
+                camel = to_camel_key(key)
+                if camel != key and camel not in keys:
+                    out['snake_only'].append((path, key, camel))
+            elif re.search(r'[A-Z]', key):       # 有 aB 没有 a_b → camel_only
+                snake = snake_of(key)
+                if snake != key and snake not in keys:
+                    out['camel_only'].append((path, key, snake))
+        for k, v in node.items():
+            walk_key_twins(v, '%s.%s' % (path, k), out)
+    elif isinstance(node, list):
+        for i, v in enumerate(node[:5]):
+            walk_key_twins(v, '%s[%d]' % (path, i), out)
+```
+
+**三个关键设计**：
+
+1. **只在同一个 dict 内比较**。`{'a_b': 1}` 与别处的 `{'aB': 2}` 互不相关 ——
+   跨 dict 比较会造出大量假阳性。
+2. **两个方向都查**。`snake_only` 让读驼峰的一端空白，`camel_only` 让读
+   蛇形的一端空白；只查一个方向会漏掉整整一半（本轮 `canDelete` 就是
+   `camel_only`，只查一个方向根本看不见）。
+3. **再用前端源码交叉验证**。光看「缺孪生」还不能定级 —— 得知道
+   **前端到底读不读那个键**。所以另收一份「前端读过的字段名」：
+
+   ```python
+   _FE_DOT_RE     = re.compile(r"""\b[A-Za-z_$][\w$]*\.([a-zA-Z_][\w$]*)\b""")
+   _FE_BRACKET_RE = re.compile(r"""\[\s*['"]([A-Za-z_][\w]*)['"]\s*\]""")
+   ```
+
+   ⚠ 这是**粗集**：`console.log` 会贡献 `log`、`TNR_UI.escape` 会贡献 `escape`。
+   所以判据必须**叠两层过滤**：① 只挑含大写字母的键（噪声基本是小写）；
+   ② 只挑「它的 snake 形式确实在响应里出现过」的键。缺任一层都会误报。
+
+##### 二、实测：48 处「前端读 camel、接口只给 snake」
+
+| # | 根因 | 命中位置 |
+|---|---|---|
+| ① | **`with_camel_keys` 只补顶层**，嵌套值原样透传 | `pet_archive_records` 的 `records[].detail`：`contactPerson` / `geoAddress` / `propertyName` / `groupPhoto` / `petCodes` 全缺 |
+| ② | **`pet_brief()` 返回 snake-only 字典**，被塞进 `detail.pet` / `data.pet_brief` | `photoCapture` / `districtName` / `shelterName` / `hospitalName` / `districtId` 全缺（`/lifecycle/`、`/pets/archive/`） |
+| ③ | **同一响应里两套口径** —— 外层手写 camel、嵌套写 snake | `/api/business/captures/` 的外层给 `canDelete`（无 snake 孪生），嵌套 `transferState` 又给 `can_delete`（无 camel 孪生）—— **两边各缺一半** |
+
+另外三处**绕过统一信封**的：
+
+| 位置 | 症状 |
+|---|---|
+| `accounts.api_me` | 裸 `JsonResponse`，绕过 `json_ok` → `/api/me/` 只给 `district_id` / `district_name`，而前端读 `user?.districtName`（`shelter/portal.html`）→ **区县名 undefined** |
+| `/api/supervision/users/`、`/api/supervision/institutions/` | `district_id` / `district_name` 手写、无孪生 |
+| `/api/supervision/business/`、`/materials/`、`/ledger/` | 同上 |
+
+**为什么之前没被发现**：这类缺陷**没有任何报错**。前端读 `r.ledgerNo`
+得到 undefined，表现是「编号列整列空白」「按钮该隐藏却没隐藏」，
+接口照样 200、日志照样干净。**只能靠枚举式闸门兜住。**
+
+##### 三、修法：递归 + 一处归一 + 消灭重复实现
+
+**(1) `with_camel_keys` 改成递归**，并下沉到 `core/http.py`（与 `body_*` 同族）：
+
+```python
+def with_camel_keys(data):
+    if isinstance(data, dict):
+        out = {}
+        for key, value in data.items():
+            out[key] = with_camel_keys(value)      # ← 递归，原实现这里传的是 value
+        for key, value in list(out.items()):
+            if not isinstance(key, str):
+                continue
+            camel = to_camel_key(key)
+            if camel != key and camel not in out:
+                out[camel] = value
+        return out
+    if isinstance(data, (list, tuple)):
+        return [with_camel_keys(v) for v in data]
+    return data
+```
+
+⚠ **不改入参**（新建 dict/list）。`pet_brief()` 的返回值被多处共享，
+就地改写会串味 —— 这是递归改写时最容易踩的坑。
+
+**(2) 在 `json_ok` / `json_fail` 上统一应用** —— 理由与 §2.43 的
+`read_json_body` 归一化同源：**归一化点只能有一个**。散到十几个手工聚合的
+接口去写，必然出现「有的补了、有的没补」，而且**新加接口时没人会记得补**。
+
+**(3) 消灭重复实现。** `serialize_instance` 里另有一份内部 `_to_camel`，
+注释写着「与 `with_camel_keys` 同一套规则」—— **那只是注释**，两处代码
+各写各的。合并到 `core.http.to_camel_key()`。漂移的后果是：同一个字段在
+模型序列化与手工聚合两条路径上得到**不同的驼峰名**，前端按其中一种读，
+另一条路径就是 undefined。
+
+**(4) `json_ok` / `json_fail` 下沉到 `core/http.py`**，`business.services`
+只 re-export。原因：它们是**纯 HTTP 信封**、不依赖业务逻辑，而
+`accounts.api_me` 也要用 —— 留在 `business.services` 会让
+`accounts.views` **反向依赖** `business`（层级倒置）。
+
+**(5) `business/views_capture.py` 三处改为只写 snake**，驼峰交给漏斗。
+`camel_only` **不能靠自动补键修**：`petID` → `pet_i_d` 这种还原有歧义，
+反向补键只会造出垃圾字段名。正确修法是**只写 snake、单向生成驼峰**。
+
+##### 四、反向验证（5 组变异，全部精确变红）
+
+| # | 变异 | 期望打红的闸门 | 结果 |
+|---|---|---|---|
+| M1 | `with_camel_keys` 改回**非递归**（`out[key] = value`） | `test_no_snake_only_dict_in_any_get_response` | ✅ FAILED |
+| M2 | `json_ok` 不再调用 `with_camel_keys` | 枚举闸门 + `test_json_ok_adds_camel_twins_recursively` | ✅ FAILED（2 红） |
+| M3 | `accounts/views.py` 退回裸 `JsonResponse` | `test_api_me_returns_camel_twins` | ✅ FAILED |
+| M4 | `business/views_capture.py` 退回手写 camel 键 | `test_no_camel_only_dict_in_any_get_response` | ✅ FAILED |
+| M5 | `serialize_instance` 退回自己的 `_to_camel` | `test_to_camel_key_is_the_single_implementation` | ✅ FAILED |
+
+每组变异后立即恢复并 **md5 校验**，最后跑一遍新增闸门确认全绿（16 例 OK）。
+
+##### 五、新增 16 例
+
+| 测试类 | 例数 | 覆盖 |
+|---|---|---|
+| `core.tests.CamelKeyHelperTest` | 8 | 驼峰规则 / **递归** / 不改入参 / 幂等 / 已有驼峰优先 / 非字符串键 / 标量透传 / **单一实现** |
+| `core.tests.ResponseEnvelopeCamelTest` | 4 | `json_ok` 递归补键 / `json_fail` 补键 / **`api_me` 回归锚点** / 未登录仍 401 JSON |
+| `core.tests.ResponseKeyContractTest` | 4 | **枚举 78 路由 × 5 角色**：无 snake_only / 无 camel_only / 前端读的驼峰键都存在 / 前端读的蛇形键都存在 |
+
+⚠ 三处**防呆断言**（缺了会静默假绿）：路由数 > 20、成功响应数 > 30、
+前端键数 > 100。第三十五条与第三十四条也各有一组 —— 这是这类闸门的固定配置。
+
+⚠ 顺带更新了 §2.43 的一条闸门：`test_whitelist_matches_read_defaults`
+原先直接比 `set(data) == set(SYSTEM_CONFIG_DEFAULTS)`，补上驼峰孪生后
+那 11 个驼峰键会被算成「白名单外的残留键」（**假阳性**）。改为只比
+**snake 键**，并顺带断言驼峰孪生存在 —— 等于给键契约多加一个锚点。
+
+##### 六、用例数
+
+全量 **1090 → 1106 OK**。
+
+> 三轮下来这条线索很清楚了：
+> **§2.42 查询参数（零缺陷）→ §2.43 请求体（4 族真缺陷）→
+> §2.44 响应体（48 处真缺陷）**。
+> 每一轮都是「把上一轮的枚举手法对称地推到一个新维度」，
+> 而每一次都**真的能炸出东西** —— 说明「这一维干净」永远不能外推。
+> 共同的可复用点只有三条：
+> **① 枚举源要动态取（URLconf）② 判据要两三个维度（状态码 / 形状 / 行数变化）
+> ③ 每个闸门都要有防呆断言，否则它自己会静默退化成假绿。**
+
+---
+
+#### 2.45 磊哥的四项决策落地（第三十七轮）
+
+§2.44 收口了**输入/输出契约**这条线。这一轮换了性质：不再是我自己找问题，
+而是**磊哥逐条决策后落地** —— 四项里三项是「功能缺口」，一项是部署策略。
+
+| # | 决策 | 落地 |
+|---|---|---|
+| 1 | `client_max_body_size` 保持 **20M** | 不改（仅记录） |
+| 2 | HTTPS 暂不做，先用 IP 访问 | 不改（仅记录） |
+| 3 | `_get` 401 静默返回 `[]` → **先提示错误信息再跳登录页** | §2.45.1 |
+| 4 | `checkin_reminder` / `notice` **要实现** | §2.45.2 / §2.45.3 |
+| 5 | 捕捉点无库存异动权限 → **补充上** | §2.45.4 |
+| 6 | `seed_data` 重复数据 | 未答，留决策 |
+| 7 | MariaDB/1panel 端口暴露、`ufw` inactive | 未答，留决策 |
+| 8 | 两个中文名 `.docx` **不移除** | 不改（仅记录） |
+| 9 | admin 口令**固定 123456** | §2.45.5 |
+
+##### 一、401：从「静默空表」到「提示原因 + 跳登录」
+
+`TNR_API._get()` 原先**完全忽略 HTTP 状态**，非 2xx 一律返回 `[]`。
+会话过期（401）因此被渲染成「所有列表都空了」—— 用户看到的是
+**「系统里没有数据」而不是「请重新登录」**，既不知道发生了什么，
+也没有任何重新登录的入口。
+
+磊哥的决策里有一句很关键：**「要先有提示错误信息后再跳转，
+否则无法确定是什么原因报错」**。所以实现不是简单 `location.href = '/login/'`：
+
+* 提示文案用**服务端返回的 message**（`api_unauthorized` 固定「请先登录」），
+  不是前端另编一句 —— 否则前后端两套说法，排查时对不上；
+* **防重入闸门**：门户首屏并发 5~9 个请求，会话过期时它们**同时**拿到 401。
+  不设闸门会连弹 N 个提示、触发 N 次跳转，`next` 还会互相覆盖；
+* **五条 fetch 路径全认 401**（`_get` / `_post` / `_postForm` / `_handle` /
+  `getData`）—— 只修 `_get` 的话，写接口遇到会话过期仍会把失败当业务错误；
+* `TNR_UI.toast` 加**短时去重**（同文案 1 秒内一次）：并发 401 时
+  `_handleUnauthorized` 与调用方 `catch` 会各弹一次。
+
+⚠ **一条闸门第一版是假绿**，值得记下来：`assertIn('_recentToasts', ...)`
+只检查**字段名**，把去重逻辑整段删掉（字段声明还在）**仍然通过** ——
+是变异测试把它抓出来的。改为断言「判据 + 记录」两个行为后才真正生效。
+**「断言存在性」和「断言行为」的差别，在这里就是「有闸门」和「没闸门」的差别。**
+
+##### 二、`notice` 公告：从「枚举值存在」到「有人能发」
+
+`Message.TYPE_CHOICES` 里的 `notice` 在此之前**没有任何写入路径** ——
+领养人端消息中心早就支持它的图标（`📜`）与文案（「公告」），
+但没有任何接口能产生一条。这与 `Institution.status`「字段存在但无人读」
+是**同一类缺口的反方向**：有人读、没人写。
+
+新增 `supervision.notice_publish` / `notice_list`：
+
+* **区级只能发给本区县**（按 `district` 收敛）。否则区级管理员就能向全市
+  广播 —— 与「账号只能管本区县」是同一条边界，不能在批量接口上单独放宽；
+* **校验全部前置**（两段式）。这是**批量写**接口：一次请求创建 N 条
+  `Message`。校验若不前置，「标题超长」会在已经建了 300 条消息之后才报出来，
+  留下**半截广播** —— 而广播是不可撤回的；
+* **目标角色只开放 `adopter`**。四端门户里只有领养人端有「消息中心」页面，
+  且 `my_messages` 的白名单也只含 `adopter` / `gov_*`。把公告发给捕捉点或
+  医院，消息会**落进一张没有任何入口能看到的表** —— 发送方看到「已发送 N 人」，
+  接收方永远收不到，**比不实现更糟**。要放开这两端，必须先补它们的消息中心；
+* `notice_list` **按标题聚合**：一条公告 = N 行 `Message`，直接列出来会看到
+  同一标题重复 N 次，运营无法阅读。用 `sent_count` 表示触达人数 ——
+  那也正是发布方真正关心的数字。
+
+##### 三、`checkin_reminder` 回访提醒：从「只有演示数据」到「每月自动发」
+
+同样是「枚举值存在、写入路径缺失」。新增
+`business.tasks.send_checkin_reminders` + 迁移 `0017` 注册定时任务
+（每月 1 日 09:00），与 `0016` 同一套幂等模式。
+
+判据逐条想清楚：
+
+| 情况 | 提醒？ | 理由 |
+|---|---|---|
+| 已领养（`completed`）+ 本月无打卡 | **提醒** | 目标场景 |
+| 本月已有 `pending` / `approved` 打卡 | 不提醒 | 已经交过了 |
+| 本月打卡被 `rejected` | **提醒** | 驳回意味着需要**重新提交**，这正是提醒的意义 |
+| 上月打过卡 | **提醒** | 不能顶替本月，否则第二个月起再也不会提醒 |
+| 还是 `pending_claim`（待领出） | 不提醒 | 动物还没交到领养人手上，催他打卡是错的 |
+| 宠物已逻辑删除 / 账号已停用 | 不提醒 | 发了没人看，只在库里堆未读 |
+| 同一人领养多只 | **每只各提醒一次** | 按 (宠物, 领养人) 组合判定 —— 不能因一只打过就漏另一只 |
+
+去重按**标题**（含月份），保证同一个月不会反复催同一个人。
+
+`0017` 里有个容易踩的点：django-q2 的 MONTHLY 类型是「按 `next_run` 的
+**日号**每月重复」，所以 `next_run` 必须落在 **1 日**。若照抄 `0016` 的
+「今天 + 1 个月」，会把执行日固定在部署当天（如 23 日），与「月初提醒」的
+意图不符。
+
+##### 四、捕捉点库存异动：补上那个「没有出口」的缺口
+
+§2.34 给 `expiry_date` 加判据时留下了一个**权宜之计**：暂不拦「下发」，
+因为当时捕捉点角色的 `stock_adjustment` 白名单里**没有 shelter** ——
+拦了下发，捕捉点的过期物料**没有任何出口**（既不能报废、也不能用）。
+
+本轮把 shelter 补进白名单，缺口闭合：
+
+* 角色闸门放开，但**余额闸门本来就在** `adjust_stock()` 里
+  （`hospital is None` 分支的前置 `shelter_stock < quantity` 校验）——
+  两道闸门缺一不可，且判据必须在**建流水之前**（否则留孤儿记录）；
+* `get_scoped_object` 仍按区县收敛 —— **角色放开不等于范围放开**；
+* 前端捕捉点门户新增「库存异动」tab，含**过期物料计数提示**与
+  「过期物料排在最前」的排序（这个入口的主要用途就是把它们清出去）。
+
+⚠ 顺带更新了 `expired_material_error` 里那段过时注释：它写着
+「暂不拦下发，因为捕捉点没有出口」—— 现在出口有了，但**拦截面本身是
+行为变更**，会改变现有演示路径，故仍维持不拦，留给磊哥决策。
+
+##### 五、admin 口令：从「随机生成、只显示一次」到「固定 123456」
+
+生产实测发现 `admin/123456` 与 `admin/admin123456` **均不匹配**。根因链：
+
+1. `deploy.sh` 调 `ensure_superuser --username admin`（不带 `--reset-password`）；
+2. 该命令在**没有启用的超管**时会创建/提升并重设口令；
+3. 口令优先级：`--password`（没传）→ `ADMIN_PASSWORD`（`.env` 里**没有**）
+   → **随机生成 12 位 token**；
+4. 随机口令**只输出一次、不落盘** —— 于是成了一个谁也不知道的口令。
+
+磊哥决策：**上线前固定 123456**（便于演示），上线时手工删号重建。
+
+改法（`deploy.sh`）：
+
+* 配置区 `ADMIN_PASSWORD` 优先取命令行，其次**继承已有 `.env`** ——
+  ⚠ 第 5 步是 `cat >` **覆盖**写 `.env`，不先读出来会在重跑时把口令清空、
+  回退成「随机生成」；
+* heredoc 里写入 `ADMIN_PASSWORD=`（持久化，不再只显示一次）；
+* 调用分支从「有没有超管」改为「**有没有拿到口令**」：有 → 带
+  `--reset-password` 强制应用；没有 → 维持旧行为（不覆盖运维改过的口令）。
+  这样「演示期固定口令」与「生产期尊重运维改过的口令」两种诉求都能表达，
+  而不是二选一。
+
+##### 六、闸门与反向验证
+
+新增用例 **38 个**（1106 → 1144）：
+
+| 归属 | 用例数 | 文件 |
+|---|---|---|
+| 401 会话失效 | 6 | `core/tests_session_expiry.py`（**新建**） |
+| 公告发布 | 15 | `supervision/tests_notice.py`（**新建**） |
+| 回访提醒 | 11 | `business/tests/test_tasks.py` |
+| 捕捉点异动 | 4 | `business/tests/test_material_views.py` |
+| 捕捉点入口契约 | 2 | `core/tests_frontend_consistency.py` |
+
+**反向验证 10 个变异，全部精确变红**（含 `_get` 不认 401、跳转前不提示、
+去掉防重入、`toast` 去掉去重、公告去掉区县收敛、公告校验不前置、
+回访提醒去掉去重、把 `rejected` 算作已打卡、异动权限退回）。
+
+⚠ 全量测试**第一次跑出 2 个失败**，都是**我自己新写的代码触发了已有闸门**：
+
+1. `DeadCatchIsZeroTest`：我在 `saveStockAdjustment` 的 `try` 里用了
+   `getMaterials()` / `getMaterialTransactions()`（静默读），`catch` 因此是
+   **死代码** —— 刷新失败会被渲染成「库存清零」。改用 `XxxStrict()`，
+   并把「提交失败」与「刷新失败」的文案**分开**（异动已经落库了，
+   说成「提交失败」会让用户重复提交）；
+2. `LocalDateInterpretationTest`：我写了裸 `.slice(0, 10)` 取日期。
+   `expiry_date` 现在是 `DateField`（纯日期串），截断**恰好**无害 ——
+   但闸门拦的正是「把『当前恰好是纯日期』这个隐含前提埋进代码」。
+   改用 `TNR_UI.localDateStr()`。
+
+**这两条恰好说明闸门在正常工作**：新代码撞上旧闸门，是闸门在保护既有的
+一致性约定，而不是闸门过时。
+
+##### 七、用例数
+
+全量 **1106 → 1144 OK**（约 383 秒）。
+
+> 这一轮的性质与前几轮都不同：**前几轮是「找问题」，这一轮是「按决策落地」**。
+> 但手法仍然复用 —— 四项里有三项是「枚举值 / 角色白名单 / 字段存在但没人用」
+> 这类**静态可枚举**的缺口，用同一套「先枚举、再取证」的做法就能定位。
+> 唯一新增的经验是那条**假绿闸门**：断言「字段名存在」不等于断言「行为存在」，
+> 而这条只有**变异测试**能发现。
+
+---
+
 ## 三、GUI 走查结论（四端）
 
 | 端 | 走查内容 | 结论 |
@@ -5382,7 +5717,7 @@ python manage.py check --deploy     # 生产部署前自检
 python manage.py check_data_integrity   # 数据一致性巡检（只读，有违规退出码 1）
 python manage.py refresh_demo_material_expiry          # 演示物料有效期订正（预演，只打印）
 python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
-python manage.py test --parallel 1  # 1090 个用例
+python manage.py test --parallel 1  # 1106 个用例
 python manage.py runserver          # http://127.0.0.1:8000
 # 演示账号（密码统一 123456）：admin / cy_shelter / babitang_hosp / adopter1
 # 9 个演示账号均可用（含 hd_shelter、aixin_hosp），详见 DEMO_ACCOUNTS.md

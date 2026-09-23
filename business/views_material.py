@@ -321,7 +321,7 @@ def material_receive(request, pk):
 
 
 @csrf_exempt
-@role_required('hospital', 'gov_city', 'gov_district')
+@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
 @login_required
 def stock_adjustment(request):
     """库存异动（过期/损坏/丢失）
@@ -332,6 +332,18 @@ def stock_adjustment(request):
         "quantity": 5,
         "reason": "过期报废"
     }
+
+    ⚠⚠ **`shelter` 是本轮（第三十七轮）补上的，不是笔误**。
+    在它之前，捕捉点**没有任何库存异动权限** —— 而 `shelter_stock` 的过期物料
+    又**不能下发**（`expiry_date` 判据会拦），于是捕捉点的过期物料成了
+    「既不能报废、也不能下发」的死库存。这是**权限模型缺口**，
+    与第二十一轮「暂不拦下发」的权宜之计是同一件事的两端：
+    现在有了正规出口，捕捉点自己就能报废过期物料。
+
+    安全性：`hospital is None` 分支在 `adjust_stock()` 内部已有
+    `shelter_stock < quantity` 的**前置**余额校验（见 services.py 同名注释），
+    所以开放角色**不会**把捕捉点库存扣成负数 —— 角色闸门与余额闸门是两道，
+    缺一不可。`get_scoped_object` 仍按区县收敛，跨区县物料一律 404。
     """
     data = parse_json_body(request)
     user = request.user

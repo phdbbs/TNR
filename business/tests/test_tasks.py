@@ -8,9 +8,13 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from business.models import AdoptionHallListing, Treatment
-from business.tasks import auto_promote_to_adoptable
-from business.tests.base import BusinessTestBase, make_institution, make_pet
+from business.models import (
+    Adoption, AdoptionHallListing, CheckIn, Message, Treatment,
+)
+from business.tasks import auto_promote_to_adoptable, send_checkin_reminders
+from business.tests.base import (
+    BusinessTestBase, make_institution, make_pet, make_user,
+)
 
 
 def _completed_treatment(pet, days_ago=None):
@@ -179,3 +183,122 @@ class StartupCompensationTest(BusinessTestBase):
                         side_effect=RuntimeError('模拟补偿失败')):
             resp = self.client.get('/')
         self.assertNotEqual(resp.status_code, 500)
+
+
+class CheckinReminderTest(BusinessTestBase):
+    """每月回访提醒（`send_checkin_reminders`）。
+
+    `Message.TYPE_CHOICES` 里的 ``checkin_reminder``（回访提醒）在第三十七轮
+    之前**没有任何真实产生点** —— 只有 `seed_data` 造过 2 条演示数据，
+    界面上有图标、有文案、有筛选，真实业务里却永远不会出现。
+    这一组用例把这个产生点钉住：它必须真的产生消息，且不该重复产生。
+    """
+
+    #: 用于区分「没传 adopter」与「显式传 None（线下登记、无账号）」
+    _DEFAULT = object()
+
+    def _adopt(self, pet, adopter=_DEFAULT, status='completed'):
+        return Adoption.objects.create(
+            pet=pet, pet_code=pet.code,
+            adopter=self.adopter if adopter is self._DEFAULT else adopter,
+            adopter_name='测试领养人', status=status,
+            adopted_at=timezone.localdate(), district=pet.district)
+
+    def _checkin(self, pet, month, status='pending', adopter=None):
+        return CheckIn.objects.create(
+            pet=pet, pet_code=pet.code, adopter=adopter or self.adopter,
+            adopter_name='测试领养人', month=month, status=status)
+
+    @staticmethod
+    def _this_month():
+        return timezone.localdate().strftime('%Y-%m')
+
+    @staticmethod
+    def _last_month():
+        first = timezone.localdate().replace(day=1)
+        return (first - timedelta(days=1)).strftime('%Y-%m')
+
+    def test_sends_reminder_when_not_checked_in(self):
+        pet = make_pet(district=self.district_a, status='adopted')
+        self._adopt(pet)
+        result = send_checkin_reminders()
+        self.assertIn('Sent 1', result)
+        msg = Message.objects.get(user=self.adopter, type='checkin_reminder')
+        self.assertIn(pet.code, msg.content)
+
+    def test_no_reminder_when_checked_in_this_month(self):
+        pet = make_pet(district=self.district_a, status='adopted')
+        self._adopt(pet)
+        self._checkin(pet, self._this_month())
+        self.assertIn('Sent 0', send_checkin_reminders())
+
+    def test_rejected_checkin_still_reminds(self):
+        """被驳回的打卡需要重新提交 —— 那正是提醒的意义，不能算「已打卡」。"""
+        pet = make_pet(district=self.district_a, status='adopted')
+        self._adopt(pet)
+        self._checkin(pet, self._this_month(), status='rejected')
+        self.assertIn('Sent 1', send_checkin_reminders())
+
+    def test_last_month_checkin_does_not_count(self):
+        """上月打过卡不能顶替本月 —— 否则第二个月起就再也不会提醒。"""
+        pet = make_pet(district=self.district_a, status='adopted')
+        self._adopt(pet)
+        self._checkin(pet, self._last_month())
+        self.assertIn('Sent 1', send_checkin_reminders())
+
+    def test_no_duplicate_within_same_month(self):
+        """同一个月重复执行任务，不能反复催同一个人。"""
+        pet = make_pet(district=self.district_a, status='adopted')
+        self._adopt(pet)
+        send_checkin_reminders()
+        send_checkin_reminders()
+        self.assertEqual(
+            Message.objects.filter(type='checkin_reminder').count(), 1,
+            '同一月份的提醒必须去重')
+
+    def test_pending_claim_not_reminded(self):
+        """还没领出（pending_claim）的动物不该催打卡 —— 它还没交到领养人手上。"""
+        pet = make_pet(district=self.district_a, status='pending_claim')
+        self._adopt(pet, status='pending_claim')
+        self.assertIn('Sent 0', send_checkin_reminders())
+
+    def test_multi_pet_adopter_gets_one_per_pet(self):
+        """同一人领养两只，**每只**各自要打卡 —— 不能因一只打过就漏另一只。"""
+        pet1 = make_pet(district=self.district_a, status='adopted')
+        pet2 = make_pet(district=self.district_a, status='adopted')
+        self._adopt(pet1)
+        self._adopt(pet2)
+        self._checkin(pet1, self._this_month())     # 只给 pet1 打卡
+        self.assertIn('Sent 1', send_checkin_reminders())
+        msgs = Message.objects.filter(type='checkin_reminder')
+        self.assertEqual(msgs.count(), 1)
+        self.assertIn(pet2.code, msgs.first().content)
+
+    def test_deleted_pet_not_reminded(self):
+        pet = make_pet(district=self.district_a, status='adopted',
+                       is_deleted=True)
+        self._adopt(pet)
+        self.assertIn('Sent 0', send_checkin_reminders())
+
+    def test_inactive_adopter_not_reminded(self):
+        """停用账号收不到提醒：发了也没人看，只会在库里堆未读。"""
+        adopter = make_user(role='adopter', is_active=False)
+        pet = make_pet(district=self.district_a, status='adopted')
+        self._adopt(pet, adopter=adopter)
+        self.assertIn('Sent 0', send_checkin_reminders())
+
+    def test_adoption_without_account_not_reminded(self):
+        """线下领养登记可能没有对应账号（adopter 为 SET_NULL）—— 不能炸。"""
+        pet = make_pet(district=self.district_a, status='adopted')
+        self._adopt(pet, adopter=None)
+        self.assertIn('Sent 0', send_checkin_reminders())
+
+    def test_force_ignores_dedup(self):
+        """`force=True` 跳过去重（补发场景）—— 但**不能**跳过「已打卡」判定。"""
+        pet = make_pet(district=self.district_a, status='adopted')
+        self._adopt(pet)
+        send_checkin_reminders()
+        self.assertIn('Sent 1', send_checkin_reminders(force=True))
+        self._checkin(pet, self._this_month())
+        self.assertIn('Sent 0', send_checkin_reminders(force=True),
+                      'force 只跳过「本月已发过」的去重，不该覆盖「已经打过卡」')

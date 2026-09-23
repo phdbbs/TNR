@@ -18,6 +18,11 @@
 **重写 `.env`**（丢掉现有 `SECRET_KEY`/`DB_PASSWORD`）、`chown root:www-data`
 （而进程实际以 `ubuntu` 跑）。三者都会破坏现状。
 
+**当前 `admin` 口令**：演示期**固定为 `123456`**（磊哥决策，上线时手工删号重建）。
+该口令来自 `.env` 的 `ADMIN_PASSWORD`，重跑 `deploy.sh` 会**强制重置**为该值 ——
+详见 §5.12。**手工改口令请改 `.env`**，不要只跑 `manage.py ensure_superuser`
+（不带 `--reset-password` 时它会跳过、什么也不做）。
+
 **该服务器的更新方式**（手工分阶段，已验证可复用）：
 
 ```bash
@@ -275,7 +280,9 @@ from django_q.models import Schedule
 for s in Schedule.objects.all():
     print(s.pk, s.name, s.func, s.schedule_type, s.repeats, s.cluster, s.next_run)
 "
-# 期望恰好一条：... business.tasks.auto_promote_to_adoptable D -1 None 2026-09-22 03:00:00+08:00
+# 期望恰好两条（第三十七轮起；详见 §5.13）：
+#   ... business.tasks.auto_promote_to_adoptable D -1 None 2026-09-22 03:00:00+08:00
+#   ... business.tasks.send_checkin_reminders  M -1 None 2026-10-01 09:00:00+08:00
 ```
 
 > **历史缺口（2026-09-21 已修，别再重复排查）**：迁移之前 `django_q_schedule`
@@ -726,6 +733,95 @@ python manage.py test core.tests.AllApiPostRoutesContractTest \
 **排障入口**：`/var/log/tnr/gunicorn-error.log` 里搜
 `Internal Server Error: /api/`，Traceback 最后一行若出现
 `object has no attribute 'get'` / `expected a number`，就是这个族的问题。
+
+### 5.11 ⚠ 会话失效（401）：前端会**提示原因再跳登录页** —— 别当成「空数据」
+
+第三十七轮之前，`TNR_API._get()` **完全忽略 HTTP 状态**：非 2xx 一律返回 `[]`。
+会话过期时界面上每一个列表都变成空表、每一个统计都变成 0 ——
+**用户看到的是「系统里没有数据」，而不是「请重新登录」**。
+
+现在的行为（改动点在 `static/js/tnr-api.js`）：
+
+1. 五条 fetch 路径（`_get` / `_post` / `_postForm` / `_handle` / `getData`）
+   都识别 401；
+2. 提示用**服务端返回的 message**（`api_unauthorized` 固定「请先登录」），
+   1.8 秒后跳 `/login/?next=<当前路径>`；
+3. **只处理一次** —— 门户首屏并发 5~9 个请求，会话过期时它们**同时**拿到 401，
+   防重入闸门保证只提示一次、只跳一次（否则 `next` 会互相覆盖）。
+
+**排障含义**：用户报「数据都没了」时先看是不是会话过期 ——
+如果前端提示了「请先登录，正在跳转登录页…」，那是**预期行为**，不是缺陷。
+反过来，若**没有**这条提示却看到空表，说明那个接口返回的不是 401
+（可能是 403 / 500），按 §5.9 的口径去查。
+
+```bash
+python manage.py test core.tests_session_expiry
+```
+
+⚠ 这条闸门里有一条是**行为断言**而不是**存在性断言**（`toast` 去重）：
+变异测试实测，只断言字段名存在时，把去重逻辑整段删掉**闸门仍然是绿的**。
+改动 `toast` 时注意别把它改回去。
+
+
+### 5.12 ⚠ `.env` 里的 `ADMIN_PASSWORD` 会**强制重置** admin 口令
+
+第三十七轮改了 `deploy.sh` 的口令策略，**与旧行为不同**，部署前必须知道：
+
+| `.env` 里 `ADMIN_PASSWORD` | 行为 |
+|---|---|
+| **有值**（如 `123456`） | 每次部署都**强制重置** `admin` 口令为该值（带 `--reset-password`） |
+| 空 | 维持旧行为：已有启用的超管则**不动口令** |
+
+**为什么改**：`ensure_superuser` 在没有启用的超管时会**随机生成**口令，
+且只显示一次、不落盘 —— 生产环境因此出现过「默认口令登不进去、
+运维也不知道新口令」的死局（2026-09-23 实测 `admin/123456` 与
+`admin/admin123456` 均不匹配）。
+
+**当前策略**（磊哥决策）：**上线前固定 `123456`** 便于演示，
+上线时手工删号重建。
+
+**运维注意**：
+
+* 想改口令 → 改 `.env` 的 `ADMIN_PASSWORD` 后重跑 `deploy.sh`。
+  **不要**只跑 `manage.py ensure_superuser` —— 没有 `--reset-password` 时它会跳过；
+* ⚠ `deploy.sh` 第 5 步是 `cat >` **覆盖写** `.env`。脚本已加「继承旧值」逻辑，
+  但**手工编辑 `.env` 前请确认脚本版本**，否则重跑会丢配置；
+* ⚠ 明文口令落在 `.env`（权限 640 / root:www-data）。正式上线时按决策
+  **删号重建**，并把这一行改成强口令或清空。
+
+```bash
+cd /opt/tnr && ./venv/bin/python manage.py shell -c \
+  "from accounts.models import User; u=User.objects.get(username='admin'); \
+   print('123456 matches:', u.check_password('123456'))"
+```
+
+
+### 5.13 定时任务：现在是**两条**（§5.2 的补充）
+
+第三十七轮新增了回访提醒，`django_q_schedule` 应有**两行**：
+
+```bash
+python manage.py shell -c "
+from django_q.models import Schedule
+for s in Schedule.objects.all(): print(s.name, s.func, s.schedule_type, s.next_run)"
+```
+
+| 名称 | 函数 | 频率 |
+|---|---|---|
+| 诊疗完成5天后自动转待领养 | `business.tasks.auto_promote_to_adoptable` | 每天 03:00 |
+| 每月回访打卡提醒 | `business.tasks.send_checkin_reminders` | 每月 1 日 09:00 |
+
+⚠ **只有一行就是缺陷**。两条都由数据迁移注册（`0016` / `0017`），
+`migrate` 会幂等补齐；若仍缺失，说明迁移没跑到。
+
+⚠ `send_checkin_reminders` 的 `next_run` **必须落在 1 日** ——
+django-q2 的 MONTHLY 是按 `next_run` 的**日号**每月重复，
+照抄 `0016` 的「今天 + 1 个月」会把执行日固定在部署当天（如 23 日）。
+
+```bash
+python manage.py test business.tests.test_tasks.CheckinReminderTest
+```
+
 
 ## 六、常见报错对照
 

@@ -35,4 +35,8 @@ urlpatterns = [
     path('ledger/', views.ledger_center, name='ledger_center'),
     path('logs/', views.operation_logs, name='operation_logs'),
     path('config/', views.system_config, name='system_config'),
+
+    # 公告（第三十七轮）：发布与已发列表
+    path('notices/', views.notice_list, name='notice_list'),
+    path('notices/publish/', views.notice_publish, name='notice_publish'),
 ]

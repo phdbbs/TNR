@@ -1926,6 +1926,7 @@ const Shelter = {
         <div class="tab-item active" data-tab="stock">库存台账</div>
         <div class="tab-item" data-tab="purchase">采购入库</div>
         <div class="tab-item" data-tab="outbound">下发出库</div>
+        <div class="tab-item" data-tab="adjustment">库存异动</div>
         <div class="tab-item" data-tab="flow">流向查询</div>
       </div>
       <div id="matContent"></div>
@@ -2188,6 +2189,98 @@ const Shelter = {
         }
       });
 
+    } else if (tab === 'adjustment') {
+      /* 库存异动（第三十七轮新增）。
+       *
+       * 为什么捕捉点必须有这个入口：`expiry_date` 判据上线后，捕捉点库存里的
+       * **过期物料既不能用于诊疗、也不能下发** —— 在补这个入口之前，它就成了
+       * 「既不能报废、也不能用」的死库存。服务端 `stock_adjustment` 本轮同步
+       * 放开了 `shelter` 角色（此前只有 hospital / gov_city / gov_district）。
+       *
+       * ⚠ 服务端已有 `shelter_stock < quantity` 的**前置**余额校验，
+       * 前端这里只做「别让用户白填一次表单」的预检，两者是两道闸门。
+       */
+      const txns = this._matTxns || [];
+      const adj = txns.filter(t => t.type === 'adjustment');
+      const matExpiry = m => m.expiryDate || m.expiry_date || '';
+      const todayStr = (() => {
+        const d = new Date();
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+          + '-' + String(d.getDate()).padStart(2, '0');
+      })();
+      /* 用 `TNR_UI.localDateStr()` 而不是裸 `.slice(0, 10)`：后者对
+       `DateTimeField` 的 UTC 串会取到 UTC 日期（差 8 小时，跨零点差一天）。
+       `expiry_date` 现在是 `DateField`（纯日期串会被原样返回），但闸门
+       `LocalDateInterpretationTest` 拦的就是「裸截断」这种写法 ——
+       留着它等于把「当前恰好是纯日期」这个隐含前提埋进代码里。 */
+      const isExpired = m => {
+        const d = TNR_UI.localDateStr(matExpiry(m));
+        return !!d && d < todayStr;
+      };
+      // 过期物料排在最前 —— 这个入口的主要用途就是把它们清出去
+      const opts = materials.slice()
+        .sort((a, b) => (isExpired(b) ? 1 : 0) - (isExpired(a) ? 1 : 0))
+        .map(m => '<option value="' + m.id + '">' + TNR_UI.escape(m.name)
+          + (isExpired(m) ? '（已过期）' : '')
+          + ' (库存:' + (m.shelterStock ?? 0) + (m.unit || '') + ')</option>')
+        .join('');
+      const adjRows = adj.map(t => ({
+        // 同文件 `flow` tab 读的是 camel 键，这里做兼容取值 —— 第三十六轮
+        // 已让响应同时含两套键，但前端**两种都认**才不怕将来口径回摆。
+        material_name: t.materialName || t.material_name || '',
+        note: t.note || '—',
+        _qty: (t.quantity || 0) + ' ' + (t.unit || ''),
+        date: t.date || '',
+        operator_name: t.operatorName || t.operator_name || ''
+      }));
+      const expiredCount = materials.filter(isExpired).length;
+      let html = '';
+      if (expiredCount > 0) {
+        // 复用主题变量而不是新造 `.alert-warning` 类 —— 项目里没有这个类，
+        // 写了也只是一个不起作用的样式名（界面看着「有提示」其实无样式）。
+        html += '<div style="background:var(--autumn-light);border-left:3px solid var(--autumn-gold);'
+          + 'padding:var(--sp-3) var(--sp-4);border-radius:8px;margin-bottom:var(--sp-4);font-size:13px;">'
+          + '⚠ 当前有 <b>' + expiredCount
+          + '</b> 件物料已过期，请及时登记报废（过期物料不能用于诊疗或下发）。</div>';
+      }
+      html += '<div class="card"><div class="card-header"><div class="card-title">'
+        + '<span class="card-title-bar"></span>库存异动报备</div></div><div class="card-body">'
+        + '<div class="form-section"><div class="form-section-header">'
+        + '<div class="form-section-header-icon">📝</div>'
+        + '<div class="form-section-title">新增异动报备</div></div><div class="form-section-body">'
+        + '<div class="form-row"><div class="form-group"><label class="form-label">物料<span class="req">*</span></label>'
+        + '<select class="form-select" id="adjMaterial"><option value="">请选择</option>' + opts + '</select></div>'
+        + '<div class="form-group"><label class="form-label">数量<span class="req">*</span></label>'
+        + '<input type="number" class="form-input" id="adjQty" value="1" min="1" /></div></div>'
+        + '<div class="form-group"><label class="form-label">原因说明<span class="req">*</span></label>'
+        + '<textarea class="form-textarea" id="adjReason" placeholder="请说明异动原因（过期报废/破损/盘亏等）"></textarea></div>'
+        + '<div style="display:flex;justify-content:flex-end;">'
+        + '<button class="btn btn-primary" id="adjSubmitBtn">提交报备</button></div>'
+        + '</div></div></div></div>';
+      html += '<div class="card mt-5"><div class="card-body-flush">'
+        + (adjRows.length ? '<div id="shelterAdjTable"></div>'
+                          : '<div class="empty-state" style="padding:var(--sp-6);">'
+                            + '<div class="empty-state-icon">📋</div>'
+                            + '<div class="empty-state-text">暂无异动记录</div></div>')
+        + '</div></div>';
+      wrap.innerHTML = html;
+      if (adjRows.length) {
+        TNR_UI.mountTable('shelterAdjTable', {
+          id: 'shelter.material.adjustment',
+          columns: [
+            { title: '物料', key: 'material_name' },
+            { title: '原因', key: 'note' },
+            { title: '数量', key: '_qty', sortable: false },
+            { title: '日期', key: 'date' },
+            { title: '操作人', key: 'operator_name' }
+          ],
+          data: adjRows, emptyText: '暂无异动记录'
+        });
+      }
+      TNR_UI.bindQtyStepper('adjQty');
+      wrap.querySelector('#adjSubmitBtn')
+        ?.addEventListener('click', () => this.saveStockAdjustment());
+
     } else if (tab === 'flow') {
       const txns = this._matTxns || [];
       const filters = [
@@ -2226,6 +2319,53 @@ const Shelter = {
       renderFlow();
       TNR_UI.bindFilter(renderFlow, wrap);
     }
+  },
+
+  /* 提交库存异动报备（捕捉点侧）。
+   *
+   * 服务端 `stock_adjustment` 会按 `shelter_stock` 校验余额并返回具体文案，
+   * 前端这里的 `qty <= 0` 只是「别让用户白填一次表单」的预检 ——
+   * 真正的余额闸门在 `adjust_stock()` 里（判据前置，不会留孤儿流水）。
+   */
+  async saveStockAdjustment() {
+    const mid = document.getElementById('adjMaterial')?.value;
+    const qty = parseInt(document.getElementById('adjQty')?.value, 10);
+    const reason = (document.getElementById('adjReason')?.value || '').trim();
+    if (!mid) { TNR_UI.toast('请选择物料', 'warning'); return; }
+    if (!qty || qty <= 0) { TNR_UI.toast('请输入有效数量', 'warning'); return; }
+    if (!reason) { TNR_UI.toast('请填写原因说明', 'warning'); return; }
+
+    let res;
+    try {
+      res = await TNR_API.adjustStock({
+        material_id: parseInt(mid, 10), quantity: qty, reason: reason
+      });
+    } catch (e) {
+      TNR_UI.toast(e.message || '操作失败', 'danger');
+      return;
+    }
+    if (!res || !res.success) {
+      TNR_UI.toast((res && res.message) || '提交失败', 'danger');
+      return;
+    }
+    TNR_UI.toast('异动报备已提交，库存已扣减', 'success');
+    /* 重新拉一次：库存与流水都要反映这次扣减，不能只改本地数组。
+     *
+     * ⚠ 必须用 `XxxStrict()`（失败抛错）而不是 `getMaterials()` ——
+     * 后者经 `_get()` 在任何非 2xx 时静默返回 `[]`，**构造上不可能失败**，
+     * 于是下面这个 catch 是**死代码**，刷新失败会被渲染成「库存清零」。
+     * （`SilentReadContractTest` 的闸门正是拦这个，本文件第一版就撞上了。）
+     *
+     * 文案也要分开：**异动已经落库了**，这里失败只是刷新没成功 ——
+     * 说成「提交失败」会让用户重复提交一次。
+     */
+    try {
+      this._materials = await TNR_API.getMaterialsStrict();
+      this._matTxns = await TNR_API.getMaterialTransactionsStrict();
+    } catch (e) {
+      TNR_UI.toast('异动已提交，但列表刷新失败：' + e.message, 'warning');
+    }
+    this.renderMatTab('adjustment');
   },
 
   /* ========== 7. 动物去向 ========== */

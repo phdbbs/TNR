@@ -2154,3 +2154,39 @@ class InactiveEntityContractTest(SimpleTestCase):
             r"(myInstitution\?\.districtId|full\.districtId)",
             '区县下拉过滤停用区县时没有保留「当前值」的兜底 ——\n'
             '存量记录的下拉会退到第一个选项，归属区县被静默改掉。')
+
+class ShelterStockAdjustmentEntryTest(SimpleTestCase):
+    """捕捉点必须**有**库存异动入口（第三十七轮补的权限缺口）。
+
+    背景：`expiry_date` 判据上线后，捕捉点库存里的过期物料既不能用于诊疗、
+    也不能下发（下发时判据会拦）；而 `stock_adjustment` 原先的角色白名单里
+    **没有 shelter** —— 那些物料成了「既不能报废、也不能用」的死库存。
+
+    服务端放开角色只是**一半**：没有界面入口，捕捉点操作员依然无从下手。
+    所以这里同时钉住两端，且**都从源码取证**（不靠人记得改过）。
+    """
+
+    def test_backend_decorator_includes_shelter(self):
+        src = read('business/views_material.py')
+        idx = src.find('def stock_adjustment(request):')
+        self.assertGreater(idx, 0, '找不到 stock_adjustment 视图')
+        # 只看紧邻的装饰器区（往上 400 字符足够覆盖三层装饰器）
+        decorators = src[max(0, idx - 400):idx]
+        self.assertIn(
+            "@role_required('shelter', 'hospital', 'gov_city', 'gov_district')",
+            decorators,
+            'stock_adjustment 的角色白名单里没有 shelter —— 捕捉点的过期物料'
+            '就没有任何正规出口（既不能报废、也不能下发）。')
+
+    def test_shelter_portal_has_adjustment_entry(self):
+        html = read(PORTALS['shelter'])
+        self.assertIn(
+            'data-tab="adjustment"', html,
+            '捕捉点门户缺少「库存异动」标签页 —— 服务端开了权限，'
+            '操作员却没有任何入口可用。')
+        self.assertIn(
+            'saveStockAdjustment', html,
+            '捕捉点门户缺少提交异动的处理函数')
+        self.assertIn(
+            'TNR_API.adjustStock(', html,
+            '捕捉点门户没有真正调用异动接口')

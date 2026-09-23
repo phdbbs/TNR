@@ -305,11 +305,72 @@ class StockAdjustmentTest(BusinessTestBase):
 
     def test_adjustment_cross_district_material_404(self):
         material = make_material(district=self.district_b, shelter_stock=10)
-        # 异动接口仅限医院/监管部门；用甲区监管操作乙区物料应被拒
+        # 异动接口限医院/监管部门/捕捉点；用甲区监管操作乙区物料应被拒
         self.login_as(self.gov_a)
         self.expect_fail(self.post_json(f'{URL}adjustment/', {
             'material_id': material.id, 'quantity': 1, 'reason': '损耗',
         }), status=404, message='无权访问')
+
+    # ---------- 捕捉点库存异动（第三十七轮补的权限） ----------
+    #
+    # 背景：`expiry_date` 判据上线后，捕捉点库存里的过期物料**既不能用于
+    # 诊疗、也不能下发**（下发时判据会拦）。而 `stock_adjustment` 原先的
+    # 角色白名单里**没有 shelter** —— 于是那些过期物料成了「既不能报废、
+    # 也不能用」的死库存。本轮把 shelter 补进白名单，这几条用例钉住
+    # 「补上了」且「没顺手放宽范围」。
+
+    def test_shelter_adjustment_reduces_shelter_stock(self):
+        """捕捉点现在能自己报废过期物料 —— 这是它唯一的正规出口。"""
+        material = make_material(district=self.district_a, shelter_stock=10)
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 4, 'reason': '过期报废',
+        }))
+        self.assertEqual(body['data']['type'], 'adjustment')
+        material.refresh_from_db()
+        self.assertEqual(material.shelter_stock, 6)
+
+    def test_shelter_adjustment_cannot_go_negative(self):
+        """捕捉点侧余额闸门（`adjust_stock` 内的**前置**判据）必须真的生效。
+
+        ⚠ 放开角色**不等于**放开余额 —— 两道闸门缺一不可。且判据必须在
+        建流水**之前**，否则会留下「库存没扣、流水已写」的孤儿记录。
+        """
+        material = make_material(district=self.district_a, shelter_stock=2)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 5, 'reason': '过期报废',
+        }), message='捕捉点库存不足')
+        material.refresh_from_db()
+        self.assertEqual(material.shelter_stock, 2)
+        self.assertFalse(
+            MaterialTransaction.objects.filter(
+                material=material, type='adjustment').exists(),
+            '库存不足时不能留下孤儿流水')
+
+    def test_shelter_adjustment_cross_district_404(self):
+        """甲区捕捉点不能异动乙区物料 —— 角色放开不等于**范围**放开。"""
+        material = make_material(district=self.district_b, shelter_stock=10)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 1, 'reason': '损耗',
+        }), status=404, message='无权访问')
+        material.refresh_from_db()
+        self.assertEqual(material.shelter_stock, 10)
+
+    def test_shelter_adjustment_writes_traceable_transaction(self):
+        """异动必须留下可追溯的流水（谁、扣了多少、为什么）。"""
+        material = make_material(district=self.district_a, shelter_stock=10)
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 3, 'reason': '过期报废',
+        }))
+        txn = MaterialTransaction.objects.get(material=material,
+                                              type='adjustment')
+        self.assertEqual(txn.quantity, 3)
+        self.assertEqual(txn.operator_id, self.shelter_user_a.id)
+        self.assertIn('过期报废', txn.note)
+        self.assertIsNone(txn.hospital_id, '捕捉点侧异动不该挂到医院名下')
 
 
 class LedgerViewsTest(BusinessTestBase):

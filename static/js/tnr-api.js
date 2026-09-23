@@ -328,6 +328,15 @@ const TNR_API = {
   // 政府端「系统配置」页因此把真实的 CAP/TRF/… 前缀显示成空白输入框。
   // 读配置请用 `TNR_API.get('/api/supervision/config/')`（失败会抛错）。
   async updateSystemConfig(data) { return this._post('/api/supervision/config/', data); },
+  /* 公告（第三十七轮）。
+   *
+   * `getNotices` 走 `getData()`（失败**抛错**）而不是 `_get()`：
+   * 公告列表是「发布确认」的依据 —— 用 `_get` 的话 403/500 会渲染成
+   * 「还没发过公告」，发布方会误以为自己的公告没发出去而**重复广播**。
+   * 这与第二十四轮台账页「筛选被拒渲染成暂无数据」是同一类谎报。
+   */
+  async getNotices() { return this.getData('/api/supervision/notices/'); },
+  async publishNotice(data) { return this._post('/api/supervision/notices/publish/', data); },
   async generatePetCodes(count) {
     try {
       const res = await fetch('/api/business/captures/codes-preview/?count=' + count, { credentials: 'same-origin' });

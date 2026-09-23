@@ -5,7 +5,7 @@ Task 13: 政府监管后端
 """
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
-from django.db.models import Sum, Count, Q, Prefetch
+from django.db.models import Sum, Count, Q, Prefetch, Max
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
@@ -13,7 +13,7 @@ from accounts.decorators import api_login_required, role_required
 from accounts.models import User
 from business.models import (
     Pet, Capture, Transfer, Treatment, Material, MaterialTransaction,
-    Release, Adoption, CheckIn, Blacklist, Euthanasia, OwnerReturn,
+    Release, Adoption, CheckIn, Blacklist, Euthanasia, OwnerReturn, Message,
 )
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
@@ -1434,3 +1434,94 @@ def system_config(request):
         updated.append(key)
 
     return json_ok({'updated': updated}, message=f'已更新 {len(updated)} 项配置')
+
+
+# ============================================
+# 公告发布（第三十七轮）
+# ============================================
+#: 公告标题 / 正文长度上限。与前端 `maxlength` 用同一组数字。
+NOTICE_TITLE_MAX = 100
+NOTICE_CONTENT_MAX = 2000
+
+#: 公告可投递的目标角色。
+#:
+#: ⚠ **当前只开放 `adopter`，这不是遗漏。** 四端门户里只有领养人端有
+#: 「消息中心」页面（`templates/portal/adopter/portal.html` 的 `page-messages`），
+#: 且读消息的 `my_messages` 接口角色白名单也只含 `adopter` / `gov_*`。
+#: 把公告发给捕捉点或医院，消息会**落进一张没有任何入口能看到的表** ——
+#: 发送方看到「已发送 N 人」，接收方永远收不到，比不实现更糟。
+#: 将来若要给这两端发公告，必须**先**补它们的消息中心 UI 与接口白名单。
+NOTICE_TARGET_ROLES = ('adopter',)
+
+
+@csrf_exempt
+@role_required('gov_city', 'gov_district')
+@login_required
+def notice_publish(request):
+    """发布公告：给目标角色的每位用户各写一条 `notice` 类型消息。
+
+    请求体::
+
+        {"title": "标题", "content": "正文", "target_role": "adopter"}
+
+    权限边界：市级可向全部区县发布；**区级只能发给本区县**（按 `district`
+    收敛）。否则区级管理员就能向全市广播 —— 与「账号只能管本区县」
+    是同一条边界，不能在批量接口上单独放宽。
+
+    ⚠ 这是**批量写**接口：一次请求创建 N 条 `Message`。因此校验必须
+    **全部前置**（两段式），否则「标题超长」这类错误会在已经建了 300 条
+    消息之后才报出来，留下半截广播 —— 而广播是不可撤回的。
+    """
+    data = parse_json_body(request)
+
+    title = body_str(data, 'title').strip()
+    content = body_str(data, 'content').strip()
+    target_role = body_str(data, 'target_role').strip() or 'adopter'
+
+    if not title:
+        return json_fail('请填写公告标题')
+    if len(title) > NOTICE_TITLE_MAX:
+        return json_fail(f'公告标题不能超过 {NOTICE_TITLE_MAX} 个字符')
+    if not content:
+        return json_fail('请填写公告内容')
+    if len(content) > NOTICE_CONTENT_MAX:
+        return json_fail(f'公告内容不能超过 {NOTICE_CONTENT_MAX} 个字符')
+    if target_role not in NOTICE_TARGET_ROLES:
+        return json_fail('不支持的目标角色：%s（可选：%s）'
+                         % (target_role, '、'.join(NOTICE_TARGET_ROLES)))
+
+    # 目标用户：启用中、角色匹配、且**落在发布者的区县范围内**
+    recipients = User.objects.filter(
+        role=target_role, is_active=True, status='active')
+    recipients = list(_scope_filter(recipients, request, field='district'))
+
+    if not recipients:
+        return json_fail('该范围内没有可接收公告的用户')
+
+    # 校验全过之后再落库（两段式）
+    with transaction.atomic():
+        Message.objects.bulk_create([
+            Message(user=u, type='notice', title=title, content=content)
+            for u in recipients
+        ])
+
+    return json_ok({'sent': len(recipients), 'title': title},
+                   message=f'公告已发送给 {len(recipients)} 位用户')
+
+
+@csrf_exempt
+@role_required('gov_city', 'gov_district')
+@login_required
+def notice_list(request):
+    """已发布公告列表（按标题聚合）。
+
+    ⚠ `Message` 表里「一条公告」其实是 **N 行**（每个接收人一行）。
+    直接列出来会看到同一标题重复 N 次，运营无法阅读。所以按
+    `title` + `content` 分组，用 `sent_count` 表示触达人数 ——
+    那也正是发布方真正关心的数字。
+    """
+    rows = (Message.objects.filter(type='notice')
+            .values('title', 'content')
+            .annotate(sent_count=Count('id'), last_at=Max('created_at'))
+            .order_by('-last_at')[:200])
+    return json_ok(with_camel_keys(list(rows)))
