@@ -47,12 +47,22 @@
   ```
 - 演示账号被停用后，除 `seed_data` 校准外，也可由市级管理员在
   「机构与用户管理」里重新启用。
-- **生产部署（`deploy.sh`）会覆盖 `admin` 的口令**：脚本执行
-  `manage.py ensure_superuser` 把 `admin` 提升为 Django 超级管理员并设置一个
-  强口令（`ADMIN_PASSWORD` 未提供则随机生成，仅打印一次），因此
-  **生产环境里 `admin` 的密码不再是 `123456`**。已存在启用的超级管理员时
-  脚本不会动口令，重新部署不会把运维改过的密码重置掉。
-  重置方式：`ADMIN_PASSWORD=新口令 python manage.py ensure_superuser --reset-password`
+- **生产环境 `admin` 的口令固定为 `123456`**（演示期约定，第三十七轮磊哥决策）。
+  `deploy.sh` 第 5 步会写 `.env`，第 7 步执行
+  `manage.py ensure_superuser --username admin --reset-password`，
+  口令来源优先级：命令行 `ADMIN_PASSWORD` → **继承已有 `.env`** → 随机生成。
+  由于 `.env` 里已写入 `ADMIN_PASSWORD=123456`，**每次部署都会强制应用它**，
+  不会再回退成「随机生成、只显示一次、不落盘」那个谁也不知道的口令。
+  ⚠ **正式上线时**按约定手工删除已有账号、全部重建，并把 `.env` 里该行改成
+  强口令或清空 —— 那时 `ensure_superuser` 才会走「没拿到口令 → SKIP」分支，
+  不再覆盖运维改过的口令。
+  需要单独改口令时**不要**跑整个 `deploy.sh`（会重建 `.env`、重装依赖、
+  `collectstatic`），直接用最小命令：
+  ```bash
+  cd /opt/tnr && ADMIN_PASSWORD=新口令 ./venv/bin/python manage.py ensure_superuser \
+      --reset-password --username admin
+  ```
+  ⚠ 改完复检 `.env` 属主仍是 `ubuntu:ubuntu`（用 root 追加会变成 `root:root`）。
 - 需要全新演示数据时可用 `python manage.py seed_data --flush`
   （**会清空全部业务数据后重建**，仅限演示/开发环境使用）。
 
