@@ -304,11 +304,15 @@ def capture_list(request):
     for cap in captures:
         item = serialize_instance(cap, exclude=CAPTURE_LIST_EXCLUDE)
         state = states.get(cap.id, {})
-        item['transferState'] = state
+        # ⚠ 只写 snake_case，camelCase 孪生由 `json_ok` → `with_camel_keys()`
+        # 统一补（第三十六轮）。这里原先手写 `transferState` + `canEdit` +
+        # `canDelete` + `statusDisplay`，而嵌套的 `state` 里又是 `can_edit` /
+        # `can_delete` —— **同一个响应里两套口径**，且 camel 那份没有 snake
+        # 孪生、snake 那份没有 camel 孪生，前端读哪一半都有一半是 undefined。
         item['transfer_state'] = state
-        item['canEdit'] = state.get('can_edit', False)
-        item['canDelete'] = state.get('can_delete', False)
-        item['statusDisplay'] = cap.get_status_display()
+        item['can_edit'] = state.get('can_edit', False)
+        item['can_delete'] = state.get('can_delete', False)
+        item['status_display'] = cap.get_status_display()
         data.append(item)
     return json_ok(data)
 
@@ -739,7 +743,8 @@ def capture_update(request, pk):
             pet.save(update_fields=changed_pet)
 
     result = serialize_instance(capture)
-    result['transferState'] = state
+    # 同 capture_list：只写 snake_case，camel 孪生交给 `json_ok` 统一补。
+    result['transfer_state'] = state
     return json_ok(result, message='捕捉记录已更新')
 
 
@@ -969,14 +974,14 @@ def capture_detail(request, pk):
         return json_fail('捕捉记录不存在', status=404)
 
     data = serialize_instance(capture)
-    data['statusDisplay'] = capture.get_status_display()
+    # ⚠ 全部只写 snake_case，camel 孪生由 `json_ok` → `with_camel_keys()` 补。
+    data['status_display'] = capture.get_status_display()
 
     pets = Pet.objects.filter(capture=capture, is_deleted=False)
     data['pets'] = [serialize_instance(p) for p in pets]
 
     state = capture_transfer_state(capture)
-    data['transferState'] = state
     data['transfer_state'] = state
-    data['canEdit'] = state['can_edit']
-    data['canDelete'] = state['can_delete']
+    data['can_edit'] = state['can_edit']
+    data['can_delete'] = state['can_delete']
     return json_ok(data)

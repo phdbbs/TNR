@@ -9,7 +9,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import api_login_required
 from accounts.models import User
-from core.http import body_str, read_json_body
+from core.http import body_str, json_fail, json_ok, read_json_body
 
 
 def _redirect_by_role(user):
@@ -57,25 +57,29 @@ def dashboard_redirect(request):
 
 
 def api_me(request):
-    """Return current user info as JSON"""
+    """Return current user info as JSON
+
+    ⚠ 必须走 `json_ok()`（第三十六轮）。这里原本是裸 `JsonResponse`，
+    **绕过**了统一信封与 `with_camel_keys()` 归一化 —— 于是 `/api/me/`
+    只给 `district_id` / `district_name`，而前端读的是 `districtId` /
+    `districtName`，拿到 undefined。`/api/` 下的响应一律用 `json_ok` /
+    `json_fail`，不要手拼信封。
+    """
     if not request.user.is_authenticated:
-        return JsonResponse({'success': False, 'message': '未登录'}, status=401)
+        return json_fail('未登录', status=401)
     u = request.user
-    return JsonResponse({
-        'success': True,
-        'data': {
-            'id': u.id,
-            'username': u.username,
-            'name': u.get_full_name() or u.username,
-            'role': u.role,
-            'role_display': u.get_role_display(),
-            'district_id': u.district_id,
-            'district_name': u.district.name if u.district else '',
-            'institution_id': u.institution_id,
-            'institution_name': u.institution.name if u.institution else '',
-            'phone': u.phone,
-            'is_superuser': u.is_superuser,
-        }
+    return json_ok({
+        'id': u.id,
+        'username': u.username,
+        'name': u.get_full_name() or u.username,
+        'role': u.role,
+        'role_display': u.get_role_display(),
+        'district_id': u.district_id,
+        'district_name': u.district.name if u.district else '',
+        'institution_id': u.institution_id,
+        'institution_name': u.institution.name if u.institution else '',
+        'phone': u.phone,
+        'is_superuser': u.is_superuser,
     })
 
 

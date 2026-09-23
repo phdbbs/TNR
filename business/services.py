@@ -12,7 +12,6 @@ import urllib.request
 from datetime import date, datetime, time, timedelta
 
 from django.db.models import Q, Sum
-from django.http import JsonResponse
 from django.utils import timezone
 
 from accounts.models import User
@@ -20,21 +19,20 @@ from business.models import (
     Pet, Material, MaterialTransaction, Chip, Blacklist, Transfer,
     Release, Adoption,
 )
-from core.http import body_dict, body_list, body_str, read_json_body  # noqa: F401
+from core.http import (body_dict, body_list, body_str,  # noqa: F401
+                       json_fail, json_ok, read_json_body, to_camel_key,
+                       with_camel_keys)
 from core.models import District, Institution
 
 
 # ============================================
 # JSON 响应工具
 # ============================================
-def json_ok(data=None, message='操作成功'):
-    """成功 JSON 响应"""
-    return JsonResponse({'success': True, 'data': data, 'message': message})
-
-
-def json_fail(message='操作失败', data=None, status=400):
-    """失败 JSON 响应"""
-    return JsonResponse({'success': False, 'data': data, 'message': message}, status=status)
+# `json_ok` / `json_fail` 已下沉到 `core.http`（与 `body_*` 同一模式）：
+# 它们是**纯 HTTP 信封**、不依赖任何业务逻辑，`accounts` 侧也要用，
+# 放在这里会让 `accounts.views` 反向依赖 `business`（层级倒置）。
+# 此处保留 re-export，让既有的 `from business.services import json_ok` 不受影响。
+# ⚠ **不要再在这里重新定义** —— 归一化点只能有一个（第三十六轮）。
 
 
 def parse_json_body(request):
@@ -394,19 +392,16 @@ def serialize_instance(instance, fields=None, exclude=None):
     - 同时返回蛇形命名（Python 惯例）和驼峰命名（前端 JS 惯例）字段
     - pet_codes 字符串自动转为数组
     - exclude: 需要剔除的字段名集合（如列表接口剔除体积巨大的 signature base64）
+
+    ⚠ 驼峰名一律走 ``core.http.to_camel_key()``（第三十六轮合并）。
+    这里原本另有一份内部 `_to_camel`，注释声称「与 `with_camel_keys` 同一套
+    规则」—— **那只是注释**，两处代码各写各的，改一处必然漂移。
     """
     if instance is None:
         return None
     from django.db.models.fields.files import FieldFile
 
     skip = set(exclude or ())
-
-    def _to_camel(snake):
-        """snake_case → camelCase"""
-        parts = str(snake).split('_')
-        if len(parts) == 1:
-            return parts[0]
-        return parts[0] + ''.join(p.title() for p in parts[1:])
 
     data = {}
     for f in instance._meta.concrete_fields:
@@ -426,7 +421,7 @@ def serialize_instance(instance, fields=None, exclude=None):
             data[f.name] = value
 
         # 添加驼峰命名别名（前端 JS 使用）
-        camel_key = _to_camel(f.name)
+        camel_key = to_camel_key(f.name)
         if camel_key != f.name:
             if f.name == 'pet_codes' and isinstance(data[f.name], str) and data[f.name]:
                 # pet_codes 字符串转数组
@@ -439,7 +434,7 @@ def serialize_instance(instance, fields=None, exclude=None):
             fk_key = f.attname
             fk_value = getattr(instance, fk_key, None)
             data[fk_key] = fk_value
-            fk_camel = _to_camel(fk_key)
+            fk_camel = to_camel_key(fk_key)
             if fk_camel != fk_key:
                 data[fk_camel] = fk_value
 
@@ -904,31 +899,6 @@ def _pet_outbound(pet):
             return (orr.created_at.isoformat() if orr.created_at else '',
                     '主人领回', orr.owner_name or '')
     return '', '', ''
-
-
-def _to_camel_key(snake):
-    """snake_case → camelCase（与 ``serialize_instance`` 同一套规则）。"""
-    parts = str(snake).split('_')
-    if len(parts) == 1:
-        return parts[0]
-    return parts[0] + ''.join(p.title() for p in parts[1:])
-
-
-def with_camel_keys(data):
-    """给字典补一份 camelCase 别名，让两种命名都能取到值。
-
-    本项目约定「序列化结果同时产出 snake_case 与 camelCase 两套键」
-    （见 ``serialize_instance``）。``pet_archive_records`` 是手工聚合、不走
-    ``serialize_instance``，所以必须在这里显式补齐——政府端读 snake_case、
-    捕捉端读 camelCase，缺哪一套哪一端就静默出问题：前端读 ``r.ledgerNo``
-    拿到 undefined 时，**编号列整列空白、编号点不开档案，且不报任何错**。
-    """
-    out = dict(data)
-    for key, value in data.items():
-        camel = _to_camel_key(key)
-        if camel != key and camel not in out:
-            out[camel] = value
-    return out
 
 
 def pet_archive_records(pets):

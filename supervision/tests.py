@@ -1058,13 +1058,29 @@ class SystemConfigWriteWhitelistTest(SupervisionBase):
         分成两份必然漂移，漂移的表现恰好是最难查的那种：新加的配置项
         「读得到、写不进去」，用户点了保存界面还提示成功。
         这里顺带断言「库里没有白名单外的键」—— 那正是上一版留下的污染形态。
+
+        ⚠ 第三十六轮起响应会**同时含 snake 与 camel 两套键**（`json_ok`
+        统一补 `with_camel_keys`），所以比较时必须只看 **snake 键**
+        （白名单里的键全是 snake）。直接把 `set(data)` 拿去比会把 11 个
+        驼峰孪生算成「白名单外的残留键」—— 那是**假阳性**。
+        顺带把「驼峰孪生确实存在」也断言上，等于给响应体键契约加了一个锚点。
         """
+        from core.http import to_camel_key
         from supervision.views import SYSTEM_CONFIG_DEFAULTS
         self.client.force_login(self.gov_city)
         data = self.ok(self.client.get(f'{API}/config/'))['data']
+
+        snake_keys = {k for k in data if '_' in k}
         self.assertEqual(
-            set(data), set(SYSTEM_CONFIG_DEFAULTS),
-            '读接口返回的键集合与写白名单不一致（或库里存在白名单外的残留键）')
+            snake_keys, set(SYSTEM_CONFIG_DEFAULTS),
+            '读接口返回的 snake 键集合与写白名单不一致（或库里存在白名单外的残留键）')
+
+        # ⚠ 用共用函数算驼峰，**不要在测试里再抄一份规则** —— 抄一份就又多
+        # 一个会漂移的实现，而测试恰恰是用来发现漂移的，它自己不能是漂移源。
+        camel_keys = {k for k in data if '_' not in k}
+        self.assertEqual(
+            camel_keys, {to_camel_key(k) for k in SYSTEM_CONFIG_DEFAULTS},
+            '配置项的 camelCase 孪生缺失（前端读 camel 会拿到 undefined）')
 
     def test_non_string_values_are_rejected(self):
         self.client.force_login(self.gov_city)

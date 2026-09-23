@@ -1,5 +1,7 @@
 """core 应用测试：区县与机构模型。"""
 import json
+import os
+import re
 
 from django.apps import apps
 from django.conf import settings
@@ -13,9 +15,13 @@ from django.test import (
 )
 
 from business.tests.base import (
-    BusinessTestBase, make_district, make_institution, make_user,
+    BusinessTestBase, make_capture, make_chip, make_district, make_institution,
+    make_material, make_pet, make_user,
 )
-from core.http import body_dict, body_list, body_str, read_json_body
+from core.http import (
+    body_dict, body_list, body_str, json_fail, json_ok, read_json_body,
+    to_camel_key, with_camel_keys,
+)
 from core.models import District, Institution
 from tnr_system.urls import (
     api_aware_bad_request, api_aware_csrf_failure, api_aware_not_found,
@@ -986,3 +992,344 @@ class BodyValueGuardTest(SimpleTestCase):
         永远不会产出 tuple，放宽只会让守卫的语义变模糊。
         """
         self.assertEqual(body_list({'k': (1, 2)}, 'k'), [])
+
+
+# ============================================================
+# 第三十六轮：响应体键契约（snake_case ↔ camelCase 双键完整性）
+# ============================================================
+#: 前端源码里会读取响应字段的文件。
+#: ⚠ 新增门户 / JS 时必须加进来，否则闸门看不见它读的键（覆盖面无声明地缩水）。
+FRONTEND_SOURCE_FILES = (
+    'templates/portal/gov/portal.html',
+    'templates/portal/shelter/portal.html',
+    'templates/portal/hospital/portal.html',
+    'templates/portal/adopter/portal.html',
+    'static/js/tnr-api.js',
+    'static/js/tnr-common.js',
+)
+
+#: 前端读取字段的两种写法：`x.field` 与 `x['field']`。
+_FE_DOT_RE = re.compile(r"""\b[A-Za-z_$][\w$]*\.([a-zA-Z_][\w$]*)\b""")
+_FE_BRACKET_RE = re.compile(r"""\[\s*['"]([A-Za-z_][\w]*)['"]\s*\]""")
+
+
+def snake_of(camel_key):
+    """`camelCase` → `snake_case`。
+
+    ⚠ 只在**测试**里用，用来把前端读的驼峰键映射回 snake 形式、判断
+    「这个键到底该由哪个 snake 字段供出来」。生产代码**不做反向变换** ——
+    `petID` → `pet_i_d` 这种歧义无法可靠还原，反向补键只会造出垃圾字段名。
+    正确做法是让生产代码**只写 snake**，驼峰由 `with_camel_keys()` 单向生成。
+    """
+    return re.sub(r'(?<!^)(?=[A-Z])', '_', str(camel_key)).lower()
+
+
+def collect_frontend_read_keys():
+    """收集前端源码里**读取过**的字段名（点号 + 下标两种写法）。
+
+    ⚠ 这是**粗集**：`console.log` 会贡献 `log`、`TNR_UI.escape` 会贡献
+    `escape`。所以不能直接拿它当判据 —— 必须再叠一层「它的 snake 形式确实
+    在响应里出现过」才可能是真缺陷（见 `test_frontend_read_camel_keys_exist`）。
+    """
+    keys = set()
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for rel in FRONTEND_SOURCE_FILES:
+        path = os.path.join(base, rel)
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding='utf-8') as fh:
+            text = fh.read()
+        keys |= set(_FE_DOT_RE.findall(text))
+        keys |= set(_FE_BRACKET_RE.findall(text))
+    return keys
+
+
+def walk_key_twins(node, path, out):
+    """递归遍历 JSON，收集「缺孪生键」的位置。
+
+    两个方向都收：
+      - `snake_only`：有 `a_b` 却没有 `aB`  → 读驼峰的一端拿到 undefined
+      - `camel_only`：有 `aB` 却没有 `a_b`  → 读蛇形的一端拿到 undefined
+
+    ⚠ 只在**同一个 dict 内**比较。`{'a_b': 1}` 与别处的 `{'aB': 2}` 互不相关。
+    """
+    if isinstance(node, dict):
+        keys = set(node.keys())
+        for key in keys:
+            if not isinstance(key, str):
+                continue
+            if '_' in key:
+                camel = to_camel_key(key)
+                if camel != key and camel not in keys:
+                    out['snake_only'].append((path, key, camel))
+            elif re.search(r'[A-Z]', key):
+                snake = snake_of(key)
+                if snake != key and snake not in keys:
+                    out['camel_only'].append((path, key, snake))
+        for key, value in node.items():
+            walk_key_twins(value, '%s.%s' % (path, key), out)
+    elif isinstance(node, list):
+        for i, value in enumerate(node[:5]):
+            walk_key_twins(value, '%s[%d]' % (path, i), out)
+
+
+class CamelKeyHelperTest(SimpleTestCase):
+    """`to_camel_key` / `with_camel_keys` 的单元契约（第三十六轮）。"""
+
+    def test_to_camel_key_rules(self):
+        self.assertEqual(to_camel_key('id'), 'id')
+        self.assertEqual(to_camel_key('ledger_no'), 'ledgerNo')
+        self.assertEqual(to_camel_key('pet_code_prefix'), 'petCodePrefix')
+        self.assertEqual(to_camel_key('is_city'), 'isCity')
+        # 连续下划线：`a__b` → `a` + `''.title()` + `B` = `aB`
+        # ⚠ 这是**已知且刻意保留**的行为（全项目没有 `__` 开头的业务字段）。
+        # 断言它是为了「规则变了要有人知道」，不是为了说它优雅。
+        self.assertEqual(to_camel_key('a__b'), 'aB')
+
+    def test_with_camel_keys_is_recursive(self):
+        """⚠ 本轮的**核心**：只补顶层是原缺陷的根因。"""
+        src = {
+            'outer_key': 1,
+            'nested': {'inner_key': 2, 'deep': {'deepest_key': 3}},
+            'rows': [{'row_key': 4}],
+        }
+        out = with_camel_keys(src)
+        self.assertEqual(out['outerKey'], 1)
+        self.assertEqual(out['nested']['innerKey'], 2,
+                         '嵌套 dict 的键没被补齐 —— 只补顶层就是原缺陷')
+        self.assertEqual(out['nested']['deep']['deepestKey'], 3,
+                         '两层嵌套没被遍历到')
+        self.assertEqual(out['rows'][0]['rowKey'], 4, 'list 元素没被遍历到')
+
+    def test_with_camel_keys_does_not_mutate_input(self):
+        """`pet_brief()` 的返回值被多处共享，就地改写会串味。"""
+        src = {'a_b': 1, 'nested': {'c_d': 2}}
+        snapshot = json.dumps(src, sort_keys=True)
+        with_camel_keys(src)
+        self.assertEqual(json.dumps(src, sort_keys=True), snapshot,
+                         '入参被就地改写了')
+
+    def test_with_camel_keys_is_idempotent(self):
+        """`json_ok` 会再过一遍，而 `serialize_instance` 已经补过一次。"""
+        once = with_camel_keys({'a_b': 1, 'nested': {'c_d': 2}})
+        twice = with_camel_keys(once)
+        self.assertEqual(once, twice)
+
+    def test_with_camel_keys_keeps_existing_camel_key(self):
+        """已有驼峰键时**不覆盖** —— 显式给的值优先于自动生成。"""
+        out = with_camel_keys({'a_b': 'snake', 'aB': 'explicit'})
+        self.assertEqual(out['aB'], 'explicit')
+
+    def test_with_camel_keys_handles_non_string_keys(self):
+        """服务层可能在序列化前传 int 键的字典，不能炸。"""
+        out = with_camel_keys({1: 'a', 'b_c': 2})
+        self.assertEqual(out[1], 'a')
+        self.assertEqual(out['bC'], 2)
+
+    def test_with_camel_keys_passes_through_scalars(self):
+        for value in (None, 1, 'x', 1.5, True):
+            with self.subTest(value=value):
+                self.assertEqual(with_camel_keys(value), value)
+
+    def test_to_camel_key_is_the_single_implementation(self):
+        """`serialize_instance` 必须复用同一份规则。
+
+        ⚠ 它原本另有一份内部 `_to_camel`，注释写着「与 `with_camel_keys`
+        同一套规则」—— 但**那只是注释**。两处各写各的，改一处必然漂移，
+        而漂移的表现是：同一个字段在模型序列化与手工聚合两条路径上得到
+        **不同的驼峰名**，前端按其中一种读，另一条路径就是 undefined。
+        """
+        import inspect
+
+        from business import services
+        src = inspect.getsource(services.serialize_instance)
+        self.assertNotIn('def _to_camel', src,
+                         'serialize_instance 里又出现了自己的驼峰实现')
+        self.assertIn('to_camel_key', src,
+                      'serialize_instance 没走共用驼峰规则')
+
+
+class ResponseEnvelopeCamelTest(BusinessTestBase):
+    """信封层：`json_ok` / `json_fail` / `api_me` 必须产出两套键。"""
+
+    def test_json_ok_adds_camel_twins_recursively(self):
+        resp = json_ok({'a_b': 1, 'nested': {'c_d': 2}})
+        body = json.loads(resp.content.decode())
+        self.assertEqual(body['data']['aB'], 1)
+        self.assertEqual(body['data']['nested']['cD'], 2)
+
+    def test_json_fail_adds_camel_twins(self):
+        resp = json_fail('出错了', data={'a_b': 1})
+        body = json.loads(resp.content.decode())
+        self.assertFalse(body['success'])
+        self.assertEqual(body['data']['aB'], 1)
+
+    def test_api_me_returns_camel_twins(self):
+        """回归锚点：`/api/me/` 曾用裸 `JsonResponse` 绕过统一信封。
+
+        前端读 `user?.districtName`（`shelter/portal.html`），而接口只给
+        `district_name` → **区县名显示成 undefined**。
+        """
+        self.login_as(self.gov_a)
+        body = self.ok(self.client.get('/api/me/'))['data']
+        self.assertEqual(body['districtId'], self.district_a.id)
+        self.assertEqual(body['districtName'], self.district_a.name)
+        self.assertEqual(body['roleDisplay'], '区级政府管理员')
+        self.assertEqual(body['district_id'], self.district_a.id)
+
+    def test_api_me_unauthenticated_still_401_json(self):
+        """改用 `json_fail` 后，未登录仍必须是 401 + JSON（不能退化成 302）。"""
+        resp = self.client.get('/api/me/')
+        self.assertEqual(resp.status_code, 401)
+        self.assertIn('application/json', resp['Content-Type'])
+        self.assertFalse(resp.json()['success'])
+
+
+class ResponseKeyContractTest(BusinessTestBase):
+    """枚举全部 `/api/` GET 路由的 **响应体键契约闸门**（第三十六轮）。
+
+    第三十四/三十五轮把「查询参数」「请求体」做成了枚举闸门，**响应体**
+    没有对应保障 —— 一扩就炸出一族真缺陷：实测 78 条路由 × 5 角色，
+    命中 **48 处**「前端读 camel、接口只给 snake」，**全部在嵌套层**。
+
+    根因三条：
+      ① `with_camel_keys` **只补顶层**，嵌套 dict 原样透传；
+      ② `pet_brief()` 返回 snake-only 字典，被塞进 `detail.pet`；
+      ③ **同一个响应里两套口径** —— `/api/business/captures/` 的外层记录
+         手写 camel（`canDelete`），嵌套的 `transferState` 又是 snake
+         （`can_delete`），两边各缺一半。
+
+    这类缺陷**没有任何报错**：前端读 `r.ledgerNo` 得到 undefined，
+    表现是「编号列整列空白」「按钮该隐藏却没隐藏」，接口照样 200。
+    所以只能靠枚举式闸门兜住。
+
+    ⚠ 三个防呆断言（缺了会静默假绿，见 `_sweep`）：
+      路由数 > 20、成功响应数 > 30、前端键数 > 100。
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.pet = make_pet(code='TNR250990001', status='in_treatment',
+                           district=cls.district_a, shelter=cls.shelter_a,
+                           hospital=cls.hospital_a)
+        make_pet(code='TNR250990002', status='in_transit',
+                 district=cls.district_b, shelter=cls.shelter_b)
+        make_capture(district=cls.district_a, shelter=cls.shelter_a,
+                     pet_codes=['TNR250990001'])
+        make_material(category='vaccine', district=cls.district_a,
+                      shelter_stock=50)
+        make_chip(pet=cls.pet)
+
+    def _sweep(self):
+        """枚举 路由 × 角色，返回 (违规字典, 出现过的键, 成功响应数)。"""
+        routes = sorted(set(iter_api_routes(pk=str(self.pet.id))))
+        self.assertGreater(
+            len(routes), 20,
+            '路由枚举写坏了（拿到 %d 条）—— 闸门会假绿' % len(routes))
+
+        roles = (
+            ('gov_city', self.gov_city),
+            ('gov_district', self.gov_a),
+            ('shelter', self.shelter_user_a),
+            ('hospital', self.hospital_user_a),
+            ('adopter', self.adopter),
+        )
+
+        violations = {'snake_only': [], 'camel_only': []}
+        all_keys = set()
+        hits = 0
+
+        for role_name, user in roles:
+            self.login_as(user)
+            for route in routes:
+                resp = self.client.get(route)
+                if resp.status_code != 200:
+                    continue
+                if 'json' not in (resp.get('Content-Type') or ''):
+                    continue
+                try:
+                    body = resp.json()
+                except ValueError:
+                    continue
+                if not body.get('success'):
+                    continue
+                hits += 1
+                local = {'snake_only': [], 'camel_only': []}
+                walk_key_twins(body, route, local)
+                for kind in ('snake_only', 'camel_only'):
+                    for path, key, missing in local[kind]:
+                        violations[kind].append(
+                            '%s / %s / %s 缺 %s' % (role_name, path, key, missing))
+                self._collect_keys(body, all_keys)
+
+        self.assertGreater(
+            hits, 30,
+            '只有 %d 次成功响应 —— 角色/夹具配错了，闸门会假绿' % hits)
+        return violations, all_keys, hits
+
+    @staticmethod
+    def _collect_keys(node, sink):
+        if isinstance(node, dict):
+            sink.update(k for k in node if isinstance(k, str))
+            for value in node.values():
+                ResponseKeyContractTest._collect_keys(value, sink)
+        elif isinstance(node, list):
+            for value in node:
+                ResponseKeyContractTest._collect_keys(value, sink)
+
+    def test_no_snake_only_dict_in_any_get_response(self):
+        """有 `a_b` 就必须有 `aB`。"""
+        violations, _keys, _hits = self._sweep()
+        self.assertEqual(
+            violations['snake_only'], [],
+            '这些位置有 snake_case 却没有 camelCase 孪生'
+            '（前端读驼峰会拿到 undefined）：\n  '
+            + '\n  '.join(sorted(set(violations['snake_only']))[:30]))
+
+    def test_no_camel_only_dict_in_any_get_response(self):
+        """有 `aB` 就必须有 `a_b`（政府端读 snake，缺了同样空白）。
+
+        ⚠ 反向**不能靠自动补键**：`petID` → `pet_i_d` 这种还原有歧义。
+        正确修法是让生产代码**只写 snake**，驼峰交给 `with_camel_keys()`。
+        """
+        violations, _keys, _hits = self._sweep()
+        self.assertEqual(
+            violations['camel_only'], [],
+            '这些位置有 camelCase 却没有 snake_case 孪生'
+            '（应改成只写 snake，让 json_ok 统一补驼峰）：\n  '
+            + '\n  '.join(sorted(set(violations['camel_only']))[:30]))
+
+    def test_frontend_read_camel_keys_exist_in_responses(self):
+        """前端读的驼峰键必须真的有人供出来。
+
+        ⚠ 两层过滤，缺一个都会误报：
+          1. 只挑**含大写字母**的键（`log` / `escape` 这类噪声不算）；
+          2. 只挑「它的 snake 形式**确实在响应里出现过**」的键 ——
+             否则会把 `TNR_UI.xxx`、`res.success` 这些非响应字段也算进来。
+        """
+        _v, all_keys, _hits = self._sweep()
+        self.assertGreater(len(all_keys), 100,
+                           '只收集到 %d 个响应键 —— 枚举坏了' % len(all_keys))
+
+        fe = collect_frontend_read_keys()
+        self.assertGreater(len(fe), 100,
+                           '只从前端收集到 %d 个键 —— 源码路径/正则坏了' % len(fe))
+
+        missing = sorted(
+            k for k in fe
+            if re.search(r'[A-Z]', k) and k not in all_keys and snake_of(k) in all_keys)
+        self.assertEqual(
+            missing, [],
+            '前端读这些 camelCase 键，但接口只给 snake 形式：' + '、'.join(missing))
+
+    def test_frontend_read_snake_keys_exist_in_responses(self):
+        """反方向：前端读的 snake 键也必须存在（政府端大量读 snake）。"""
+        _v, all_keys, _hits = self._sweep()
+        fe = collect_frontend_read_keys()
+        missing = sorted(
+            k for k in fe
+            if '_' in k and k not in all_keys and to_camel_key(k) in all_keys)
+        self.assertEqual(
+            missing, [],
+            '前端读这些 snake_case 键，但接口只给 camel 形式：' + '、'.join(missing))

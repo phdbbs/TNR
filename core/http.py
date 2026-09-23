@@ -22,6 +22,7 @@ HTTP 400 的 **HTML 错误页**（`DEBUG` 下还带 Traceback），前端拿到�
 import json
 
 from django.core.exceptions import RequestDataTooBig
+from django.http import JsonResponse
 
 
 def is_api_request(request):
@@ -143,3 +144,102 @@ def body_list(data, key):
     """
     value = data.get(key)
     return value if isinstance(value, list) else []
+
+
+# ============================================
+# 响应体：统一信封 + 键命名补齐（snake_case ↔ camelCase）
+# ============================================
+#: `/api/` 响应的统一信封：`{'success': bool, 'data': ..., 'message': str}`。
+#: 前端 `TNR_API` 三个封装都按这个形状解析，所以**只有一份实现**。
+def json_ok(data=None, message='操作成功'):
+    """成功 JSON 响应。
+
+    ⚠⚠ **`data` 一律过 `with_camel_keys()`（第三十六轮收口）。**
+    本项目约定「返回给前端的每个记录字典同时含 snake_case 与 camelCase
+    两套键」—— 模型序列化走 `serialize_instance` 会自动补，但**手工聚合的
+    接口**（dashboard / ledger / users / institutions / materials / me …）
+    全靠人手写，实测 78 条路由 × 5 角色里漏了 48 处，且**全在嵌套层**。
+
+    把补齐放在这里而不是逐个接口去改，理由与 `read_json_body` 的归一化同源：
+    **归一化点只能有一个**。分散到十几个接口去写，必然出现「有的接口补了、
+    有的没补」这种最难查的形态 —— 而且新加接口时**没人会记得补**。
+
+    ⚠ 直连 `JsonResponse` 的接口会**绕过**这里。`/api/` 下必须用本函数
+    （`accounts.api_me` 曾经就是裸 `JsonResponse`，因此 `/api/me/` 的
+    `districtId` / `districtName` 一直是 undefined）。
+    """
+    return JsonResponse({
+        'success': True, 'data': with_camel_keys(data), 'message': message})
+
+
+def json_fail(message='操作失败', data=None, status=400):
+    """失败 JSON 响应（`data` 同样过 `with_camel_keys()`，见 `json_ok`）。"""
+    return JsonResponse({
+        'success': False, 'data': with_camel_keys(data), 'message': message},
+        status=status)
+
+
+def to_camel_key(snake):
+    """`snake_case` → `camelCase`。
+
+    ⚠ **全项目唯一实现**。`serialize_instance` 里原本另有一份同名内部函数
+    `_to_camel`，注释写着「与 `with_camel_keys` 同一套规则」—— 但那只是
+    **一句注释**，两处代码各写各的。规则一旦要改（例如处理连续下划线、
+    数字前缀），必然只改一处 → 同一个字段在模型序列化与手工聚合两条路径上
+    得到**不同的驼峰名**，前端按其中一种读，另一条路径就是 undefined。
+    第三十六轮把它们合并到这里。
+    """
+    parts = str(snake).split('_')
+    if len(parts) == 1:
+        return parts[0]
+    return parts[0] + ''.join(p.title() for p in parts[1:])
+
+
+def with_camel_keys(data):
+    """**递归地**给字典/列表补一份 camelCase 别名，让两种命名都能取到值。
+
+    本项目约定「返回给前端的每个记录字典同时含 snake_case 与 camelCase
+    两套键」。模型序列化走 `serialize_instance` 会自动补；**手工聚合的接口**
+    必须显式补齐 —— 政府端读 snake_case、捕捉端读 camelCase，缺哪一套哪一端
+    就静默出问题：前端读 `r.ledgerNo` 拿到 undefined 时，**编号列整列空白、
+    编号点不开档案，且不报任何错**。
+
+    ⚠⚠ **必须递归（第三十六轮）**。原实现只补**顶层**键，嵌套的值原样透传，
+    于是所有嵌套结构里的 snake 键都没有孪生。实测枚举 78 条路由 × 5 角色，
+    命中 48 处「前端读 camel、接口只给 snake」，**全部落在嵌套层**：
+
+    - `pet_brief()` 返回的 snake-only 字典被塞进 `detail.pet` /
+      `data.pet_brief` → `photoCapture` / `districtName` / `shelterName` /
+      `hospitalName` / `districtId` 全缺；
+    - `pet_archive_records` 的 `records[].detail` 里的 `contactPerson` /
+      `geoAddress` / `propertyName` / `groupPhoto` / `petCodes` 全缺；
+    - 更刺眼的是**同一响应里两套口径**：`/api/business/captures/` 的外层记录
+      给的是 camel（`canDelete`），而它的嵌套 `transferState` 给的是 snake
+      （`can_delete`）—— 手工拼装没有统一口径。
+
+    ⚠ **不改入参**：返回的是新建的 dict/list，不会污染调用方传进来的对象
+    （`pet_brief()` 的返回值被多处共享，就地改写会串味）。
+
+    ⚠ **副作用提醒**：若某个响应字典是「枚举值 → 数字」的**聚合映射**
+    （如 `pet_status_distribution`），补齐后它会同时含 `in_transit` 与
+    `inTransit`。**按 key 直接取值不受影响**；但**遍历它的键**会拿到两份
+    （图表会翻倍）。当前没有任何前端代码遍历这类映射；若将来要遍历，
+    请在那一处显式只取一种命名，而**不要**为了它把这里改回非递归。
+
+    ⚠ 非字符串键（如 `{1: 'a'}`）跳过：JSON 里键必是字符串，但服务层可能
+    在序列化前传入 int 键的字典。
+    """
+    if isinstance(data, dict):
+        out = {}
+        for key, value in data.items():
+            out[key] = with_camel_keys(value)
+        for key, value in list(out.items()):
+            if not isinstance(key, str):
+                continue
+            camel = to_camel_key(key)
+            if camel != key and camel not in out:
+                out[camel] = value
+        return out
+    if isinstance(data, (list, tuple)):
+        return [with_camel_keys(v) for v in data]
+    return data
