@@ -21,6 +21,29 @@ from business.models import (
 from core.models import District, Institution
 
 # ============================================
+# 区县（**单一来源**）
+# ============================================
+# 字段：(内部代号, 展示名, 实际 code, 是否市级)
+#
+# ⚠ 不要在别处再抄一份。下面两处都从这里**派生**：
+#   1. `SEED_MATERIALS` 里的区县代号（'D001' 等）；
+#   2. `SEED_MATERIAL_DISTRICT_CODES`（演示物料的区县范围）。
+# `code` 是稳定主键，`name` 只是展示名：改名后重跑不会重复创建。
+# 名称与项目实际（襄阳市）保持一致，避免「北京区县名 + 襄阳业务数据」的错配。
+SEED_DISTRICTS = [
+    ('D000', '全市（市级）', 'CITY', True),
+    ('D001', '襄城区', 'CY', False),
+    ('D002', '樊城区', 'HD', False),
+    ('D003', '东津新区', 'XC', False),
+    ('D004', '襄州区', 'DC', False),
+]
+
+# 内部代号 → 区县实际 code（供种子清单与其它命令换算，避免各抄一份）
+SEED_DISTRICT_CODE_BY_INTERNAL = {
+    internal: code for internal, _name, code, _is_city in SEED_DISTRICTS
+}
+
+# ============================================
 # 演示物料清单（**单一来源**）
 # ============================================
 # 字段：(mat_id, 名称, 类别, 单位, 规格, 供应商, 批号, 捕捉点库存, 安全库存,
@@ -37,6 +60,7 @@ from core.models import District, Institution
 # （`get_or_create` 的 defaults 只在创建时生效，已导入的库修不回来）。
 # 两处必须同源 —— 改这里就等于同时改了两边。
 SEED_MATERIALS = [
+    # --- 襄城区（演示区县之一，内部代号 D001） ---
     ('MAT001', '狂犬疫苗', 'vaccine', '支', '1ml/支', '国药集团', 'B20250101',
      120, 50, 270, '', '', 'D001'),
     ('MAT002', '猫三联疫苗', 'vaccine', '支', '1ml/支', '英特威', 'B20250102',
@@ -45,15 +69,37 @@ SEED_MATERIALS = [
      60, 30, 90, '', '', 'D001'),
     ('MAT004', '宠物芯片', 'chip', '个', '134.2kHz', '信码科技', 'C20250101',
      500, 200, None, '1000010001', '1000010500', 'D001'),
+    # --- 樊城区（演示区县之二，内部代号 D002） ---
+    #
+    # ⚠ 为什么樊城区也必须有：生产实测时 4 条物料**全挂在襄城区**，
+    # `hd_gov`（樊城区政府管理员）登录后「物料管理」是**一整页空白** ——
+    # 区县级账号看不到任何本区县物料，演示时看不出这个模块存在。
+    #
+    # 名称与襄城区**刻意重名**：同一件耗材在多个区县各有一条库存是正常
+    # 业务状态，也正好让 `(name, district)` 这个幂等键始终被真实覆盖。
+    ('MAT101', '狂犬疫苗', 'vaccine', '支', '1ml/支', '国药集团', 'B20250201',
+     90, 40, 300, '', '', 'D002'),
+    ('MAT102', '猫三联疫苗', 'vaccine', '支', '1ml/支', '英特威', 'B20250202',
+     60, 30, 200, '', '', 'D002'),
+    ('MAT103', '体内外驱虫药', 'dewormer', '盒', '6片/盒', '拜耳', 'Q20250201',
+     45, 20, 120, '', '', 'D002'),
+    ('MAT104', '宠物芯片', 'chip', '个', '134.2kHz', '信码科技', 'C20250201',
+     300, 150, None, '1000010501', '1000011000', 'D002'),
 ]
 
-# 演示物料所属区县的**实际 code**（与上面清单里的内部代号 'D001' 对应，
-# 见 `_seed_districts`：('D001', '襄城区', 'CY', False)）。
+# 演示物料所属区县的**实际 code**。
 #
 # ⚠ `refresh_demo_material_expiry` 用它把订正范围**限定在演示区县内**。
 # 别的区县里同名的物料（如现场 4 个区县各有一套「狂犬疫苗」）不是演示数据，
 # 只按名称匹配会误伤它们 —— 那是真实业务数据。
-SEED_MATERIAL_DISTRICT_CODE = 'CY'
+#
+# 这里**从 SEED_MATERIALS 派生**，不手工维护：手工列表一旦与清单漂移
+# （加了物料却忘了加区县），那个区县的演示物料过期后就永远修不回来，
+# 而命令不会报错 —— 只是"改得比预期少"。派生之后不可能漂移。
+# 是**元组**而不是单个字符串：演示区县可以不止一个（襄城区 + 樊城区）。
+SEED_MATERIAL_DISTRICT_CODES = tuple(sorted({
+    SEED_DISTRICT_CODE_BY_INTERNAL[row[-1]] for row in SEED_MATERIALS
+}))
 
 
 class Command(BaseCommand):
@@ -116,17 +162,10 @@ class Command(BaseCommand):
     # ============================================
     def _seed_districts(self):
         self.stdout.write('创建区县...')
-        # code 是稳定主键，name 只是展示名：改名后重跑不会重复创建。
-        # 名称与项目实际（襄阳市）保持一致，避免出现「北京区县名 + 襄阳业务数据」的错配。
-        data = [
-            ('D000', '全市（市级）', 'CITY', True),
-            ('D001', '襄城区', 'CY', False),
-            ('D002', '樊城区', 'HD', False),
-            ('D003', '东津新区', 'XC', False),
-            ('D004', '襄州区', 'DC', False),
-        ]
+        # 清单提到模块级 `SEED_DISTRICTS`（单一来源）—— 演示物料的区县范围
+        # 也由它派生，抄两份必然漂移。
         districts = {}
-        for code_id, name, code, is_city in data:
+        for code_id, name, code, is_city in SEED_DISTRICTS:
             d, created = District.objects.get_or_create(
                 code=code,
                 defaults={'name': name, 'is_city': is_city, 'status': 'active'}
@@ -578,14 +617,38 @@ class Command(BaseCommand):
             ('MTX006R', 'receive', 'MAT004', '宠物芯片', 210, '个', 'C20250101',
              '', '襄城流浪动物捕捉点', 'I003', 'RVC-2025-0107-001', date(2025, 1, 7),
              'D001', 'aixin_hosp', '签收下发物料（原单号：DIS-2025-0107-001）'),
+            # --- 樊城区（D002）---
+            #
+            # 只补物料不补流水，`hd_gov` 的「库存流水」页仍是空的 ——
+            # 物料台账的意义就在流水上，所以这里配两条：
+            # 一条采购入库（形成库存），一条下发医院且**尚未签收**
+            # （正好演示「待签收」这个中间态）。
+            ('MTX101', 'purchase', 'MAT101', '狂犬疫苗', 90, '支', 'B20250201',
+             '国药集团', '国药集团', None, 'PUR-2026-0210-001', date(2026, 2, 10),
+             'D002', 'hd_shelter', '采购入库'),
+            ('MTX102', 'dispatch', 'MAT101', '狂犬疫苗', 30, '支', 'B20250201',
+             '', '芭比堂动物医院', 'I005', 'DIS-2026-0212-001', date(2026, 2, 12),
+             'D002', 'hd_shelter', '下发至医院（待签收）'),
         ]
         for row in data:
             (mtx_id, txn_type, mat_id, mat_name, qty, unit, batch_no,
              supplier, from_to, hosp_id, ledger_no, txn_date, dist, operator, note) = row
+            # ⚠ 幂等键是 **(ledger_no, type)**，不能只用 `ledger_no`。
+            #
+            # `ledger_no` **本身就不唯一** —— 这是业务设计，不是缺陷：
+            # 「下发」与「签收」是同一张单的两条台账，运行时两边共用同一个
+            # `DIS-` 单号（签收行的 note 里写着「原单号：DIS-…」）。
+            # 本地库实测：按 `ledger_no` 分组有 **21 组**重复，加上 `type`
+            # 之后只剩 **1 组**（`''` × 66，那是 `consume` 消耗记录本来
+            # 就没有台账编号）—— 21 组里绝大多数正是这种下发/签收配对。
+            #
+            # 只按 `ledger_no` 取键，将来种子里真的配一对同号的下发/签收，
+            # 就会**静默少建一条**（第二条被当成"已存在"跳过），而且不报错。
+            # 加上 `type` 之后，键与业务身份一致：同号不同侧是两条。
             MaterialTransaction.objects.get_or_create(
                 ledger_no=ledger_no,
+                type=txn_type,
                 defaults={
-                    'type': txn_type,
                     'material': materials[mat_id],
                     'material_name': mat_name,
                     'quantity': qty,
@@ -790,12 +853,31 @@ class Command(BaseCommand):
              '请于3月完成PET001的月度回访打卡。', False),
         ]
         for msg_id, user, msg_type, title, content, is_read in data:
+            # ⚠ 幂等键必须**带上收件人**，不能只用 (title, content)。
+            #
+            # `Message` 是「一条通知发给一个人」的流水表：同一个 (title, content)
+            # 本来就会有多行（同一只宠物的审核/领养完成通知反复产生、
+            # 一条公告发给 N 个领养人）。本地库实测按 (title, content) 分组
+            # 有 **9 组**重复 —— 那是真实使用产生的**正常数据，不是脏数据，
+            # 无需清理**（已核对：同一用户同标题同正文的多行创建时间相隔 8~9
+            # 分钟，是反复实测留下的，不是一次请求写重）。
+            #
+            # 但 (title, content) 不是这个表的业务身份，用它取键会**认领别人的行**：
+            # 库里只要已有一条同标题同内容、但收件人不是 `adopter1` 的真实通知，
+            # `get_or_create` 就认为"已存在"并跳过 —— 演示账号**静默收不到**
+            # 这条演示消息，而命令照样报成功。
+            # 业务身份 = (收件人, 类型, 标题, 正文)，四者齐备才是同一条。
+            #
+            # ⚠ 这是**潜在**缺陷，不是活缺陷：种子清单里三条消息的键本来就
+            # 互不相同，所以今天撞不上、修完也看不出可见差异 —— 但键与业务
+            # 身份不一致这件事本身，迟早会撞，而且撞了不报错。
+            # `msg_id` 只是清单里的可读标号（`Message` 没有这一列），不参与取键。
             Message.objects.get_or_create(
+                user=users[user],
+                type=msg_type,
                 title=title,
                 content=content,
                 defaults={
-                    'user': users[user],
-                    'type': msg_type,
                     'is_read': is_read,
                 }
             )

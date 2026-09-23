@@ -251,9 +251,16 @@ class RefreshDemoMaterialExpiryCommandTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        # code 必须与 seed_data.SEED_MATERIAL_DISTRICT_CODE 一致
+        # ⚠ code 必须与 `seed_data.SEED_MATERIAL_DISTRICT_CODES` 对齐，而且
+        # 演示区县**是复数**（襄城区 + 樊城区）—— 命令要求全部在场，
+        # 缺任何一个都会直接中止，所以两个都得建出来。
         cls.demo_district = make_district(name='襄城区', code='CY')
-        cls.other_district = make_district(name='樊城区', code='HD')
+        cls.demo_district_2 = make_district(name='樊城区', code='HD')
+        # ⚠ 「别区县」必须是**非演示区县**。原先这里放的是樊城区 ——
+        # 樊城区在补物料之后也成了演示区县，于是"别处不该被动"这条用例
+        # 断言的是一个**本来就该被订正**的区县，必然失败。
+        # 那是用例构造错，不是产品行为变了。
+        cls.other_district = make_district(name='东津新区', code='XC')
 
     def _seed_material(self, name, expiry, district=None, batch_no=''):
         return make_material(name=name, batch_no=batch_no, expiry_date=expiry,
@@ -316,13 +323,33 @@ class RefreshDemoMaterialExpiryCommandTest(TestCase):
         self.assertIsNone(chip.expiry_date)
 
     def test_same_name_in_other_district_is_left_alone(self):
-        """⚠ 别的区县里的同名过期物料**不是**演示数据，不能动。"""
+        """⚠ **非演示区县**里的同名过期物料不是演示数据，不能动。"""
         other = self._seed_material('狂犬疫苗', days_from_today(-264),
                                     district=self.other_district)
         out = self._run('--apply')
         other.refresh_from_db()
         self.assertEqual(other.expiry_date, days_from_today(-264))
         self.assertIn('非演示物料', out)
+
+    def test_second_demo_district_is_also_corrected(self):
+        """⚠ 演示区县是**复数**，每一个都要订正。
+
+        回归背景：命令原先只认单个 `SEED_MATERIAL_DISTRICT_CODE`。加了第二个
+        演示区县之后若不遍历，樊城区的演示物料过期后就**永远修不回来**，
+        而且命令不报错 —— 只是"改得比预期少"，看不出少了谁。
+
+        判据落在**业务结果**上（那条记录确实被改成了未来的日期），
+        不依赖被测模块的任何常量或数据结构。
+        """
+        m = self._seed_material('狂犬疫苗', days_from_today(-264),
+                                district=self.demo_district_2)
+        out = self._run('--apply')
+        m.refresh_from_db()
+        self.assertNotEqual(
+            m.expiry_date, days_from_today(-264),
+            '第二个演示区县的过期物料没有被订正')
+        self.assertGreater(m.expiry_date, timezone.localdate())
+        self.assertIn('已订正 1 行', out)
 
     def test_non_demo_material_is_left_alone(self):
         """用户自己录入的过期物料是真实业务数据，命令不能碰。"""

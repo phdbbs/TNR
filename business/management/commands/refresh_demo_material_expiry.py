@@ -7,11 +7,15 @@ defaults=...)` 的 `defaults` **只在创建时生效** —— 所以**已经导
 
 **判据（三个条件同时成立才改）**：
   1. 物料名在 `seed_data.SEED_MATERIALS` 里；
-  2. 所属区县是**演示区县**（`SEED_MATERIAL_DISTRICT_CODE`，襄城区）；
+  2. 所属区县是**演示区县**（`SEED_MATERIAL_DISTRICT_CODES`，襄城区 / 樊城区）；
   3. `expiry_date` **存在且已过期**。
 
-第 2 条不能省：实测现场 4 个区县各有 4 件同名物料，只有襄城区那套是演示数据，
-其余是别处产生的 —— 只按名称匹配会**误伤真实业务数据**。
+第 2 条不能省：实测现场 4 个区县各有 4 件同名物料，只有演示区县那几套是
+演示数据，其余是别处产生的 —— 只按名称匹配会**误伤真实业务数据**。
+
+⚠ 演示区县是**复数**（`SEED_MATERIAL_DISTRICT_CODES` 是元组）。漏掉其中
+任何一个，那个区县的演示物料过期后就**永远修不回来** —— 命令不会报错，
+只是"改得比预期少"。
 
 第 3 条也不能省：`expiry_date=None` 表示「没登记有效期」（芯片就是），
 **不等于过期**。曾把它判成「需要改」，等于给用户没登记有效期的物料
@@ -29,18 +33,26 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from business.management.commands.seed_data import (
-    SEED_MATERIALS, SEED_MATERIAL_DISTRICT_CODE,
+    SEED_DISTRICT_CODE_BY_INTERNAL, SEED_MATERIAL_DISTRICT_CODES, SEED_MATERIALS,
 )
 from business.models import Material
 from core.models import District
 
-# 演示物料名 → 有效期距今天数（从 seed_data 的清单派生，单一来源）
+# **(区县实际 code, 物料名)** → 有效期距今天数（从 seed_data 的清单派生，单一来源）
+#
+# ⚠ 键里**必须带区县**。演示物料在多个演示区县里**同名各有一条**
+# （襄城区与樊城区各有一套「狂犬疫苗」），只按名称索引会让后一条
+# **静默覆盖**前一条 —— 于是其中一个区县的物料被改成另一个区县的日期，
+# 而命令不会报错、看起来完全正常。
 DEMO_MATERIAL_OFFSETS = {
-    name: offset
+    (SEED_DISTRICT_CODE_BY_INTERNAL[district_code], name): offset
     for (_id, name, _cat, _unit, _spec, _sup, _batch,
-         _stock, _safety, offset, _cs, _ce, _dc) in SEED_MATERIALS
+         _stock, _safety, offset, _cs, _ce, district_code) in SEED_MATERIALS
     if offset is not None
 }
+
+# 演示物料名（去重后的全集）—— 用于 `name__in` 查询与日志展示
+DEMO_MATERIAL_NAMES = sorted({name for _code, name in DEMO_MATERIAL_OFFSETS})
 
 
 class Command(BaseCommand):
@@ -57,39 +69,46 @@ class Command(BaseCommand):
         today = timezone.localdate()
         self.stdout.write(f'今天 = {today}')
 
-        district = District.objects.filter(
-            code=SEED_MATERIAL_DISTRICT_CODE).first()
-        if district is None:
+        districts = list(District.objects.filter(
+            code__in=SEED_MATERIAL_DISTRICT_CODES).order_by('code'))
+        missing = sorted(set(SEED_MATERIAL_DISTRICT_CODES)
+                         - {d.code for d in districts})
+        if missing:
             self.stderr.write(self.style.ERROR(
-                f'找不到演示区县（code={SEED_MATERIAL_DISTRICT_CODE}），'
+                f'找不到演示区县（code={"/".join(missing)}），'
                 f'无法确定订正范围，已中止。'))
             return
         self.stdout.write(
-            f'演示区县 = {district.code}/{district.name}；'
-            f'演示物料名 = {"、".join(DEMO_MATERIAL_OFFSETS)}')
+            f'演示区县 = {"、".join(f"{d.code}/{d.name}" for d in districts)}；'
+            f'演示物料名 = {"、".join(DEMO_MATERIAL_NAMES)}')
 
         rows = list(Material.objects.filter(
-            district=district,
-            name__in=list(DEMO_MATERIAL_OFFSETS)).order_by('id'))
+            district__in=districts,
+            name__in=DEMO_MATERIAL_NAMES
+        ).select_related('district').order_by('district__code', 'id'))
 
         if not rows:
             self.stdout.write('演示区县内未找到演示物料，无需订正。')
         else:
             changed = 0
             for m in rows:
+                # ⚠ 输出必须带区县：演示物料**同名存在于多个区县**
+                # （襄城区/樊城区各一套「狂犬疫苗」），只印名称看不出改的是哪一条。
+                tag = f'{m.district.code}/{m.name}'
                 if m.expiry_date is None:
                     self.stdout.write(
-                        f'  [跳过] {m.name} 未登记有效期（None），'
+                        f'  [跳过] {tag} 未登记有效期（None），'
                         f'不代填')
                     continue
                 if m.expiry_date >= today:
                     self.stdout.write(
-                        f'  [跳过] {m.name} 有效期 {m.expiry_date} 未过期，'
+                        f'  [跳过] {tag} 有效期 {m.expiry_date} 未过期，'
                         f'不回滚')
                     continue
-                target = today + timedelta(days=DEMO_MATERIAL_OFFSETS[m.name])
+                target = today + timedelta(
+                    days=DEMO_MATERIAL_OFFSETS[(m.district.code, m.name)])
                 self.stdout.write(
-                    f'  [{"改写" if apply else "将改写"}] {m.name}'
+                    f'  [{"改写" if apply else "将改写"}] {tag}'
                     f'（批号 {m.batch_no or "—"}） {m.expiry_date} -> {target}')
                 if apply:
                     m.expiry_date = target
@@ -104,7 +123,7 @@ class Command(BaseCommand):
 
         # 非演示物料但已过期的：真实业务数据，只报告不改。
         others = list(Material.objects.filter(expiry_date__lt=today).exclude(
-            district=district, name__in=list(DEMO_MATERIAL_OFFSETS))
+            district__in=districts, name__in=DEMO_MATERIAL_NAMES)
             .select_related('district').order_by('district__code', 'id'))
         if others:
             self.stdout.write(self.style.WARNING(

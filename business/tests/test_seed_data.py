@@ -17,6 +17,7 @@
 
 这些测试把上述承诺钉死，避免再次退化。
 """
+from datetime import timedelta
 from io import StringIO
 
 from django.core.management import call_command
@@ -25,10 +26,11 @@ from django.utils import timezone
 
 from accounts.models import User
 from business.management.commands.seed_data import (
-    SEED_MATERIALS, SEED_MATERIAL_DISTRICT_CODE,
+    SEED_DISTRICT_CODE_BY_INTERNAL, SEED_MATERIAL_DISTRICT_CODES, SEED_MATERIALS,
 )
 from business.models import (
-    Adoption, Capture, CheckIn, Chip, Material, Message, Pet, Release, Treatment,
+    Adoption, Capture, CheckIn, Chip, Material, MaterialTransaction, Message,
+    Pet, Release, Treatment,
 )
 from core.models import District, Institution
 
@@ -62,6 +64,10 @@ class SeedIdempotencyTest(SeedDataTestBase):
             'adoption': Adoption.objects.count(),
             'checkin': CheckIn.objects.count(),
             'message': Message.objects.count(),
+            # ⚠ 本轮改动的正是这两个模型的幂等键，它们原先**不在快照里** ——
+            # 键写错会让行数变化，而快照看不见，用例照样绿。
+            'material': Material.objects.count(),
+            'material_txn': MaterialTransaction.objects.count(),
         }
         self.seed()
         after = {
@@ -76,6 +82,10 @@ class SeedIdempotencyTest(SeedDataTestBase):
             'adoption': Adoption.objects.count(),
             'checkin': CheckIn.objects.count(),
             'message': Message.objects.count(),
+            # ⚠ 本轮改动的正是这两个模型的幂等键，它们原先**不在快照里** ——
+            # 键写错会让行数变化，而快照看不见，用例照样绿。
+            'material': Material.objects.count(),
+            'material_txn': MaterialTransaction.objects.count(),
         }
         self.assertEqual(after, snapshot, f'第二次执行产生了重复数据：{snapshot} -> {after}')
 
@@ -264,10 +274,20 @@ class SeedMaterialExpiryTest(SeedDataTestBase):
                 f'{self.MIN_DAYS}~{self.MAX_DAYS} 内')
 
     def test_chip_keeps_no_expiry_date(self):
-        """芯片无有效期是刻意的，不要顺手给它补一个。"""
+        """芯片无有效期是刻意的，不要顺手给它补一个。
+
+        ⚠ 不能用 `Material.objects.get(name='宠物芯片')`：演示区县不止一个，
+        每个区县各有一条「宠物芯片」，按名称单独取会 `MultipleObjectsReturned`。
+        断言要覆盖**每一个**演示区县。
+        """
         self.seed()
-        chip = Material.objects.get(name='宠物芯片')
-        self.assertIsNone(chip.expiry_date)
+        chips = Material.objects.filter(name='宠物芯片')
+        self.assertEqual(
+            chips.count(), len(SEED_MATERIAL_DISTRICT_CODES),
+            '每个演示区县都应有一条「宠物芯片」')
+        for chip in chips:
+            with self.subTest(district=chip.district.code):
+                self.assertIsNone(chip.expiry_date)
 
 
 class SeedMaterialMultiDistrictTest(SeedDataTestBase):
@@ -293,9 +313,15 @@ class SeedMaterialMultiDistrictTest(SeedDataTestBase):
         会先执行一次 `seed_data` 把区县建出来，再插入同名物资 ——
         场景等价于「库里已经跑过一次种子、后来别的区县也有了同名物资，
         现在再次部署」。
+
+        ⚠ 「非演示区县」要排除**全部**演示区县（`SEED_MATERIAL_DISTRICT_CODES`，
+        现在是襄城区 + 樊城区）。只排除一个的话，构造出来的"别处"可能正好落在
+        另一个演示区县里，`seed_data` 就会在那里**合法地**再建一条 ——
+        用例随之变红，但那是用例构造错了，不是产品缺陷。
         """
         self.seed()
-        other = District.objects.exclude(code=SEED_MATERIAL_DISTRICT_CODE).first()
+        other = District.objects.exclude(
+            code__in=SEED_MATERIAL_DISTRICT_CODES).first()
         self.assertIsNotNone(other, '需要至少一个非演示区县才能构造该场景')
         return Material.objects.create(
             name=name, category='vaccine', unit='支', district=other,
@@ -309,7 +335,7 @@ class SeedMaterialMultiDistrictTest(SeedDataTestBase):
         out = self.seed()   # 修复前这里直接抛异常
 
         self.assertIn('种子数据填充完成', out)
-        demo = District.objects.get(code=SEED_MATERIAL_DISTRICT_CODE)
+        demo = District.objects.get(code=SEED_MATERIAL_DISTRICT_CODES[0])
         self.assertTrue(
             Material.objects.filter(name=name, district=demo).exists(),
             f'演示区县应有一条自己的「{name}」')
@@ -331,19 +357,27 @@ class SeedMaterialMultiDistrictTest(SeedDataTestBase):
                          '重跑 seed_data 产生了重复物资')
 
     def test_each_demo_material_is_created_exactly_once(self):
-        """演示区县里，每件种子物资恰好一条（不能多也不能少）。"""
+        """每件种子物资在**它自己的区县**里恰好一条（不能多也不能少）。
+
+        ⚠ 断言必须按 (名称, 区县) 做。演示物料**同名存在于多个演示区县**
+        （襄城区与樊城区各一套「狂犬疫苗」），只按名称断言在第二个演示区县
+        加进来之后会立刻变成「找到了 2 条」—— 那是用例没跟上数据形态，
+        不是产品缺陷。
+        """
         for _id, name, *_rest in SEED_MATERIALS:
             self._make_same_named_material_elsewhere(name)
 
         self.seed()
         self.seed()
 
-        demo = District.objects.get(code=SEED_MATERIAL_DISTRICT_CODE)
-        for _id, name, *_rest in SEED_MATERIALS:
-            with self.subTest(name=name):
+        for row in SEED_MATERIALS:
+            name, district_code = row[1], row[-1]
+            with self.subTest(name=name, district=district_code):
+                d = District.objects.get(
+                    code=SEED_DISTRICT_CODE_BY_INTERNAL[district_code])
                 self.assertEqual(
-                    Material.objects.filter(name=name, district=demo).count(), 1,
-                    f'演示区县「{name}」应恰好一条')
+                    Material.objects.filter(name=name, district=d).count(), 1,
+                    f'{d.code}「{name}」应恰好一条')
 
     def test_material_lookup_key_is_not_name_alone(self):
         """回归防线：取键必须带区县。
@@ -358,5 +392,196 @@ class SeedMaterialMultiDistrictTest(SeedDataTestBase):
         with self.assertRaises(Material.MultipleObjectsReturned):
             Material.objects.get(name=name)   # 说明确实存在多条同名
         # 而按 (name, district) 取是安全的 —— 这正是 seed_data 现在用的键
-        demo = District.objects.get(code=SEED_MATERIAL_DISTRICT_CODE)
+        demo = District.objects.get(code=SEED_MATERIAL_DISTRICT_CODES[0])
         self.assertIsNotNone(Material.objects.get(name=name, district=demo))
+
+    def test_every_demo_district_has_the_full_material_set(self):
+        """**每个**演示区县都要有完整的一套演示物料。
+
+        这是「补樊城区物料数据」的判据。生产实测：4 条物料全挂在襄城区，
+        `hd_gov`（樊城区政府管理员）登录后「物料管理」是**一整页空白** ——
+        接口返回 200、页面不报错，只是没有数据。
+
+        所以判据必须落在**业务结果**（每个演示区县各有多少条）上，
+        不能停在「命令没报错」—— 那正是这个缺陷躲过前面所有测试的原因。
+        """
+        self.seed()
+        names = sorted({row[1] for row in SEED_MATERIALS})
+        for code in SEED_MATERIAL_DISTRICT_CODES:
+            with self.subTest(district=code):
+                d = District.objects.get(code=code)
+                got = sorted(Material.objects.filter(district=d)
+                             .values_list('name', flat=True))
+                self.assertEqual(
+                    got, names,
+                    f'{code} 的物料应恰好是演示清单全集（缺哪件都说明该区县页面会缺内容）')
+
+    def test_every_demo_district_has_material_transactions(self):
+        """只有物料没有流水，区县的「库存流水」页仍是空的。
+
+        物料台账的意义就在流水上，所以判据同样落在业务结果上。
+        """
+        self.seed()
+        for code in SEED_MATERIAL_DISTRICT_CODES:
+            with self.subTest(district=code):
+                n = MaterialTransaction.objects.filter(
+                    district__code=code).count()
+                self.assertGreater(
+                    n, 0, f'{code} 应有库存流水，否则该区县的流水页是空的')
+
+    def test_seed_material_district_codes_is_derived_from_the_list(self):
+        """演示区县范围必须是**派生**的，不能手工维护。
+
+        手工列表与物料清单一旦漂移（加了物料却忘了加区县），那个区县的
+        演示物料过期后就永远修不回来，而订正命令不会报错 —— 只是"改得比预期少"。
+        """
+        derived = {SEED_DISTRICT_CODE_BY_INTERNAL[row[-1]]
+                   for row in SEED_MATERIALS}
+        self.assertEqual(set(SEED_MATERIAL_DISTRICT_CODES), derived)
+        self.assertGreater(len(SEED_MATERIAL_DISTRICT_CODES), 1,
+                           '演示区县应不止一个（襄城区 + 樊城区）')
+
+    def test_fancheng_is_a_demo_district(self):
+        """樊城区必须在内 —— 这是**业务要求**，不能靠"派生"自动满足。
+
+        ⚠ 只断言「派生的集合 == 派生的集合」是**同义反复**：把樊城区的物料
+        整段删掉，`SEED_MATERIAL_DISTRICT_CODES` 会跟着退化成 ('CY',)，
+        上面那条用例照样绿。所以这里把**具体区县**钉死。
+
+        补樊城区物料就是为了这个：生产上 `hd_gov`（樊城区政府管理员）
+        登录后「物料管理」是一整页空白 —— 接口 200、页面不报错，只是没数据。
+        """
+        self.assertIn('HD', SEED_MATERIAL_DISTRICT_CODES)
+        expected = sum(1 for row in SEED_MATERIALS if row[-1] == 'D002')
+        self.assertGreater(expected, 0, '樊城区在物料清单里必须有条目')
+
+        self.seed()
+        d = District.objects.get(code='HD')
+        self.assertEqual(
+            Material.objects.filter(district=d).count(), expected,
+            '樊城区的物料条数应与清单一致')
+
+
+class RefreshDemoMaterialExpiryMultiDistrictTest(SeedDataTestBase):
+    """订正命令必须覆盖**每一个**演示区县，且同名物料各按自己的偏移。
+
+    回归背景：`DEMO_MATERIAL_OFFSETS` 原先是按**物料名**索引的字典。
+    演示物料在多个演示区县里同名各有一条，于是后一条**静默覆盖**前一条 ——
+    樊城区的物料会被改成襄城区的日期，命令不报错、输出看起来完全正常。
+    改为按 **(区县 code, 物料名)** 索引。
+
+    ⚠ 期望值从 **`SEED_MATERIALS` 源清单**里查，不从 `DEMO_MATERIAL_OFFSETS`
+    里取 —— 后者是**被测对象**，拿它的形状去断言它自己，退回旧键形状时
+    用例只会 `KeyError` 报错，而不是说明"口径错了"。
+    """
+
+    @staticmethod
+    def _declared_offset(district_code, name):
+        """从源清单里查「该区县该物料」声明的有效期偏移。"""
+        for row in SEED_MATERIALS:
+            if (SEED_DISTRICT_CODE_BY_INTERNAL[row[-1]] == district_code
+                    and row[1] == name):
+                return row[9]
+        raise AssertionError(f'清单里没有 {district_code}/{name}')
+
+    def test_expiry_is_corrected_in_every_demo_district(self):
+        self.seed()
+        today = timezone.localdate()
+        rows = {}
+        for code in SEED_MATERIAL_DISTRICT_CODES:
+            d = District.objects.get(code=code)
+            m = Material.objects.get(name='狂犬疫苗', district=d)
+            m.expiry_date = today - timedelta(days=5)   # 人为弄成已过期
+            m.save(update_fields=['expiry_date'])
+            rows[code] = m
+
+        out = StringIO()
+        call_command('refresh_demo_material_expiry', '--apply', stdout=out)
+        self.assertIn('已订正', out.getvalue())
+
+        for code, m in rows.items():
+            with self.subTest(district=code):
+                m.refresh_from_db()
+                self.assertEqual(
+                    m.expiry_date,
+                    today + timedelta(days=self._declared_offset(code, '狂犬疫苗')),
+                    f'{code} 的有效期未被订正到**本区县**的偏移')
+
+        # ⚠ 两个区县的结果必须**不同**。同名物料在两个区县的偏移故意不一样
+        # （270 / 300），键退回按名称索引时两者会拿到同一个值 ——
+        # 这条断言不依赖任何被测数据结构，是"静默覆盖"最直接的判据。
+        self.assertNotEqual(
+            rows['CY'].expiry_date, rows['HD'].expiry_date,
+            '同名物料在两个演示区县被写成了同一个日期 —— 偏移发生了覆盖')
+
+
+class SeedMessageIdempotencyKeyTest(SeedDataTestBase):
+    """种子消息的幂等键必须带**收件人**。
+
+    原键是 `(title, content)`。`Message` 是「一条通知发给一个人」的流水表 ——
+    同一个 `(title, content)` 本来就会有多行（同一只宠物的审核通知反复产生、
+    一条公告发给 N 个领养人）。本地库实测按 `(title, content)` 分组有 **9 组**
+    重复，那是**真实使用产生的正常数据，不是脏数据**（已核对：同一用户同标题
+    同正文的多行创建时间相隔 8~9 分钟，是反复实测留下的）。
+
+    所以 `(title, content)` 不是这个表的业务身份。用它取键会**认领别人的行**：
+    库里只要已有一条同标题同内容、但收件人不同的真实通知，`get_or_create`
+    就认为"已存在"并跳过 —— 演示账号**静默收不到**这条演示消息，
+    而命令照样报成功。
+
+    ⚠ 这是**潜在**缺陷：种子清单里三条消息的键本来就互不相同，撞不上。
+    用例构造的是「将来会撞」的那一形态，不是今天的形态。
+    """
+
+    def test_real_message_to_another_user_does_not_swallow_the_demo_message(self):
+        self.seed()
+        demo = Message.objects.get(user__username='adopter1', type='approval',
+                                   title='领养审核通过')
+
+        # 造一条**同标题同内容、但收件人不同**的真实通知
+        other = User.objects.create_user(username='real_adopter', password='x')
+        Message.objects.create(user=other, type=demo.type,
+                               title=demo.title, content=demo.content)
+        # 再把演示那条删掉 —— 模拟「账号被清理后重跑种子」
+        demo.delete()
+
+        self.seed()
+
+        self.assertTrue(
+            Message.objects.filter(user__username='adopter1',
+                                   title='领养审核通过').exists(),
+            '收件人不同的同标题消息不应让演示消息被跳过')
+
+
+class SeedMaterialTxnIdempotencyKeyTest(SeedDataTestBase):
+    """种子物资流水的幂等键必须带**类型**。
+
+    `ledger_no` 本身就不唯一，这是业务设计而非缺陷：「下发」与「签收」是
+    同一张单的两条台账，运行时两边**共用同一个** `DIS-` 单号（签收行的
+    note 里写着「原单号：DIS-…」）。本地库实测：按 `ledger_no` 分组有
+    **21 组**重复，加上 `type` 之后只剩 **1 组**（`''` × 66，`consume`
+    消耗记录本来就没有台账编号）—— 21 组里绝大多数正是这种下发/签收配对。
+
+    只按 `ledger_no` 取键，种子里真配一对同号的下发/签收就会**静默少建一条**
+    （第二条被当成"已存在"跳过），而且不报错。
+    """
+
+    def test_pre_existing_row_with_same_ledger_no_but_other_type(self):
+        self.seed()
+        seeded = MaterialTransaction.objects.get(
+            ledger_no='PUR-2025-0105-001', type='purchase')
+
+        # 模拟「同一单号、另一侧台账」的真实行
+        MaterialTransaction.objects.create(
+            ledger_no=seeded.ledger_no, type='consume',
+            material=seeded.material, material_name=seeded.material_name,
+            quantity=1, unit=seeded.unit, date=seeded.date,
+            district=seeded.district)
+        seeded.delete()
+
+        self.seed()
+
+        self.assertTrue(
+            MaterialTransaction.objects.filter(
+                ledger_no='PUR-2025-0105-001', type='purchase').exists(),
+            '同号不同侧的真实台账不应让种子流水被跳过')
