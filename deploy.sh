@@ -32,8 +32,23 @@ if ! [[ "$DB_PASS" =~ ^[A-Za-z0-9_.@%+=-]+$ ]]; then
     exit 1
 fi
 
-# 超级管理员口令：未指定则自动生成（仅在新建超级管理员时使用）。
+# 超级管理员口令。
+#
+# 【第三十七轮】策略改为「**拿到口令就强制应用，并写进 .env 持久化**」。
+#
+# 背景：`ensure_superuser` 在没有启用的超管时会**随机生成**口令，且只显示
+# 一次、不落盘 —— 生产环境因此出现过「默认口令登不进去、运维也不知道新口令」
+# 的死局（2026-09-23 实测 `admin/123456` 与 `admin/admin123456` 均不匹配）。
+#
+# 磊哥决策：**上线前固定 123456**（便于演示），上线时手工删号重建。
+#
+# 优先级：命令行传入 > 已有 .env 里的值 > 空。
+# ⚠ 必须继承旧 .env：本脚本第 5 步是 `cat >` **覆盖**写 .env，
+# 不先读出来就会在重跑时把口令清空、回退成「随机生成」。
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+if [ -z "$ADMIN_PASSWORD" ] && [ -f "$PROJECT_DIR/.env" ]; then
+    ADMIN_PASSWORD="$(sed -n 's/^ADMIN_PASSWORD=//p' "$PROJECT_DIR/.env" | tail -n 1)"
+fi
 
 echo "============================================"
 echo "  TNR 流浪动物管理系统 - 部署脚本"
@@ -97,6 +112,12 @@ HTTPS=off
 CSRF_TRUSTED_ORIGINS=
 LOG_LEVEL=INFO
 
+# 超级管理员口令（第三十七轮新增）。
+# 有值 → 每次部署都会把 admin 口令**强制重置**为该值（便于演示期固定口令）；
+# 留空 → 维持现状，不重置（首次部署若无启用的超管则会随机生成一次）。
+# ⚠ 这是明文口令，与 DB_PASSWORD 同级敏感，.env 权限已收紧为 640。
+ADMIN_PASSWORD=$ADMIN_PASSWORD
+
 # 地图服务（高德开放平台 https://lbs.amap.com 申请 Web 服务类型 Key）
 # 用于捕捉登记「定位」功能的逆地理编码，必须配置否则定位不可用。
 TNR_AMAP_KEY=
@@ -120,12 +141,21 @@ python manage.py seed_data
 #
 # 现在交由 `manage.py ensure_superuser` 处理（判断的是「是否已有启用的超级管理员」
 # 这一真正的业务条件），并且可以单独写单测覆盖。
-# 已有超级管理员则不动口令，避免每次重新部署都覆盖运维改过的密码。
-ADMIN_OUTPUT="$(python manage.py ensure_superuser --username admin)"
+#
+# 【第三十七轮】分支依据从「有没有超管」改为「**有没有拿到口令**」：
+#   有 ADMIN_PASSWORD（命令行传入或 .env 继承）→ 带 --reset-password 强制应用；
+#   没有 → 维持旧行为（已有超管则不动口令）。
+# 这样「演示期固定口令」与「生产期尊重运维改过的口令」两种诉求都能表达，
+# 而不是二选一。
+if [ -n "$ADMIN_PASSWORD" ]; then
+    ADMIN_OUTPUT="$(ADMIN_PASSWORD="$ADMIN_PASSWORD" python manage.py ensure_superuser --username admin --reset-password)"
+else
+    ADMIN_OUTPUT="$(python manage.py ensure_superuser --username admin)"
+fi
 echo "$ADMIN_OUTPUT" | grep -v "^ADMIN_CREDENTIALS=" | grep -v "^ADMIN_RESULT="
 ADMIN_CREDENTIALS="$(echo "$ADMIN_OUTPUT" | grep "^ADMIN_CREDENTIALS=" | tail -n 1)"
 if [ -n "$ADMIN_CREDENTIALS" ]; then
-    ADMIN_SUMMARY="超级管理员: ${ADMIN_CREDENTIALS#ADMIN_CREDENTIALS=}  （仅本次显示，请立即保存；已覆盖演示口令 123456）"
+    ADMIN_SUMMARY="超级管理员: ${ADMIN_CREDENTIALS#ADMIN_CREDENTIALS=}  （由 .env 的 ADMIN_PASSWORD 固定；如需变更请改 .env 后重跑本脚本）"
 else
     ADMIN_SUMMARY="超级管理员: 已存在，口令未改动（重置：ADMIN_PASSWORD=新口令 重跑本脚本）"
 fi
