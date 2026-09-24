@@ -71,7 +71,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260924a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260924b"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -504,6 +504,9 @@ const GovPortal = {
   async renderDistrictsTable() {
     const filters = TNR_UI.getFilterValues(document.getElementById('instContent'));
     let data = await TNR_API.getDistricts();
+    // 区县创建时间是 DateField（`District.created_at`）—— `inDateRange` 对纯日期串原样返回。
+    data = data.filter(d =>
+      TNR_UI.inDateRange(d.createdAt || d.created_at, filters.start_date, filters.end_date));
     if (filters.status) data = data.filter(d => d.status === filters.status);
     if (filters.search) {
       const s = filters.search.toLowerCase();
@@ -616,6 +619,10 @@ const GovPortal = {
   async renderInstitutionsTable() {
     const filters = TNR_UI.getFilterValues(document.getElementById('instContent'));
     let data = await TNR_API.getInstitutions(this.instState.tab);
+    // 机构创建时间（`Institution.created_at`，第三十九轮补的字段）——
+    // 少了它，这一页的起止时间就是个「设了没反应」的空壳。
+    data = data.filter(i =>
+      TNR_UI.inDateRange(i.createdAt || i.created_at, filters.start_date, filters.end_date));
     if (!this.isCityLevel() && this.currentUser.district_id) {
       data = data.filter(i => i.district_id === this.currentUser.district_id);
     }
@@ -788,6 +795,10 @@ const GovPortal = {
     let data = await TNR_API.getUsers();
     // 政府端账号管理只展示非领养人账号
     data = data.filter(u => u.role !== 'adopter');
+    // 账号的开户时间 = `date_joined`（`user_list` 返回的字段），不是 `User.created_at` ——
+    // 两者对由 seed 建的账号可能不同天，界面上「开户时间」列用的是前者，保持同口径。
+    data = data.filter(u =>
+      TNR_UI.inDateRange(u.dateJoined || u.date_joined, filters.start_date, filters.end_date));
     if (filters.role) data = data.filter(u => u.role === filters.role);
     if (filters.status) data = data.filter(u => u.status === filters.status);
     if (filters.search) {
@@ -1153,6 +1164,28 @@ const GovPortal = {
       ];
     }
 
+    /* 起止时间：6 个标签页的**时间字段不同**（放养看放养时间、领养看领养时间、
+       安乐死看处置时间，其余看创建时间）。统一在这里收口，而不是在 6 个分支里
+       各写一遍 —— 各写一遍必然漂移，且漂移只表现为「某一页筛出来的条数不对」，
+       接口照样 200、界面照样有数据。
+       
+       ⚠ 值是**字段列表**而不是单个字段名：`released_at` / `adopted_at` /
+       `euthanized_at` 都可空（事件还没发生，比如「待领出」的领养单），
+       只给一个名字的话，用户圈一个「全部」区间反而会把这类记录藏起来 ——
+       GUI 实测抓到过。按顺序取第一个有值的（见 `TNR_UI.firstDate`）。 */
+    const SUP_DATE_KEYS = {
+      capture: ['created_at', 'createdAt'],
+      transfer: ['created_at', 'createdAt'],
+      treatment: ['created_at', 'createdAt'],
+      release: ['released_at', 'releasedAt', 'created_at', 'createdAt'],
+      adoption: ['adopted_at', 'adoptedAt', 'created_at', 'createdAt'],
+      euthanasia: ['euthanized_at', 'euthanizedAt', 'created_at', 'createdAt']
+    };
+    const supDateKeys = SUP_DATE_KEYS[type] || ['created_at', 'createdAt'];
+    data = (data || []).filter(r =>
+      TNR_UI.inDateRange(TNR_UI.firstDate(...supDateKeys.map(k => r[k])),
+                         filters.start_date, filters.end_date));
+
     const rowActions = r => `<button class="btn-link" data-detail="${r.id}">详情</button>`;
     TNR_UI.mountTable('supTableWrapper', { id: 'gov.supervision.' + this.supState.tab, columns, data, rowActions, emptyText: '暂无监管数据' });
     TNR_UI.delegateClick('supTableWrapper', {
@@ -1357,6 +1390,17 @@ const GovPortal = {
   /* ========== 5. 物料全局监管 ========== */
   async render_material() {
     const el = document.getElementById('page-material');
+    /* ⚠ 本函数会**整页重建**（顶部「统计区间」的预设按钮与起止输入都走这里），
+       而且进门第一件事就是把 DOM 清成「加载中」。不先把列表筛选条的值抄下来，
+       用户填在「物料库存明细 / 物料流水追踪」里的条件会被**静默清空**、
+       列表悄悄回到全量 —— 界面不报错、接口也 200，是最难发现的一类失效。
+       按**筛选条容器 id** 分组记（两条都有 `keyword`，按字段名存会互相覆盖）。 */
+    const keepFilters = {};
+    el.querySelectorAll('[id$="FilterBar"]').forEach(bar => {
+      const m = {};
+      bar.querySelectorAll('[data-filter]').forEach(i => { m[i.dataset.filter] = i.value; });
+      if (Object.keys(m).length) keepFilters[bar.id] = m;
+    });
     el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⏳</div><div class="table-empty-text">加载中...</div></div>';
     try {
       const sup = await TNR_API.getMaterialSupervisionStrict();
@@ -1376,12 +1420,42 @@ const GovPortal = {
       const matDistricts = [...new Set(materials.map(m => m.district_name).filter(Boolean))]
         .map(n => ({ value: n, label: n }));
 
+      /* 顶部 4 张汇总卡原先直接取后端 `stats`（**没有任何时间条件**），
+         是一组只增不减的累计值。这里补「统计区间」并按区间在内存里重算 ——
+         与其它端「数据概览」同一套口径（`TNR_UI.inDateRange`）。
+         库存预警是**当前值**，卡片标题明确标注「当前」，不与区间数字混为一谈。 */
+      const mr = this._matRange = this._matRange || { start: '', end: '' };
+      const matRangeText = (mr.start || mr.end)
+        ? ((mr.start || '最早') + ' ~ ' + (mr.end || '至今'))
+        : '全部时间';
+      const matInR = (v) => TNR_UI.inDateRange(v, mr.start, mr.end);
+      const inRangeTxns = txns.filter(t => matInR(t.date || t.created_at));
+      const sumOf = (type) => inRangeTxns.filter(t => t.type === type)
+        .reduce((s, t) => s + (t.quantity || 0), 0);
+
       el.innerHTML = `
-        <div class="stat-grid">
-          <div class="stat-card green"><div class="stat-card-icon">📦</div><div><div class="stat-card-value">${stats.total_purchased || 0}</div><div class="stat-card-label">采购总量</div></div></div>
-          <div class="stat-card blue"><div class="stat-card-icon">📤</div><div><div class="stat-card-value">${stats.total_dispatched || 0}</div><div class="stat-card-label">下发总量</div></div></div>
-          <div class="stat-card"><div class="stat-card-icon">🔬</div><div><div class="stat-card-value">${stats.total_consumed || 0}</div><div class="stat-card-label">消耗总量</div></div></div>
-          <div class="stat-card rouge"><div class="stat-card-icon">⚠️</div><div><div class="stat-card-value">${stats.alert_count || 0}</div><div class="stat-card-label">库存预警</div></div></div>
+        <div class="card mb-4">
+          <div class="card-header" style="flex-wrap:wrap;gap:var(--sp-2);">
+            <div class="card-title"><span class="card-title-bar"></span>数据概览</div>
+            <div class="flex gap-2" style="flex-wrap:wrap;align-items:center;">
+              <span class="fs-sm text-muted">开始日期</span>
+              <input type="date" class="form-input" id="govMatStart" style="width:auto;" value="${mr.start}">
+              <span class="fs-sm text-muted">结束日期</span>
+              <input type="date" class="form-input" id="govMatEnd" style="width:auto;" value="${mr.end}">
+              <button type="button" class="btn btn-secondary btn-sm" data-mat-range="week">最近一周</button>
+              <button type="button" class="btn btn-secondary btn-sm" data-mat-range="month">最近一月</button>
+              <button type="button" class="btn btn-secondary btn-sm" data-mat-range="all">全部</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="fs-sm text-muted mb-3">物料流水统计区间：${matRangeText}（库存预警为当前值，不受区间影响）</div>
+            <div class="stat-grid">
+              <div class="stat-card green"><div class="stat-card-icon">📦</div><div><div class="stat-card-value">${sumOf('purchase')}</div><div class="stat-card-label">采购总量（${matRangeText}）</div></div></div>
+              <div class="stat-card blue"><div class="stat-card-icon">📤</div><div><div class="stat-card-value">${sumOf('dispatch')}</div><div class="stat-card-label">下发总量（${matRangeText}）</div></div></div>
+              <div class="stat-card"><div class="stat-card-icon">🔬</div><div><div class="stat-card-value">${sumOf('consume')}</div><div class="stat-card-label">消耗总量（${matRangeText}）</div></div></div>
+              <div class="stat-card rouge"><div class="stat-card-icon">⚠️</div><div><div class="stat-card-value">${stats.alert_count || 0}</div><div class="stat-card-label">库存预警（当前）</div></div></div>
+            </div>
+          </div>
         </div>
 
         <div id="govMatStockFilterBar">${TNR_UI.renderFilterBar([
@@ -1427,6 +1501,62 @@ const GovPortal = {
         </div>
       `;
 
+      /* 回填进门时抄下来的列表筛选条值 —— 重建后控件是全新的，值全为空，
+         不回填就等于把用户刚填的条件抹掉。回填必须在下面的
+         `renderMatStock()` / `renderMatTxn()` 之前，它们一读就是最终值。 */
+      Object.keys(keepFilters).forEach(barId => {
+        const bar = document.getElementById(barId);
+        if (!bar) return;
+        const m = keepFilters[barId];
+        bar.querySelectorAll('[data-filter]').forEach(i => {
+          if (m[i.dataset.filter] !== undefined) i.value = m[i.dataset.filter];
+        });
+      });
+
+      // ---- 顶部「统计区间」交互（只影响上方 4 张汇总卡）----
+      const matFmt = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+        + '-' + String(d.getDate()).padStart(2, '0');
+      // direct-bind-ok：这些区间按钮在**卡片头部**，不在任何 mountTable 渲染的子树里
+      // （mountTable 重建的只有它自己的 tbody）。排序 / 翻页不会碰到它们，
+      // 所以直接绑定是安全的，不需要走事件委托。
+      document.querySelectorAll('#page-material [data-mat-range]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const today = new Date();
+          const kind = btn.dataset.matRange;
+          if (kind === 'all') {
+            this._matRange = { start: '', end: '' };
+          } else {
+            const days = kind === 'week' ? 6 : 29;
+            this._matRange = {
+              start: matFmt(new Date(today.getTime() - days * 86400000)),
+              end: matFmt(today)
+            };
+          }
+          this.render_material();
+        });
+      });
+      const matStartEl = document.getElementById('govMatStart');
+      const matEndEl = document.getElementById('govMatEnd');
+      const applyMatRange = () => {
+        this._matRange = {
+          start: (matStartEl.value || '').trim(),
+          end: (matEndEl.value || '').trim()
+        };
+        // 起止填反不静默变成 0 —— 明确提示一句，区间文字也会照原样显示出来。
+        if (this._matRange.start && this._matRange.end
+            && this._matRange.start > this._matRange.end) {
+          TNR_UI.toast('开始日期晚于结束日期，该区间内不会有记录', 'warning');
+        }
+        this.render_material();
+      };
+      [matStartEl, matEndEl].forEach(inp => {
+        if (!inp) return;
+        inp.addEventListener('change', applyMatRange);
+        inp.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') { ev.preventDefault(); applyMatRange(); }
+        });
+      });
+
       /* 两个列表的列定义与渲染。mountTable 必须在容器随 innerHTML 进入 DOM 之后调用 ——
          反过来的话选择器查不到元素，表格会静默不渲染且不报错。 */
       const matStockCols = [
@@ -1456,6 +1586,8 @@ const GovPortal = {
       const renderMatStock = () => {
         const v = TNR_UI.getFilterValues(matStockBar);
         const rows = materials.filter(m => {
+          // 物料建档时间（Material.created_at）—— 控件既然在，就必须真的生效。
+          if (!TNR_UI.inDateRange(m.createdAt || m.created_at, v.start_date, v.end_date)) return false;
           if (v.district && String(m.district_name || '').toLowerCase() !== v.district) return false;
           if (!v.keyword) return true;
           return [m.name, m.category_display, m.category, m.unit, m.district_name]
@@ -1471,10 +1603,8 @@ const GovPortal = {
         const v = TNR_UI.getFilterValues(matTxnBar);
         const rows = txns.filter(t => {
           if (v.type && String(t.type) !== v.type) return false;
-          // `t.date` 是 DateField（纯日期），localDateStr 原样返回 —— 统一口径。
-          const d = TNR_UI.localDateStr(t.date);
-          if (v.start_date && d < v.start_date) return false;
-          if (v.end_date && d > v.end_date) return false;
+          // `t.date` 是 DateField（纯日期），`inDateRange` 内部对纯日期串原样返回。
+          if (!TNR_UI.inDateRange(t.date, v.start_date, v.end_date)) return false;
           if (!v.keyword) return true;
           return [t.ledger_no, t.material_name, t.batch_no, t.from_to, t.operator_name, t.district_name]
             .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
@@ -2012,15 +2142,13 @@ const GovPortal = {
       el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⏳</div><div class="table-empty-text">加载中...</div></div>';
       try {
         const logs = await TNR_API.getOperationLogsStrict();
+        /* 原先这里是**手写**的筛选条（只有一个关键词输入），所以它拿不到
+           `renderFilterBar` 统一追加的起止时间。改用公共渲染器，顺带把
+           「搜索/重置」按钮也补齐（手写版没有按钮，只能靠防抖触发）。 */
         el.innerHTML = `
-          <div class="filter-bar">
-            <div class="filter-item">
-              <div class="filter-item-label">搜索</div>
-              <div class="search-input"><span class="search-input-icon">🔍</span>
-                <input type="text" class="form-input" data-filter="logsearch" placeholder="操作/详情/操作人">
-              </div>
-            </div>
-          </div>
+          ${TNR_UI.renderFilterBar([
+            { key: 'logsearch', label: '搜索', type: 'search', placeholder: '操作/详情/操作人' }
+          ])}
           <div class="card">
             <div class="card-body card-body-flush" id="logList">
               ${this.renderLogList(logs || [])}
@@ -2029,8 +2157,10 @@ const GovPortal = {
         `;
         TNR_UI.bindFilter(() => {
           const f = TNR_UI.getFilterValues(el);
-          let filtered = logs || [];
-          if (f.logsearch) filtered = (logs || []).filter(l =>
+          // 日志的时间口径 = `action_time`（后端 `with_camel_keys` 同时给了 `actionTime`）。
+          let filtered = (logs || []).filter(l =>
+            TNR_UI.inDateRange(l.actionTime || l.action_time, f.start_date, f.end_date));
+          if (f.logsearch) filtered = filtered.filter(l =>
             this.logSearchFields(l).some(v => v.includes(f.logsearch))
           );
           document.getElementById('logList').innerHTML = this.renderLogList(filtered);
@@ -2098,13 +2228,27 @@ const GovPortal = {
         </div>
         <div class="card mt-5">
           <div class="card-header"><div class="card-title"><span class="card-title-bar"></span>已发布公告</div></div>
-          <div class="card-body card-body-flush">
-            ${notices.length
-              ? '<div id="noticeTable"></div>'
-              : '<div class="table-empty"><div class="table-empty-icon">📜</div><div class="table-empty-text">暂无公告</div></div>'}
+          <div class="card-body card-body-flush" id="noticeListArea">
+            ${TNR_UI.renderFilterBar([
+              { key: 'nkw', label: '搜索', type: 'search', placeholder: '公告标题 / 内容' }
+            ])}
+            <div id="noticeTable"></div>
           </div>
         </div>`;
-      if (notices.length) {
+      /* 「已发布公告」原先**没有筛选条**（是本次统一补的），所以这里必须自己
+         建一个局部渲染函数 —— 与其它列表一样把过滤后的数组交给 `mountTable`。
+         时间口径取 `last_at`（最后一次广播时间；后端 `with_camel_keys` 同时给
+         `lastAt`），语义上等同于「这条公告是什么时候发出去的」。
+         作用域限定在 `#noticeListArea`：本页的筛选条 key 是 `nkw`，与别页不冲突，
+         但**限定作用域仍然必要** —— 各 `.page-view` 常驻 DOM，全局裸查会读到别页残留值。 */
+      const noticeArea = document.getElementById('noticeListArea');
+      const renderNoticeTable = () => {
+        const f = TNR_UI.getFilterValues(noticeArea);
+        const rows = (notices || []).filter(r =>
+          TNR_UI.inDateRange(r.lastAt || r.last_at, f.start_date, f.end_date)
+          && (!f.nkw || [r.title, r.content]
+            .some(v => String(v || '').toLowerCase().includes(f.nkw)))
+        );
         TNR_UI.mountTable('noticeTable', {
           id: 'gov.notice.list',
           columns: [
@@ -2116,9 +2260,11 @@ const GovPortal = {
             { title: '触达人数', render: r => (r.sentCount ?? r.sent_count ?? 0) + ' 人' },
             { title: '发布时间', render: r => String(r.lastAt || r.last_at || '').replace('T', ' ').slice(0, 16) }
           ],
-          data: notices, emptyText: '暂无公告'
+          data: rows, emptyText: notices.length ? '当前条件下暂无公告' : '暂无公告'
         });
-      }
+      };
+      renderNoticeTable();
+      TNR_UI.bindFilter(renderNoticeTable, noticeArea);
       el.querySelector('#btnPublishNotice')
         ?.addEventListener('click', () => this.publishNotice());
     }

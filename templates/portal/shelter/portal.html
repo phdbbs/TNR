@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260924a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260924b"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -372,15 +372,31 @@ const Shelter = {
     return s.getFullYear() + '-' + p(s.getMonth() + 1) + '-' + p(s.getDate());
   },
 
-  /* 记录是否落在所选时间范围内（按日期字符串比较，与列表筛选同一口径） */
-  _inRange(iso, range) {
-    const start = this._rangeStart(range);
-    if (!start) return true;
-    if (!iso) return false;
-    // ⚠ `iso` 多为 `createdAt`（DateTimeField → UTC 串），裸截断会拿到 UTC 日期，
-    // 与用户选的本地日期比较会把北京时间 00:00–08:00 的记录算到**前一天**。
-    // 后端筛选口径是本地日期（`__date` 查询），前端必须对齐。
-    return TNR_UI.localDateStr(iso) >= start;
+  /* 看板当前生效的统计窗口 `{start, end}`（两个都是 `YYYY-MM-DD` 或空串）。
+   *
+   * 两级来源，**任意起止优先**：
+   *   1. 用户直接在「开始日期 / 结束日期」里填的（`_dashStart` / `_dashEnd`）；
+   *   2. 预设档位（`_dashRange`：today / week / month / d30 / all）—— 只决定**起点**，
+   *      终点不设限（与改动前的 `_inRange` 行为完全一致，默认档仍是「本月」）。
+   *
+   * 抽出来是为了让「卡片标题上的区间文字」和「实际的过滤判据」**同源** ——
+   * 两处各算一遍必然漂移，而漂移的表现是标题写着「本月」、数字却是别的区间，
+   * 界面上看不出来。 */
+  _dashWindow() {
+    if (this._dashStart || this._dashEnd) {
+      return { start: this._dashStart || '', end: this._dashEnd || '' };
+    }
+    const range = this._dashRange || 'month';
+    return { start: this._rangeStart(range) || '', end: '' };
+  },
+
+  /* 记录是否落在所选时间范围内。
+   * ⚠ `iso` 多为 `createdAt`（DateTimeField → UTC 串），裸截断会拿到 UTC 日期，
+   * 与用户选的本地日期比较会把北京时间 00:00–08:00 的记录算到**前一天**。
+   * 统一交给 `TNR_UI.inDateRange`（全站唯一的起止时间判据）。 */
+  _inRange(iso, win) {
+    const w = win || this._dashWindow();
+    return TNR_UI.inDateRange(iso, w.start, w.end);
   },
 
   async render_dashboard() {
@@ -391,8 +407,10 @@ const Shelter = {
         TNR_API.getMaterials(), TNR_API.getPets()
       ]);
 
-    const range = this._dashRange || 'month';
-    const inR = (x) => this._inRange(x && (x.createdAt || x.created_at), range);
+    // 统计窗口：任意起止优先，其次预设档位。卡片标题上的区间文字与下面的
+    // 实际过滤**共用同一个 `win`** —— 两处各算一遍必然漂移，且漂移看不出来。
+    const win = this._dashWindow();
+    const inR = (x) => this._inRange(x && (x.createdAt || x.created_at), win);
 
     // —— 业务量：受时间范围影响（否则就是一条只增不减的累计值，看不出近期情况）——
     const capIn = captures.filter(inR);
@@ -440,7 +458,12 @@ const Shelter = {
       { key: 'd30', label: '近30天' },
       { key: 'all', label: '全部' }
     ];
-    const rangeLabel = (rangeOptions.find(o => o.key === range) || {}).label || '本月';
+    // 预设档位只在**没填任意起止**时生效（`_dashWindow()` 是唯一的判据来源）。
+    const customRange = !!(this._dashStart || this._dashEnd);
+    const activeRange = customRange ? '' : (this._dashRange || 'month');
+    const rangeLabel = customRange
+      ? ((win.start || '最早') + ' ~ ' + (win.end || '至今'))
+      : ((rangeOptions.find(o => o.key === activeRange) || {}).label || '本月');
 
     let html = '';
 
@@ -468,10 +491,16 @@ const Shelter = {
     html += '</div></div>';
 
     // ③ 数据概览：带时间条件，避免只看到一条永远增长的累计值
-    html += '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>数据概览</div>';
-    html += '<div class="flex gap-2" style="flex-wrap:wrap;">';
+    html += '<div class="card"><div class="card-header" style="flex-wrap:wrap;gap:var(--sp-2);"><div class="card-title"><span class="card-title-bar"></span>数据概览</div>';
+    /* 任意起止 + 预设快捷。预设按钮**只是把区间填进两个输入框**，最终判据只有
+       `_dashWindow()` 一份 —— 不会出现「按了按钮、数字却按别的区间算」。 */
+    html += '<div class="flex gap-2" style="flex-wrap:wrap;align-items:center;">';
+    html += '<span class="fs-sm text-muted">开始日期</span>';
+    html += '<input type="date" class="form-input" id="dashStart" style="width:auto;" value="' + win.start + '">';
+    html += '<span class="fs-sm text-muted">结束日期</span>';
+    html += '<input type="date" class="form-input" id="dashEnd" style="width:auto;" value="' + win.end + '">';
     rangeOptions.forEach(o => {
-      html += '<button type="button" class="btn btn-sm ' + (o.key === range ? 'btn-primary' : 'btn-secondary') + '" data-dash-range="' + o.key + '">' + o.label + '</button>';
+      html += '<button type="button" class="btn btn-sm ' + (o.key === activeRange ? 'btn-primary' : 'btn-secondary') + '" data-dash-range="' + o.key + '">' + o.label + '</button>';
     });
     html += '</div></div><div class="card-body">';
 
@@ -505,7 +534,32 @@ const Shelter = {
     document.querySelectorAll('#page-dashboard [data-dash-range]').forEach(btn => {
       btn.addEventListener('click', () => {
         this._dashRange = btn.dataset.dashRange;
+        // 预设档位与任意起止**互斥**：点了预设就把手填的区间清掉，
+        // 否则 `_dashWindow()` 仍优先用手填值，按钮看起来「点了没反应」。
+        this._dashStart = '';
+        this._dashEnd = '';
         this.render_dashboard();
+      });
+    });
+    const dashStartEl = document.getElementById('dashStart');
+    const dashEndEl = document.getElementById('dashEnd');
+    const applyDashCustom = () => {
+      const s = (dashStartEl.value || '').trim();
+      const e = (dashEndEl.value || '').trim();
+      this._dashStart = s;
+      this._dashEnd = e;
+      // 起止填反了不是「系统坏了」，但也别让它静默变成 0 —— 明确提示一句，
+      // 区间文字本身也会照原样显示出来，用户一眼能看到自己填反了。
+      if (s && e && s > e) {
+        TNR_UI.toast('开始日期晚于结束日期，该区间内不会有记录', 'warning');
+      }
+      this.render_dashboard();
+    };
+    [dashStartEl, dashEndEl].forEach(inp => {
+      if (!inp) return;
+      inp.addEventListener('change', applyDashCustom);
+      inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); applyDashCustom(); }
       });
     });
   },
@@ -548,6 +602,8 @@ const Shelter = {
         : null;
 
       const list = allCaptures.filter(c => {
+        // 起止时间：捕捉单没有独立的「捕捉时间」字段，创建时间即捕捉时间（Capture.created_at）。
+        if (!TNR_UI.inDateRange(c.createdAt || c.created_at, vals.start_date, vals.end_date)) return false;
         if (vals.district && districtId !== c.districtId) return false;
         // 小区：文本模糊匹配（包含即可），不再要求全等
         if (communityKw && !(c.communityName || '').toLowerCase().includes(communityKw)) return false;
@@ -1589,10 +1645,12 @@ const Shelter = {
 
     const renderTable = () => {
       const vals = TNR_UI.getFilterValues(el);
-      let filtered = list;
+      // 时间口径与「动物去向 → 回收」标签一致：有 returnTime 用 returnTime，没有退到 createdAt。
+      let filtered = list.filter(r =>
+        TNR_UI.inDateRange(r.returnTime || r.createdAt, vals.start_date, vals.end_date));
       if (vals.keyword) {
         const kw = vals.keyword.toLowerCase();
-        filtered = list.filter(r => ((r.petCode || '') + (r.ownerName || '') + (r.ownerPhone || '')).toLowerCase().includes(kw));
+        filtered = filtered.filter(r => ((r.petCode || '') + (r.ownerName || '') + (r.ownerPhone || '')).toLowerCase().includes(kw));
       }
       const columns = [
         { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || r.id) + '</span>' },
@@ -1830,6 +1888,7 @@ const Shelter = {
       const renderPendingOrders = () => {
         const v = TNR_UI.getFilterValues(trPendingBar);
         const rows = pendingOrders.filter(r => {
+          if (!TNR_UI.inDateRange(r.createdAt || r.created_at, v.start_date, v.end_date)) return false;
           if (!v.keyword) return true;
           const hay = [r.ledgerNo, r.toHospitalName, (r.petCodes || []).join(' ')]
             .filter(Boolean).join(' ').toLowerCase();
@@ -1914,8 +1973,8 @@ const Shelter = {
           rows = rows.filter(r => (r.petCodes || []).some(
             c => String(c).toLowerCase().indexOf(v.pet_code) !== -1));
         }
-        if (v.start_date) rows = rows.filter(r => TNR_UI.localDateStr(r.createdAt) >= v.start_date);
-        if (v.end_date) rows = rows.filter(r => TNR_UI.localDateStr(r.createdAt) <= v.end_date);
+        // 起止时间统一走 `TNR_UI.inDateRange`（全站唯一判据），不再手写两段比较。
+        rows = rows.filter(r => TNR_UI.inDateRange(r.createdAt, v.start_date, v.end_date));
         TNR_UI.mountTable('[data-mt="shelter.transfers.detail"]', {
           id: 'shelter.transfers.detail',
           columns, data: rows, emptyText: '没有符合条件的转运单据', rowActions
@@ -2030,6 +2089,9 @@ const Shelter = {
       const renderStock = () => {
         const v = TNR_UI.getFilterValues(stockBar);
         const rows = materials.filter(r => {
+          // 库存是「当前值」，按建档时间筛只对「新增了哪些物料」有意义 —— 但控件既然在，
+          // 就必须真的生效（一个设了没反应的输入框比没有输入框更糟）。
+          if (!TNR_UI.inDateRange(r.createdAt || r.created_at, v.start_date, v.end_date)) return false;
           if (v.category && String(r.category) !== v.category) return false;
           if (v.keyword) {
             const hay = [r.name, r.specification, r.batchNo].filter(Boolean).join(' ').toLowerCase();
@@ -2094,11 +2156,8 @@ const Shelter = {
               .filter(Boolean).join(' ').toLowerCase();
             if (!hay.includes(v.keyword)) return false;
           }
-          // `t.date` 是 DateField（纯日期），localDateStr 原样返回 —— 统一口径。
-          const d = TNR_UI.localDateStr(t.date);
-          if (v.start_date && d < v.start_date) return false;
-          if (v.end_date && d > v.end_date) return false;
-          return true;
+          // `t.date` 是 DateField（纯日期），`inDateRange` 内部对纯日期串原样返回。
+          return TNR_UI.inDateRange(t.date, v.start_date, v.end_date);
         });
         TNR_UI.mountTable('[data-mt="shelter.material.purchase"]', { id: 'shelter.material.purchase', columns: puCols, data: rows, emptyText: '暂无采购记录' });
       };
@@ -2181,11 +2240,8 @@ const Shelter = {
               .filter(Boolean).join(' ').toLowerCase();
             if (!hay.includes(v.keyword)) return false;
           }
-          // 同采购页：`t.date` 是 DateField，统一走 localDateStr。
-          const d = TNR_UI.localDateStr(t.date);
-          if (v.start_date && d < v.start_date) return false;
-          if (v.end_date && d > v.end_date) return false;
-          return true;
+          // 同采购页：`t.date` 是 DateField，统一走 `inDateRange`。
+          return TNR_UI.inDateRange(t.date, v.start_date, v.end_date);
         });
         TNR_UI.mountTable('[data-mt="shelter.material.outbound"]', { id: 'shelter.material.outbound', columns: obCols, data: rows, emptyText: '暂无出库记录' });
       };
@@ -2334,7 +2390,8 @@ const Shelter = {
       wrap.innerHTML = TNR_UI.renderFilterBar(filters) + '<div id="flowTableWrap"></div>';
       const renderFlow = () => {
         const vals = TNR_UI.getFilterValues(wrap);
-        let list = txns;
+        // 物料流水的时间字段是 `date`（DateField，纯日期串），localDateStr 原样返回。
+        let list = txns.filter(t => TNR_UI.inDateRange(t.date, vals.start_date, vals.end_date));
         if (vals.type) list = list.filter(t => t.type === vals.type);
         if (vals.keyword) {
           const kw = vals.keyword;
@@ -2505,6 +2562,7 @@ const Shelter = {
       const renderRecoverable = () => {
         const v = TNR_UI.getFilterValues(recovBar);
         const rows = recoverable.filter(r => {
+          if (!TNR_UI.inDateRange(r.createdAt || r.created_at, v.start_date, v.end_date)) return false;
           if (!v.keyword) return true;
           const hay = [r.code, TNR_API.petAttrText(r)].filter(Boolean).join(' ').toLowerCase();
           return hay.includes(v.keyword);
@@ -2542,20 +2600,11 @@ const Shelter = {
             ((r.petCode || '') + (r.ownerName || '') + (r.ownerPhone || '') + (r.ownerAddress || '') + (r.petBreed || '')).toLowerCase().includes(kw)
           );
         }
-        if (vals.start_date) {
-          filtered = filtered.filter(r => {
-            // `returnTime` / `createdAt` 都是 DateTimeField（UTC 串），
-            // 裸截断得到 UTC 日期，跟本地日期比会把 00:00–08:00 的记录算到前一天。
-            const t = TNR_UI.localDateStr(r.returnTime || r.createdAt);
-            return t >= vals.start_date;
-          });
-        }
-        if (vals.end_date) {
-          filtered = filtered.filter(r => {
-            const t = TNR_UI.localDateStr(r.returnTime || r.createdAt);
-            return t <= vals.end_date;
-          });
-        }
+        // 起止时间：`returnTime` / `createdAt` 都是 DateTimeField（UTC 串），
+        // 统一走 `TNR_UI.inDateRange` 按**本地日期**比较 —— 裸截断会把北京时间
+        // 00:00–08:00 的记录算到前一天。区间**含当天**（收口在公共判据里）。
+        filtered = filtered.filter(r =>
+          TNR_UI.inDateRange(r.returnTime || r.createdAt, vals.start_date, vals.end_date));
         if (vals.owner_name) {
           const v = vals.owner_name.toLowerCase();
           filtered = filtered.filter(r => (r.ownerName || '').toLowerCase().includes(v));
@@ -2653,7 +2702,17 @@ const Shelter = {
       const relBar = document.getElementById('releaseFilterBar');
       const renderReleaseTables = () => {
         const v = TNR_UI.getFilterValues(relBar);
-        const hit = (r) => {
+        /* 两张表共用一条筛选条，但**时间口径不同**：
+           待放养还没放养 → 只能看创建时间；已放养 → 看放养时间（released_at）。
+           两者常常跨天（登记当天发起、小区隔天才签字），用同一个 key 会让
+           「按放养时间筛」在待放养表上对不上，反之亦然。
+           所以把「要比哪个时间字段」作为参数传进来，而不是在里面写死。
+
+           ⚠ 已放养表必须**带上创建时间兜底**：`Release.released_at` 可空，
+           缺兜底时用户圈一个「全部」区间（2000~2099）反而会把这类行藏起来
+           —— GUI 实测抓到过（`before=4 wide=2`）。 */
+        const hit = (r, dateValue) => {
+          if (!TNR_UI.inDateRange(dateValue, v.start_date, v.end_date)) return false;
           if (!v.keyword) return true;
           const hay = [r.ledgerNo, r.petCode || r.pet_code,
             r.communityName || r.community_name, r.receiverName || r.receiver_name,
@@ -2669,7 +2728,7 @@ const Shelter = {
           { title: '联系电话', key: 'receiverPhone', render: r => esc(r.receiverPhone || r.receiver_phone || '—') },
           { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-confirm-release="' + r.id + '">确认放养</button>' }
         ];
-        TNR_UI.mountTable('[data-mt="shelter.release.pending"]', { id: 'shelter.release.pending', columns: pendingCols, data: pendingReleases.filter(hit), emptyText: '暂无待放养记录' });
+        TNR_UI.mountTable('[data-mt="shelter.release.pending"]', { id: 'shelter.release.pending', columns: pendingCols, data: pendingReleases.filter(r => hit(r, r.createdAt || r.created_at)), emptyText: '暂无待放养记录' });
 
         const releasedCols = [
           { title: '放养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
@@ -2679,7 +2738,7 @@ const Shelter = {
           { title: '接收人', key: 'receiverName', render: r => esc(r.receiverName || r.receiver_name || '—') },
           { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt || r.released_at) }
         ];
-        TNR_UI.mountTable('[data-mt="shelter.release.released"]', { id: 'shelter.release.released', columns: releasedCols, data: releasedReleases.filter(hit), emptyText: '暂无放养记录' });
+        TNR_UI.mountTable('[data-mt="shelter.release.released"]', { id: 'shelter.release.released', columns: releasedCols, data: releasedReleases.filter(r => hit(r, r.releasedAt || r.released_at || r.createdAt || r.created_at)), emptyText: '暂无放养记录' });
       };
       renderReleaseTables();
       TNR_UI.bindFilter(renderReleaseTables, relBar);
@@ -2734,6 +2793,11 @@ const Shelter = {
       const renderAdoptionList = () => {
         const v = TNR_UI.getFilterValues(relAdBar);
         const rows = adoptedPets.filter(r => {
+          /* 时间口径 = 领养时间（adopted_at），**没有则退到记录创建时间**。
+             `Adoption.adopted_at` 可空（`pending_claim` 待领出的还没领养），
+             只比 adopted_at 的话，用户圈一个「全部」区间反而把待领出的单子
+             藏起来 —— GUI 实测：5 条 → 3 条。 */
+          if (!TNR_UI.inDateRange(r.adoptedAt || r.adopted_at || r.createdAt || r.created_at, v.start_date, v.end_date)) return false;
           if (!v.keyword) return true;
           const hay = [r.ledgerNo, r.petCode || r.pet_code,
             r.adopterName || r.adopter_name, r.adopterPhone || r.adopter_phone]
@@ -2790,6 +2854,10 @@ const Shelter = {
         const v = TNR_UI.getFilterValues(relDeathBar);
         const rows = deadPets.filter(r => {
           const e = euthOf(r) || {};
+          // 时间口径 = **安乐死处置时间**（不是宠物建档时间）：这一页列的是「已死亡」，
+          // 用户圈时间区间问的是「这段时间死了哪些」，而不是「这段时间建档的动物里哪些死了」。
+          if (!TNR_UI.inDateRange(e.euthanizedAt || e.euthanized_at || r.createdAt,
+                                  v.start_date, v.end_date)) return false;
           if (v.body === 'done' && !(e.bodyReceived || e.body_received)) return false;
           if (v.body === 'todo' && (e.bodyReceived || e.body_received)) return false;
           if (v.keyword) {
@@ -3088,6 +3156,10 @@ const Shelter = {
     const renderTable = () => {
       const vals = TNR_UI.getFilterValues(el);
       const list = adoptions.filter(a => {
+        /* 领养时间（adopted_at）优先，**没有则退到创建时间** ——
+           「待领出」的申请 `adopted_at` 是空的，只比 adopted_at 会让这些单子
+           在**任何**区间下都消失（连「全部」区间也是）。 */
+        if (!TNR_UI.inDateRange(a.adoptedAt || a.adopted_at || a.createdAt || a.created_at, vals.start_date, vals.end_date)) return false;
         if (vals.status && String(a.status) !== vals.status) return false;
         if (vals.keyword) {
           const hay = [a.ledgerNo, a.petCode, a.adopterName, a.adopterPhone, a.qualification]
@@ -3215,6 +3287,8 @@ const Shelter = {
     const renderTable = () => {
       const vals = TNR_UI.getFilterValues(el);
       const list = checkins.filter(r => {
+        // 打卡记录的时间口径 = 提交时间（CheckIn.created_at）。
+        if (!TNR_UI.inDateRange(r.createdAt || r.created_at, vals.start_date, vals.end_date)) return false;
         if (vals.status && String(r.status) !== vals.status) return false;
         if (vals.month && !String(r.month || '').toLowerCase().includes(vals.month)) return false;
         if (vals.keyword) {
@@ -3304,7 +3378,11 @@ const Shelter = {
       // 若沿用首次的 allList，刚提交的记录不会出现、删掉的行也不会消失。
       allList = (await TNR_API.getBlacklist()) || [];
       const vals = TNR_UI.getFilterValues(el);
-      let list = allList;
+      // 黑名单的登记时间 = Blacklist.created_at（另有 violation_date 是「违规日期」，
+      // 是业务日期、不是登记日期；起止时间按**登记时间**筛，与列表现有的
+      // 「登记时间」列同口径）。
+      let list = allList.filter(b =>
+        TNR_UI.inDateRange(b.createdAt || b.created_at, vals.start_date, vals.end_date));
       if (vals.keyword) {
         const kw = vals.keyword;
         list = list.filter(b => ((b.name || '') + (b.idCard || '') + (b.phone || '')).toLowerCase().includes(kw));
@@ -3641,9 +3719,30 @@ const Shelter = {
     const vals = TNR_UI.getFilterValues(pageEl);
     const dKw = (vals.district || '').toLowerCase();
     const kw = vals.keyword || '';
-    if (dKw || kw) {
+    const hasRange = !!(vals.start_date || vals.end_date);
+    // 7 个标签页的**时间字段各不相同**（一宠一档/物料是 `date`，放养看放养时间、
+    // 领养看领养时间…）。写成一张映射表，而不是在 7 个分支里各写一遍 ——
+    // 各写一遍必然漂移，而漂移的表现是「某一页筛出来的条数不对」，不报错。
+    //
+    // ⚠ 值是**字段列表**而不是单个字段名：`released_at` / `adopted_at` 都是
+    // 可空的（事件还没发生），只给一个名字的话，「全部」区间反而会把
+    // 待放养/待领出的记录藏起来。按顺序取第一个有值的（见 `TNR_UI.firstDate`）。
+    const LEDGER_DATE_KEYS = {
+      pets: ['date'],
+      captures: ['createdAt', 'created_at'],
+      transfers: ['createdAt', 'created_at'],
+      treatments: ['createdAt', 'created_at'],
+      releases: ['releasedAt', 'released_at', 'createdAt', 'created_at'],
+      adoptions: ['adoptedAt', 'adopted_at', 'createdAt', 'created_at'],
+      materials: ['date']
+    };
+    if (dKw || kw || hasRange) {
       const dId = ((this._ledgerDistricts || []).find(d => (d.name || '').toLowerCase() === dKw) || {}).id;
+      const dateKeys = LEDGER_DATE_KEYS[tab] || ['createdAt', 'created_at'];
       data = data.filter(r => {
+        if (hasRange && !TNR_UI.inDateRange(
+              TNR_UI.firstDate(...dateKeys.map(k => r[k])),
+              vals.start_date, vals.end_date)) return false;
         if (dKw) {
           const rname = String(r.districtName || r.district_name || '').toLowerCase();
           const rid = (r.districtId !== undefined ? r.districtId : r.district_id);

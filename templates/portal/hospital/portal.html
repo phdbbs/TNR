@@ -67,7 +67,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260924a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260924b"></script>
 <script>
 /* ====================================================
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
@@ -92,7 +92,10 @@ const Hospital = {
     materialTab: 'pending',
     ledgerTab: 'transfer',
     treatmentPetId: null,
-    treatmentData: { items: {}, sterilization: null, vaccine: null, deworming: null, chip: null }
+    treatmentData: { items: {}, sterilization: null, vaccine: null, deworming: null, chip: null },
+    // 首页看板「数据概览」的统计区间（任意起止）。空串 = 不限。
+    dashStart: '',
+    dashEnd: ''
   },
 
   /* ========== 初始化 ========== */
@@ -176,11 +179,13 @@ const Hospital = {
   /* ========== 1. 首页看板 ========== */
   async render_dashboard() {
     try {
-      const [transfers, pets, materials, txns] = await Promise.all([
+      const [transfers, pets, materials, txns, treatments, euthanasia] = await Promise.all([
         TNR_API.getTransfersStrict(),
         TNR_API.getHospitalPetsStrict(),
         TNR_API.getMaterialsStrict(),
-        TNR_API.getMaterialTransactionsStrict()
+        TNR_API.getMaterialTransactionsStrict(),
+        TNR_API.getTreatmentsStrict(),
+        TNR_API.getEuthanasiaStrict()
       ]);
 
       const pendRecv = transfers.filter(t => t.status === 'pending').length;
@@ -203,7 +208,52 @@ const Hospital = {
         todoItems.push({icon: '🐾', title: '待领养资料维护：' + (p.code || ''), desc: (p.name || '') + ' · 请完善照片和简介', nav: 'adoption-info'});
       });
 
+      /* —— 数据概览：带「统计区间」（任意起止）。
+       *
+       * 改动前这一页**完全没有时间维度**：4 张卡片全是「当前状态」计数，
+       * 只增不减的任务数看不出「这周干了多少」。现在补一层按区间加总的业务量，
+       * 原 4 张当前态卡片保留、并明确标注「不受统计区间影响」——
+       * 两者混在一起而不标注，用户会以为「待接收」也是区间内的数字。
+       *
+       * ⚠ 卡片标题上的区间文字与下面的实际过滤**共用同一个 `win`**：
+       * 两处各算一遍必然漂移，而漂移在界面上看不出来（标题写「最近一周」、
+       * 数字却是全部时间）。 */
+      const win = { start: this.state.dashStart || '', end: this.state.dashEnd || '' };
+      const inR = (v) => TNR_UI.inDateRange(v, win.start, win.end);
+      const rangeText = (win.start || win.end)
+        ? ((win.start || '最早') + ' ~ ' + (win.end || '至今'))
+        : '全部时间';
+      // 交接单：有签收时间就按签收时间（「这段时间接收了多少」），否则退到创建时间。
+      const recvInRange = transfers.filter(t => inR(t.received_at || t.created_at)).length;
+      const treatInRange = treatments.filter(t => inR(t.created_at)).length;
+      const consumeInRange = txns
+        .filter(t => t.type === 'consume' && inR(t.date || t.created_at))
+        .reduce((s, t) => s + (t.quantity || 0), 0);
+      const euthInRange = euthanasia.filter(e => inR(e.euthanized_at || e.created_at)).length;
+
       let html = '';
+      html += '<div class="card mb-4"><div class="card-header" style="flex-wrap:wrap;gap:var(--sp-2);">'
+        + '<div class="card-title"><span class="card-title-bar"></span>数据概览</div>'
+        + '<div class="flex gap-2" style="flex-wrap:wrap;align-items:center;">'
+        + '<span class="fs-sm text-muted">开始日期</span>'
+        + '<input type="date" class="form-input" id="hdashStart" style="width:auto;" value="' + win.start + '">'
+        + '<span class="fs-sm text-muted">结束日期</span>'
+        + '<input type="date" class="form-input" id="hdashEnd" style="width:auto;" value="' + win.end + '">'
+        + '<button type="button" class="btn btn-secondary btn-sm" data-hdash-range="week">最近一周</button>'
+        + '<button type="button" class="btn btn-secondary btn-sm" data-hdash-range="month">最近一月</button>'
+        + '<button type="button" class="btn btn-secondary btn-sm" data-hdash-range="all">全部</button>'
+        + '</div></div><div class="card-body">';
+      html += '<div class="fs-sm text-muted mb-3">业务量统计区间：' + rangeText
+        + '（下方「当前状态」为实时值，不受统计区间影响）</div>';
+      html += '<div class="stat-grid">';
+      html += '<div class="stat-card blue"><div class="stat-card-icon">📥</div><div><div class="stat-card-value">' + recvInRange + '</div><div class="stat-card-label">接收交接单（' + rangeText + '）</div></div></div>';
+      html += '<div class="stat-card"><div class="stat-card-icon">🔬</div><div><div class="stat-card-value">' + treatInRange + '</div><div class="stat-card-label">诊疗记录（' + rangeText + '）</div></div></div>';
+      html += '<div class="stat-card gold"><div class="stat-card-icon">📦</div><div><div class="stat-card-value">' + consumeInRange + '</div><div class="stat-card-label">物料消耗（' + rangeText + '）</div></div></div>';
+      html += '<div class="stat-card rouge"><div class="stat-card-icon">⚖️</div><div><div class="stat-card-value">' + euthInRange + '</div><div class="stat-card-label">安乐死处置（' + rangeText + '）</div></div></div>';
+      html += '</div>';
+      html += '</div></div>';
+
+      html += '<div class="fs-sm text-muted mb-3">当前状态（实时值，不受统计区间影响）</div>';
       html += '<div class="stat-grid">';
       html += '<div class="stat-card"><div class="stat-card-icon">📥</div><div><div class="stat-card-value">' + pendRecv + '</div><div class="stat-card-label">待接收动物</div></div></div>';
       html += '<div class="stat-card blue"><div class="stat-card-icon">🔬</div><div><div class="stat-card-value">' + pendTreat + '</div><div class="stat-card-label">待诊疗任务</div></div></div>';
@@ -251,6 +301,44 @@ const Hospital = {
       });
       document.querySelectorAll('[data-quick]').forEach(el => {
         el.addEventListener('click', () => this.navigateTo(el.dataset.quick));
+      });
+
+      // ---- 数据概览：统计区间交互 ----
+      const hFmt = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+        + '-' + String(d.getDate()).padStart(2, '0');
+      document.querySelectorAll('#page-dashboard [data-hdash-range]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const today = new Date();
+          const kind = btn.dataset.hdashRange;
+          if (kind === 'all') {
+            this.state.dashStart = '';
+            this.state.dashEnd = '';
+          } else {
+            const days = kind === 'week' ? 6 : 29;
+            this.state.dashStart = hFmt(new Date(today.getTime() - days * 86400000));
+            this.state.dashEnd = hFmt(today);
+          }
+          this.render_dashboard();
+        });
+      });
+      const hDashStartEl = document.getElementById('hdashStart');
+      const hDashEndEl = document.getElementById('hdashEnd');
+      const applyHDash = () => {
+        this.state.dashStart = (hDashStartEl.value || '').trim();
+        this.state.dashEnd = (hDashEndEl.value || '').trim();
+        // 起止填反不静默变成 0 —— 明确提示，区间文字本身也会照原样显示。
+        if (this.state.dashStart && this.state.dashEnd
+            && this.state.dashStart > this.state.dashEnd) {
+          TNR_UI.toast('开始日期晚于结束日期，该区间内不会有记录', 'warning');
+        }
+        this.render_dashboard();
+      };
+      [hDashStartEl, hDashEndEl].forEach(inp => {
+        if (!inp) return;
+        inp.addEventListener('change', applyHDash);
+        inp.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') { ev.preventDefault(); applyHDash(); }
+        });
       });
     } catch (e) {
       document.getElementById('page-dashboard').innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div><div class="empty-state-desc">' + this.escape(e.message) + '</div></div>';
@@ -368,12 +456,10 @@ const Hospital = {
     const bar = document.getElementById('receiveFilterBar');
     const v = TNR_UI.getFilterValues(bar);
     const shown = rows.filter(r => {
-      // ⚠ 用 localDateStr 而不是 `.slice(0, 10)`：`created_at` 是 DateTimeField，
-      // 后端序列化成 **UTC 带偏移**的串，裸截断拿到的是 UTC 日期，跟用户选的
-      // 本地日期比较会把北京时间 00:00–08:00 的记录算到**前一天**。
-      const d = TNR_UI.localDateStr(r.created_at);
-      if (v.start_date && d < v.start_date) return false;
-      if (v.end_date && d > v.end_date) return false;
+      // ⚠ `created_at` 是 DateTimeField，后端序列化成 **UTC 带偏移**的串；
+      // 统一交给 `TNR_UI.inDateRange` 按**本地日期**比较（裸 `.slice(0,10)` 会把
+      // 北京时间 00:00–08:00 的记录算到前一天）。
+      if (!TNR_UI.inDateRange(r.created_at, v.start_date, v.end_date)) return false;
       if (!v.keyword) return true;
       // 行是映射后的展示结构（含 HTML 片段），逐字段拼 haystack，避免漏列。
       return Object.keys(r).map(k => r[k]).join(' ').toLowerCase().includes(v.keyword);
@@ -806,9 +892,7 @@ const Hospital = {
         const v = TNR_UI.getFilterValues(treatBar);
         const list = rows.filter(r => {
           // 同上：`created_at` 是 UTC 串，必须按本地时区取日期再比较。
-          const d = TNR_UI.localDateStr(r.created_at);
-          if (v.start_date && d < v.start_date) return false;
-          if (v.end_date && d > v.end_date) return false;
+          if (!TNR_UI.inDateRange(r.created_at, v.start_date, v.end_date)) return false;
           if (!v.keyword) return true;
           return [r.pet_code, r.hospital_name, r._doctor]
             .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
@@ -946,12 +1030,7 @@ const Hospital = {
     const v = TNR_UI.getFilterValues(bar);
     return {
       ok: (hay) => !v.keyword || String(hay || '').toLowerCase().includes(v.keyword),
-      inRange: (d) => {
-        const s = TNR_UI.localDateStr(d);
-        if (v.start_date && s < v.start_date) return false;
-        if (v.end_date && s > v.end_date) return false;
-        return true;
-      }
+      inRange: (d) => TNR_UI.inDateRange(d, v.start_date, v.end_date)
     };
   },
 
@@ -1213,8 +1292,13 @@ const Hospital = {
       ]) + '</div>';
       // 行对象是映射后的展示结构（含 HTML 片段），逐字段拼成 haystack 最省事，
       // 也不会漏列 —— 逐列写死字段名在字段改名后会静默失效。
-      const infoHit = (r) => {
+      //
+      // 起止时间：两张表的时间字段**不同**（申请单看 `applied_at`，待领出看领养
+      // 登记时间 `created_at`），所以由调用方把要比的值传进来 ——
+      // 在里面写死一个字段名，必然有一张表的时间是错的（而且照样返回 200）。
+      const infoHit = (r, dateValue) => {
         const v = TNR_UI.getFilterValues(document.getElementById('adoptInfoFilterBar'));
+        if (!TNR_UI.inDateRange(dateValue, v.start_date, v.end_date)) return false;
         return !v.keyword
           || Object.keys(r).map(k => r[k]).join(' ').toLowerCase().includes(v.keyword);
       };
@@ -1227,7 +1311,7 @@ const Hospital = {
             { title: '资质说明', key: '_qual', sortable: false },
             { title: '申请时间', key: 'applied_at' },
             { title: '操作', key: '_actions', sortable: false },
-          ], data: applRows.filter(infoHit), emptyText: '暂无申请' });
+          ], data: applRows.filter(r => infoHit(r, r.applied_at)), emptyText: '暂无申请' });
       };
       const mountClaims = () => {
         if (pendingClaims.length === 0) return;
@@ -1238,7 +1322,7 @@ const Hospital = {
             { title: '电话', key: 'adopter_phone' },
             { title: '登记时间', key: 'created_at' },
             { title: '操作', key: '_actions', sortable: false },
-          ], data: claimRows.filter(infoHit), emptyText: '暂无记录' });
+          ], data: claimRows.filter(r => infoHit(r, r.created_at)), emptyText: '暂无记录' });
       };
 
       if (pets.length === 0 && pendingClaims.length === 0) {
@@ -1462,10 +1546,10 @@ const Hospital = {
         const list = records.filter(e => {
           if (v.body === 'done' && !e.body_received) return false;
           if (v.body === 'todo' && e.body_received) return false;
-          // `euthanized_at` 是 DateField（纯日期），localDateStr 原样返回 —— 统一口径。
-          const d = TNR_UI.localDateStr(e.euthanized_at);
-          if (v.start_date && d < v.start_date) return false;
-          if (v.end_date && d > v.end_date) return false;
+          // `euthanized_at` 是 DateField（纯日期），`inDateRange` 内部对纯日期串原样返回。
+          // 它是**可空**的（已登记但尚未处置），所以必须带创建时间兜底 ——
+          // 否则圈一个「全部」区间反而会把这类记录藏起来。
+          if (!TNR_UI.inDateRange(TNR_UI.firstDate(e.euthanizedAt, e.euthanized_at, e.createdAt, e.created_at), v.start_date, v.end_date)) return false;
           if (v.keyword) {
             const hay = [e.pet_code, e.reason, e.operator_name].filter(Boolean).join(' ').toLowerCase();
             if (!hay.includes(v.keyword)) return false;
@@ -1615,15 +1699,10 @@ const Hospital = {
        日期字段各页不同（created_at / date / euthanized_at），故按值传入 inRange。 */
     const bar = document.getElementById('ledgerFilterBar');
     const v = TNR_UI.getFilterValues(bar);
-    const inRange = (d) => {
-      // `d` 各页不同：`MaterialTransaction.date` 是 DateField（纯日期，原样返回），
-      // `Transfer/Treatment.created_at` 是 DateTimeField（UTC 串，需转本地日期）。
-      // `localDateStr` 两种情况都对，故不必按页区分。
-      const s = TNR_UI.localDateStr(d);
-      if (v.start_date && s < v.start_date) return false;
-      if (v.end_date && s > v.end_date) return false;
-      return true;
-    };
+    // `d` 各页不同：`MaterialTransaction.date` 是 DateField（纯日期，原样返回），
+    // `Transfer/Treatment.created_at` 是 DateTimeField（UTC 串，需转本地日期）。
+    // `inDateRange` 内部走 `localDateStr`，两种情况都对，故不必按页区分。
+    const inRange = (d) => TNR_UI.inDateRange(d, v.start_date, v.end_date);
     const hit = (hay) => !v.keyword || String(hay || '').toLowerCase().includes(v.keyword);
 
     if (tab === 'transfer') {
@@ -1711,7 +1790,8 @@ const Hospital = {
           { title: '操作人', key: 'operator_name' },
         ], data: rows, emptyText: '暂无物料台账' });
     } else if (tab === 'euthanasia') {
-      const data = euthanasia.filter(e => inRange(e.euthanized_at)
+      const data = euthanasia.filter(e => inRange(TNR_UI.firstDate(
+            e.euthanizedAt, e.euthanized_at, e.createdAt, e.created_at))
           && hit([e.ledger_no, e.pet_code, e.reason, e.operator_name].join(' ')))
         .slice().sort((a, b) => (b.euthanized_at || '').localeCompare(a.euthanized_at || ''));
       if (data.length === 0) { c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无安乐死台账</div></div>'; return; }

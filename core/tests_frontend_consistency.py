@@ -832,7 +832,8 @@ class RowActionEventDelegationTest(SimpleTestCase):
     def test_no_direct_row_binding_inside_mounttable_methods(self):
         problems = []
         for name, rel in PORTALS.items():
-            source = strip_js_comments(read(rel))   # 等长替换，索引与行号不变
+            raw = read(rel)
+            source = strip_js_comments(raw)   # 等长替换，索引与行号不变
             mounts = [m.start() for m in self.MOUNT.finditer(source)]
             if not mounts:
                 continue
@@ -841,17 +842,35 @@ class RowActionEventDelegationTest(SimpleTestCase):
                 fn = self._method_of(source, pos)
                 if not any(self._method_of(source, p) == fn for p in mounts):
                     continue          # 该方法不渲染表格，不属于本约定管辖
-                if self.EXEMPT in source[max(0, pos - 400):pos]:
+                # ⚠ 豁免标记必须去**未剥离注释**的原文里找。这里曾经写的是
+                # `self.EXEMPT in source[...]`，而 `source` 是剥掉注释后的文本
+                # —— 注释已经被替换成等长空白，标记**永远找不到**，
+                # 于是「标注 direct-bind-ok 即可豁免」这条承诺是**死代码**：
+                # 照着文档加注释的人会一直撞 FAIL，却查不出为什么。
+                # 剥离是等长的，偏移量在 raw 与 source 之间一一对应。
+                if self.EXEMPT in raw[max(0, pos - 400):pos]:
                     continue
                 line_no = source.count('\n', 0, pos) + 1
                 problems.append(
                     f'{name}:{line_no} {fn}() 里 querySelectorAll(\'{m.group(1)}\') '
                     '直接绑了监听器；mountTable 重建 tbody 后它会失效'
-                    '（点按钮没反应且不报错），请改用 TNR_UI.delegateClick(稳定容器, {...})')
+                    '（点按钮没反应且不报错），请改用 TNR_UI.delegateClick(稳定容器, {...})；'
+                    '确认不需要委托的，在上一行注释里写 direct-bind-ok 并说明理由')
         self.assertFalse(
             problems,
             '行内绑定未走事件委托：\n  ' + '\n  '.join(problems)
         )
+
+    def test_direct_bind_exemption_actually_works(self):
+        """`direct-bind-ok` 豁免必须真的生效。
+
+        这条用例是给上面那个「死代码」缺陷上的锁：豁免标记写在注释里，
+        而分析走的是**剥掉注释**的文本 —— 一旦有人把 `raw` 改回 `source`，
+        豁免机制会再次静默失效（表现是「照文档加注释也没用」，而不是报错）。
+        """
+        source = read('core/tests_frontend_consistency.py')
+        self.assertIn('if self.EXEMPT in raw[max(0, pos - 400):pos]:', source,
+                      '豁免判断又回到剥注释后的文本上了 —— direct-bind-ok 会失效')
 
     def test_delegate_click_helper_exists_and_dedups(self):
         """委托助手必须存在，且按「容器 + 标识」去重，重复调用不会叠加监听器。"""

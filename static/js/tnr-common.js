@@ -1028,6 +1028,57 @@ const TNR_UI = {
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   },
 
+  /** 一条记录是否落在 `[start, end]` 区间内（**含两端**）。
+   *
+   * 全站**唯一**的起止时间判据 —— 各端列表与「数据概览」共用，避免每个调用点
+   * 各写一份 `if (v.start_date && d < v.start_date) return false;` 然后漂移
+   * （已经漂过一次：有的地方比 `created_at`、有的比 `date`、有的漏了 `end_date`）。
+   *
+   * @param {string} dateValue 行上的时间字段。可以是 `DateTimeField` 序列化出的
+   *        ISO 串（`USE_TZ=True` 下是 **UTC 带偏移**），也可以是 `DateField` 的
+   *        纯日期串 —— 统一交给 `localDateStr()` 换算成**本地日期**再比较，
+   *        与后端 `__date` 查询同口径。**绝不能裸截断 `.slice(0,10)`**：
+   *        北京时间 00:00–08:00 的记录会被算到前一天。
+   * @param {string} start 起始日期 `YYYY-MM-DD`，空 = 不限
+   * @param {string} end   结束日期 `YYYY-MM-DD`，空 = 不限
+   *
+   * 语义要点：
+   *   - **未设范围时恒为 true** —— 不设筛选时不改变任何既有行为；
+   *   - 设了范围而该行**没有时间**时返回 false：用户既然圈了区间，
+   *     一条没有时间的记录混在结果里就是错的（宁可少、不可错）。
+   *
+   * ⚠ 上面那条「没有时间就排除」只有在**每行都拿得到时间**时才是对的。
+   * 很多业务时间字段是**可空**的，因为事件还没发生：`Adoption.adopted_at`
+   * （待领出时为空）、`Transfer.received_at`（待签收时为空）、
+   * `Euthanasia.euthanized_at`、`Release.released_at` 都是这样。
+   * 直接拿它们当唯一判据的后果不是报错，而是**用户圈一个「全部」区间，
+   * 这些行反而消失**（GUI 实测：`Adoption` 5 行圈 2000~2099 后只剩 3 行）。
+   * 所以调用点必须用 `firstDate()` 补上创建时间兜底。
+   */
+  inDateRange(dateValue, start, end) {
+    if (!start && !end) return true;
+    const d = this.localDateStr(dateValue);
+    if (!d) return false;
+    if (start && d < start) return false;
+    if (end && d > end) return false;
+    return true;
+  },
+
+  /** 取第一个有值的时间，用于「业务发生时间 → 记录创建时间」兜底。
+   *
+   * 一行记录的「时间」= 它最后一次业务活动发生的时间；活动还没发生，
+   * 就退到它被创建的时间。**任何情况下都不该因为「没有时间」被丢掉。**
+   *
+   * 用法（把驼峰与蛇形两种别名都列上，因为 `serialize_instance` 两个都给）：
+   *   `TNR_UI.firstDate(r.adoptedAt, r.adopted_at, r.createdAt, r.created_at)`
+   */
+  firstDate(...values) {
+    for (let i = 0; i < values.length; i++) {
+      if (values[i]) return values[i];
+    }
+    return '';
+  },
+
   formatDate(date) {
     if (!date) return '—';
     const s = String(date);
@@ -1146,9 +1197,38 @@ const TNR_UI = {
   },
 
   // === 渲染搜索筛选栏（自动附带标准「搜索/重置」按钮，配合 bindFilter 生效） ===
+
+  /* 所有列表筛选条统一追加的两个「起止时间」条件。
+   *
+   * key 固定为 `start_date` / `end_date` —— 与后端 `parse_date_param()` 的参数名
+   * 同源（政府端台账 `/api/supervision/ledger/` 就是直接透传这两个 key 给服务端）。
+   *
+   * ⚠ 抽成常量、由 `renderFilterBar` 统一追加，而不是在 31 个调用点各写一遍：
+   * 逐处手写必然漏，而漏掉的表现是「这一页没有起止时间」—— **不报错、只是少个控件**，
+   * 正是本项目最防的那种静默缺陷。
+   */
+  DATE_RANGE_FILTERS: [
+    { key: 'start_date', label: '开始日期', type: 'date' },
+    { key: 'end_date', label: '结束日期', type: 'date' }
+  ],
+
   renderFilterBar(filters, actions = '', opts = {}) {
+    /* 起止时间**默认自动追加**（要求：每个列表的搜索条件都要有）。
+     *
+     * 幂等：筛选条自己已经写了 `start_date` 的（医院端交接/诊疗/物料/安乐死/台账、
+     * 捕捉端转运明细/采购/出库/回收、政府端物料流水/台账中心）**不重复追加** ——
+     * 否则同一页会出现两组同名 `data-filter`，`getFilterValues` 后者覆盖前者，
+     * 用户在上面那组输入的值会被下面那组**静默抹掉**。
+     *
+     * 显式关掉传 `{ noDateRange: true }`（目前只有「实体本身没有任何时间字段」才需要）。
+     */
+    const list = Array.isArray(filters) ? filters : [];
+    const hasDateRange = list.some(f => f && f.key === 'start_date');
+    const all = (opts.noDateRange || hasDateRange)
+      ? list : list.concat(this.DATE_RANGE_FILTERS);
+
     let html = '<div class="filter-bar">';
-    filters.forEach(f => {
+    all.forEach(f => {
       html += '<div class="filter-item">';
       html += `<div class="filter-item-label">${f.label}</div>`;
       if (f.type === 'select') {
