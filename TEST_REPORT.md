@@ -6191,3 +6191,93 @@ X509v3 Subject Alternative Name: critical
 2. **变异还原不能用「反向字符串替换」**：`.sig-preview` 与 `.sig-canvas` 都含
    `touch-action: …`，反向替换命中了错误的那一处，把文件改坏而脚本毫无察觉
    （只报「文件未还原」）。改为**内存快照回写** + md5 复核。
+
+#### 2.49 第三十九轮生产端到端验收（38/38 通过）
+
+脚本：`gui-test-scripts/69_accept_39.js`　日志：`gui-test-screenshots/69accept39.log`
+截图：`gui-test-screenshots/r39_*.png`（8 张）
+
+##### 一、部署结果（`36e68d0` → `9dcf1e4`）
+
+| 项 | 结果 |
+|---|---|
+| `git reset --hard` | `9dcf1e4`，属主复查异常数 0 |
+| `collectstatic`（root） | `0 copied / 165 unmodified`，`staticfiles` 属主 `www-data:www-data` |
+| 重启 | `tnr-gunicorn` / `tnr-qworker` 均 RUNNING |
+| nginx 实际返回的 JS | `initSignatureField` 出现 **2** 次；旧的 `initSignaturePad(canvas)` **0** 次 |
+| nginx 实际返回的 CSS | `.sig-preview` 内含 `touch-action: auto`；`.sig-canvas` 内含 `touch-action: none` |
+| 模板 | `class="sig-field"` **5** 处；`LOC_HINT_IDLE` 4 处；`_gpsOnce` 3 处；`class="signature-pad"` **0** 处 |
+| 探活 | `http /login/` 200；`https /login/` 200 且 `ssl_verify_result=0`；https 静态资源 200 |
+| 证书 | `notAfter=Sep 30 18:56:24 2026 GMT`，`issuer=CN = YE2`（生产证书，非 STAGING） |
+
+##### 二、签名：20 项断言全过（含**触屏滑动**这条关键回归）
+
+判据全部落在**业务结果**上，不是「元素存在」：
+
+| 断言 | 实测 |
+|---|---|
+| 表单里画布数 | `#page-capture-add canvas = 0` |
+| 预览块 `touch-action` | `auto` |
+| **在预览块上做真实触摸上下滑动** | 弹窗 `modalShown=false`、`isEmpty=true` —— **既不弹窗也不落笔** |
+| 点击预览块 | 弹窗打开，`z-index=1600`（> 通用弹窗 1500） |
+| 弹窗画布 | `touch-action: none`，尺寸 `354x283` 非 0 |
+| 画一笔 → 确定 | 弹窗关闭、预览出现 `<img>`、`isEmpty=false`、`data:image/png;base64,…` |
+| 确定之后 | 表单里画布数仍为 **0**（没有退回原地手写） |
+| 重开弹窗 | 已有笔迹被铺回画布（可继续修改） |
+| 取消 | 页面签名**不变** |
+| 清除 | 回到占位状态 |
+
+编辑场景（记录 id=5，签名长度 41810）：预览块存在且**回显为图片**、无内联画布、
+`touch-action: auto`；打开弹窗后已有签名被铺回；**不重签直接确定 → 原签名仍在**。
+
+> ⚠ 演示库里**所有**捕捉单都已提交转运（`captureLocked=true`），照实挑「可编辑记录」
+> 一条都选不出来（第一版因此报 `no-editable-capture`）。改为在调用处临时短路
+> `Shelter.captureLocked`：详情拉取、弹窗渲染、签名回显全走真实代码，只让开那道锁定闸。
+
+##### 三、定位：HTTP vs HTTPS 的对照实验
+
+`https` 侧走 SSH 隧道（本机 8443 → 服务器 127.0.0.1:443）+ Chromium
+`--host-resolver-rules="MAP 124.223.41.44 127.0.0.1:8443"`，**浏览器发出的
+Host / Origin 与安全组放行后完全一致**，且 `ignoreHTTPSErrors=false`（真实证书链校验）。
+
+| 场景 | `isSecureContext` | 初始提示 | 点「定位」结果 |
+|---|---|---|---|
+| `http://124.223.41.44` | **false** | 「…当前为 HTTP 访问，浏览器不允许精确定位」 | 「已定位（城市级）：浙江省杭州市上城区四季青街道之江绿道江干段（当前为 HTTP 访问…），请补全门牌号」 |
+| `https://124.223.41.44`（授权） | **true** | 「未定位（点击「定位」获取当前地址及经纬度）」 | **「已精确定位（误差约 25 米）：湖北省襄阳市樊城区定中门街道天元四季城二期」**，地址自动填入 |
+| `https://124.223.41.44`（拒绝授权） | **true** | 同上 | 「未能获取您的网络位置（当前为服务器所在城市：北京市），请手动填写详细地址」，**地址留空** |
+
+- HTTP 那条返回的「杭州市」是**服务器机房所在城市**（本机在杭州），与操作员在襄阳的
+  实际位置无关 —— 所以 `source === 'server_ip'` 时 `pendingLocation = null`、
+  **绝不自动填表**，这条被实测钉住。
+- 拒绝授权时不谎报「已精确定位」，如实降级。
+- 结论：**代码侧没有任何待修项**。安全组放行 443 后，手机走
+  `https://124.223.41.44` 就能弹 GPS 权限框并拿到精确地址。
+
+##### 四、本轮新踩的坑（已写进技能与记忆）
+
+1. **`https://localhost:8443` 登录 403** —— 日志给出的原因：
+   `Forbidden (Origin checking failed - https://localhost:8443 does not match any trusted origins.)`。
+   根因是 nginx `proxy_set_header Host $host` 而 **`$host` 不含端口**：
+   Django 算出的 `good_origin` 是 `https://localhost`，与浏览器的
+   `Origin: https://localhost:8443` 不匹配，`CSRF_TRUSTED_ORIGINS` 又是空的。
+   **这是隧道端口造成的假象，不是生产缺陷** —— 生产用默认 443 端口时浏览器不发端口，
+   两边都是 `https://124.223.41.44`，匹配通过（已实测）。
+   ⇒ **验证 HTTPS 必须让浏览器发真实 Host，不能用「隧道端口 + 改 Host 头」凑合。**
+2. **`Host $host` 丢端口的通用含义**：若将来用**非标准端口**暴露站点
+   （如 `https://host:8443`），登录/提交会 403。届时要么改 `$http_host`，
+   要么把外部 origin 加进 `CSRF_TRUSTED_ORIGINS`。
+3. **SSH 隧道不能挂在 `ControlMaster` 上**：复用 master 时端口转发会随
+   `ControlPersist`（900s）超时一起消失 —— 跑完一轮验收隧道就没了，
+   下一轮 `curl` 直接 `Failed to connect`。常驻隧道要独立 `ssh -N -L`
+   （`ServerAliveInterval=30`），不要 `-f` + ControlPath。
+4. **`Shelter` 是顶层 `const`，不挂在 `window` 上**：`window.Shelter` 恒为
+   `undefined`，必须用裸标识符访问。
+
+##### 五、遗留（需要磊哥决策）
+
+- **腾讯云安全组放行 TCP 443** —— 控制台操作，服务器上改不了。放行前手机只能走 HTTP，
+  定位**必然**拿不到精确位置。
+- 移动端签名弹窗的按钮排布：CSS 里 `order: 3` + `flex: 1 1 100%` 把「重写」放在
+  **单独一行、最底部、占满宽度**（`取消/确定` 在其上方一行）。这是有意写的，
+  但移动端拇指最容易误触的正是最底部那一条。是否改成「重写/取消/确定」同一行，
+  等磊哥定。
