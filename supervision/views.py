@@ -991,19 +991,43 @@ def ledger_center(request):
 
     records = []
 
-    def _date_filter(qs, date_field='created_at'):
+    def _range_q(date_field):
+        """单字段的区间条件（含两端）。"""
+        q = Q()
         if start_date:
             # 下界同样要补时区：`date` 直接比较 DateTimeField 会触发
             # naive datetime 警告（见 `aware_day_start` 的说明）。
-            qs = qs.filter(**{f'{date_field}__gte': aware_day_start(start_date)})
+            q &= Q(**{f'{date_field}__gte': aware_day_start(start_date)})
         if end_date:
             # 结束日期含当天：用次日零点开区间，避免当天非零点记录被排除。
             # `end_date == date.max`（9999-12-31）时加一天会 `OverflowError`
             # —— 那是**第四种**异常类型，`except ValueError` 兜不住，
             # 由 `date_upper_exclusive()` 统一处理（退回闭区间上界，语义等价）。
             upper, exclusive = date_upper_exclusive(end_date)
-            qs = qs.filter(**{f'{date_field}__{"lt" if exclusive else "lte"}': upper})
-        return qs
+            q &= Q(**{f'{date_field}__{"lt" if exclusive else "lte"}': upper})
+        return q
+
+    def _date_filter(qs, date_field='created_at', fallback_field=None):
+        """按 `[start_date, end_date]` 过滤（含两端）。
+
+        `fallback_field`：业务时间字段**可空**时传记录创建时间字段。
+        `Release.released_at`（待放养为空）、`Adoption.adopted_at`（待领出为空）、
+        `Euthanasia.euthanized_at` 三个都是 `null=True` —— 只比它们会让用户
+        圈一个**「全部」区间反而把这些行藏起来**。实测（Django test client 直打接口）：
+        `adoption` 台账 5 条，圈 2000~2099 只剩 3 条，两条「待领出」的
+        `adopted_at` 是 NULL 被静默丢掉。兜底口径与前端 `TNR_UI.firstDate()`
+        完全一致：业务时间没有值就退到记录创建时间。
+        """
+        if not start_date and not end_date:
+            return qs
+        if not fallback_field:
+            return qs.filter(_range_q(date_field))
+        # 两个 Q 之间是 AND（`qs.filter` 链式），组内是 OR：
+        # 「业务时间有值 → 比业务时间」或「业务时间为空 → 比创建时间」。
+        return qs.filter(
+            (Q(**{f'{date_field}__isnull': False}) & _range_q(date_field))
+            | (Q(**{f'{date_field}__isnull': True}) & _range_q(fallback_field))
+        )
 
     # 一宠一档（按宠物档案聚合全生命周期数据）
     # 聚合逻辑下沉到 business.services.pet_archive_records，与捕捉端
@@ -1160,7 +1184,7 @@ def ledger_center(request):
     # 放养台账
     if business_type is None or business_type == 'release':
         qs = _scope_filter(Release.objects.all(), request)
-        qs = _date_filter(qs, 'released_at')
+        qs = _date_filter(qs, 'released_at', 'created_at')
         if institution_id:
             qs = qs.filter(community_id=institution_id)
         for r in qs:
@@ -1186,7 +1210,7 @@ def ledger_center(request):
     # 领养台账
     if business_type is None or business_type == 'adoption':
         qs = _scope_filter(Adoption.objects.all(), request)
-        qs = _date_filter(qs, 'adopted_at')
+        qs = _date_filter(qs, 'adopted_at', 'created_at')
         if institution_id:
             qs = qs.filter(hospital_id=institution_id)
         for a in qs:
@@ -1213,7 +1237,7 @@ def ledger_center(request):
     # 安乐死台账
     if business_type is None or business_type == 'euthanasia':
         qs = _scope_filter(Euthanasia.objects.all(), request)
-        qs = _date_filter(qs, 'euthanized_at')
+        qs = _date_filter(qs, 'euthanized_at', 'created_at')
         if institution_id:
             qs = qs.filter(hospital_id=institution_id)
         for e in qs:
