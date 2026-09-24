@@ -118,12 +118,84 @@ python manage.py refresh_demo_material_expiry --apply  # 确认无误后落库
 
 > ⚠ **HTTPS 是「弹 GPS 权限框」的硬前提，不是优化项。**
 > `navigator.geolocation.getCurrentPosition()` 只在**安全上下文**（HTTPS / `localhost` /
-> `127.0.0.1`）下可用。当前生产是 `http://公网IP` → 浏览器**直接拒绝且不弹任何权限框**，
-> **网页代码绕不过去**。所以磊哥要的「询问是否授予浏览器/微信 GPS 权限」，
-> **必须先有域名 + 证书**；在此之前只能降级 IP 定位（城市级），这不是前端缺陷。
+> `127.0.0.1`）下可用。`http://公网IP` 下浏览器**直接拒绝且不弹任何权限框**，
+> **网页代码绕不过去**。所以在没有 HTTPS 之前，定位只能降级到城市级 IP 定位 ——
+> 这不是前端缺陷。
 
 nginx 只监听 80，且 Django 在反代后必须显式被告知原始协议，否则
 `request.is_secure()` 恒为 `False`，所有 HTTPS 相关判断都会失真。
+
+### 2.1 没有域名也能上 HTTPS —— Let's Encrypt 的 **IP 地址证书**
+
+> **2026-01 起 LE 正式签发 IP 证书，2026-03 起 Certbot 支持。**
+> 此前「必须先买域名」的结论已经作废（2026-09-24 生产实测通过）。
+
+```bash
+# apt 源里的 certbot 是 2.x，不支持 --ip-address，必须用 snap 装 5.4+
+snap install --classic certbot
+ln -sf /snap/bin/certbot /usr/bin/certbot
+
+# nginx 里先加 HTTP-01 校验路径（必须放在 `location /` 之前，
+# 否则请求会被 proxy_pass 转给 Django，校验文件永远取不到）
+mkdir -p /var/www/certbot/.well-known/acme-challenge
+chown -R www-data:www-data /var/www/certbot
+
+# 先 staging 试签（不消耗生产配额、不会触发限流）
+certbot certonly --staging --preferred-profile shortlived \
+  --webroot --webroot-path /var/www/certbot \
+  --ip-address 124.223.41.44 --cert-name ip-124.223.41.44 \
+  --non-interactive --agree-tos --register-unsafely-without-email
+
+# 通了就去掉 --staging 签正式的，并写入续期钩子
+certbot certonly --preferred-profile shortlived \
+  --webroot --webroot-path /var/www/certbot \
+  --ip-address 124.223.41.44 --cert-name ip-124.223.41.44 \
+  --deploy-hook 'systemctl reload nginx' \
+  --non-interactive --agree-tos --register-unsafely-without-email
+```
+
+nginx 配置（**把 443 并进同一个 `server` 块**，location 只写一份）：
+
+```nginx
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+
+    ssl_certificate     /etc/letsencrypt/live/ip-124.223.41.44/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ip-124.223.41.44/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ...
+}
+```
+
+**为什么合并成一个 server 块**：拆成两个块意味着 `/api/` 的 JSON 413 兜底、
+静态目录、代理头都要在两处各写一遍 —— 历史上正是这类「孪生配置」漏改一处
+造成了 413 回 HTML、前端「点提交没反应」。
+
+**为什么 80 端口要保留**：IP 证书**只能**是 6 天有效期（LE 对 IP 证书强制
+`shortlived` 档）。万一续期失败，浏览器只对 HTTPS 报警告，HTTP 入口仍然可用，
+不会把整个站点锁死。
+
+### 2.2 ⚠ 两个必查项（漏一个就白做）
+
+| 检查 | 命令 | 期望 |
+|---|---|---|
+| **云安全组放行 443** | 从**外部**探测 | `OPEN` |
+| 续期真的能跑 | `certbot renew --dry-run --cert-name ip-124.223.41.44` | `all simulated renewals succeeded` |
+| 续期钩子已写入 | `grep renew_hook /etc/letsencrypt/renewal/ip-124.223.41.44.conf` | `renew_hook = systemctl reload nginx` |
+
+> ⚠ **本机 `ss -lntp` 显示 `0.0.0.0:443` 监听正常 ≠ 公网能连。**
+> 2026-09-24 实测：nginx 已在 `0.0.0.0:443` 监听、主机 `iptables -P INPUT ACCEPT`
+> （无主机防火墙）、证书校验通过，但**从公网探测 443 仍然 closed/filtered** ——
+> 拦截方是**云厂商安全组**（只放行了 80）。这是控制台操作，服务器上改不了。
+> 判据必须是**外部探测**，不能是 `ss` 的输出。
+
+### 2.3 有域名时（可选，更稳）
+
+有域名就用 90 天证书，运维负担小得多：
 
 ```bash
 apt install certbot python3-certbot-nginx
@@ -138,6 +210,13 @@ CSRF_TRUSTED_ORIGINS=https://你的域名
 ```
 
 然后重启应用。`HTTPS=on` 会一并启用 Secure Cookie、HSTS 与强制跳转 HTTPS。
+
+> ⚠ **IP 证书（6 天）场景下不要开 `HTTPS=on`。**
+> 它会连带打开 `SECURE_HSTS_SECONDS`（默认 1 年）与强制跳转。HSTS 是**记在
+> 浏览器里**的：证书一旦续期失败，用户连 HTTP 都进不去，整整一年 ——
+> 这把「6 天证书」的运维风险放大成了「站点不可达」。
+> 当前做法是**只加 443、不动 `.env`**，HTTP 与 HTTPS 并存，互不影响。
+
 
 ## 三、目录属主（手工部署必查）
 
@@ -911,6 +990,10 @@ grep -c 'v=20260924a' /var/log/nginx/access.log   # 为 0 才不用再升位
 | `地图服务返回错误：USERKEY_PLAT_NOMATCH (10009)` | Key 绑定的是"Web端(JS API)"而非"Web服务" | 同一应用下添加"Web服务"类型 Key |
 | `地图服务请求失败：...timeout/Connection refused` | 服务器出网被墙/无外网 | 开放对 `restapi.amap.com:443` 的出网访问 |
 | 前端定位报 `Only secure origins are allowed` | HTTP 非安全源，浏览器禁止 GPS 定位 | **预期行为**，浏览器**不会弹权限框**（代码绕不过去）。前端已自动降级 IP 定位；如需精确定位请配 HTTPS（见第二节） |
+| `ss` 显示 `0.0.0.0:443` 在听，公网却连不上 | **云安全组没放行 443**（主机防火墙是关的，拦不到） | 控制台加入站规则 TCP 443。判据必须用**外部**探测，`ss` 的输出说明不了问题 |
+| `certbot certonly --ip-address` 报 `unrecognized arguments` | apt 源里是 certbot 2.x | 换 snap 版（`snap install --classic certbot`，5.4+ 才支持 IP 证书） |
+| IP 证书续期成功，浏览器仍报旧证书 | 缺 `--deploy-hook`，nginx 没 reload | `grep renew_hook /etc/letsencrypt/renewal/<name>.conf`；缺失则 `certbot reconfigure` 补上 |
+| IP 证书申请报 `Certificate not yet due for renewal` | 之前签过 staging 证书占了同名位置 | `certbot delete --cert-name <name>` 后再签；**先确认它确实是 staging**（`openssl x509 -noout -issuer` 含 `STAGING`） |
 | 定位总是返回**北京**且 `source` 为 `server_ip` | 拿不到客户端公网 IP，高德按**服务器出口**定位 | 从公网经反代访问再验；本机 `127.0.0.1` 测永远是 `server_ip`。前端对 `server_ip` **不自动填表**，只提示手动定位 |
 | 上传大图报 400，页面是 Django 的 HTML 报错页 | `RequestDataTooBig`（`request.body` 超 `DATA_UPLOAD_MAX_MEMORY_SIZE`） | 见 §5.5。**不要调大阈值**；确认 `parse_json_body()` 对 multipart 不读 `request.body` |
 | 上传大图报 **413**（HTML） | nginx `client_max_body_size` 不够 | 调到 20M 并 `nginx -s reload`；前端 `compressImage()` 已在源头压缩。**响应应为 JSON**，否则缺 `error_page 413`（见 §5.7） |

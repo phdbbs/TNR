@@ -6067,3 +6067,127 @@ for p in PORTALS:
 # ⚠ 定位失步的通用手法：词法器保证长度不变 → 逐字符比对原始与剥离结果，
 #   第一个对不上的偏移就是失步起点。
 ```
+
+#### 2.48 定位「无法获取定位」的根因是 HTTP；签名改弹窗手写（第三十九轮）
+
+磊哥两个诉求：① 新增捕捉的「定位」显示无法获取定位，一次性彻底修复；
+② 全局手写签名从「页面内直画」改成「点击弹出、在图上手写，确定后页面只预览」——
+因为直接手写会吃掉手机端的上下滑动手势（「本来点到图片位置想上下滑动，
+结果都是在输入签名」）。
+
+##### 一、定位：**后端完全正常，根因是站点跑在 HTTP 上**
+
+先把「是不是后端坏了」证伪。以真实湖北公网 IP 伪造 `X-Real-IP` 直连应用
+（绕过 nginx，因为 nginx 会用 `$remote_addr` 覆盖该头）：
+
+| 请求 | 结果 |
+|---|---|
+| `GET /api/business/geocode/reverse/?lat=32.045&lng=112.144` | `襄城区米公街道前进路23-4号铝制品家属院` ✅ |
+| `GET /api/business/geocode/ip/` + `X-Real-IP: 111.170.10.10` | `source=client_ip`，`襄阳市襄城区中原街道晨光路幸福社区` ✅ |
+| 同上，`X-Real-IP: 127.0.0.1`（私网） | `source=server_ip`，`北京市东城区…南锣鼓巷`（**正确地拒绝填表**） |
+| 同上，`X-Real-IP: 100.99.98.71`（Tailscale CGNAT） | 同 `server_ip` |
+| 未登录 | 401 ✅ |
+
+生产 `.env` 里 `TNR_AMAP_KEY` 存在且有效（直接 curl 高德返回 `status=1`）。
+⚠ 顺带纠正一个易误判的点：**`/proc/<pid>/environ` 里看不到 `TNR_AMAP_KEY` 是正常的** ——
+它由 dotenv 在进程启动**之后**注入，不会出现在 `/proc` 的初始环境快照里。
+据此判「Key 没配」是错的。
+
+**真因**：`HTTPS=off`、无 443、无证书 → `window.isSecureContext === false` →
+浏览器**强制**禁止 `navigator.geolocation` 且**连权限框都不弹**。
+旧代码此时直接走 IP 兜底，而 IP 兜底在拿不到客户端公网 IP 时只能提示
+「未能获取您的网络位置」—— 现场看到的就是「无法获取定位」。
+
+**代码侧能修的两件事**（提交 `b5b25b8`）：
+
+1. **别白等**：旧版只发一次 `enableHighAccuracy: true` + 15 秒硬超时。高精度会
+   强制启用 GPS 芯片，室内 20~30 秒才收敛 → 大量超时 → 直接掉城市级兜底。
+   现在先高精度（12s），失败立刻补一次低精度（WiFi/基站，1~2 秒），两阶段都失败
+   才降级 IP；并区分「用户明确拒绝」（`code === 1`，不再重试）与「信号弱」。
+2. **把降级原因说清楚**：「未定位」提示收成 `LOC_HINT_IDLE` 常量（初始化与重置
+   两处共用，避免文案漂移），HTTP 下明确写「当前为 HTTP 访问，浏览器不允许精确定位」。
+
+##### 二、真正的修复是 HTTPS —— 而且**不需要域名**
+
+> **2026-01 LE 正式签发 IP 地址证书，2026-03 Certbot 支持。**
+> 此前 DEPLOY.md 里「必须先有域名」的结论**已经作废**。
+
+生产实测通过（Ubuntu 24.04 / nginx 1.24 / snap certbot 5.8.0）：
+
+```
+certbot certonly --preferred-profile shortlived --webroot --webroot-path /var/www/certbot \
+  --ip-address 124.223.41.44 --cert-name ip-124.223.41.44 \
+  --deploy-hook 'systemctl reload nginx' --non-interactive --agree-tos --register-unsafely-without-email
+```
+
+```
+issuer=C = US, O = Let's Encrypt, CN = YE2          <- 不是 STAGING
+notAfter=Sep 30 18:56:24 2026 GMT                    <- 6 天（LE 对 IP 证书强制 shortlived）
+X509v3 Subject Alternative Name: critical
+    IP Address:124.223.41.44
+```
+
+- 443 已并入**同一个** `server` 块（`listen 80; listen 443 ssl;`）——
+  拆两个块会让 `/api/` 的 JSON 413 兜底、静态目录、代理头各写两遍，
+  历史上正是这类「孪生配置」漏改一处造成过 413 回 HTML。
+- **80 端口保留**：IP 证书只能是 6 天有效期，万一续期失败，浏览器只对 HTTPS
+  报警告，HTTP 入口仍可用，不会把站点锁死。
+- **不开 `HTTPS=on`**：它会连带打开 `SECURE_HSTS_SECONDS`（默认 1 年）与强制跳转。
+  HSTS 记在**浏览器**里 —— 证书续期失败后用户连 HTTP 都进不去，整整一年。
+  这把「6 天证书」的运维风险放大成了「站点不可达」。
+- 续期：`snap.certbot.renew.timer`（enabled，每日两次）+ `renew_hook = systemctl reload nginx`；
+  `certbot renew --dry-run` 返回 `all simulated renewals succeeded` ✅
+
+##### ⚠ 三、还剩**一件我做不了**的事：云安全组放行 443
+
+| 检查项 | 实测 |
+|---|---|
+| `ss -lntp` 443 | `0.0.0.0:443` 监听正常 ✅ |
+| 主机防火墙 | `iptables -P INPUT ACCEPT`（没有主机防火墙） ✅ |
+| 证书校验（本机 `--resolve` 到 127.0.0.1） | TLS 校验通过（`ssl_verify_result=0`） ✅ |
+| **从公网探测 443** | **closed / filtered** ❌ |
+
+**拦截方是腾讯云安全组**（只放行了 80）。这是控制台操作，服务器上改不了。
+判据必须用**外部探测** —— `ss` 显示在监听、证书也有效，公网照样连不上，
+只看服务器内部会得出完全相反的结论。
+
+##### 四、签名：`touch-action: none` 是根因，搬进弹窗才是正解
+
+`.signature-pad { touch-action: none }` 这一条**不能删**（不写就一个笔画也画不出来），
+但它会**整块吞掉触屏滚动手势** —— 手指落在签名区想上滑翻页，全被当成笔画。
+所以不是「加个 `passive: false`」或「修 `isEmpty`」能解决的（上一轮实测过，那是假修）。
+
+修法（提交 `81edc42`）：页面上只留一张**预览图**（`touch-action: auto`，不拦手势），
+真正的画布搬进**弹窗** —— 弹窗里本来就不需要滚动，`touch-action: none` 放在那儿
+才是正确语义。
+
+| 组件 | 职责 |
+|---|---|
+| `TNR_UI.initSignatureField(el, opts)` | 预览块 + 「签名/重新签名」+「清除」；返回 `isEmpty/getDataURL/clear`（与旧接口**同名同义**，调用点几乎不用改）+ `isDirty/setValue` |
+| `TNR_UI._bindSigCanvas(canvas)` | 纯笔迹逻辑：DPR 缩放、坐标换算（`clientWidth/rect.width`，否则 CSS 拉伸后笔迹整体偏移）、单点也留痕、只看 alpha 通道判空 |
+| `TNR_UI._openSignatureModal(...)` | 全页单例弹窗（每次重开新建 DOM 会累积监听）；`z-index: 1600` **必须高于 `TNR_UI.modal` 的 1500** |
+
+替换捕捉端 5 处（`ca/ed/or/rc/cf_signature`），移除 5 个独立的「清除签名」按钮与监听。
+**只删按钮不删监听**会让页面初始化抛未捕获 `TypeError`，后续所有绑定都不执行 ——
+表现为「整个捕捉页的按钮都没反应」，控制台之外看不到任何提示（已作用例钉住）。
+编辑捕捉记录改为 `if (sigPad.isDirty() && !sigPad.isEmpty())`：原逻辑每存一次
+就重传一份签名图，`media/` 会不断堆积。
+
+##### 五、验证链
+
+| 环节 | 结果 |
+|---|---|
+| 变异验证 | **10/10 精确变红**（全部 `FAIL:` 断言失败、`ERROR=0`、文件全部按 md5 还原） |
+| 内联 JS 语法 | 4 个门户 8 段内联脚本全部 `node --check` 通过 |
+| 全量测试 | **1173 通过**（上轮 1159，+14） |
+| 逐提交验证 | `81edc42` → 1168 通过；`b5b25b8` → 1173 通过 |
+
+##### 六、本轮踩到的两个坑（已写进技能）
+
+1. **远程脚本被执行了两次**：`./rsh.sh 'sudo bash -s' < x.sh` 的每一次调用都在生产上
+   跑了两遍（`auth.log` 里能看到成对的 `sudo` 记录，`certbot` 备份文件名也生成了两份）。
+   只读命令无害，但 `certbot delete` + `certonly` 连跑两次就可能删掉刚签好的证书。
+   **所有生产脚本必须写成幂等的**（本次靠「已是生产证书则跳过签发」这一道守卫兜住）。
+2. **变异还原不能用「反向字符串替换」**：`.sig-preview` 与 `.sig-canvas` 都含
+   `touch-action: …`，反向替换命中了错误的那一处，把文件改坏而脚本毫无察觉
+   （只报「文件未还原」）。改为**内存快照回写** + md5 复核。
