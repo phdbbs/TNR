@@ -163,7 +163,20 @@ TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
         'DIRS': [BASE_DIR / 'templates'],
-        'APP_DIRS': True,
+        # ⚠ Django 5.0 起 `django/template/engine.py` 的 `Engine.__init__` **无条件**
+        #    把加载器包进 `cached.Loader`（4.2 及以前是 `if not debug` 才包，
+        #    见 engine.py:41）。后果是**模板被永久缓存**：改完 `.html` 不重启进程
+        #    就看不到任何变化，接口照样 200、页面照样渲染 —— 典型的静默失效。
+        #
+        #    `runserver --noreload` 下尤其致命：autoreload 的 `reset_loaders()`
+        #    是唯一的清缓存途径，而它只在 `--reload`（默认）时才被模板变化触发。
+        #    实测代价：第四十轮两轮 GUI 实测**全部跑在旧模板上**，27 条「失败」
+        #    里有 22 条是假象（真缺陷只有后端台账可空字段那一处）。
+        #
+        #    所以：开发（DEBUG）显式指定**不带缓存**的两条加载器；
+        #    生产（DEBUG=False）维持默认的 cached.Loader（那是性能优化，
+        #    生产不会频繁改模板）。
+        'APP_DIRS': not DEBUG,
         'OPTIONS': {
             'context_processors': [
                 'django.template.context_processors.debug',
@@ -174,6 +187,14 @@ TEMPLATES = [
         },
     },
 ]
+if DEBUG:
+    # 与 `APP_DIRS=True` 语义完全等价（filesystem + app_directories），
+    # 但不套 cached.Loader —— 改模板立即生效。
+    # 注意：`loaders` 与 `APP_DIRS=True` 互斥，所以上面必须写 `not DEBUG`。
+    TEMPLATES[0]['OPTIONS']['loaders'] = [
+        'django.template.loaders.filesystem.Loader',
+        'django.template.loaders.app_directories.Loader',
+    ]
 
 WSGI_APPLICATION = 'tnr_system.wsgi.application'
 
