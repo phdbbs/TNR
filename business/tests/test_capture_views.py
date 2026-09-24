@@ -296,13 +296,21 @@ class CaptureCreateTest(BusinessTestBase):
 
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_group_photo_upload(self):
+        """合影必须真的存下来。
+
+        ⚠ 单只照片同样是必传材料（第四十一轮），所以这里不能再只发一张合影：
+        缺单照会在写库前被拒，用例会以「请上传动物 XXX 的单只照片」失败。
+        编号走 `codes-preview`，与页面真实流程一致。
+        """
         self.login_as(self.shelter_user_a)
-        upload = make_image_file('photo.png')
+        codes = self.ok(self.get_json(f'{CAPTURES_URL}codes-preview/?count=2'))['data']
+        data = {**{k: str(v) for k, v in self._payload().items()},
+                'pet_codes': codes,
+                'group_photo': make_image_file('photo.png')}
+        for code in codes:
+            data['pet_photo_' + code] = make_image_file(f'{code}.png')
         resp = self.client.post(
-            f'{CAPTURES_URL}create/',
-            data={**{k: str(v) for k, v in self._payload().items()}, 'group_photo': upload},
-            format='multipart',
-        )
+            f'{CAPTURES_URL}create/', data=data, format='multipart')
         body = self.ok(resp)
         capture = Capture.objects.get(id=body['data']['capture']['id'])
         self.assertTrue(capture.group_photo)
@@ -702,14 +710,17 @@ class CaptureDetailTest(BusinessTestBase):
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_detail_contains_all_form_fields(self):
         self.login_as(self.shelter_user_a)
-        upload = make_image_file('group.png')
+        # 单只照片与合影同为必传材料：只发合影会在写库前被拒（第四十一轮）。
+        codes = self.ok(self.get_json(f'{CAPTURES_URL}codes-preview/?count=1'))['data']
         resp = self.client.post(f'{CAPTURES_URL}create/', data={
             'property_name': '详情物业', 'community_name': '详情小区',
             'address': '详情路9号', 'geo_address': '甲区详情路9号',
             'latitude': '32.06', 'longitude': '112.14',
             'contact_person': '孙七', 'contact_phone': '13800000004',
             'pet_count': '1', 'signature': 'data:image/png;base64,SIG',
-            'group_photo': upload,
+            'pet_codes': codes,
+            'group_photo': make_image_file('group.png'),
+            'pet_photo_' + codes[0]: make_image_file('single.png'),
         }, format='multipart')
         body = self.ok(resp)
         capture_id = body['data']['capture']['id']

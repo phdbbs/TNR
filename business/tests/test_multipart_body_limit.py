@@ -38,6 +38,7 @@ TypeError)` 里，于是冒泡成裸 400。
   3. **端到端**：带大图提交捕捉登记 / 编辑领养信息都必须成功。
 """
 import io
+import json
 import random
 from unittest import mock
 
@@ -201,6 +202,7 @@ class LargeUploadEndToEndTest(BusinessTestBase):
             'signature': 'data:image/png;base64,iVBORw0KGgo=',
             'pet_species_TNR260922900': '猫',
             'group_photo': make_big_image('group.png'),
+            'pet_photo_TNR260922900': make_big_image('pet.png'),
         }
         payload.update(overrides)
         return payload
@@ -262,23 +264,29 @@ class LargeUploadEndToEndTest(BusinessTestBase):
         pet.refresh_from_db()
         self.assertTrue(pet.photo_before, '捕捉前照片应当被保存')
 
-    def test_small_multipart_still_works(self):
-        """正向对照：不带大图时行为不变（防止修法把整条路径改坏）。"""
+    def test_missing_group_photo_is_rejected_even_when_other_fields_are_valid(self):
+        """缺整体合影不能靠「请求很小」绕过新增捕捉的必传规则。"""
         self.login_as(self.shelter_user_a)
         payload = self._capture_payload(group_photo='')
         resp = self.client.post(CAPTURE_CREATE_URL, payload)
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertTrue(resp.json().get('success'), resp.content)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(resp.json().get('success'), resp.content)
+        self.assertIn('整体合影', resp.json().get('message', ''))
 
-    def test_json_capture_create_still_works(self):
-        """正向对照：JSON 提交（不带文件）路径不受影响。"""
+    def test_json_capture_create_without_files_is_rejected(self):
+        """JSON 直提交没有上传材料，也不能绕过服务端必传校验。"""
         self.login_as(self.shelter_user_a)
         payload = self._capture_payload()
         payload.pop('group_photo')
+        payload.pop('pet_photo_TNR260922900')
         payload['pet_codes'] = ['TNR260922901']
-        resp = self.post_json(CAPTURE_CREATE_URL, payload)
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertTrue(resp.json().get('success'), resp.content)
+        payload['pet_species_TNR260922901'] = '猫'
+        resp = self.client.post(
+            CAPTURE_CREATE_URL, data=json.dumps(payload),
+            content_type='application/json')
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(resp.json().get('success'), resp.content)
+        self.assertIn('整体合影', resp.json().get('message', ''))
 
 
 class UploadGateConsistencyTest(SimpleTestCase):
@@ -397,6 +405,7 @@ class AuditDistrictSurvivesMultipartTest(BusinessTestBase):
             'pet_species_TNR260922902': '猫',
             'signature': 'data:image/png;base64,iVBORw0KGgo=',
             'group_photo': make_big_image('group2.png'),
+            'pet_photo_TNR260922902': make_big_image('pet2.png'),
         })
         self.assertEqual(resp.status_code, 200, resp.content)
         capture = resp.json()['data']['capture']

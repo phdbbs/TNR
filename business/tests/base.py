@@ -182,6 +182,46 @@ class ApiMixin:
         return user
 
     def post_json(self, url, payload=None):
+        # 新增捕捉的真实提交是 multipart：签字、整体合影、每只单照均为必传。
+        # 旧的业务单测大量使用 JSON 助手，这里把它们转换成同一条真实上传路径，
+        # 避免测试继续跑在「没有任何照片也能成功」的不存在形态上。需要专门验证
+        # 缺上传材料时，直接用 self.client.post()，不要通过这个兼容助手。
+        if url.rstrip('/') == '/api/business/captures/create':
+            payload = dict(payload or {})
+            if not payload.pop('_skip_capture_media', False):
+                from business.services import MAX_CAPTURE_BATCH, generate_pet_codes
+                try:
+                    count = int(payload.get('pet_count') or 0)
+                except (TypeError, ValueError, OverflowError):
+                    count = 0
+                # ⚠ 只为**合法数量**补材料。参数契约类用例会故意提交 '9'*24 这种
+                #   探测值（`test_param_contract.py`），夹具若跟着它去生成编号和
+                #   图片，等于在测试进程里跑 10^24 次循环 —— 实测整包被 OOM
+                #   SIGKILL，看起来像「测试挂了」，其实是夹具自己吃光了内存。
+                #   这类用例要的就是服务端 400，走原来的 JSON 路径即可。
+                if 0 < count <= MAX_CAPTURE_BATCH:
+                    raw_codes = payload.get('pet_codes')
+                    if isinstance(raw_codes, (list, tuple)):
+                        codes = [str(c).strip() for c in raw_codes if str(c).strip()]
+                    elif raw_codes:
+                        codes = [c.strip() for c in str(raw_codes).split(',') if c.strip()]
+                    else:
+                        preview = self.client.get(
+                            f'/api/business/captures/codes-preview/?count={count}')
+                        codes = preview.json().get('data', []) if preview.status_code == 200 else []
+                        if not codes:
+                            # 预览接口本身属于被测链路；测试夹具不能因为它暂时
+                            # 不可用就退回「无文件 JSON」这种已被禁止的形态。
+                            codes = generate_pet_codes(count)
+                    if codes:
+                        # 统一成重复表单字段，真实 multipart 读取端用 getlist()
+                        # 才能得到完整编号列表；保留逗号串会被 Django 当成一个值。
+                        payload['pet_codes'] = codes
+                        payload.setdefault('signature', 'data:image/png;base64,TESTSIGNATURE')
+                        payload['group_photo'] = make_image_file('test-group.png')
+                        for i, code in enumerate(codes):
+                            payload[f'pet_photo_{code}'] = make_image_file(f'test-pet-{i}.png')
+                        return self.client.post(url, data=payload)
         return self.client.post(
             url, data=json.dumps(payload or {}), content_type="application/json"
         )

@@ -89,6 +89,7 @@ class CaptureUploadValidationTest(BusinessTestBase):
             'contact_person': '张建国',
             'contact_phone': '13871234501',
             'pet_count': 2,
+            'signature': 'data:image/png;base64,TESTSIGNATURE',
             'pet_codes': c,
             'pet_species_' + c[0]: '猫',
             'pet_gender_' + c[0]: '母',
@@ -99,17 +100,20 @@ class CaptureUploadValidationTest(BusinessTestBase):
         return data
 
     def test_rejects_non_image_group_photo(self):
-        resp = self.client.post('/api/business/captures/create/',
-                                self._payload(group_photo=text_file('group.png')))
+        c = codes(2)
+        data = self._payload(group_photo=text_file('group.png'))
+        data['pet_photo_' + c[0]] = png_file('one.png')
+        data['pet_photo_' + c[1]] = png_file('two.png')
+        resp = self.client.post('/api/business/captures/create/', data)
         self.expect_fail(resp, message='不是有效的图片文件')
         self.assertEqual(Capture.objects.count(), 0)
         self.assertEqual(Pet.objects.count(), 0)
 
     def test_rejects_non_image_pet_photo(self):
         c = codes(2)
-        data = self._payload(pet_photo_=None)
-        data.pop('pet_photo_', None)
+        data = self._payload(group_photo=png_file('group.png'))
         data['pet_photo_' + c[0]] = text_file('one.png')
+        data['pet_photo_' + c[1]] = png_file('two.png')
         resp = self.client.post('/api/business/captures/create/', data)
         self.expect_fail(resp, message='不是有效的图片文件')
         # 两段式：第 1 张非法时整批不落库，不留半成品
@@ -120,6 +124,7 @@ class CaptureUploadValidationTest(BusinessTestBase):
         c = codes(2)
         data = self._payload(group_photo=png_file('group.png'))
         data['pet_photo_' + c[0]] = png_file('one.png')
+        data['pet_photo_' + c[1]] = png_file('two.png')
         body = self.ok(self.client.post('/api/business/captures/create/', data))
         self.assertEqual(len(body['data']['pet_codes']), 2)
         cap = Capture.objects.get(ledger_no=body['data']['capture']['ledger_no'])
@@ -128,6 +133,37 @@ class CaptureUploadValidationTest(BusinessTestBase):
         self.assertTrue(pet.photo_capture)
         self.assertEqual(pet.species, '猫')
         self.assertEqual(pet.gender, '母')
+
+    def test_missing_any_required_capture_material_rejected_without_writes(self):
+        c = codes(2)
+        base = self._payload(group_photo=png_file('group.png'))
+        base['pet_photo_' + c[0]] = png_file('one.png')
+        # 第二只单照缺失：服务端必须在 Capture/Pet 写入前拒绝。
+        before_capture = Capture.objects.count()
+        before_pet = Pet.objects.count()
+        resp = self.client.post('/api/business/captures/create/', base)
+        self.expect_fail(resp, message='单只照片')
+        self.assertEqual(Capture.objects.count(), before_capture)
+        self.assertEqual(Pet.objects.count(), before_pet)
+
+        # 合影缺失也必须拒绝，不能只依赖页面上的红色星号。
+        base = self._payload()
+        base['pet_photo_' + c[0]] = png_file('one.png')
+        base['pet_photo_' + c[1]] = png_file('two.png')
+        resp = self.client.post('/api/business/captures/create/', base)
+        self.expect_fail(resp, message='整体合影')
+        self.assertEqual(Capture.objects.count(), before_capture)
+        self.assertEqual(Pet.objects.count(), before_pet)
+
+        # 签字缺失同样拒绝。
+        base = self._payload(group_photo=png_file('group.png'))
+        base.pop('signature', None)
+        base['pet_photo_' + c[0]] = png_file('one.png')
+        base['pet_photo_' + c[1]] = png_file('two.png')
+        resp = self.client.post('/api/business/captures/create/', base)
+        self.expect_fail(resp, message='电子签名')
+        self.assertEqual(Capture.objects.count(), before_capture)
+        self.assertEqual(Pet.objects.count(), before_pet)
 
 
 class CaptureUpdateUploadValidationTest(BusinessTestBase):

@@ -162,6 +162,28 @@ def _to_float(v):
         return None
 
 
+def _capture_required_upload_error(request, data, pet_codes):
+    """新增捕捉的三类必传材料：合影、每只单照、电子签名。
+
+    前端会在点提交前拦截，但服务端必须再拦一次：请求可以绕过页面直接构造，
+    而 ImageField 对空文件/缺文件不会自行报错。所有检查都在任何 Capture/Pet
+    写入之前完成，避免留下「捕捉单已建、照片却缺失」的半成品。
+    """
+    if not body_str(data, 'signature').strip():
+        return '请完成物业电子签名后再提交'
+    if not request.FILES.get('group_photo'):
+        return '请上传整体合影后再提交'
+
+    labels = {}
+    for code in pet_codes:
+        key = 'pet_photo_' + code
+        if not request.FILES.get(key):
+            return f'请上传动物 {code} 的单只照片后再提交'
+        labels[key] = f'动物 {code} 的捕捉照片'
+    labels['group_photo'] = '整体合影'
+    return validate_uploaded_images(request.FILES, labels)
+
+
 def _parse_return_time(v):
     """解析回收时间：支持 ISO 串与 ``datetime-local`` 的 ``YYYY-MM-DDTHH:MM``。
 
@@ -425,7 +447,8 @@ def capture_create(request):
 
     表单字段与「新增捕捉登记」页一一对应：物业名称、所在小区、详细地址、
     定位地址/经纬度、归属区县、物业交接人、联系电话、捕捉数量、宠物编号、
-    整体合影、单只照片、物业电子签名。定位得到的地址会作为默认地址写入
+    整体合影、单只照片、物业电子签名。整体合影、每只动物单照和电子签名均为
+    必传材料；缺任一项在写库前直接拒绝。定位得到的地址会作为默认地址写入
     address，并同时保留 geo_address 供详情页区分展示。
     """
     data = parse_json_body(request)
@@ -514,14 +537,11 @@ def capture_create(request):
             return json_fail(f'动物 {code}：{err}')
         pet_attrs.append(parsed)
 
-    # 上传图片的内容校验：ImageField 直接赋值不校验，非图片文件会被原样存进
-    # media/（前端裂图、库里无痕迹）。放在事务之前，非法时整批拒绝。
-    photo_labels = {'group_photo': '整体合影'}
-    for code in pet_codes:
-        photo_labels['pet_photo_' + code] = f'动物 {code} 的捕捉照片'
-    photo_err = validate_uploaded_images(request.FILES, photo_labels)
-    if photo_err:
-        return json_fail(photo_err)
+    # 新增捕捉的材料是业务必填，不只是前端 UX 提示：签字、整体合影、每只单照
+    # 缺任一项都必须在任何写库前拒绝；同时按内容校验图片，不能信任扩展名。
+    upload_err = _capture_required_upload_error(request, data, pet_codes)
+    if upload_err:
+        return json_fail(upload_err)
 
     with transaction.atomic():
         # 小区外键回填：前端「所在小区」是自由文本（不做下拉枚举），这里按名称

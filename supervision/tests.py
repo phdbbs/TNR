@@ -761,16 +761,14 @@ class SupervisionDataTest(SupervisionBase):
     def test_operation_logs_records_real_business_write(self):
         """端到端：捕捉点写业务 → 政府端日志里能看到，且归属区县按业务记录算。"""
         self.client.force_login(self.shelter_user)
-        self.ok(self.client.post(
-            '/api/business/captures/create/',
-            data=json.dumps({
-                'shelter_id': self.shelter_a.id,
-                'pet_count': 1,
-                'property_name': '甲区物业',
-                'community_name': '甲区小区',
-                'contact_person': '张三',
-                'contact_phone': '13800000000',
-            }), content_type='application/json'))
+        self.ok(self.post_json('/api/business/captures/create/', {
+            'shelter_id': self.shelter_a.id,
+            'pet_count': 1,
+            'property_name': '甲区物业',
+            'community_name': '甲区小区',
+            'contact_person': '张三',
+            'contact_phone': '13800000000',
+        }))
 
         self.client.force_login(self.gov_a)
         data = self.ok(self.client.get(f'{API}/logs/'))['data']
@@ -782,16 +780,14 @@ class SupervisionDataTest(SupervisionBase):
 
     def test_operation_logs_hidden_from_other_district(self):
         self.client.force_login(self.shelter_user)
-        self.ok(self.client.post(
-            '/api/business/captures/create/',
-            data=json.dumps({
-                'shelter_id': self.shelter_a.id,
-                'pet_count': 1,
-                'property_name': '甲区物业',
-                'community_name': '甲区小区',
-                'contact_person': '张三',
-                'contact_phone': '13800000000',
-            }), content_type='application/json'))
+        self.ok(self.post_json('/api/business/captures/create/', {
+            'shelter_id': self.shelter_a.id,
+            'pet_count': 1,
+            'property_name': '甲区物业',
+            'community_name': '甲区小区',
+            'contact_person': '张三',
+            'contact_phone': '13800000000',
+        }))
         self.client.force_login(self.gov_b)
         data = self.ok(self.client.get(f'{API}/logs/'))['data']
         self.assertFalse([r for r in data if r['module'] == '捕捉登记'],
