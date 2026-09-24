@@ -6273,10 +6273,56 @@ Host / Origin 与安全组放行后完全一致**，且 `ignoreHTTPSErrors=false
 4. **`Shelter` 是顶层 `const`，不挂在 `window` 上**：`window.Shelter` 恒为
    `undefined`，必须用裸标识符访问。
 
-##### 五、遗留（需要磊哥决策）
+##### 五、443 放行后的**公网直连**复验（磊哥放行后实测）
 
-- **腾讯云安全组放行 TCP 443** —— 控制台操作，服务器上改不了。放行前手机只能走 HTTP，
-  定位**必然**拿不到精确位置。
+此前 HTTPS 侧走的是 SSH 隧道（`--host-resolver-rules` 映射到 `127.0.0.1:8443`）。
+443 放行后改用**真实公网直连**（脚本加 `TNR_DIRECT=1`，不再挂任何映射），
+并**关掉 `ignoreHTTPSErrors`** —— 真实证书链被系统信任才算数。
+
+| 检查项 | 实测 |
+|---|---|
+| `nc -z 124.223.41.44 443` | **OPEN** ✅（此前 closed/filtered） |
+| `curl` 直连（不加 `-k`） | `HTTP=200`、`TLS校验=0`、`remote_ip=124.223.41.44` ✅ |
+| 完整验收（`TNR_DIRECT=1`） | **38/38 通过**，与隧道模式结果一致 ✅ |
+| HTTPS 定位 | 「已精确定位（误差约 25 米）：湖北省襄阳市樊城区定中门街道天元四季城二期」 |
+| HTTPS 登录 | 通过（标准 443 端口下 CSRF origin 校验正常） |
+
+> 一个有意思的差异：直连时「拒绝授权 → 走 IP 兜底」拿到的是 **`source=client_ip`**
+> （本机杭州的公网 IP → 杭州市上城区，**会填入地址**并提示补门牌号）；
+> 走隧道时请求从服务器 127.0.0.1 出去，拿不到客户端 IP → `source=server_ip`
+> → **拒绝填表**。两条都是正确行为，恰好把 `client_ip` / `server_ip` 两个分支都实测到了。
+
+##### 六、证书续期链（6 天有效期的静默失败高危区）
+
+LE 对 IP 证书**强制 `shortlived` 档 = 6 天有效期**，续期一旦静默失败，
+10 月 1 日之后 HTTPS 直接不可用（HTTP 保留，所以不会完全锁死，但定位又坏）。
+逐项核实：
+
+| 检查项 | 实测 |
+|---|---|
+| `certbot renew --dry-run` | **`Congratulations, all simulated renewals succeeded`** ✅ |
+| 续期配置 `preferred_profile` | **`shortlived`** ✅（IP 证书必须；漏了续期会失败） |
+| `authenticator` / `webroot_map` | `webroot` + `/var/www/certbot` + `124.223.41.44 = /var/www/certbot` ✅ |
+| `server` | `https://acme-v02.api.letsencrypt.org/directory`（**生产**端点，非 staging）✅ |
+| `renew_hook` | `systemctl reload nginx` ✅（dry-run 日志显示「skipping deploy hook」，说明已注册） |
+| `snap.certbot.renew.timer` | `enabled`，NEXT = 2026-09-24 21:43 CST ✅ |
+
+> ⚠ **`certbot renew --dry-run` 会先随机睡最多 8 分钟**（日志：
+> `Non-interactive renewal: random delay of 354.3 seconds`）。这不是卡死 ——
+> 用 5 分钟的工具超时去跑会被 SIGTERM 打断**外层包装**，远端进程仍在跑并持锁，
+> 紧接着再跑就会报 `Another instance of Certbot is already running`。
+> 要跳过延迟用 `--no-random-sleep-on-renew`，或干脆放后台等。
+
+##### 七、遗留（需要磊哥决策）
+
+- **HTTP 入口仍然可用，且 HTTP 下定位必然失败。** 操作员若还记着旧地址
+  `http://124.223.41.44`，点「定位」依旧拿不到精确位置（提示已写明
+  「当前为 HTTP 访问，浏览器不允许精确定位」，但用户不一定知道该换成什么）。
+  两个可选动作：
+  1. **（推荐，低风险）** HTTP 页面顶部/定位处加一条醒目提示 + 「改用 HTTPS 访问」链接。
+     保留 80 兜底能力 —— 与既有决策（不开 `HTTPS=on`、不写 HSTS、证书过期时 HTTP 仍可用）一致。
+  2. **HTTP → HTTPS 301 跳转**（排除 `/.well-known/acme-challenge/`）。
+     更彻底，但**与「保留 80 兜底」相冲突**：证书万一续期失败，用户会被跳进证书错误页。
 - 移动端签名弹窗的按钮排布：CSS 里 `order: 3` + `flex: 1 1 100%` 把「重写」放在
   **单独一行、最底部、占满宽度**（`取消/确定` 在其上方一行）。这是有意写的，
   但移动端拇指最容易误触的正是最底部那一条。是否改成「重写/取消/确定」同一行，
