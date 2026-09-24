@@ -2190,3 +2190,128 @@ class ShelterStockAdjustmentEntryTest(SimpleTestCase):
         self.assertIn(
             'TNR_API.adjustStock(', html,
             '捕捉点门户没有真正调用异动接口')
+
+
+def css_rule(css, selector):
+    """取某条 CSS 规则的花括号内容（只看精确匹配的选择器）。
+
+    用 `re.escape(selector) + r'\\s*\\{'` 而不是 `find`：`.sig-preview` 还出现在
+    `.sig-preview img` / `.sig-preview .sig-placeholder` 里，用 find 会取错规则。
+    """
+    m = re.search(re.escape(selector) + r'\s*\{([^}]*)\}', css)
+    return m.group(1) if m else None
+
+
+class SignatureModalFieldTest(SimpleTestCase):
+    """手写签名：页面只预览，手写在弹窗里（第三十九轮）。
+
+    磊哥反馈的真实故障：手机端手指落在签名区想上下滑动翻页，结果全被当成笔画。
+    根因是画布**必须**写 `touch-action: none`（不写就一个笔画也画不出来），
+    而这一条会整块吞掉触屏滚动手势。修法是把画布搬进弹窗 —— 弹窗里本来就不需要
+    滚动，那里才是 `touch-action: none` 的正确位置。
+
+    所以这些用例锁的是「**位置**」而不只是「有没有写」：
+    同一行 `touch-action: none` 放在页面预览块上就是缺陷，放在弹窗画布上才对。
+    """
+
+    SHELTER = PORTALS['shelter']
+    COMMON_JS = 'static/js/tnr-common.js'
+    CSS = 'static/css/tnr-traditional.css'
+    FIELD_IDS = ('ca_signature', 'ed_signature', 'or_signature',
+                 'rc_signature', 'cf_signature')
+
+    # --- 模板：不能再有页面内直画的画布 ---
+
+    def test_no_template_keeps_an_inline_canvas(self):
+        """页面上不允许再出现直画的 canvas —— 它就是吞掉滚动手势的那一块。"""
+        for name, rel in PORTALS.items():
+            html = read(rel)
+            self.assertNotIn('class="signature-pad"', html,
+                             f'{name} 门户还有页面内直画的签名画布；'
+                             '它带 touch-action:none，会吞掉手机端的上下滑动手势。')
+            self.assertNotIn('TNR_UI.initSignaturePad(', html,
+                             f'{name} 门户还在调旧的 initSignaturePad')
+
+    def test_every_signature_field_target_exists_and_is_empty(self):
+        html = read(self.SHELTER)
+        targets = re.findall(
+            r"initSignatureField\(\s*document\.getElementById\('([^']+)'\)", html)
+        for tid in self.FIELD_IDS:
+            self.assertIn(tid, targets, f'捕捉点门户缺少签名字段 #{tid}')
+        for tid in targets:
+            # 组件会整块重写容器的 innerHTML，容器里预置的标记会被**静默抹掉**
+            self.assertIn(f'<div class="sig-field" id="{tid}"></div>', html,
+                          f'#{tid} 不是空的 sig-field 容器')
+
+    def test_no_orphan_clear_buttons(self):
+        """5 个独立的「清除签名」按钮已随组件移除。
+
+        如果只删按钮、留下 `getElementById(...).addEventListener`，
+        页面初始化时会**抛未捕获 TypeError**，后面所有绑定全部不执行 ——
+        表现是「整个捕捉页的按钮都没反应」，且控制台之外看不到任何提示。
+        """
+        html = read(self.SHELTER)
+        for old in ('btnClearSig', 'btnClearEditSig', 'orClearSig',
+                    'rcClearSig', 'cfClearSig'):
+            self.assertNotIn(old, html,
+                             f'{old} 已移除；若仍被 getElementById 引用会中断页面初始化')
+
+    # --- 组件：API 与旧接口兼容 ---
+
+    def test_old_api_is_gone_and_new_one_is_present(self):
+        src = read(self.COMMON_JS)
+        self.assertNotIn('initSignaturePad(', src, '旧的 initSignaturePad 应已删除')
+        for token in ('initSignatureField(el, opts)',
+                      '_bindSigCanvas(canvas)',
+                      '_openSignatureModal(',
+                      '_closeSignatureModal(',
+                      '_drawSigImage('):
+            self.assertIn(token, src, f'tnr-common.js 缺少 {token}')
+
+    def test_component_keeps_backward_compatible_api(self):
+        """调用点靠 isEmpty/getDataURL 提交，名字变了就会静默传空。"""
+        src = read(self.COMMON_JS)
+        idx = src.find('initSignatureField(el, opts)')
+        self.assertGreater(idx, 0)
+        body = src[idx:idx + 4000]
+        for method in ('isEmpty()', 'getDataURL()', 'isDirty()', 'clear()', 'setValue('):
+            self.assertIn(method, body, f'签名组件缺少 {method}')
+
+    def test_edit_path_only_uploads_when_actually_resigned(self):
+        """「留空则保留」：没重新签就不该重传 —— 否则每存一次就多一份签名图。"""
+        html = read(self.SHELTER)
+        self.assertIn("if (sigPad.isDirty() && !sigPad.isEmpty()) fd.append('signature'",
+                      html,
+                      '编辑捕捉记录时会无条件重传签名，media/ 里会不断堆积重复图片')
+
+    # --- CSS：手势归属是关键判据 ---
+
+    def test_preview_does_not_swallow_touch_scroll(self):
+        css = read(self.CSS)
+        rule = css_rule(css, '.sig-preview')
+        self.assertIsNotNone(rule, 'CSS 里找不到 .sig-preview 规则')
+        self.assertNotIn('touch-action: none', rule,
+                         '.sig-preview 带 touch-action:none —— 手机端在签名区上滑'
+                         '会变成画笔画，正是磊哥反馈的那个故障。')
+
+    def test_modal_canvas_owns_the_touch_gestures(self):
+        css = read(self.CSS)
+        rule = css_rule(css, '.sig-canvas')
+        self.assertIsNotNone(rule, 'CSS 里找不到 .sig-canvas 规则')
+        self.assertIn('touch-action: none', rule,
+                      '弹窗画布必须写 touch-action:none，否则画不出笔画')
+
+    def test_signature_modal_sits_above_the_page_modal(self):
+        """签名弹窗是从「编辑捕捉记录」等弹窗里开出来的。
+
+        `TNR_UI.modal` 把 overlay 的 z-index 设成 **1500**（内联样式），
+        签名弹窗低于它就会被压在下面 —— 用户点得到、但看不见，也点不到按钮。
+        """
+        css = read(self.CSS)
+        rule = css_rule(css, '.sig-modal')
+        self.assertIsNotNone(rule, 'CSS 里找不到 .sig-modal 规则')
+        m = re.search(r'z-index:\s*(\d+)', rule)
+        self.assertIsNotNone(m, '.sig-modal 没写 z-index')
+        self.assertGreater(int(m.group(1)), 1500,
+                           '签名弹窗的 z-index 必须高于 TNR_UI.modal 的 1500')
+

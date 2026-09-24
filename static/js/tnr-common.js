@@ -735,63 +735,272 @@ const TNR_UI = {
     return html;
   },
 
-  // === 签名板 ===
-  initSignaturePad(canvas) {
+  // === 签名（页面只预览，手写在弹窗里）===
+
+  /* 画布笔迹绑定。只管「这块 canvas 上画了什么」，与页面/弹窗无关。
+   *
+   * ⚠ 只应绑定**一次**（弹窗的 canvas 是全页单例）：鼠标抬手监听挂在 window 上，
+   * 每次重开都绑一遍会不断累积监听器。
+   */
+  _bindSigCanvas(canvas) {
     const ctx = canvas.getContext('2d');
-    let isDrawing = false;
-    let lastX = 0, lastY = 0;
+    let drawing = false, lastX = 0, lastY = 0, ratio = 1;
 
-    const ratio = Math.max(window.devicePixelRatio || 1, 1);
-    canvas.width = canvas.offsetWidth * ratio;
-    canvas.height = 200 * ratio;
-    ctx.scale(ratio, ratio);
-    ctx.strokeStyle = '#1C1C1C';
-    ctx.lineWidth = 2;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    const getPos = (e) => {
-      const rect = canvas.getBoundingClientRect();
-      const touch = e.touches && e.touches[0];
-      return [
-        (touch ? touch.clientX : e.clientX) - rect.left,
-        (touch ? touch.clientY : e.clientY) - rect.top
-      ];
+    /* 画布尺寸必须按设备像素比放大，否则高分屏上笔迹发虚、坐标也会偏。
+       每次打开弹窗都重新量一次 —— 手机横竖屏切换后宽度会变。 */
+    const resize = () => {
+      const cssW = Math.max(canvas.clientWidth || 0, 1);
+      const cssH = Math.max(canvas.clientHeight || 0, 1);
+      ratio = Math.max(window.devicePixelRatio || 1, 1);
+      canvas.width = Math.round(cssW * ratio);
+      canvas.height = Math.round(cssH * ratio);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(ratio, ratio);
+      ctx.strokeStyle = '#1C1C1C';
+      ctx.fillStyle = '#1C1C1C';
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.clearRect(0, 0, cssW, cssH);
     };
 
-    const start = (e) => { isDrawing = true; [lastX, lastY] = getPos(e); };
-    const draw = (e) => {
-      if (!isDrawing) return;
-      e.preventDefault();
-      const [x, y] = getPos(e);
+    /* 触摸/鼠标坐标 → 画布坐标。
+       不能直接用 clientX - rect.left：CSS 把 canvas 拉伸过之后
+       rect 与 clientWidth 不再相等，笔迹会整体偏移。 */
+    const pos = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const src = (e.touches && e.touches[0]) || e;
+      const sx = rect.width ? canvas.clientWidth / rect.width : 1;
+      const sy = rect.height ? canvas.clientHeight / rect.height : 1;
+      return [(src.clientX - rect.left) * sx, (src.clientY - rect.top) * sy];
+    };
+
+    const start = (e) => {
+      e.preventDefault();          // 阻断后续合成的鼠标事件与页面滚动
+      drawing = true;
+      [lastX, lastY] = pos(e);
+      // 只点一下不拖也要留痕：moveTo/lineTo 同一个点画不出东西，补一个圆点
+      ctx.beginPath();
+      ctx.arc(lastX, lastY, ctx.lineWidth / 2, 0, Math.PI * 2);
+      ctx.fill();
       ctx.beginPath();
       ctx.moveTo(lastX, lastY);
+    };
+    const move = (e) => {
+      if (!drawing) return;
+      e.preventDefault();
+      const [x, y] = pos(e);
       ctx.lineTo(x, y);
       ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x, y);
       [lastX, lastY] = [x, y];
     };
-    const stop = () => { isDrawing = false; };
+    const end = () => { drawing = false; };
 
     canvas.addEventListener('mousedown', start);
-    canvas.addEventListener('mousemove', draw);
-    canvas.addEventListener('mouseup', stop);
-    canvas.addEventListener('mouseout', stop);
-    canvas.addEventListener('touchstart', start);
-    canvas.addEventListener('touchmove', draw);
-    canvas.addEventListener('touchend', stop);
+    canvas.addEventListener('mousemove', move);
+    canvas.addEventListener('mouseleave', end);
+    // 抬手挂在 window：手指拖出画布再松开，不挂 window 会一直停在 drawing
+    window.addEventListener('mouseup', end);
+    canvas.addEventListener('touchstart', start, { passive: false });
+    canvas.addEventListener('touchmove', move, { passive: false });
+    canvas.addEventListener('touchend', end);
+    canvas.addEventListener('touchcancel', end);
+
+    /* 有没有落笔：只看 alpha 通道。签名是纯黑笔画 + 全透明底，
+       alpha 非 0 就说明画过；比整张图逐字节比较快得多。 */
+    const hasInk = () => {
+      const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      for (let i = 3; i < d.length; i += 4) if (d[i] !== 0) return true;
+      return false;
+    };
 
     return {
-      clear() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      resize,
+      clear() { ctx.clearRect(0, 0, canvas.width, canvas.height); },
+      hasInk,
+      isEmpty() { return !hasInk(); },
+      getDataURL() { return canvas.toDataURL('image/png'); },
+      /* 把一张图按「等比缩放 + 居中」铺回画布（回显已有签名）。
+         ctx 上已经应用了 scale(ratio)，所以这里用 CSS 像素坐标即可。 */
+      drawScaled(img) {
+        const cw = canvas.clientWidth, ch = canvas.clientHeight;
+        const s = Math.min(cw / img.width, ch / img.height, 1);
+        const w = img.width * s, h = img.height * s;
+        ctx.drawImage(img, (cw - w) / 2, (ch - h) / 2, w, h);
       },
-      isEmpty() {
-        const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-        return data.every(val => val === 0);
-      },
-      getDataURL() {
-        return canvas.toDataURL();
-      }
     };
+  },
+
+  /* 全页共用一个签名弹窗：每次重开都新建 DOM 会累积事件监听。 */
+  _sigModalState: null,
+
+  _openSignatureModal({ title, initial, onCommit }) {
+    let st = this._sigModalState;
+    if (!st) {
+      const overlay = document.createElement('div');
+      overlay.className = 'sig-modal';
+      overlay.innerHTML =
+        '<div class="sig-modal-panel" role="dialog" aria-modal="true">' +
+          '<div class="sig-modal-title"></div>' +
+          '<div class="sig-modal-hint">请在下方空白处签名；点「确定」保存，点「取消」不保存。</div>' +
+          '<canvas class="sig-canvas"></canvas>' +
+          '<div class="sig-modal-actions">' +
+            '<button type="button" class="btn btn-secondary btn-sm sig-spacer" data-sig-act="clear">重写</button>' +
+            '<button type="button" class="btn btn-secondary" data-sig-act="cancel">取消</button>' +
+            '<button type="button" class="btn btn-primary" data-sig-act="ok">确定</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+
+      st = this._sigModalState = {
+        overlay,
+        titleEl: overlay.querySelector('.sig-modal-title'),
+        pad: this._bindSigCanvas(overlay.querySelector('.sig-canvas')),
+        onCommit: null,
+        loadToken: 0,
+        prevOverflow: '',
+      };
+
+      const act = (name) => {
+        const s = this._sigModalState;
+        if (name === 'clear') { s.pad.clear(); return; }
+        if (name === 'ok') {
+          // 画布空白 = 明确表示「没有签名」，提交 null（调用方据此判必填）
+          this._closeSignatureModal(s.pad.isEmpty() ? null : s.pad.getDataURL());
+          return;
+        }
+        this._closeSignatureModal(undefined);   // 取消：undefined 表示「不提交」
+      };
+
+      overlay.addEventListener('click', (e) => {
+        const btn = e.target.closest ? e.target.closest('[data-sig-act]') : null;
+        if (btn) { act(btn.getAttribute('data-sig-act')); return; }
+        // 点遮罩 = 取消。必须判断 target 就是遮罩本身，否则点面板内部也会误关
+        if (e.target === overlay) act('cancel');
+      });
+
+      /* 横竖屏切换后画布尺寸会变：重新量尺寸，并把已有笔迹按新尺寸铺回去，
+         否则用户转个屏，刚写的签名就没了。 */
+      st.onWinResize = () => {
+        const s = this._sigModalState;
+        if (!s || !s.overlay.classList.contains('show')) return;
+        const keep = s.pad.isEmpty() ? null : s.pad.getDataURL();
+        s.pad.resize();
+        if (keep) this._drawSigImage(keep);
+      };
+      window.addEventListener('resize', st.onWinResize);
+      window.addEventListener('orientationchange', st.onWinResize);
+      document.addEventListener('keydown', (e) => {
+        const s = this._sigModalState;
+        if (e.key === 'Escape' && s && s.overlay.classList.contains('show')) {
+          this._closeSignatureModal(undefined);
+        }
+      });
+    }
+
+    st.titleEl.textContent = title || '手写签名';
+    st.onCommit = onCommit;
+    st.overlay.classList.add('show');
+    // 必须先显示再量尺寸：display:none 的元素 clientWidth 是 0，量不到宽度
+    st.pad.resize();
+    // 作废上一次打开时还在解码中的图片
+    st.loadToken += 1;
+    if (initial) this._drawSigImage(initial);
+    st.prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+  },
+
+  /* 把 dataURL 铺回弹窗画布。图片解码是异步的，用 loadToken 作废过期回调 ——
+     用户在图片加载完之前就关掉/重开了弹窗，回调再画上去就是错的。 */
+  _drawSigImage(url) {
+    const st = this._sigModalState;
+    if (!st) return;
+    const token = ++st.loadToken;
+    const img = new Image();
+    img.onload = () => {
+      if (!st.overlay.classList.contains('show')) return;
+      if (token !== st.loadToken) return;
+      st.pad.drawScaled(img);
+    };
+    img.src = url;
+  },
+
+  _closeSignatureModal(result) {
+    const st = this._sigModalState;
+    if (!st) return;
+    st.overlay.classList.remove('show');
+    document.body.style.overflow = st.prevOverflow || '';
+    const cb = st.onCommit;
+    st.onCommit = null;
+    st.pad.clear();
+    // result === undefined 表示取消：回调一次都不调，页面保持原值
+    if (result !== undefined && typeof cb === 'function') cb(result);
+  },
+
+  /* 把 `el` 变成「预览 + 弹窗手写」的签名字段。
+   *
+   * 返回值与旧 `initSignaturePad` **同名同义**（isEmpty / getDataURL / clear），
+   * 所以调用点几乎不用改；另加 isDirty / setValue 供「编辑已有签名」的场景使用。
+   *
+   * `opts`：{ title, initial, onChange }
+   */
+  initSignatureField(el, opts) {
+    if (!el) throw new Error('initSignatureField: 容器元素不存在');
+    const o = opts || {};
+    el.classList.add('sig-field');
+    el.innerHTML =
+      '<div class="sig-preview" data-sig-preview></div>' +
+      '<div class="sig-tools">' +
+        '<button type="button" class="btn btn-secondary btn-sm" data-sig-sign>签名</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" data-sig-clear>清除</button>' +
+      '</div>';
+
+    const preview = el.querySelector('[data-sig-preview]');
+    const btnSign = el.querySelector('[data-sig-sign]');
+    const btnClear = el.querySelector('[data-sig-clear]');
+
+    let committed = o.initial || null;   // 已确认的签名（dataURL），null = 没有
+    let dirty = false;                   // 本次会话是否改过（编辑场景据此决定要不要重传）
+
+    const render = () => {
+      el.classList.toggle('has-value', !!committed);
+      preview.innerHTML = committed
+        ? '<img src="' + committed + '" alt="电子签名">'
+        : '<span class="sig-placeholder">点击此处手写签名</span>';
+      btnSign.textContent = committed ? '重新签名' : '签名';
+      btnClear.hidden = !committed;
+    };
+
+    const api = {
+      isEmpty() { return !committed; },
+      getDataURL() { return committed; },
+      isDirty() { return dirty; },
+      setValue(url) { committed = url || null; dirty = false; render(); },
+      clear() { if (committed) { committed = null; dirty = true; } render(); },
+    };
+
+    const open = () => {
+      this._openSignatureModal({
+        title: o.title || '手写签名',
+        initial: committed,
+        onCommit: (url) => {
+          // 与打开前一模一样就不算「改过」：编辑页据此决定要不要重传文件
+          dirty = url !== committed;
+          committed = url;
+          render();
+          if (typeof o.onChange === 'function') o.onChange(committed);
+        },
+      });
+    };
+
+    // 预览块与「签名」按钮都能唤起弹窗；预览块本身不拦滚动手势
+    preview.addEventListener('click', open);
+    btnSign.addEventListener('click', open);
+    btnClear.addEventListener('click', () => api.clear());
+    render();
+    return api;
   },
 
   // === 格式化日期 ===

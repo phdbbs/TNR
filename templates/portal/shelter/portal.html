@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260923a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260924a"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -756,9 +756,7 @@ const Shelter = {
           <div>${this.captureStatusBadge(full.status)}<span class="form-hint" style="margin-left:8px;">宠物数量与编号不可修改，如需调整请删除后重新登记</span></div>
         </div>
         <div class="form-group"><label class="form-label">物业电子签名（重新签名将替换原签名，留空则保留）</label>
-          ${full.signature ? '<div style="margin-bottom:8px;"><img src="' + full.signature + '" style="max-width:240px;background:#fff;border:1px solid var(--border-light);border-radius:6px;"></div>' : ''}
-          <canvas class="signature-pad" id="ed_signature"></canvas>
-          <div class="mt-3 flex gap-2"><button type="button" class="btn btn-secondary btn-sm" id="btnClearEditSig">清除重签</button></div>
+          <div class="sig-field" id="ed_signature"></div>
         </div>
       `;
     };
@@ -770,8 +768,8 @@ const Shelter = {
       actions: '<button class="btn btn-secondary" data-action="close">取消</button><button class="btn btn-primary" id="btnSaveCaptureEdit">保存</button>'
     });
 
-    const sigPad = TNR_UI.initSignaturePad(document.getElementById('ed_signature'));
-    document.getElementById('btnClearEditSig').addEventListener('click', () => sigPad.clear());
+    const sigPad = TNR_UI.initSignatureField(document.getElementById('ed_signature'),
+      { title: '物业电子签名', initial: full.signature || null });
     // 绑定照片点击放大
     TNR_UI.bindPhotoZoom(document);
     // 逐只照片槽：点击 → 打开该只动物对应的隐藏 file input，选图后就地预览。
@@ -815,7 +813,8 @@ const Shelter = {
       fd.append('contact_phone', contactPhone);
       fd.append('address', document.getElementById('ed_address').value.trim());
       fd.append('district_id', document.getElementById('ed_districtId').value || '');
-      if (!sigPad.isEmpty()) fd.append('signature', sigPad.getDataURL());
+      // 「留空则保留」：没重新签就不传，避免每次保存都把同一张签名重新上传一份
+      if (sigPad.isDirty() && !sigPad.isEmpty()) fd.append('signature', sigPad.getDataURL());
       const photoInput = document.getElementById('ed_groupPhoto');
       if (photoInput.files && photoInput.files[0]) fd.append('group_photo', photoInput.files[0]);
       // 单只照片：按 pet_id 匹配（后端 pet_photo_<pet_id> 落库到该宠物 photo_capture）
@@ -994,10 +993,7 @@ const Shelter = {
         <div class="card-header"><div class="card-title"><span class="card-title-bar"></span>确认区 · 电子签名</div></div>
         <div class="card-body">
           <div class="form-group"><label class="form-label">物业电子签名<span class="req">*</span></label>
-            <canvas class="signature-pad" id="ca_signature"></canvas>
-            <div class="mt-3 flex gap-2">
-              <button class="btn btn-secondary btn-sm" id="btnClearSig">清除签名</button>
-            </div>
+            <div class="sig-field" id="ca_signature"></div>
           </div>
           <div class="flex gap-3" style="margin-top:var(--sp-4);">
             <button class="btn btn-primary btn-lg" id="btnSubmitCapture">提交捕捉登记</button>
@@ -1264,9 +1260,9 @@ const Shelter = {
       }
     });
 
-    const sigPad = TNR_UI.initSignaturePad(document.getElementById('ca_signature'));
+    const sigPad = TNR_UI.initSignatureField(document.getElementById('ca_signature'),
+      { title: '物业电子签名' });
     this._sigPad = sigPad;
-    document.getElementById('btnClearSig').addEventListener('click', () => sigPad.clear());
 
     document.getElementById('btnSubmitCapture').addEventListener('click', async () => {
       const propertyName = document.getElementById('ca_propertyName').value.trim();
@@ -1609,8 +1605,7 @@ const Shelter = {
         <div class="form-group"><label class="form-label">身份证号</label><input class="form-input" id="or_ownerIdCard" placeholder="身份证号"></div>
         <div class="form-group"><label class="form-label">领回原因<span class="req">*</span></label><textarea class="form-textarea" id="or_reason" placeholder="说明领回原因"></textarea></div>
         <div class="form-group"><label class="form-label">主人电子签名<span class="req">*</span></label>
-          <canvas class="signature-pad" id="or_signature"></canvas>
-          <button class="btn btn-secondary btn-sm mt-2" id="orClearSig">清除签名</button>
+          <div class="sig-field" id="or_signature"></div>
         </div>
       `;
     };
@@ -1622,8 +1617,8 @@ const Shelter = {
     });
 
     setTimeout(() => {
-      const sigPad = TNR_UI.initSignaturePad(document.getElementById('or_signature'));
-      document.getElementById('orClearSig').addEventListener('click', () => sigPad.clear());
+      const sigPad = TNR_UI.initSignatureField(document.getElementById('or_signature'),
+        { title: '主人电子签名' });
 
       document.getElementById('btnSubmitReturn').addEventListener('click', async () => {
         const petSel = document.getElementById('or_petCode');
@@ -2880,8 +2875,7 @@ const Shelter = {
         <div class="form-group"><label class="form-label">住址<span class="req">*</span></label><input class="form-input" id="rc_ownerAddress" placeholder="详细住址"></div>
         <div class="form-group"><label class="form-label">走失原因<span class="req">*</span></label><textarea class="form-textarea" id="rc_lostReason" placeholder="说明走失原因及找回经过"></textarea></div>
         <div class="form-group"><label class="form-label">回收人电子签名<span class="req">*</span></label>
-          <canvas class="signature-pad" id="rc_signature"></canvas>
-          <button class="btn btn-secondary btn-sm mt-2" id="rcClearSig">清除签名</button>
+          <div class="sig-field" id="rc_signature"></div>
         </div>
       `;
     };
@@ -2893,8 +2887,8 @@ const Shelter = {
     });
 
     setTimeout(() => {
-      const sigPad = TNR_UI.initSignaturePad(document.getElementById('rc_signature'));
-      document.getElementById('rcClearSig').addEventListener('click', () => sigPad.clear());
+      const sigPad = TNR_UI.initSignatureField(document.getElementById('rc_signature'),
+        { title: '回收人电子签名' });
 
       document.getElementById('btnSubmitRecover').addEventListener('click', async () => {
         const ownerName = document.getElementById('rc_ownerName').value.trim();
@@ -2946,8 +2940,7 @@ const Shelter = {
           <div class="form-group"><label class="form-label">接收人电话<span class="req">*</span></label><input class="form-input" id="cf_receiverPhone" value="${TNR_UI.escape(rec.receiverPhone || rec.receiver_phone || '')}"></div>
         </div>
         <div class="form-group"><label class="form-label">物业电子签名<span class="req">*</span></label>
-          <canvas class="signature-pad" id="cf_signature"></canvas>
-          <button class="btn btn-secondary btn-sm mt-2" id="cfClearSig">清除签名</button>
+          <div class="sig-field" id="cf_signature"></div>
         </div>
       `;
     };
@@ -2959,8 +2952,8 @@ const Shelter = {
     });
 
     setTimeout(() => {
-      const sigPad = TNR_UI.initSignaturePad(document.getElementById('cf_signature'));
-      document.getElementById('cfClearSig').addEventListener('click', () => sigPad.clear());
+      const sigPad = TNR_UI.initSignatureField(document.getElementById('cf_signature'),
+        { title: '物业电子签名' });
       document.getElementById('btnConfirmRelease').addEventListener('click', async () => {
         const receiverName = document.getElementById('cf_receiverName').value.trim();
         const receiverPhone = document.getElementById('cf_receiverPhone').value.trim();

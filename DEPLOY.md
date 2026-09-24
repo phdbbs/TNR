@@ -896,7 +896,7 @@ curl -s http://127.0.0.1/static/js/tnr-api.js | grep -c '_handleUnauthorized'
 判断方式（读访问日志，别猜）：
 
 ```bash
-grep -c 'v=20260923a' /var/log/nginx/access.log   # 为 0 才不用再升位
+grep -c 'v=20260924a' /var/log/nginx/access.log   # 为 0 才不用再升位
 ```
 
 

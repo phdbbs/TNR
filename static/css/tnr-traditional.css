@@ -1268,16 +1268,117 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
   justify-content: center;
 }
 
-/* === 19. 签名板 === */
-.signature-pad {
+/* === 19. 签名：页面只预览，手写在弹窗里进行 ===
+ *
+ * 为什么必须这样拆：画布必须写 `touch-action: none`，否则手指一划就去滚页面、
+ * 一个笔画也画不出来。但这一条会**整块吞掉触屏滚动手势** —— 旧版把画布直接
+ * 摆在表单里，用户手指落在签名区想上滑翻页，结果全被当成笔画（磊哥反馈的
+ * 「本来想上下滑动，结果都在输入签名」就是这个原因）。
+ *
+ * 所以页面上只留一张预览图（不拦手势），真正的画布搬进弹窗：
+ * 弹窗里本来就不需要滚动，`touch-action: none` 放在那儿才是正确语义。
+ */
+.sig-field { display: block; }
+
+.sig-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+  padding: var(--sp-3);
+  border: 2px dashed var(--border-ink);
+  border-radius: var(--r-lg);
+  background: var(--white);
+  cursor: pointer;
+  touch-action: auto;   /* 关键：预览块绝不吞滚动手势 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sig-field.has-value .sig-preview { border-style: solid; }
+
+.sig-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 160px;
+}
+
+.sig-preview .sig-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+/* 纯 CSS 的「笔」图标，避免再引一个图标字体 */
+.sig-preview .sig-placeholder::before {
+  content: '';
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  transform: rotate(-8deg);
+}
+
+.sig-tools { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); }
+
+.sig-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  /* 必须高于 TNR_UI.modal 的 1500：签名弹窗是从「编辑捕捉记录」等弹窗里开出来的，
+     低于它就会被压在下面点不到。toast 是 9999，仍在其上。 */
+  z-index: 1600;
+  background: rgba(28, 28, 28, 0.6);
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+}
+
+.sig-modal.show { display: flex; animation: fadeIn 0.15s ease; }
+
+.sig-modal-panel {
+  background: var(--white);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-lg);
+  width: 100%;
+  max-width: 560px;
+  padding: var(--sp-4);
+}
+
+.sig-modal-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.sig-modal-hint {
+  color: var(--ink-muted);
+  font-size: 12px;
+  margin: 4px 0 var(--sp-3);
+}
+
+.sig-canvas {
+  display: block;
+  width: 100%;
+  height: 220px;
   border: 2px solid var(--border-ink);
   border-radius: var(--r-lg);
   background: var(--white);
   cursor: crosshair;
-  touch-action: none;
-  width: 100%;
-  display: block;
+  touch-action: none;   /* 只有这里该写：弹窗内不需要滚动，手势全给画笔 */
 }
+
+.sig-modal-actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: var(--sp-4);
+}
+
+.sig-modal-actions .sig-spacer { margin-right: auto; }
 
 /* === 20. 时间线 === */
 .timeline {
@@ -1696,6 +1797,17 @@ body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(
   .modal { width: 92vw !important; max-width: 92vw !important; }
   .modal-lg, .modal-xl { width: 96vw !important; }
   .drawer { width: 92vw !important; }
+  /* 签名弹窗在手机上从底部升起，画布按视口高度自适应，
+     保证横屏（高度小）时「确定/取消」按钮仍在屏幕内、不用滚动 */
+  .sig-modal { padding: 0; align-items: flex-end; }
+  .sig-modal-panel {
+    max-width: 100%;
+    border-radius: var(--r-xl) var(--r-xl) 0 0;
+  }
+  .sig-canvas { height: 34vh; min-height: 160px; }
+  .sig-modal-actions { flex-wrap: wrap; }
+  .sig-modal-actions .btn { flex: 1 1 30%; }
+  .sig-modal-actions .sig-spacer { flex: 1 1 100%; margin-right: 0; order: 3; }
   .btn { min-height: 38px; }
   .form-input, .form-select { min-height: 38px; font-size: 16px; }  /* 16px 防 iOS 聚焦缩放 */
   .pagination { justify-content: center; }
