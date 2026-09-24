@@ -2315,3 +2315,67 @@ class SignatureModalFieldTest(SimpleTestCase):
         self.assertGreater(int(m.group(1)), 1500,
                            '签名弹窗的 z-index 必须高于 TNR_UI.modal 的 1500')
 
+
+class LocationFlowTest(SimpleTestCase):
+    """定位流程（第三十九轮）。
+
+    磊哥反馈「显示无法获取定位」。**实测结论：后端完全正常** ——
+    以真实湖北公网 IP 请求 `/api/business/geocode/ip/`，高德返回
+    「湖北省襄阳市襄城区中原街道晨光路幸福社区」，`source=client_ip`。
+    根因是站点跑在 `http://公网IP` 上：非安全上下文下浏览器**强制**禁止
+    `navigator.geolocation` 且连权限框都不弹，网页代码绕不过去。
+
+    代码侧真正能修的是「拿不到 GPS 时别白等 15 秒」和「把降级原因说清楚」。
+    """
+
+    SHELTER = PORTALS['shelter']
+
+    def test_gps_is_requested_in_two_stages(self):
+        """先高精度、失败再低精度。
+
+        旧版只发一次 `enableHighAccuracy: true` + 15 秒硬超时：高精度会强制
+        启用 GPS 芯片，室内要 20~30 秒才收敛，于是室内实测大量超时，
+        直接掉到城市级兜底 —— 现场体感就是「定位没用」。
+        """
+        html = read(self.SHELTER)
+        self.assertIn('_gpsOnce(true,', html, '缺少高精度阶段的请求')
+        self.assertIn('_gpsOnce(false,', html, '缺少低精度兜底阶段的请求')
+
+    def test_single_shot_high_accuracy_call_is_gone(self):
+        html = read(self.SHELTER)
+        self.assertNotIn('enableHighAccuracy: true, timeout: 15000', html,
+                         '旧的一次性高精度请求还在：室内会白等 15 秒才降级')
+
+    def test_denied_permission_does_not_retry(self):
+        """用户点了「拒绝」再问一次还是拒绝，不该白白再等一轮。"""
+        html = read(self.SHELTER)
+        idx = html.find('_doGpsLocate()')
+        self.assertGreater(idx, 0, '找不到 _doGpsLocate')
+        body = html[idx:idx + 2200]
+        self.assertIn('code === 1', body, '没有区分「用户拒绝」与「信号弱」')
+        self.assertIn('denied', body)
+
+    def test_idle_hint_is_a_single_constant(self):
+        """初始化与「重置表单」两处文案必须同源，不能各写一份字面量。"""
+        html = read(self.SHELTER)
+        self.assertIn('LOC_HINT_IDLE', html)
+        self.assertEqual(
+            html.count('未定位（点击「定位」获取当前地址及经纬度）'), 1,
+            '「未定位」提示出现多次 —— 两处字面量迟早会漂移，应收成常量')
+        self.assertEqual(
+            html.count('未定位（点击「定位」获取大致位置'), 1)
+
+    def test_server_ip_location_is_never_autofilled(self):
+        """`source === 'server_ip'` 拿到的**是服务器机房所在城市**，与用户无关。
+
+        线上真实事故：襄阳的手机点「定位」，详细地址被填成
+        「北京市东城区交道口街道辛安里南锣鼓巷」，用户直接提交。
+        宁可留空让用户手填，也不要给一个看起来合理的错地址。
+        """
+        html = read(self.SHELTER)
+        idx = html.find("info.source === 'server_ip'")
+        self.assertGreater(idx, 0, '找不到 server_ip 分支')
+        branch = html[idx:idx + 700]
+        self.assertIn('pendingLocation = null', branch,
+                      'server_ip 的结果被写进了待提交定位 —— 会把用户带到一个'
+                      '与本人无关的城市地址')
