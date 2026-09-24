@@ -36,6 +36,13 @@ class Institution(models.Model):
     contact = models.CharField('联系人', max_length=50, blank=True, default='')
     phone = models.CharField('联系电话', max_length=20, blank=True, default='')
     status = models.CharField('状态', max_length=10, default='active')
+    # 建档时间。写法与 `District.created_at` 保持一致（DateField + auto_now_add）。
+    #
+    # 为什么必须补：政府端「机构管理」列表要按起止时间筛选，而这个模型此前
+    # **没有任何时间字段**。界面上的起止时间控件拿不到日期 → `inDateRange` 对
+    # 「设了区间、但记录没有时间」返回 false → **一设日期就整列空表**，
+    # 而且不报错、看起来就像「这个区间真的没有机构」。
+    created_at = models.DateField('创建时间', auto_now_add=True)
 
     class Meta:
         ordering = ['id']
