@@ -2923,3 +2923,76 @@ class NullableTimeFieldFallbackTest(SimpleTestCase):
             problems,
             '映射表里的可空时间字段没有配 created_at 兜底：\n  ' + '\n  '.join(problems))
 
+
+class CaptureCreateInteractionContractTest(SimpleTestCase):
+    """新增捕捉的默认一只 / 加号增行 / 三类必传材料契约。"""
+
+    PORTAL = PORTALS['shelter']
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.source = strip_js_comments(read(cls.PORTAL))
+
+    def _method(self, name):
+        marker = f'async {name}() {{'
+        start = self.source.find(marker)
+        self.assertGreaterEqual(start, 0, f'找不到 Shelter.{name}()')
+        end = self.source.find('\n  },', start)
+        self.assertGreater(end, start, f'Shelter.{name}() 未闭合')
+        return self.source[start:end]
+
+    def test_form_defaults_to_one_and_initializes_it_without_manual_generate(self):
+        body = self._method('render_capture_add')
+        self.assertRegex(body, r'id="ca_petCount"[^>]*value="1"')
+        self.assertNotIn('btnGenCodes', body,
+                         '新增捕捉不应再要求用户点击「自动生成」')
+        self.assertRegex(
+            body,
+            r'bindQtyStepper\(countInput,[\s\S]*?onChange:[\s\S]*?this\._generatePetEntries\(\)[\s\S]*?\);',
+            '数量右侧 + 必须触发重新生成编号和单只信息')
+        self.assertIn('await this._generatePetEntries();', body,
+                      '打开表单时必须自动生成默认的第 1 只')
+
+    def test_submit_checks_all_three_required_materials_before_formdata(self):
+        body = self._method('render_capture_add')
+        submit = body[body.find('id="btnSubmitCapture"'):]
+        # 用行为顺序锁定：三类必传守卫都要出现在 FormData 之前，
+        # 否则会出现「界面提示了，但已经开始提交」的半成品路径。
+        fd_pos = submit.find('new FormData()')
+        self.assertGreater(fd_pos, 0, '找不到新增捕捉 FormData 构造')
+        checks = (
+            "!this._groupPhoto || !this._groupPhoto.file",
+            "missingPetPhoto",
+            'sigPad.isEmpty()',
+        )
+        for check in checks:
+            with self.subTest(check=check):
+                self.assertGreater(submit.find(check), -1)
+                self.assertLess(submit.find(check), fd_pos,
+                                f'{check} 必须在 FormData/写请求前校验')
+        self.assertIn("fd.append('group_photo', this._groupPhoto.file)", submit)
+        self.assertIn("fd.append('signature', sigPad.getDataURL())", submit)
+        self.assertIn("fd.append('pet_photo_' + code, rec.file)", submit)
+
+    def test_reset_restores_the_default_first_animal(self):
+        """重置后必须重新生成第 1 只。
+
+        「自动生成」按钮移除后，数量右侧的 + 是唯一增行入口；若重置只把数量
+        设回 1 却不生成条目，用户就**再也没有办法录入任何一只**了 —— 而这条
+        路径在页面上看起来完全正常（空列表 + 数量 1，点 + 也只能从 1 变 2，
+        编号与条目依旧对不上）。
+        """
+        body = self._method('render_capture_add')
+        # ⚠ 只搜 `btnResetCapture` 会先命中按钮**标签**本身（`id="btnResetCapture">重置表单`），
+        #   截取到的片段里根本没有回调，断言就成了空转。必须定位到事件绑定处。
+        start = body.find("getElementById('btnResetCapture')")
+        self.assertGreater(start, 0, '找不到「重置」按钮的事件绑定')
+        end = body.find('\n    });', start)
+        self.assertGreater(end, start, '重置回调未闭合')
+        reset = body[start:end]
+        self.assertIn("addEventListener('click', async () => {", reset,
+                      '重置回调必须是 async，才能等待编号生成')
+        self.assertIn('await this._generatePetEntries();', reset,
+                      '重置后必须重新生成默认的第 1 只')
+

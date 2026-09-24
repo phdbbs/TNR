@@ -1020,27 +1020,26 @@ const Shelter = {
             <div class="form-group"><label class="form-label">捕捉数量<span class="req">*</span></label>
               <div class="flex gap-2 items-center">
                 <input type="number" class="form-input" id="ca_petCount" min="1" max="100" value="1" style="max-width:72px;text-align:center;">
-                <button class="btn btn-secondary btn-sm" id="btnGenCodes">自动生成</button>
               </div>
-              <div class="form-hint">输入数量后自动生成对应数量的单只照片与档案信息项（编号由服务端生成，保证全局唯一）</div>
+              <div class="form-hint">已默认生成 1 只及其编号；点击数量右侧「+」增加一只，系统会自动生成新编号、单只信息和照片项（编号由服务端生成，保证全局唯一）</div>
             </div>
             <div class="form-group"><label class="form-label">宠物编号列表（一宠一档）</label>
               <div id="ca_petCodes" style="border:1px solid var(--border-light);border-radius:6px;padding:8px;min-height:40px;background:var(--rice-light);">
-                <span class="text-light fs-sm">输入数量后自动生成</span>
+                <span class="text-light fs-sm">正在生成编号…</span>
               </div>
             </div>
           </div>
-          <div class="form-group"><label class="form-label">整体合影</label>
+          <div class="form-group"><label class="form-label">整体合影<span class="req">*</span></label>
             <div class="upload-area" id="ca_groupUpload" style="padding:20px;cursor:pointer;">
               <div class="upload-icon" id="ca_groupIcon">📷</div>
               <div class="upload-text" id="ca_groupText">点击上传整体合影</div>
               <div class="upload-hint" id="ca_groupHint">手机端会自动打开相机，电脑端会弹出文件选择器</div>
             </div>
           </div>
-          <div class="form-group"><label class="form-label">单只照片与档案信息（逐只填写）</label>
+          <div class="form-group"><label class="form-label">单只照片与档案信息（逐只填写）<span class="req">*</span></label>
             <div class="form-hint" style="margin-bottom:8px;">每只动物单独选择猫/狗、公/母并填写品种，信息会随该动物带入转运、回收、诊疗、领养、放养、死亡全流程</div>
             <div class="pet-entry-list" id="ca_petEntries">
-              <div class="text-light fs-sm">输入捕捉数量后自动生成</div>
+              <div class="text-light fs-sm">正在生成单只信息项…</div>
             </div>
           </div>
         </div>
@@ -1346,7 +1345,6 @@ const Shelter = {
     };
     countInput.addEventListener('input', () => scheduleGenerate(350));
     countInput.addEventListener('change', () => scheduleGenerate(0));
-    document.getElementById('btnGenCodes').addEventListener('click', () => this._generatePetEntries());
 
     // 数量加减按钮：移动端浏览器不显示 number 的原生上下箭头，两端统一用
     // TNR_UI.bindQtyStepper 提供的显式 −/+ 按钮（详见该方法注释）。
@@ -1358,6 +1356,10 @@ const Shelter = {
         this._generatePetEntries();   // 主动操作立即生效；已填属性按「第几只」保留
       }
     });
+
+    // 打开「新增捕捉」即完成第一只的编号与信息项初始化，不再要求用户
+    // 先输入数量、再额外点击「自动生成」。数量右侧的 + 是后续增行唯一入口。
+    await this._generatePetEntries();
 
     const sigPad = TNR_UI.initSignatureField(document.getElementById('ca_signature'),
       { title: '物业电子签名' });
@@ -1372,13 +1374,23 @@ const Shelter = {
       if (!contactPhone) { TNR_UI.toast('请填写联系电话', 'warning'); return; }
       const communityName = document.getElementById('ca_communityName').value.trim();
       if (!communityName) { TNR_UI.toast('请填写所在小区', 'warning'); return; }
-      if (!this._pendingCodes || this._pendingCodes.length === 0) { TNR_UI.toast('请先填写捕捉数量，系统会自动生成动物信息项', 'warning'); return; }
+      if (!this._pendingCodes || this._pendingCodes.length === 0) { TNR_UI.toast('动物信息项尚未生成，请稍候再提交', 'warning'); return; }
       // 数量框与已生成的编号必须一致：不一致时提交会用「已生成的编号」落库，
       // 而界面上显示的数量是另一个数——用户看到的是 2 只、库里却是 4 只。
       const wantCount = parseInt(document.getElementById('ca_petCount').value) || 0;
       if (wantCount !== this._pendingCodes.length) {
         TNR_UI.toast('数量与已生成的动物信息不一致（当前填写 ' + wantCount + ' 只，已生成 '
           + this._pendingCodes.length + ' 只），请重新输入数量后再提交', 'warning');
+        return;
+      }
+      if (!this._groupPhoto || !this._groupPhoto.file) {
+        TNR_UI.toast('请先上传整体合影', 'warning');
+        return;
+      }
+      const missingPetPhoto = (this._pendingCodes || []).find(code =>
+        !this._petPhotos || !this._petPhotos[code] || !this._petPhotos[code].file);
+      if (missingPetPhoto) {
+        TNR_UI.toast('请上传动物 ' + missingPetPhoto + ' 的单只照片', 'warning');
         return;
       }
       if (sigPad.isEmpty()) { TNR_UI.toast('请完成物业电子签名', 'warning'); return; }
@@ -1457,11 +1469,14 @@ const Shelter = {
       }
     });
 
-    document.getElementById('btnResetCapture').addEventListener('click', () => {
+    // 重置后必须重新生成默认的第 1 只：现在「自动生成」按钮已经移除，
+    // 数量右侧的 + 是唯一增行入口，而它在数量为 1 时不会减少也不会凭空
+    // 补出第一只——重置完若留空，用户就再也没有办法录入任何一只了。
+    document.getElementById('btnResetCapture').addEventListener('click', async () => {
       document.querySelectorAll('#page-capture-add input, #page-capture-add textarea').forEach(i => { if (i.type !== 'button') i.value = ''; });
       document.getElementById('ca_petCount').value = 1;
-      document.getElementById('ca_petCodes').innerHTML = '<span class="text-light fs-sm">输入数量后自动生成</span>';
-      document.getElementById('ca_petEntries').innerHTML = '<div class="text-light fs-sm">输入捕捉数量后自动生成</div>';
+      document.getElementById('ca_petCodes').innerHTML = '<span class="text-light fs-sm">正在生成编号…</span>';
+      document.getElementById('ca_petEntries').innerHTML = '<div class="text-light fs-sm">正在生成单只信息项…</div>';
       document.getElementById('ca_petPhotoInputs').innerHTML = '';
       document.getElementById('ca_locInfo').textContent = LOC_HINT_IDLE;
       pendingLocation = null;
@@ -1478,6 +1493,7 @@ const Shelter = {
       if (groupIcon) groupIcon.outerHTML = '<div id="ca_groupIcon" style="font-size:20px;">📷</div>';
       if (groupText) groupText.textContent = '点击上传整体合影';
       if (groupHint) groupHint.textContent = '手机端会自动打开相机，电脑端会弹出文件选择器';
+      await this._generatePetEntries();
     });
   },
 
