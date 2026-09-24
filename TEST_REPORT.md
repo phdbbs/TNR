@@ -6437,5 +6437,118 @@ curl -s -b cookies.txt http://127.0.0.1:8000/gov/ | grep -c '<唯一标记>'
 
 ### 七、提交
 
-按主题分 6 批：模板缓存修复 / 模型字段 + 迁移 / 后端兜底 / 前端实现 / 测试 / 文档，
-推送 cnb.cool · gitee · github 三个远程。
+按主题分 7 批：模板缓存修复 / 模型字段 + 迁移 / 后端兜底 / 前端实现（含豁免修正）/
+测试 / 文档 / sqlite 路径变量，推送 cnb.cool · gitee · github 三个远程。
+
+**逐提交验证抓到 1 个红提交**（这正是它的价值）：
+
+```
+########## [3/6] 6cdbeb5 feat(frontend): 全站列表与「数据概览」统一支持起止时间筛选
+Ran 1173 tests in 387.898s
+FAILED (failures=1)
+  FAIL
+```
+
+`feat(frontend)` 在 gov 物料页给 `[data-mat-range]` 预设按钮**直接绑了监听器**
+（这些按钮在卡片头部、不在 `mountTable` 会重建的 `tbody` 里，走
+`direct-bind-ok` 豁免是**正当的**），而那个豁免机制本身是**死代码** ——
+它在 `strip_js_comments()` 之后的文本里找标记，注释早已被替换成等长空白，
+标记永远找不到。原计划的 `test(...)` 提交里顺手修了它，但那让
+`feat(frontend)` 成了历史里唯一一个红提交。
+
+**处置**：把豁免修正（3 行判据 + 1 条上锁用例）并入 `feat(frontend)`
+（它是该提交引入的直接绑定所**必需的前置**），并改写 `test(...)` 的提交信息。
+重排后 `git diff <备份分支> HEAD` 为**空** —— 最终内容一字未变。
+
+教训：**当新代码依赖一个「既有机制」时，先验证那个机制真的生效**，
+不要假定「文档写了它就有效」。这里的机制是一条写在文档里的豁免约定，
+而它是死代码，撞上去的人只会看到「照文档做还是失败」。
+
+### 八、重排历史后如何避免重跑 45 分钟
+
+7 个提交 × 全量 6.5 分钟 = 45 分钟。重排只改动了 1 个提交的树，所以：
+
+```
+for pair in 46e6152:46e6152 3c21d9e:3c21d9e eb0bba6:eb0bba6 \
+            6cdbeb5:e996b42 ab669a0:a8ff467 f745078:2b8d895 d7213bc:74854a5; do
+  git diff --quiet "${pair%%:*}" "${pair##*:}" && echo "树相同" || echo "树不同"
+done
+```
+
+实测只有 `6cdbeb5 → e996b42` 一对树不同，其余 6 个提交与**已验证绿**的旧提交
+逐字节相同 → 只需重验那一个（1174 项 OK）。**用「树是否相同」把验证范围
+收敛到真正变化的部分**，比无脑全量重跑快 7 倍，且证据更硬。
+
+### 九、生产部署与端到端验收（2026-09-24 17:12）
+
+**部署**：`e3c7bc1 → 74854a5`，`git reset --hard` + `migrate` + `collectstatic`
++ `supervisorctl restart`。生产是 **MySQL**（Docker 容器 `1Panel-mariadb-LQ69`），
+与本地 `sqlite3` 不同源。
+
+迁移 `core/0005` 在生产 MySQL 上的**真实 DDL**（部署前用临时落盘 + `sqlmigrate` 预演）：
+
+```sql
+ALTER TABLE `core_institution` ADD COLUMN `created_at` date DEFAULT '2026-09-24' NOT NULL;
+ALTER TABLE `core_institution` ALTER COLUMN `created_at` DROP DEFAULT;
+```
+
+非破坏、存量行拿到执行日。**改前改后数据对比**：
+
+| 判据 | 结果 |
+|---|---|
+| 机构行数（迁移前 → 后） | 10 → **10** ✅ |
+| `core_institution.created_at` 为空的行数 | **0** ✅ |
+| 业务表 Pet / Capture / Adoption / Transfer | 10 / 4 / 1 / 6 → **未变** ✅ |
+| 全库 31 张表行数 | 901 → 906（**仅** `sessions.Session` 92→97，是验收登录产生的）✅ |
+
+**服务端验收**（Django test client 直打生产，46 项）：
+
+- 五端门户页均 200，且都引用了公共层；台账 8 分支 **宽区间条数 == 不带参数条数**
+  （这是可空业务时间缺 `created_at` 兜底那个真缺陷的回归判据）、窄区间 0 条、
+  非法日期 400 而非 500；机构列表 10/10 带非空驼峰 `createdAt`。
+
+**浏览器端到端**（Playwright 真浏览器，`TNR_BASE=http://100.99.98.71`）：
+
+```
+通过 208｜失败 0｜跳过 22
+```
+
+跳过项均为「该列表在生产上暂无数据」（空列表上四条断言恒真，通过说明不了什么，
+所以记 SKIP 而不是 PASS）。
+
+### 十、本轮新踩的两个部署坑
+
+**1. `docker exec -i` 会吞掉经 stdin 送进来的脚本**
+
+部署脚本是通过 `ssh 'sudo bash -s' < script.sh` 送进去的，而 `docker exec -i`
+会让容器进程去读 **stdin** —— 于是**脚本自己剩下的内容被它吃掉**。
+表现极具误导性：脚本在第 3 步之后**无声中断**、返回码仍是 0，
+输出看着一切正常，而生产**一行没改**（`HEAD` 还停在旧提交）。
+
+修法：`docker exec`（**不带 `-i`**，查询不需要 stdin）+ 补 `</dev/null` 双保险。
+
+**2. `mariadb` 客户端不认 dump 选项 → 0 字节空备份**
+
+`docker exec … mariadb --single-transaction --routines --triggers` 报
+`unknown option`，产出 **0 字节**的 `db-tnr_system.sql`。
+dump 必须用 **`mariadb-dump`**，查询才用 `mariadb`。
+⚠ 这正是「备份成功」沦为一句空话的地方 —— 脚本必须设**大小闸门**
+（实测正常 dump 243 KB，0 字节或 2 KB 都要报警）。
+
+### 十一、`DB_NAME` 在 sqlite 分支被静默忽略（已修）
+
+`settings.py` 的 sqlite 分支原先**写死** `BASE_DIR / 'db.sqlite3'`，
+即 `DB_NAME` 只在 mysql 分支生效。后果是「在副本库上预演一次迁移」这个动作
+**静默失效**：环境变量被忽略、迁移照样打在**真实库**上，命令返回 0、
+输出一切正常，只有事后对比行数才发现库被动过。
+
+本轮实测踩到：想预演 `core 0005` 的「回退 → 前滚」，用
+`DB_NAME=/tmp/x.sqlite3` 指定副本，实际打的是 `db.sqlite3`；
+回退后副本库里 `created_at` 列**还在**，一度被误读成
+「SQLite 的 `RemoveField` 不删列」—— 其实是副本根本没被回退。
+
+修法：给 sqlite 单独一个变量名 **`DB_SQLITE_PATH`**，**故意不复用 `DB_NAME`**
+（后者语义是「MySQL 的库名」，混用会带来反向 footgun：把生产 `.env` 里的
+`DB_NAME=tnr_system` 抄到本地，会在 cwd 建一个叫 `tnr_system` 的 sqlite 文件）。
+不设该变量时行为与从前**完全一致**。
+
