@@ -274,10 +274,21 @@ if _db_engine == 'mysql':
         }
     }
 else:
+    # ⚠ sqlite 分支原先**写死** `BASE_DIR / 'db.sqlite3'`，即 `DB_NAME` 只在
+    #    mysql 分支生效。后果：想「在副本库上预演一次迁移」（`DB_NAME=/tmp/x.sqlite3
+    #    manage.py migrate`）时，环境变量被**静默忽略**，迁移**照样打在真实库上** ——
+    #    命令返回 0、输出一切正常，只有事后对比行数才发现库被动过。
+    #    （第四十轮实测踩到：预演 `core 0005` 回退+前滚，实际打的是 `db.sqlite3`。）
+    #
+    #    所以这里给 sqlite 单独一个变量名 `DB_SQLITE_PATH`，**故意不复用 `DB_NAME`**：
+    #    `DB_NAME` 的语义是「MySQL 的库名」，两者混用会带来反向footgun
+    #    （把 `DB_NAME=tnr_system` 从生产 `.env` 抄到本地，会在 cwd 建一个叫
+    #    `tnr_system` 的 sqlite 文件）。不设该变量时行为与从前完全一致。
+    _sqlite_path = os.environ.get('DB_SQLITE_PATH')
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
+            'NAME': Path(_sqlite_path).expanduser() if _sqlite_path else BASE_DIR / 'db.sqlite3',
         }
     }
 
