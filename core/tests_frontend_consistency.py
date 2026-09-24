@@ -11,6 +11,7 @@ import os
 import re
 
 from django.test import SimpleTestCase
+from html.parser import HTMLParser
 
 from business.models import Adoption, Capture, CheckIn, MaterialTransaction, Pet, Treatment, Transfer
 from business.services import MANAGEABLE_ROLES
@@ -2398,3 +2399,527 @@ class LocationFlowTest(SimpleTestCase):
         self.assertIn('pendingLocation = null', branch,
                       'server_ip 的结果被写进了待提交定位 —— 会把用户带到一个'
                       '与本人无关的城市地址')
+
+
+# ---------------------------------------------------------------------------
+# 「起止时间」搜索条件：每个列表（含数据概览）都要有，且判据必须唯一
+# ---------------------------------------------------------------------------
+#
+# 需求原话：「每个列表的搜索条件包括『数据概览』，全部添加：起止时间 作为搜索条件。」
+#
+# 这类改动最容易留下三种**不报错**的缺陷：
+#   1. 某个列表**没挂**起止时间控件 —— 只是少个控件，肉眼扫不出来；
+#   2. 控件挂了但**没接判据** —— 填了日期列表纹丝不动，比没有控件更糟；
+#   3. 判据**各写一份** —— 同一个区间在不同页面筛出不同结果，永远对不上账。
+#
+# 下面的用例分别锁这三件事。
+# ---------------------------------------------------------------------------
+
+DATE_RANGE_KEYS = ('start_date', 'end_date')
+
+# 「控件存在、但判据在服务端」的列表渲染方法（需要明确理由才准豁免）。
+BACKEND_DATE_FILTERED = {
+    ('gov', 'renderLedgerTable'):
+        '台账走服务端过滤：start_date / end_date 直接透传给 /api/supervision/ledger/，'
+        '前端不再做内存过滤（否则会把服务端已分页的结果再筛一遍）',
+}
+
+# 领养人端不用 mountTable（移动端卡片列表），所以单独登记。
+ADOPTER_DATE_LISTS = (
+    ('renderHall', '领养大厅 —— 上架时间'),
+    ('renderMyAdoption', '我的领养 —— 申请 applied_at / 记录 adopted_at'),
+    ('renderCheckinHistory', '打卡历史 —— 提交时间'),
+    ('renderMessages', '消息中心 —— 产生时间'),
+)
+
+PORTAL_METHOD_HEADER = re.compile(
+    r'(?m)^  (?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{')
+TOP_FN_HEADER = re.compile(
+    r'(?m)^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{')
+ENSURE_DATE_BAR = re.compile(r"ensureDateBar\(\s*'([\w]+)'\s*,\s*'([\w]+)'")
+
+
+def call_first_arg(source, start):
+    """返回 `(` 之后**第一个顶层实参**的文本（忽略括号/引号内的逗号）。
+
+    用来判断 `inDateRange(<第一个实参>, start, end)` 的第一个实参里
+    到底比的是哪个时间字段 —— 实参可能跨多行、可能嵌套函数调用。
+    """
+    i, n, depth = start, len(source), 0
+    out = []
+    while i < n:
+        c = source[i]
+        if c in '\'"`':
+            q = c
+            out.append(c)
+            i += 1
+            while i < n and source[i] != q:
+                if source[i] == '\\':
+                    out.append(source[i])
+                    i += 1
+                out.append(source[i])
+                i += 1
+            out.append(q)
+            i += 1
+            continue
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            if depth == 0:
+                break
+            depth -= 1
+        elif c == ',' and depth == 0:
+            break
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
+def method_spans(source, header_re, stop_re=None):
+    """按「方法头」切分源码，返回 ``[(名字, 起, 止)]``。
+
+    **不用花括号配平**：门户模板里有大量跨行模板字符串（整段 HTML），
+    里面出现的 `{` / `}` 会让朴素计数失步，把方法体截断（假阴性）或越界
+    （假阳性）。方法头本身就是天然分隔符，按它切更稳 —— 代价是方法体
+    可能略微多算，方向上偏「宽松」，不会误报。
+    """
+    heads = [(m.group(1), m.start()) for m in header_re.finditer(source)]
+    stop = len(source)
+    if stop_re:
+        m = stop_re.search(source)
+        if m:
+            stop = m.start()
+    return [
+        (name, start, heads[i + 1][1] if i + 1 < len(heads) else stop)
+        for i, (name, start) in enumerate(heads)
+    ]
+
+
+def portal_body(source, var_name):
+    """取 `const <var_name> = { ... };` 的文本；找不到返回 None。"""
+    m = re.search(r'(?m)^(?:const|let|var)\s+' + re.escape(var_name) + r'\s*=\s*\{', source)
+    if not m:
+        return None
+    end = re.search(r'(?m)^\};', source[m.end():])
+    if not end:
+        return None
+    return source[m.start():m.end() + end.end()]
+
+
+class _IdParentParser(HTMLParser):
+    """收集模板里每个 ``id`` 的**最近的带 id 祖先**。
+
+    用来断言「时间筛选条」与「列表容器」是**兄弟节点** —— 这正是本项目
+    最防的那类静默缺陷：筛选条若被放进列表容器里，列表一重建它就被连同
+    节点一起清掉，用户看到的是「选完日期，控件消失了」。
+    """
+
+    VOID = frozenset((
+        'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+        'link', 'meta', 'param', 'source', 'track', 'wbr',
+    ))
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parent = {}
+        self.stack = []
+
+    def _parent_id(self):
+        for _tag, el_id in reversed(self.stack):
+            if el_id:
+                return el_id
+        return None
+
+    def handle_starttag(self, tag, attrs):
+        el_id = dict(attrs).get('id')
+        if el_id:
+            self.parent[el_id] = self._parent_id()
+        if tag not in self.VOID:
+            self.stack.append((tag, el_id))
+
+    def handle_endtag(self, tag):
+        if tag in self.VOID:
+            return
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                del self.stack[i:]
+                break
+
+
+class DateRangeFilterTest(SimpleTestCase):
+    """起止时间：公共层契约。"""
+
+    COMMON = 'static/js/tnr-common.js'
+
+    def test_render_filter_bar_appends_date_range(self):
+        """`renderFilterBar` 必须**默认追加**起止时间。
+
+        抽成常量 + 统一追加，而不是在 30 多个调用点各写一遍：逐处手写必然漏，
+        而漏掉的表现是「这一页没有起止时间」—— 不报错、只是少个控件。
+        """
+        source = read(self.COMMON)
+        idx = source.find("renderFilterBar(filters, actions = '', opts = {})")
+        self.assertGreater(idx, 0, 'renderFilterBar 签名变了，本用例需要同步')
+        body = source[idx:idx + 1800]
+        self.assertIn('DATE_RANGE_FILTERS', body,
+                      'renderFilterBar 不再引用 DATE_RANGE_FILTERS —— '
+                      '所有列表会一起丢掉起止时间控件')
+        self.assertIn('concat(this.DATE_RANGE_FILTERS)', body,
+                      '起止时间没有被拼进筛选条件列表')
+
+    def test_date_range_filters_are_idempotent(self):
+        """筛选条自己已经写了 `start_date` 的，不得再追加一组。
+
+        重复追加会让同一页出现两组同名 `data-filter`，`getFilterValues`
+        后者覆盖前者 —— 用户在**上面那组**输入的值被**静默抹掉**。
+
+        ⚠ 这里必须断**行为**、不能断「标识符存在」：变异测试实测过，
+        把 `hasDateRange` 的值改成常量 `false`（= 幂等判断被废掉）之后，
+        `assertIn('hasDateRange', body)` 依然通过 —— 这种断言绿的原因和
+        被删掉的逻辑毫无关系。
+        """
+        source = read(self.COMMON)
+        idx = source.find("renderFilterBar(filters, actions = '', opts = {})")
+        body = source[idx:idx + 1800]
+        self.assertRegex(
+            body,
+            r"hasDateRange\s*=\s*list\.some\(\s*f\s*=>\s*f\s*&&\s*f\.key\s*===\s*'start_date'\s*\)",
+            '幂等判断不再是「按 start_date 探测」了 —— 同一页会出现两组同名筛选控件')
+        self.assertRegex(
+            body, r'opts\.noDateRange\s*\|\|\s*hasDateRange',
+            '幂等判断没有被真正接进追加条件')
+        self.assertIn('noDateRange', body,
+                      '缺少显式关闭的逃生口（留给没有时间字段的实体）')
+
+    def test_date_range_keys_match_backend_params(self):
+        """前端的 key 必须与后端读的查询参数同名。
+
+        政府端台账把这两个 key **直接透传**给 `/api/supervision/ledger/`；
+        前端改成 `dateFrom` 之类，后端只会收到空值 —— 筛选静默失效，
+        接口照样 200 返回全量。
+        """
+        source = read(self.COMMON)
+        idx = source.find('DATE_RANGE_FILTERS: [')
+        self.assertGreater(idx, 0, '找不到 DATE_RANGE_FILTERS')
+        block = source[idx:idx + 400]
+        keys = re.findall(r"key:\s*'([^']+)'", block)
+        self.assertEqual(keys, list(DATE_RANGE_KEYS),
+                         f'DATE_RANGE_FILTERS 的 key 变成了 {keys}，'
+                         f'与后端 parse_date_param 读的 {DATE_RANGE_KEYS} 不同名')
+
+        backend = read('supervision/views.py')
+        for key in DATE_RANGE_KEYS:
+            self.assertIn(f"request.GET.get('{key}')", backend,
+                          f'后端台账不再读 {key} —— 前端的起止时间会静默失效')
+
+    def test_in_date_range_is_the_single_implementation(self):
+        """全站**只有一个**时间区间判据，且换算本地日期。
+
+        - 各写一份必然漂移，漂移的表现是「同一个区间在不同页面筛出不同结果」；
+        - 裸截断 `.slice(0, 10)` 会把北京时间 00:00–08:00 的记录算到**前一天**。
+        """
+        source = read(self.COMMON)
+        idx = source.find('inDateRange(dateValue, start, end) {')
+        self.assertGreater(idx, 0, 'inDateRange 不见了')
+        body = source[idx:idx + 700]
+        self.assertIn('localDateStr', body,
+                      'inDateRange 必须用 localDateStr 换算本地日期，'
+                      '不能裸截断 ISO 串（UTC 串会让日期差一天）')
+        self.assertNotIn('slice(0, 10)', body)
+
+        # 除 tnr-common.js 外，任何前端文件都不得再**定义**一份同名判据。
+        # （各端调用 `inDateRange(dateValue, ...)` 是正常的，这里只认定义体。）
+        definition = re.compile(
+            r'inDateRange\s*\(\s*dateValue\s*,\s*start\s*,\s*end\s*\)\s*\{')
+        for rel in FRONTEND_FILES:
+            if rel == self.COMMON:
+                continue
+            self.assertIsNone(definition.search(read(rel)),
+                              f'{rel} 里又定义了一份 inDateRange —— 判据必须唯一')
+
+
+class DateRangeCoverageTest(SimpleTestCase):
+    """起止时间：每个列表都要真正接上判据。"""
+
+    def _spans(self, name, source):
+        """返回 ``(spans, body)``。
+
+        ⚠ `spans` 里的偏移一律换算成**相对整个 source 的绝对值** ——
+        门户端的方法定义在 `const Xxx = { ... }` 内部，若直接把「相对对象体」
+        的偏移拿去索引整个文件，切出来的就是**错位的一段**（实测会切到别的
+        方法上，报出一串根本不存在的缺陷）。
+        """
+        obj = PORTAL_OBJECTS.get(name)
+        if not obj:
+            return method_spans(source, TOP_FN_HEADER), source
+        m = re.search(r'(?m)^(?:const|let|var)\s+' + re.escape(obj) + r'\s*=\s*\{', source)
+        self.assertIsNotNone(m, f'{name}: 找不到门户对象 {obj}')
+        body = portal_body(source, obj)
+        self.assertIsNotNone(body, f'{name}: 门户对象 {obj} 未闭合')
+        base = m.start()
+        spans = [(n, base + s, base + e)
+                 for n, s, e in method_spans(body, PORTAL_METHOD_HEADER)]
+        return spans, source
+
+    def test_every_table_renderer_uses_the_date_judgement(self):
+        """凡调用 `mountTable(` 的方法，都必须**直接或间接**用到 `inDateRange`。
+
+        间接 = 调用了某个含 `inDateRange` 的辅助方法（如医院端 `_matQuery()`）
+        —— 只认直接调用会把「把判据抽成共用函数」这种**正确**做法判成缺陷。
+        """
+        problems = []
+        checked = 0
+        for name, rel in PORTALS.items():
+            source = strip_js_comments(read(rel))   # 等长替换，行号不变
+            spans, _body = self._spans(name, source)
+            segs = [source[s:e] for _n, s, e in spans]
+
+            # 含判据但不渲染表格的方法 = 可复用的时间判据助手
+            helpers = {
+                n for (n, _s, _e), seg in zip(spans, segs)
+                if 'inDateRange' in seg and 'mountTable(' not in seg
+            }
+
+            for (n, s, _e), seg in zip(spans, segs):
+                if 'mountTable(' not in seg:
+                    continue
+                if (name, n) in BACKEND_DATE_FILTERED:
+                    continue
+                checked += 1
+                direct = 'inDateRange' in seg
+                indirect = any(
+                    re.search(r'\b' + re.escape(h) + r'\b', seg) for h in helpers)
+                if not (direct or indirect):
+                    line_no = source.count('\n', 0, s) + 1
+                    problems.append(
+                        f'{name}:{line_no} {n}() 渲染了表格却没有任何时间判据 —— '
+                        '界面上有「开始/结束日期」，填了列表纹丝不动')
+
+        self.assertGreaterEqual(checked, 20, '解析到的列表渲染方法太少，用例可能已失效')
+        self.assertFalse(
+            problems,
+            '以下列表缺少起止时间判据：\n  ' + '\n  '.join(problems))
+
+    def test_backend_filtered_lists_still_pass_dates_through(self):
+        """豁免「前端不筛」的列表，必须真的把日期透传给服务端。
+
+        豁免清单如果被写成「什么都不做」，就等于把这个列表的起止时间
+        静默变成装饰品。
+
+        ⚠ 同样要断**值从哪来**，不能只断 `start_date:` 这个 key 存在 ——
+        变异测试实测过：把值改成字面量 `''` 之后，`assertIn('start_date:', seg)`
+        照样通过。
+        """
+        source = strip_js_comments(read(PORTALS['gov']))
+        spans, _ = self._spans('gov', source)
+        segs = {n: source[s:e] for n, s, e in spans}
+        seg = segs['renderLedgerTable']
+        for key in DATE_RANGE_KEYS:
+            self.assertRegex(
+                seg, key + r"\s*:\s*rawFilters\." + key,
+                f'政府端台账没有把用户填的 {key} 透传给后端（值被写成了常量）')
+
+    def test_adopter_lists_have_date_filters(self):
+        """领养人端 4 个列表：既要有筛选条，也要接判据。"""
+        source = strip_js_comments(read(PORTALS['adopter']))
+        spans = method_spans(source, TOP_FN_HEADER)
+        segs = {n: source[s:e] for n, s, e in spans}
+        for fn, desc in ADOPTER_DATE_LISTS:
+            self.assertIn(fn, segs, f'领养人端找不到 {fn}（{desc}）')
+            seg = segs[fn]
+            self.assertIn('inDateRange', seg, f'{fn}（{desc}）没有接时间判据')
+            self.assertIn('dateFilterOf', seg, f'{fn}（{desc}）没有读筛选状态')
+
+    def test_adopter_date_bars_sit_outside_the_list_containers(self):
+        """领养人端筛选条必须与列表容器**同级**。
+
+        放进列表容器里的后果：`renderXxx()` 一重建 innerHTML，输入框连同节点
+        一起被清掉 —— 用户看到「选完日期，控件没了」，而控制台干干净净。
+        """
+        html = read(PORTALS['adopter'])
+        tree = _IdParentParser()
+        tree.feed(html)
+        parent = tree.parent
+
+        expected_siblings = {
+            'hallDateBar': ('page-hall', 'hallList'),
+            'myAdoptionDateBar': ('page-my-adoption', 'myAdoptionList'),
+            'messagesDateBar': ('page-messages', 'messagesList'),
+            'checkinDateBar': ('checkinHistorySection', 'checkinHistory'),
+        }
+        for bar, (page, listing) in expected_siblings.items():
+            self.assertIn(bar, parent, f'模板里找不到 #{bar}')
+            self.assertIn(listing, parent, f'模板里找不到 #{listing}')
+            self.assertEqual(
+                parent[bar], page,
+                f'#{bar} 的父节点是 #{parent[bar]}，期望 #{page}')
+            self.assertEqual(
+                parent[listing], page,
+                f'#{listing} 的父节点是 #{parent[listing]}，期望 #{page}')
+            self.assertNotEqual(
+                parent[bar], listing,
+                f'#{bar} 被放进了 #{listing} 里面 —— 列表一重建筛选条就会消失')
+
+        # 打卡历史必须是独立区块，否则重渲染会把表单里填好的内容清空。
+        self.assertEqual(parent.get('checkinHistorySection'), 'page-checkin')
+        self.assertEqual(parent.get('checkinContent'), 'page-checkin')
+
+    def test_adopter_date_bar_mount_ids_exist(self):
+        """`ensureDateBar` 的挂载点 id 必须真实存在。
+
+        写错 id 的表现是「这一页根本没有筛选条」—— `getElementById` 返回
+        null，函数直接 return，不报错。
+        """
+        html = read(PORTALS['adopter'])
+        source = strip_js_comments(html)
+        pairs = ENSURE_DATE_BAR.findall(source)
+        self.assertGreaterEqual(len(pairs), 4,
+                                '领养人端挂载的起止时间筛选条少于 4 个')
+        self.assertIn('function dateBarHtml(key)', source,
+                      'dateBarHtml 不见了，筛选条渲染不出控件')
+        for key, mount_id in pairs:
+            self.assertIn(f'id="{mount_id}"', html,
+                          f'ensureDateBar({key!r}, {mount_id!r}) 的挂载点不存在')
+            # 状态表里必须有对应条目，否则 dateFilterOf 会现场新建一个
+            # —— 值读得回来，但**区间不会在页面间保留**，且失败时无从排查。
+            self.assertIn(f"{key}: {{ start: '', end: '' }}", source,
+                          f'dateFilters 里没有 {key} 的条目')
+
+    def test_institution_has_created_at(self):
+        """`Institution` 必须有建档时间。
+
+        政府端「机构管理」列表要按起止时间筛选，而 `Institution` 曾经是
+        **唯一没有任何时间字段**的业务列表实体。缺字段不会报错：
+        `inDateRange` 对「设了区间、记录没有时间」返回 false →
+        **一填日期就整列空表**，看起来就像「这个区间真的没有机构」。
+        """
+        from core.models import Institution
+        field_names = {f.name for f in Institution._meta.concrete_fields}
+        self.assertIn('created_at', field_names,
+                      'Institution 缺少 created_at —— 政府端机构列表的'
+                      '起止时间会把所有机构筛掉（空表且不报错）')
+
+
+# ---------------------------------------------------------------------------
+# 可空时间字段必须带「创建时间」兜底
+# ---------------------------------------------------------------------------
+#
+# `inDateRange` 的语义是「设了区间、记录没有时间 → 排除」。这条语义只有在
+# **每行都拿得到时间**时才是对的。但很多业务时间是**可空**的，因为事件还没
+# 发生：`Adoption.adopted_at`（待领出为空）、`Transfer.received_at`（待签收为空）、
+# `Euthanasia.euthanized_at`、`Release.released_at` 都是这样。
+#
+# 直接拿它们当唯一判据的后果**不是报错**，而是：用户圈一个「全部」区间
+# （2000~2099）反而把这些行**藏起来**。GUI 实测抓到过 ——
+# `Adoption` 5 行，圈 2000~2099 后只剩 3 行，界面没有任何提示。
+# ---------------------------------------------------------------------------
+
+# 事件未发生时即为空的业务时间字段（驼峰与蛇形两种别名都列上）。
+#
+# 判定依据是**模型的 `null=True`**，不是「名字里带 at」：
+#   Adoption.adopted_at / Release.released_at / Euthanasia.euthanized_at /
+#   Transfer.received_at / OwnerReturn.return_time / AdoptionHallListing.published_at
+# 都是 `null=True`（`business/models.py` 可查）。
+#
+# ⚠ 特意**不**收录 `last_at`：它不是模型字段，而是公告列表聚合出来的
+# `Max('created_at')`（`supervision/views.py` 的 notices 接口）。分组里
+# 至少有一条 Message，`Max` 必然有值 —— 把它当可空字段会逼着调用点写一个
+# 永远用不上的兜底，属于「按名字猜」而不是「按事实判」。
+NULLABLE_TIME_FIELDS = (
+    'adopted_at', 'adoptedAt',
+    'released_at', 'releasedAt',
+    'euthanized_at', 'euthanizedAt',
+    'received_at', 'receivedAt',
+    'return_time', 'returnTime',
+    'published_at', 'publishedAt',
+)
+
+# 把时间值当参数传进去的判据助手（调用点上不出现字段名，单独用行级规则兜）。
+DATE_FILTER_HELPERS = (
+    'inDateRange', 'inRange(', 'inR(', 'hit(', 'matInR', '_inRange', '_dashInRange',
+)
+
+
+class NullableTimeFieldFallbackTest(SimpleTestCase):
+    """可空业务时间字段一律要退到 `created_at`。"""
+
+    CALL = re.compile(r'inDateRange\s*\(')
+
+    def _nullable_in(self, text):
+        return [f for f in NULLABLE_TIME_FIELDS
+                if re.search(r'\.' + re.escape(f) + r'\b', text)]
+
+    def test_in_date_range_args_fall_back_to_created_at(self):
+        """`inDateRange(<可空字段>, ...)` 的第一个实参必须含 `created`。"""
+        problems = []
+        checked = 0
+        for name, rel in PORTALS.items():
+            source = strip_js_comments(read(rel))
+            for m in self.CALL.finditer(source):
+                arg = call_first_arg(source, m.end())
+                fields = self._nullable_in(arg)
+                if not fields:
+                    continue
+                checked += 1
+                if 'created' not in arg.lower():
+                    line_no = source.count('\n', 0, m.start()) + 1
+                    problems.append(
+                        f'{name}:{line_no} 用 {"/".join(fields)} 做唯一判据、'
+                        f'没有 created_at 兜底 → {arg.strip()[:80]}')
+        self.assertGreater(checked, 0, '没有解析到任何可空时间字段的调用点，用例可能已失效')
+        self.assertFalse(
+            problems,
+            '可空时间字段缺 created_at 兜底（圈「全部」区间会把这些行藏起来）：\n  '
+            + '\n  '.join(problems))
+
+    def test_helper_passed_dates_fall_back_to_created_at(self):
+        """把时间值当参数传给判据助手时，同一行也必须含 `created`。
+
+        `hit(r, r.releasedAt || r.released_at)` 这种写法里，`inDateRange`
+        收到的是一个变量，上一条用例看不见它 —— 但它同样是缺陷。
+        """
+        problems = []
+        checked = 0
+        for name, rel in PORTALS.items():
+            source = strip_js_comments(read(rel))
+            for line_no, line in enumerate(source.splitlines(), start=1):
+                if not any(h in line for h in DATE_FILTER_HELPERS):
+                    continue
+                fields = self._nullable_in(line)
+                if not fields:
+                    continue
+                checked += 1
+                if 'created' not in line.lower():
+                    problems.append(f'{name}:{line_no} {line.strip()[:90]}')
+        self.assertGreater(checked, 0, '没有解析到任何「传参给判据助手」的行，用例可能已失效')
+        self.assertFalse(
+            problems,
+            '传参给判据助手时缺 created_at 兜底：\n  ' + '\n  '.join(problems))
+
+    def test_ledger_mapping_tables_list_created_at_fallback(self):
+        """两个「时间字段映射表」必须给可空字段配好兜底列表。
+
+        映射表把「哪个标签页比哪个字段」收口成一处（这是对的），但值是
+        **字段列表**而不是单个字段名 —— 只写 `adopted_at` 的话，待领出的单子
+        在任何区间下都筛不出来，包括「全部」。
+        """
+        problems = []
+        for name, rel, var in (
+            ('shelter', PORTALS['shelter'], 'LEDGER_DATE_KEYS'),
+            ('gov', PORTALS['gov'], 'SUP_DATE_KEYS'),
+        ):
+            body = find_object_literal(read(rel), var)
+            self.assertIsNotNone(body, f'{name}: 找不到 {var}')
+            entries = re.findall(r"(\w+)\s*:\s*\[([^\]]*)\]", body)
+            self.assertGreaterEqual(len(entries), 5, f'{name}: {var} 条目太少')
+            for tab, inner in entries:
+                fields = re.findall(r"'([^']+)'", inner)
+                self.assertGreaterEqual(
+                    len(fields), 1, f'{name}: {var}.{tab} 是空列表')
+                if any(f in NULLABLE_TIME_FIELDS for f in fields):
+                    if not any('created' in f.lower() for f in fields):
+                        problems.append(f'{name}: {var}.{tab} = {fields}')
+        self.assertFalse(
+            problems,
+            '映射表里的可空时间字段没有配 created_at 兜底：\n  ' + '\n  '.join(problems))
+
