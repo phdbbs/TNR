@@ -6797,3 +6797,267 @@ FAIL: test_same_district_gov_can_withdraw            （同区县转运单可撤
 
 > 这类缺陷**只有真的读一次页面文本**才会发现。全量单测永远发现不了它 ——
 > 它绿的原因和这段注释毫无关系。
+
+---
+
+## 第四十二轮（续）：生产部署与端到端验收（2026-09-27）
+
+### 部署
+
+脚本 `/tmp/tnr-deploy/p87_deploy42.sh`（`21af757 → 712cc0f`，幂等，MySQL 口径）。
+生产实况：`ubuntu@100.99.98.71`（Tailscale），库是 Docker 容器 `1Panel-mariadb-LQ69`。
+
+| 步骤 | 实测输出 |
+|---|---|
+| 起点 | `部署前 HEAD: 21af757`（与脚本预期一致） |
+| 改动清单 | 28 个文件；`→ collectstatic=0  migrate=1  restart=1` |
+| 备份 | 22 个改动文件 + MySQL dump **384024 字节 / 33 张表**（闸门 ≥10000 通过） |
+| 行数基线 | `6 14 6 1 10 9`（capture/pet/transfer/adoption/institution/user） |
+| 更新代码 | `HEAD is now at 712cc0f` |
+| 属主全仓修正 | 28 个，复查异常 **0** |
+| `manage.py check` | `no issues (0 silenced)` |
+| migrate | `Applying accounts.0003_alter_user_role... OK`，`showmigrations accounts` 三条全 `[X]` |
+| collectstatic | **跳过**（无 `static/` 改动 —— 避开 root/属主那条坑） |
+| 平台账号 | `已创建：platform` / `PLATFORM_ADMIN_CREDENTIALS=platform 123456` |
+| 重启 | `tnr-gunicorn` / `tnr-qworker` uptime 归零（`0:00:10` / `0:00:08`） |
+
+### 两个「看起来是缺陷、其实是判据写错」的追查
+
+**① 磁盘与下发内容里各残留 1 处「机构基础管理 / 账号权限管理」。**
+
+部署脚本的判据①写的是「应为 0」，实测是 1。追上下文：
+
+```
+gov_base.html:192:  {# 第四十二轮：「机构基础管理 / 账号权限管理 / 系统配置」三个全局设置页已迁至平台管理端（/platform/）。 #}
+gov/portal.html:80:     第四十二轮把「机构基础管理 / 账号权限管理 / 系统配置」三个**全局设置**页
+```
+
+前者是 `{# #}` 注释（**已被 Django 剥离，下发内容里没有**）；后者在
+`<script>` 内的 JS 块注释里（随 JS 源码下发、**不渲染为可见文本**）。
+两处都是本轮我自己写的说明性注释。**是判据写错了**（期望 0 没考虑到注释里会提到这些词）。
+
+同时反向确认：下发 HTML 里 `{#` / `{%` 计数都是 **0**，`{# #}` 泄漏没有回归。
+
+**② `Traceback 计数 73`。**
+
+这是 `grep -c Traceback <整份日志>` —— `MEMORY-deploy.md` 里明确记过的**错误判据**，
+它把历史错误与外部扫描器的 `DisallowedHost` 一起算进来。按时间窗口复算：
+
+```
+LASTBOOT=5670（最后一次 "Booting worker" 的行号，总行数 5680）
+sed -n "5671,$p" $LOG | grep -c Traceback   →  0
+```
+
+**重启后 0 个 Traceback**，且重启后无 `Bad Request` / `Internal Server Error` 记录。
+
+### 端到端验收（脚本 `/tmp/tnrprobe42/accept42.py`，经 nginx 80 端口）
+
+判据一律是**业务结果**，不是状态码。
+
+| 组 | 内容 | 结果 |
+|---|---|---|
+| A | 两个账号登录 | 2/2 |
+| B | 平台端侧栏恰 3 项、gov 侧栏恰 4 项、两页 `{#`/`{%` 均为 0、gov 侧栏无任何全局设置项 | 9/9 |
+| C | 角色闸门：gov→`/platform/`、platform→`/gov/`、platform→`/shelter/` 全部 302 挡回 `/` | 3/3 |
+| D | 平台端读接口**非空**：区县 5 行、机构 10 行、账号 10 行（含 platform）、**操作日志 76 条**、编号规则 11 项齐全 | 6/6 |
+| E | 政府端仍能看业务：大屏 digits=94、业务监管 / 物料监管可读、台账 **14 条** | 4/4 |
+| F | 政府端 6 个写/管理接口全部 **403** | 6/6 |
+| G | 平台端写操作真实落库（见下） | 6/6 |
+| H | 编号规则写接口补跑（正确路径 `/api/supervision/config/`） | 8/8 |
+
+**G 组 + 库内核对的业务结果**（`accept42_db.py`，17 项全 PASS）：
+
+| 判据 | 实测 |
+|---|---|
+| 新建机构真的落库 | 1 行，`id=11 code=I007 district=襄城区` |
+| 停用真的落库 | `status='inactive'`（不是只改了前端徽标） |
+| 编号规则写真的生效 | 改成 `CPX` → 回读得 `CPX` → 改回 `CAP` → 回读得 `CAP` |
+| 区县公告真的送达 | `sent=1`，库内 1 行 `Message(type='notice', district_id=2)`，收件人 `adopter1` |
+| 公告列表能读到该条 | `{'title':'验收测试-R42-区县公告','district_id':2,'sent_count':1}` |
+| 越权写全部没落库 | 越权账号 / 越权公告 / 越权机构**均不存在** |
+| 清理后回到基线 | 机构 11→10、Message 4→3、账号 10（不变） |
+
+⚠ 生产实测印证了「领养人归属必须从 `Adoption` 推导」这条口径：
+`adopter1` 的 `district_id = None`，而它能收到襄城区公告，靠的是
+`Adoption(district=2)` 反查 —— 读 `User.district` 会让区县公告收件人恒为空集。
+
+### 一次**探针自己写错路径**造成的 3 条假失败（诚实记录）
+
+首轮跑出 3 条 FAIL，全是 `POST /api/supervision/system_config/ → 404`：
+
+```
+FAIL  F4 政府端改编号规则 → 403   | status=404
+FAIL  G3 平台端保存编号规则成功   | status=404 msg=接口不存在
+FAIL  G4 编号规则改回 CAP 成功   | status=404
+```
+
+**真实路由是 `/api/supervision/config/`**（`supervision/urls.py: path('config/', views.system_config, name='system_config')`），
+`system_config` 是**视图函数名**，不是路径。改成正确路径后 8/8 通过。
+
+顺带说明：这个 404 返回的是 `{"success":false,"message":"接口不存在"}` ——
+**JSON 而非 HTML**，反向印证了第三十三轮加的 `/api/` 404 收口在生效。
+
+### 部署后另发现一处**真缺陷**：新建目录的属主漂移
+
+部署脚本第 5 步的 `chown` 循环遍历的是 `git ls-files`（**只有文件**），
+而 `git reset --hard` 新建的**目录**不在其中：
+
+```
+$ find /opt/tnr -type d -user root     （排除 venv/.git/media/staticfiles）
+./templates/portal/platform
+```
+
+本轮新增的 `templates/portal/platform/` 目录是 `root:root`。
+当前能跑（755 可读可进入），但这正是 `MEMORY-deploy.md` 记过的
+「属主是**三套**、且会累积」那条 —— 一旦权限位变严就是 500。
+
+已修（全仓目录 + 文件双重复检，均为 0），并**已把「目录也要 chown」写进
+`MEMORY-deploy.md`**：原来的循环只覆盖 `git ls-files`，是判据漏了而不是这次特有。
+
+### 验收后的收尾（3 个提交）
+
+生产验收跑通后又做了三件事，都是本轮自己引入的问题：
+
+| 提交 | 内容 |
+|---|---|
+| `8aca49a` `docs(supervision)` | 14 个管理接口收口到 `platform_admin` 后注释没跟上。`district_*` 四个还写着「仅市级管理员」；`system_config` 的 docstring 整段描述「政府端系统配置页对区级管理员可见 / 仅市级管理员可修改」—— **与代码完全相反**，本次排查时真的把我误导了一次。**纯注释，行为零变化。** |
+| `60980e7` `refactor(ui)` | 删掉四个「声明后零引用」的前端状态（gov `instState`/`settingsState`/`currentUser`、shelter **28 行** `navGroups`）；新增 `DeadPortalStateTest` 判据；顺带修正两处**报错行号偏移** |
+| `60a53d0` `tool(scripts)` | 把只在 `/tmp` 的内联 JS 语法检查器固化进 `scripts/check_inline_js.py`，补上 `platform` 页，并修掉「有语法错误的页也打 `✓`」的假绿 |
+
+**`DeadPortalStateTest` 的变异验证**（判据必须能红才算数）：
+往 `GovPortal` 注入 `deadState: { tab: 'x' }` → 变红，报出 `gov:74`；
+移除 → 变绿。
+
+> 报错行号原本是错的（报 `gov:1`）：`body` 是 `source` 的**切片**，
+> `body.find(...)` 是**相对偏移**，少了起点换算就会把排查者送到错误位置。
+> 同一个 bug 在既有的 `UndeclaredInstancePropertyTest` 里也有，一并修了。
+
+**`check_inline_js.py` 的变异验证**：往 `gov/portal.html` 注入多余逗号 →
+`/gov/` 报 `✗ ... SyntaxError`，退出码 1；复原后全 `✓`。
+（第一版每页无条件打 `✓`，于是「语法错误」与「✓ /gov/」并存 —— 典型假绿，已改为按页二选一。）
+
+### 本轮最终测试数
+
+| 范围 | 结果 |
+|---|---|
+| 全量 `manage.py test` | **1207 tests, OK**（380s；较迁移前 1206 +1 = 新增 `DeadPortalStateTest`） |
+| `core.tests_frontend_consistency` | 98 OK |
+| 逐提交 worktree 验证（3 个提交） | 见下 |
+| 生产端到端（HTTP） | 44 项判据，最终 0 失败 |
+| 生产库内核对 | 17 项全 PASS，且验收数据已清理干净 |
+
+**生产终态（第一次部署后，即 `712cc0f`）**：工作区脏文件 0，
+`tnr-gunicorn` / `tnr-qworker` RUNNING，重启后 Traceback **0**，
+业务表行数 `6 14 6 1 10 10`（对照基线 `6 14 6 1 10 9`，唯一差异是新增的 `platform` 账号），
+`check_data_integrity` → 「未发现一致性问题」，
+root 属主的文件与目录**均为 0**。
+
+（收尾三个提交推送后另做一次增量部署，记录见下一节。）
+
+---
+
+## 第四十二轮（续二）：收尾三个提交的增量部署与复验（2026-09-27）
+
+脚本 `/tmp/tnr-deploy/p88_deploy42b.sh`（`712cc0f → 60a53d0`，幂等）。
+
+| 步骤 | 实测 |
+|---|---|
+| 改动 | 5 个文件；`collectstatic=0 migrate=0 **restart=1**` |
+| 备份 | 4 个已存在文件（`scripts/check_inline_js.py` 是新增，无旧文件可备份）+ dump **390206 字节 / 33 表** |
+| 更新代码 | `HEAD is now at 60a53d0` |
+| 属主修正 | 文件 5 个、目录 0 个；**双重复检均为 0** |
+| `manage.py check` | `no issues` |
+| 重启 | uptime 归零 `0:00:10` / `0:00:09`（**模板改动必须重启**：生产走 `cached.Loader`） |
+
+### 判据①（磁盘）与判据②（**服务端实际下发**）
+
+| 判据 | 实测 |
+|---|---|
+| `gov/portal.html` 已无 `instState` / `currentUser` | 0 / 0 |
+| `shelter/portal.html` 已无 `navGroups:`（**声明形式**） | 0 |
+| 下发 `/gov/` 含 `instState` / `currentUser` | 0 / 0 |
+| 下发 `/shelter/` 含 `navGroups:` | 0 |
+| 下发 `/platform/`、`/gov/`、`/shelter/` 的 `{#` 计数 | 0 / 0 / 0 |
+| 下发 `/gov/` 长度 | 95971 → **95861**（少 110 字节 = 删掉的三行状态） |
+| 下发 `/platform/` 长度 | **65117**（未改动 → 逐字节一致，对照组） |
+| `admin → /platform/` 下发内容含「账号权限管理」 | 0（越权仍被挡回） |
+
+### 判据③
+
+```
+重启后 Traceback 数（权威判据）: 0
+整份日志 Traceback 数（错误判据）: 73   ← 历史 + 外部扫描器，仅作对照
+check_data_integrity: 未发现一致性问题
+业务表行数: 6 14 6 1 10 10   （基线 6 14 6 1 10 9）
+```
+
+### 复验：删掉 28 行 JS 之后，捕捉点端真的没坏
+
+`shelter/portal.html` 是本轮唯一**删掉代码**的门户，所以单独验两层：
+
+**① 语法层** —— 把生产**实际下发**的三个门户页拉回本机，逐段交给 `node --check`：
+
+```
+shelter.html   内联脚本 2 段  ✓ 242 字节 / ✓ 203590 字节
+gov.html       内联脚本 3 段  ✓ 841 / ✓ 230 / ✓ 75731
+platform.html  内联脚本 3 段  ✓ 810 / ✓ 224 / ✓ 47338
+→ 8 段全部合法，0 处失败
+```
+
+**② 功能层** —— 多角色冒烟 `smoke42_roles.py`，**18/18 PASS**（判据是接口真返回数据）：
+
+| 端 | 判据 |
+|---|---|
+| 捕捉点 `cy_shelter` | `/shelter/` 200；侧栏含核心业务项；**无 `navGroups:` 声明**；捕捉记录 6 / 转运 4 / 物料 8 / 全量台账 14 / 库存台账 6 / 领养大厅 1 |
+| 医院 `aixin_hosp` | `/hospital/` 200；待诊疗宠物 4 / 诊疗记录 3 |
+| 领养人 `adopter1` | `/adopter/` 200；我的领养 1 / 我的消息 3 |
+
+### 端到端验收复跑（37/37 PASS）
+
+首轮那 3 条假失败（探针路径写错）修正后全部通过：
+
+```
+PASS  F4 政府端改编号规则 → 403   | status=403
+PASS  G3 平台端保存编号规则成功   | status=200 msg=已更新 1 项配置
+PASS  G4 编号规则改回 CAP 成功   | status=200
+汇总：PASS 37 / FAIL 0
+```
+
+库内核对 **17/17 PASS**，验收数据清理干净（机构 11→10、Message 4→3）。
+
+### 又踩了一次「关键词计数把注释也算进去」
+
+判据「`shelter/portal.html` 已无 `navGroups`」实测返回 **1**。取上下文：
+
+```
+166: const Shelter = {
+167:   /* ⚠ 侧边栏由 `shelter_base.html` **服务端渲染**，不要在这里放导航结构：
+168:      曾经有一份 28 行的 `navGroups` 字面量留在这里，改了它对界面没有任何影响
+```
+
+是我**自己写的说明性注释**里提到了这个词。改用**声明形式**判定即归零：
+
+```
+grep -c 'navGroups:' shelter.html   →   0
+```
+
+> 同一天第三次栽在同一个形态上（前两次是「机构基础管理」与 Traceback 窗口）。
+> **通则：拿关键词计数当判据时，要问「这个词除了我要找的东西，还会在哪里出现」——
+> 优先用结构化/带语法的形式（`key:`、解析标签集合、时间窗口），不要用裸词。**
+
+### 生产终态（`60a53d0`）
+
+| 项 | 值 |
+|---|---|
+| 代码 | `HEAD=60a53d0`，工作区脏文件 **0** |
+| 服务 | `tnr-gunicorn` / `tnr-qworker` RUNNING |
+| 日志 | 重启后 Traceback **0**，`Bad Request` / `Internal Server Error` **0** |
+| 数据 | `6 14 6 1 10 10`（基线 `6 14 6 1 10 9`，唯一差异 = 新增 `platform` 账号） |
+| 残留验收数据 | **0**（机构 + 公告都按 `验收测试%` 前缀查过） |
+| `capture_prefix` | `CAP`（已复原） |
+| 一致性 | `未发现一致性问题` |
+| 属主 | root 属主文件 **0**、目录 **0** |
+| 探活 | `/login/`=200、`/platform/`=302、`/gov/`=302、`/shelter/`=302 |
+
+
+
