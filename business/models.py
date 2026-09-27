@@ -269,7 +269,7 @@ class MaterialTransaction(models.Model):
     TYPE_CHOICES = [
         ('purchase', '采购入库'),
         ('dispatch', '下发'),
-        ('receive', '医院签收'),
+        ('receive', '签收'),
         ('consume', '消耗'),
         ('adjustment', '异动'),
     ]
@@ -281,7 +281,20 @@ class MaterialTransaction(models.Model):
     batch_no = models.CharField('批号', max_length=50, blank=True, default='')
     supplier = models.CharField('供应商', max_length=100, blank=True, default='')
     from_to = models.CharField('来往方', max_length=100, blank=True, default='', help_text='如"爱心宠物医院"或"国药集团"')
-    hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='material_txns', verbose_name='医院')
+    # ⚠ `hospital` 的语义是**这笔流水的「对方机构」**，历史上只可能是医院，所以叫了这个名。
+    #   第四十五轮起捕捉点之间也能下发（市级 → 区县级），于是它也会指向捕捉点。
+    #   「本笔流水让**哪个机构**的库存发生变化」是另一件事，见下面的 `institution`。
+    hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='material_txns', verbose_name='对方机构')
+    # 「库存归属机构」——本笔流水**动的是哪个机构的库存**。
+    #   捕捉点侧采购/异动/下发 → 发起捕捉点；医院侧签收/消耗/异动 → 该医院。
+    #   为什么必须单独加一列：`hospital=None` 曾同时表示「捕捉点侧」和「没有对方机构」，
+    #   于是**发起捕捉点根本没有被记下来** —— 同一区县有两个捕捉点时，
+    #   台账里分不出这批货是从哪个点出去的（第四十五轮 C3 的根因）。
+    #   ⚠ 历史行这一列为 NULL，**不允许**回填猜测（同一区县可能有两个捕捉点，
+    #   猜错就是把库存记到别的机构名下）；读取侧一律把 NULL 当作「未归属」。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='material_stock_txns', verbose_name='库存归属机构')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='material_txns', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     date = models.DateField('日期')
@@ -297,6 +310,74 @@ class MaterialTransaction(models.Model):
 
     def __str__(self):
         return f'{self.get_type_display()} - {self.material_name} x{self.quantity}'
+
+
+class MaterialStock(models.Model):
+    """机构库存 —— 「一行 = 一个机构 + 一种物料的**当前库存**」。
+
+    为什么要有这张表（第四十五轮 Q3 方案 2）
+    ----------------------------------------
+    在这之前，库存只有 `Material.shelter_stock` **一个数**，含义是
+    「这个区县（的捕捉点）一共有多少」：同一区县有两个捕捉点时，
+    **分不出是哪个点的**；而医院侧的库存是**每次现算**的
+    （`get_hospital_stock()` = 4 次聚合），也就是「每次盘点都全量计算」。
+
+    磊哥的要求：区县级捕捉点也要有像医院那样**按机构**看得到的库存，
+    且**不要每次全量累加，要有已经算好的结果**。
+
+    于是这张表就是那个「已经算好的结果」：
+    - 写入侧：采购 / 下发 / 签收 / 消耗 / 异动，在**同一个事务里**
+      把对应机构那一行加或减（见 `services.apply_stock_delta()`）；
+    - 读取侧：看库存 = **直接读一行**（`services.get_institution_stock()`），
+      不做任何累加；
+    - 流水（`MaterialTransaction`）照旧逐笔完整记录 → 两者必须能互相验证，
+      对账规则见 `check_data_integrity` 的「机构库存与流水合计不一致」。
+
+    ⚠ 与 `Material.shelter_stock` 的关系：后者是**存量兼容字段**，
+    语义保持「该区县捕捉点合计」不变（界面不用改）。新写入会同时维护两者；
+    对账规则只在「该物料已有机构库存行」时才比较，避免把纯存量数据误报成脏数据。
+
+    区县归属：**故意不加冗余 `district` 外键** —— 这一行的归属恒等于
+    `institution.district`，加一列只是把同一个事实存两遍，反而制造漂移面
+    （与 `Message` 那种「归属要靠别的表反查、反查还会算错」的情形不同：
+    这里反查只有一跳且恒等）。因此走 `DISTRICT_LOOKUP` 声明式收敛。
+    """
+    material = models.ForeignKey(
+        'business.Material', on_delete=models.CASCADE, related_name='stocks', verbose_name='物资')
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.CASCADE, related_name='material_stocks', verbose_name='持有机构')
+    quantity = models.IntegerField('当前库存', default=0)
+    # 期初库存 —— 「这张表诞生之前就已经存在的量」。
+    #
+    # 为什么必须有这一列：`Material.shelter_stock` 是**种子数据直接写进去**的
+    # （`seed_data` 设字段、不写流水），所以「机构库存 == 该机构流水合计」这条
+    # 对账判据从第一天起就**恒不成立**（实测 16 行全不一致，流水侧是 0）。
+    # 把期初显式存下来，判据就能写成**精确等式**：
+    #
+    #     quantity == opening_quantity + 按机构归属的流水合计
+    #
+    # 否则只剩两个选择，都不好：① 造一条假的「期初采购」流水 → 台账里凭空
+    # 多出一笔没人下过的单；② 放宽判据（「只在有流水时比较」）→ 判据自己
+    # 变成一笔糊涂账，真正的漏记反而漏检。
+    opening_quantity = models.IntegerField('期初库存', default=0)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    # 本模型没有 `district` 外键，区县隔离必须沿机构派生 —— 不声明的话
+    # 区县角色一访问就 `FieldError` 500（市级账号走 `return all()` 绕过该分支，
+    # 只测市级账号**永远发现不了**，同 `CheckIn` / `AdoptionHallListing`）。
+    DISTRICT_LOOKUP = 'institution__district'
+
+    class Meta:
+        ordering = ['-id']
+        verbose_name = '机构库存'
+        verbose_name_plural = verbose_name
+        constraints = [
+            models.UniqueConstraint(
+                fields=['material', 'institution'], name='uniq_material_institution_stock'),
+        ]
+
+    def __str__(self):
+        return f'{self.institution.name} - {self.material.name} x{self.quantity}'
 
 
 # ============================================

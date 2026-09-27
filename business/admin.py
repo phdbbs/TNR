@@ -1,6 +1,7 @@
 from django.contrib import admin
 from .models import (
-    Pet, Capture, OwnerReturn, Transfer, Treatment, Material, MaterialTransaction,
+    Pet, Capture, OwnerReturn, Transfer, Treatment, Material, MaterialStock,
+    MaterialTransaction,
     Chip, Release, Adoption, AdoptionApplication, CheckIn, Blacklist, Euthanasia, Message, AdoptionHallListing,
 )
 
@@ -54,10 +55,17 @@ class MaterialAdmin(admin.ModelAdmin):
 
 @admin.register(MaterialTransaction)
 class MaterialTransactionAdmin(admin.ModelAdmin):
-    list_display = ('id', 'type', 'material_name', 'quantity', 'unit', 'from_to', 'ledger_no', 'district', 'date', 'created_at')
+    list_display = ('id', 'type', 'material_name', 'quantity', 'unit', 'from_to', 'hospital', 'institution', 'ledger_no', 'district', 'date', 'created_at')
     list_filter = ('type', 'district')
     search_fields = ('material_name', 'batch_no', 'supplier', 'from_to', 'ledger_no', 'operator_name')
     date_hierarchy = 'date'
+
+
+@admin.register(MaterialStock)
+class MaterialStockAdmin(admin.ModelAdmin):
+    list_display = ('id', 'material', 'institution', 'quantity', 'updated_at')
+    list_filter = ('institution__type', 'institution__district')
+    search_fields = ('material__name', 'institution__name')
 
 
 @admin.register(Chip)
