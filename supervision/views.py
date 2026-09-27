@@ -948,15 +948,48 @@ def business_supervision(request):
 @role_required('gov_city', 'gov_district')
 @login_required
 def material_supervision(request):
-    """物资全局统计：流水、库存、预警"""
-    # 物资列表（含库存）
-    material_qs = _scope_filter(Material.objects.all(), request)
+    """物资全局统计：流水、库存、预警
+
+    **「机构」维度的数据从哪来（第四十四轮）**：
+    - `Material` 只挂区县、**没有机构外键**，`shelter_stock` 就是「本区县捕捉点」的库存；
+    - `MaterialTransaction.hospital` 才是机构（医院），**医院库存只能由流水反推**。
+
+    政府端要「按机构看库存」，所以这里把每个物料的**各医院库存**一并算出来
+    （`materials[].hospital_stocks` = `{医院id: 库存}`），口径与
+    `business.services.get_hospital_stock()` **完全一致**（采购 + 签收 − 消耗 − 异动）。
+    ⚠ 不能逐条调 `get_hospital_stock()`：那是 4 次聚合 × (物料 × 医院)，
+    16 个物料 × 6 家医院 = 384 次查询。这里合成**一条 GROUP BY**、再在内存里按同一
+    口径相加 —— 两个数必须对得上，否则「物料监管」与「医院端库存」会各说各话。
+    """
+    material_qs = list(_scope_filter(Material.objects.all(), request))
+
+    # 物料 × 医院 × 类型 的合计（一条查询）。只统计本响应返回的物料，
+    # 免得把别区县医院的数字也带进响应体。
+    hospital_totals = {}   # material_id -> {hospital_id: {type: 合计}}
+    if material_qs:
+        agg = (MaterialTransaction.objects
+               .filter(material_id__in=[m.id for m in material_qs], hospital__isnull=False)
+               .values('material_id', 'hospital_id', 'type')
+               .annotate(total=Sum('quantity')))
+        for row in agg:
+            by_h = hospital_totals.setdefault(row['material_id'], {}).setdefault(row['hospital_id'], {})
+            by_h[row['type']] = row['total'] or 0
+
+    def _hospital_stocks(mid):
+        """按 `get_hospital_stock()` 的口径把分组合计合成库存。"""
+        return {
+            str(hid): (by_type.get('purchase', 0) + by_type.get('receive', 0)
+                       - by_type.get('consume', 0) - by_type.get('adjustment', 0))
+            for hid, by_type in (hospital_totals.get(mid) or {}).items()
+        }
+
     materials = []
     alerts = []
     for m in material_qs:
         item = serialize_instance(m)
         item['category_display'] = m.get_category_display()
         item['district_name'] = m.district.name if m.district else ''
+        item['hospital_stocks'] = _hospital_stocks(m.id)
         # 预警：库存低于安全库存
         if m.shelter_stock < m.safety_stock:
             alerts.append({
@@ -970,8 +1003,22 @@ def material_supervision(request):
         materials.append(item)
 
     # 流水列表
-    txn_qs = _scope_filter(MaterialTransaction.objects.all(), request)
-    transactions = [serialize_instance(t) for t in txn_qs]
+    # `select_related` 两个外键：`hospital` 与 `district` 都要取名字。
+    txn_qs = (_scope_filter(MaterialTransaction.objects.all(), request)
+              .select_related('hospital', 'district'))
+    transactions = []
+    for t in txn_qs:
+        item = serialize_instance(t)
+        # `hospital` 是外键，`serialize_instance` 只给 id；补机构名供台账列显示。
+        item['hospital_name'] = t.hospital.name if t.hospital_id else ''
+        # ⚠ `district_name` 必须补：台账标签的「区县」列与关键字搜索都在读
+        #   `r.district_name`，而 `serialize_instance` 对外键只给 id ——
+        #   漏了不会报错，整列安静地显示「—」、搜索也搜不到区县。
+        #   （同一份响应里 `materials` 一直有 `district_name`，很容易以为
+        #   流水行也有；这类「两个孪生列表只有一个补了字段」的洞，
+        #   靠肉眼比对看不出来，只能靠断言把两边都钉住。）
+        item['district_name'] = t.district.name if t.district_id else ''
+        transactions.append(item)
 
     # 汇总
     stats = {
@@ -980,18 +1027,20 @@ def material_supervision(request):
         'total_received': txn_qs.filter(type='receive').aggregate(t=Sum('quantity'))['t'] or 0,
         'total_consumed': txn_qs.filter(type='consume').aggregate(t=Sum('quantity'))['t'] or 0,
         'total_adjustment': txn_qs.filter(type='adjustment').aggregate(t=Sum('quantity'))['t'] or 0,
-        'material_count': material_qs.count(),
+        'material_count': len(material_qs),
         'transaction_count': txn_qs.count(),
         'alert_count': len(alerts),
     }
 
-    data = {
+    # 手工聚合的响应必须递归补驼峰（见 `with_camel_keys` 的说明）。本接口原先
+    # 是「`serialize_instance` 给两套键、手拼字段只给 snake」的混搭，现在统一补齐。
+    # `hospital_stocks` 的键是数字字符串，补驼峰时原样保留（不会翻倍）。
+    return json_ok(with_camel_keys({
         'materials': materials,
         'transactions': transactions,
         'alerts': alerts,
         'stats': stats,
-    }
-    return json_ok(data)
+    }))
 
 
 # ============================================
