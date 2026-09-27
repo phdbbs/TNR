@@ -12,19 +12,27 @@ from accounts.models import User
 from core.http import body_str, json_fail, json_ok, read_json_body
 
 
+#: 业务角色 → 门户入口 URL。**这是「系统里到底有几个端」的权威来源**：
+#: 登录后的跳转（`_redirect_by_role`）与门户首页的入口卡片都由它派生。
+#: 第四十三轮从 `_redirect_by_role` 内部提出来，供
+#: `core/tests_frontend_consistency.py::PortalLandingPageTest` 引用 ——
+#: 新增一个端却忘了在门户首页加卡片时，那条用例会直接变红。
+#: ⚠ 值必须是**可访问的绝对路径**（`reverse()` 的结果也接受）。
+ROLE_PORTAL_MAP = {
+    # 平台管理端是**独立的一端**：全局主数据的维护都在它名下，
+    # 政府端（gov_city / gov_district）只保留查看。
+    'platform_admin': '/platform/',
+    'gov_city': '/gov/',
+    'gov_district': '/gov/',
+    'shelter': '/shelter/',
+    'hospital': '/hospital/',
+    'adopter': '/adopter/',
+}
+
+
 def _redirect_by_role(user):
     """根据用户角色重定向到对应门户。"""
-    role_map = {
-        # 平台管理端是**独立的一端**：全局主数据的维护都在它名下，
-        # 政府端（gov_city / gov_district）只保留查看。
-        'platform_admin': '/platform/',
-        'gov_city': '/gov/',
-        'gov_district': '/gov/',
-        'shelter': '/shelter/',
-        'hospital': '/hospital/',
-        'adopter': '/adopter/',
-    }
-    return redirect(role_map.get(user.role, '/'))
+    return redirect(ROLE_PORTAL_MAP.get(user.role, '/'))
 
 
 def login_view(request):

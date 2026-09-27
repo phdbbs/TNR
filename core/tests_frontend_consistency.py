@@ -11,9 +11,10 @@ import glob
 import os
 import re
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 from html.parser import HTMLParser
 
+from accounts.views import ROLE_PORTAL_MAP
 from business.models import Adoption, Capture, CheckIn, MaterialTransaction, Pet, Treatment, Transfer
 from business.services import MANAGEABLE_ROLES
 
@@ -3100,4 +3101,173 @@ class CaptureCreateInteractionContractTest(SimpleTestCase):
                       '重置回调必须是 async，才能等待编号生成')
         self.assertIn('await this._generatePetEntries();', reset,
                       '重置后必须重新生成默认的第 1 只')
+
+
+# ============================================================
+# 第四十三轮：门户首页（`/portal/`）与登录页的「入口 + 账号提示」必须完整
+# ============================================================
+#: 演示账号清单文档 —— 「系统里有哪些演示账号」的权威来源。
+DEMO_ACCOUNTS_DOC = 'DEMO_ACCOUNTS.md'
+#: 账号提示的两个落点（门户首页 / 登录页）。改一处必须改另一处。
+DEMO_HINT_TARGETS = (
+    ('portal', '/portal/', 'portal-demo-hint'),
+    ('login', '/login/', 'login-demo-hint'),
+)
+
+
+class PortalLandingPageTest(TestCase):
+    """门户首页的入口卡片与账号提示必须与系统实际状态一致。
+
+    **真实案例（第四十二轮 → 第四十三轮）**：新增平台管理端 `/platform/` 后，
+    门户首页仍是「四端门户」：
+
+      * 平台管理端**在首页上完全不存在** —— 只有知道 URL 的人能手输进去；
+      * 政府监管端卡片却还在宣传「机构管理 / 账号权限」—— 那两块已经搬去平台端，
+        用户按文案去政府端找，**找不到任何入口，而系统不会有任何报错**；
+      * 登录页的演示账号提示同样漏了 `platform`，照着提示是进不去管理后台的。
+
+    这三条都不抛异常、不影响任何接口返回 200，属于典型的「文案承诺了不存在的
+    功能 / 新功能没有入口」。只能靠判据盯住。
+
+    **判据来源刻意不写死列表**：
+      * 「有几个端」→ `accounts.views.ROLE_PORTAL_MAP`（登录后往哪跳的权威定义）；
+      * 「有哪些演示账号」→ `DEMO_ACCOUNTS.md` 的表格。
+    写死的话，将来加一个端而忘了加卡片，闸门照样是绿的 —— 那正是本轮要防的。
+
+    **为什么是 `TestCase` 而不是本文件惯用的 `SimpleTestCase`**：这几条要
+    **渲染真实页面**（走完整请求栈），而 `request_started` 上挂着
+    `business.apps` 的启动补偿，它要查库；在 `SimpleTestCase` 里会被禁库拦下
+    并记一条 ERROR 堆栈 —— 那只是测试噪音，但会盖住真正的失败信号。
+    同 `core/tests.py::ApiAwareCsrfFailureEndToEndTest`。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        doc = read(DEMO_ACCOUNTS_DOC)
+        cls.doc_accounts = set(
+            re.findall(r'^\|\s*`([a-z][a-z0-9_]*)`\s*\|', doc, re.M))
+        cls.portal_urls = sorted(set(ROLE_PORTAL_MAP.values()))
+
+    # -- 辅助 ---------------------------------------------------------------
+
+    def _html(self, url):
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200, f'{url} 返回 {resp.status_code}')
+        # ⚠ 先剥 HTML 注释再断言。本文件已经**两次**栽在「判据是源码里有没有
+        #   出现 X，而修复时顺手写的说明注释正好包含 X」上（见
+        #   `strip_html_comments` 的注释）。剥掉之后断言的是**用户真正看得见的
+        #   文字**，语义也更准确：HTML 注释不会渲染给用户。
+        return strip_html_comments(resp.content.decode('utf-8'))
+
+    @staticmethod
+    def _card(html, accent):
+        """按 `data-accent` 截出**卡片**（`<a>`）那一块。
+
+        ⚠ 必须锚在 `<a class="portal-card` 上：同一段渲染结果里 `<style>`
+          也含 `data-accent="gold"` 这类选择器，只按 `data-accent=` 找会先命中 CSS。
+        """
+        m = re.search(
+            rf'<a class="portal-card[^>]*data-accent="{re.escape(accent)}".*?</a>',
+            html, re.S)
+        return m.group(0) if m else None
+
+    @staticmethod
+    def _hint_usernames(html, cls):
+        """取出提示块里出现的**用户名**（`<b>小写标识符</b>`）。
+
+        中文文案（如「演示账号」）与小写字母数字以外的内容都不会被匹配到，
+        所以不需要维护「哪些 `<b>` 是用户名」的排除清单。
+        """
+        m = re.search(rf'class="{re.escape(cls)}"[^>]*>(.*?)</div>', html, re.S)
+        return set(re.findall(r'<b>([a-z][a-z0-9_]*)</b>', m.group(1))) if m else set()
+
+    # -- 入口卡片 -----------------------------------------------------------
+
+    def test_doc_and_urlconf_are_parsed(self):
+        """守卫的守卫：解析逻辑失效时下面几条会**静默变绿**。"""
+        self.assertGreaterEqual(
+            len(self.doc_accounts), 10,
+            f'没能从 {DEMO_ACCOUNTS_DOC} 解析出演示账号，解析逻辑可能已失效')
+        self.assertGreaterEqual(
+            len(self.portal_urls), 5,
+            '没能从 ROLE_PORTAL_MAP 解析出端，解析逻辑可能已失效')
+
+    def test_every_portal_has_a_landing_card(self):
+        html = self._html('/portal/')
+        missing = [u for u in self.portal_urls if f'href="{u}"' not in html]
+        self.assertEqual(
+            missing, [],
+            '门户首页缺少这些端的入口卡片（端存在但用户在首页看不到）：'
+            + '、'.join(missing))
+
+    def test_card_count_matches_portal_count(self):
+        """卡片数必须**恰好**等于端数 —— 多一张是「入口指向不存在的端」。"""
+        html = self._html('/portal/')
+        # ⚠ 用 `[\s"]` 收口：`class="portal-card-current-badge"` 也以
+        #   `class="portal-card` 开头，直接 `count('class="portal-card')`
+        #   会把 5 张卡片数成 10。
+        cards = re.findall(r'class="portal-card[\s"]', html)
+        self.assertEqual(
+            len(cards), len(self.portal_urls),
+            f'门户首页有 {len(cards)} 张入口卡片，但系统里有 '
+            f'{len(self.portal_urls)} 个端：{self.portal_urls}')
+
+    def test_gov_card_no_longer_advertises_platform_only_pages(self):
+        """政府端卡片不得再宣传已迁走的全局设置功能（含正向对照）。"""
+        html = self._html('/portal/')
+        gov = self._card(html, 'gold')
+        self.assertIsNotNone(gov, '门户首页找不到政府监管端卡片（data-accent="gold"）')
+        for word in ('机构管理', '账号权限', '系统配置'):
+            self.assertNotIn(
+                word, gov,
+                f'政府监管端卡片仍在宣传「{word}」—— 该功能第四十二轮已迁到'
+                f'平台管理端，政府端没有任何入口，用户按文案去找必然扑空')
+
+        # 正向对照：这些词必须**真的**出现在平台端卡片上。
+        # 没有这条，把两处文案一起删掉也能让上面的断言通过。
+        platform = self._card(html, 'ochre')
+        self.assertIsNotNone(
+            platform, '门户首页找不到平台管理端卡片（data-accent="ochre"）')
+        self.assertIn('机构管理', platform,
+                      '平台管理端卡片没有说明它负责机构管理')
+
+    # -- 账号提示 -----------------------------------------------------------
+
+    def test_demo_hints_only_list_real_accounts(self):
+        """两处提示里出现的用户名必须真实存在（防手滑写出 `platform1`）。"""
+        problems = []
+        for name, url, cls in DEMO_HINT_TARGETS:
+            shown = self._hint_usernames(self._html(url), cls)
+            self.assertTrue(shown, f'{url} 的 .{cls} 提示块里一个用户名都没解析到')
+            for user in sorted(shown - self.doc_accounts):
+                problems.append(
+                    f'{name}（{url}）提示里的 `{user}` 不在 {DEMO_ACCOUNTS_DOC} 中')
+        self.assertEqual(problems, [], '提示里出现了不存在的演示账号：\n  '
+                         + '\n  '.join(problems))
+
+    def test_portal_hint_covers_every_demo_account(self):
+        """门户首页提示必须列全 `DEMO_ACCOUNTS.md` 里的每一个演示账号。
+
+        「只列一部分」的后果：用户拿到的是一个**看起来完整**的清单，
+        照着重置/试账号时才发现还有几个根本不知道存在。
+        """
+        shown = self._hint_usernames(self._html('/portal/'), 'portal-demo-hint')
+        missing = sorted(self.doc_accounts - shown)
+        self.assertEqual(
+            missing, [],
+            f'门户首页演示账号提示漏了：{missing}（以 {DEMO_ACCOUNTS_DOC} 为准）')
+
+    def test_both_hints_mention_the_platform_account(self):
+        """两个提示都必须给出平台管理端账号。
+
+        第四十二轮新增 `/platform/` 后，`platform` 一度在两个提示里都缺席 ——
+        照着提示走**没有任何办法**进管理后台，而提示本身看不出「少了什么」。
+        """
+        for name, url, cls in DEMO_HINT_TARGETS:
+            with self.subTest(target=name):
+                shown = self._hint_usernames(self._html(url), cls)
+                self.assertIn(
+                    'platform', shown,
+                    f'{url} 的账号提示没有列出平台管理端账号 `platform`')
 
