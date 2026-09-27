@@ -6652,3 +6652,148 @@ ASCII 标识符」取证，与第四十轮的模板缓存陷阱同源。
 又不在真实业务数据里留下测试记录（验收前后 `capture/transfer/adoption`
 行数完全一致）。
 
+
+---
+
+## 第四十二轮：全局设置迁到平台管理端，政府端收为只读（2026-09-27）
+
+### 需求与澄清
+
+磊哥原话：**「目前系统的设置用户权限，设置区域，添加用户、医院、捕捉点等都是放到了政府端。
+要把这些全局设置的功能改到专门的平台管理端。政府端只是查看各种业务。」**
+
+动手前先问了四个必须明确的问题，磊哥的选择：
+
+| 问题 | 选择 |
+|---|---|
+| 平台端用什么角色？ | **新增 `platform_admin`**（独立角色，不是复用 `gov_city`） |
+| 哪些功能迁走？ | 机构停用/启用 + 账号启停 + 公告发布 + 操作日志（查看）—— 四项全迁 |
+| 收到多深？ | **前后端一起收口**（服务端角色白名单也要改，不是只藏菜单） |
+| 可见范围？ | **全局可见**（平台管理员不挂区县，看得到全部区县） |
+
+### 改了什么
+
+**新增**
+
+| 文件 | 作用 |
+|---|---|
+| `core/scope.py` | 区县范围的**唯一真源**：`GLOBAL_SCOPE_ROLES = ('platform_admin', 'gov_city')`、`EMPTY_DISTRICT_SCOPE = -1`、`resolve_user_district_scope()`。放 `core` 是因为 `accounts → core`、`business → accounts`，放 `business.services` 会成环 |
+| `templates/portal/platform_base.html` | 平台端门户壳层（侧栏 3 项：机构基础管理 / 账号权限管理 / 系统配置） |
+| `templates/portal/platform/portal.html` | 平台端 SPA（1020 行，由政府端对应整块**原样搬过来**，只改 `isCityLevel()` → `isGlobalScope()` 与表格 id） |
+| `accounts/management/commands/ensure_platform_admin.py` | 幂等建 `role='platform_admin'`，输出 `PLATFORM_ADMIN_CREDENTIALS=` 供部署脚本取 |
+| `accounts/migrations/0003_alter_user_role.py` | `User.role` 的 choices 加 `platform_admin` |
+| `business/tests/test_global_scope_consistency.py` | 锁「列表可见集合 == 详情可见集合」跨角色 × 区县一致（含平台端）8 条 |
+
+**修改**
+
+- `supervision/views.py`：14 个管理接口的角色白名单收成 `platform_admin`；
+  `notice_publish` 新增**可选 `district_id`**（平台端不挂区县，不显式指定就只能发全市公告 ——
+  那会让「区县公告」这项既有能力在迁移中静默消失）；`_notice_recipients(target_role, scope)`
+  签名由 `(request, target_role)` 改成显式 scope；`notice_list` 聚合键补上 `district_id`。
+- `templates/portal/gov/portal.html`：2350 → 1439 行，只剩四个只读页
+  （数据总览大屏 / 全业务监管 / 物料全局监管 / 全局台账中心）。
+- `business/services.py`：`MANAGEABLE_ROLES` 增加平台行
+  （`platform_admin` 可建 `platform_admin/gov_city/gov_district/shelter/hospital`）。
+- `business/views_portal.py`：抽出 `_portal_user_data()` / `_render_portal()`
+  （四个门户原本各抄一份 user_data 字典，加第四个必然漂移），新增 `platform_portal` 视图。
+- `business/management/commands/seed_data.py`、`deploy.sh`、`DEMO_ACCOUNTS.md`、
+  `start_dev.sh`：补平台账号与 `PLATFORM_ADMIN_PASSWORD` 链路。
+- 四类「门户清单」型测试/脚本都补上了 `platform`：`core/tests_frontend_consistency.py` 的
+  `PORTALS`、`core/tests.py` 的 `FRONTEND_SOURCE_FILES`、`scripts/dead_catch_probe.py`、
+  `business/tests/test_silent_read_contract.py`。**这类清单少一个 portal，闸门就静默缩水。**
+
+### 两个「差点漏掉」的判据
+
+**① 超级管理员进不去平台端 —— 而部署脚本会一路显示成功。**
+
+`ensure_superuser` 建的 `admin` 是 `role='gov_city'`，而 `role_required` 只比对业务角色、
+**不看 `is_superuser`**。所以「迁完设置」这一步如果不给平台端建账号，
+生产上会出现「没有任何账号能进 `/platform/`」，而部署脚本打印的却是
+`部署完成！`。已在 `deploy.sh` 第 6 步后加 `ensure_platform_admin`，并把结果打进摘要。
+
+**② 平台管理员不挂区县 ⇒ 不显式传 `district_id` 就只能发全市公告。**
+
+旧口径按「发布者的 `get_district_scope()`」收敛，平台管理员的 scope 恒为 `None`。
+照抄这个口径，「区县公告」会在迁移中**静默消失**（界面还在、按钮还在、永远只发全市）。
+所以 `notice_publish` 改成三态：
+缺省 / `''` = 全市；合法 id = 该区县（`is_city` 归一成 `None`）；
+**其它任何值一律 400** —— `body_int()` 对非法值返回 `None`、与「未提供」不可区分，
+直接写 `if district_id:` 会让 `{"district_id": "abc"}` 变成一次**全市广播**，而广播不可撤回。
+
+### 一次做过头、被测试挡回来的改动（诚实记录）
+
+迁移收口时顺手把 `gov_city` / `gov_district` 从 **24 个业务写接口**的角色白名单里摘掉了，
+理由是「政府端只查看业务」+ 三条自查证据：政府端门户零调用点、`business/views_*.py`
+里除装饰器外零 `gov_*` 分支、`business/tests/` 里零政府账号的业务写用例。
+
+**全量跑出 27 个失败**，其中三条直接写着相反的意图：
+
+```
+FAIL: test_gov_city_can_still_edit_anywhere          （市级可编辑任意宠物领养信息）
+FAIL: test_gov_district_can_still_edit_in_district   （「政府端的口径**不变**」）
+FAIL: test_same_district_gov_can_withdraw            （同区县转运单可撤回）
+```
+
+也就是说「政府端能写业务数据」是**被测试钉住的既有设计**（监管纠正），不是历史遗留。
+**已全部回滚**（`git checkout` 8 个文件 + 手工还原 2 处）。
+
+> 教训：我那次「零测试覆盖」的自查用了 `grep "gov_a\|gov_city"` ——
+> **漏掉了 `role='gov_district'` 字面量**，于是把「有测试」误判成「没测试」。
+> 判定「有没有覆盖」要搜**角色名本身**，不要搜夹具变量名。
+
+### 测试结果
+
+| 模块 | 结果 |
+|---|---|
+| 全量 `manage.py test` | **1205 tests, OK**（6m31s） |
+| `business`（回滚后复跑） | **818 tests, OK** |
+| `supervision.tests` | 97 OK |
+| `supervision.tests_notice` | 26 OK（重写为平台端口径） |
+| `core.tests_frontend_consistency` | 97 OK（含本轮新增模板注释泄漏检查） |
+| `core.tests_audit` | 44 OK |
+| `accounts` / `core.tests` / `core.tests_data_integrity` / `core.tests_session_expiry` | 35 / 69 / 14 / 6 OK |
+
+### GUI 实测（Playwright，真浏览器）
+
+脚本 `gui-test-scripts/72_platform_admin.js`（本地，已 gitignore），
+**40 pass / 0 fail**。判据全是**业务结果**，不是状态码：
+
+| 判据 | 实测值 |
+|---|---|
+| 平台端侧栏 = 3 项管理页 | `["机构基础管理","账号权限管理","系统配置"]` |
+| 平台端「区县管理」有区县行 | `rows=6` |
+| 平台端「医院管理」有医院行 | `rows=7` |
+| 机构表单区县下拉不含「市级」 | `["襄城区","樊城区","东津新区","襄州区","南漳县"]` |
+| **新增机构** | toast `✓机构创建成功`，列表 `rows 7→8` 且出现该名称 |
+| **停用机构** | toast `✓机构已停用`，该行显示「停用」 |
+| 账号表单角色下拉 | `["platform_admin","gov_city","gov_district","shelter","hospital"]` |
+| 选 `platform_admin` 时区县字段隐藏 / 选 `shelter` 时区县+机构都出现 | `true` / `district=true institution=true` |
+| **保存编号规则** | toast `✓编号规则已保存` |
+| **操作日志**（平台端全局可见） | `entries=200`，且**没有**「加载失败」 |
+| 公告「发布范围」下拉 | `["全市（全部区县）","襄城区","樊城区","东津新区","襄州区","南漳县"]` |
+| 确认框写出发布范围 | `发布范围：襄城区` |
+| **发一条区县公告** | toast `✓公告已发送给 1 位用户`；列表出现该公告且「发布范围 = 襄城区」 |
+| 政府端侧栏 | `["数据总览大屏","全业务监管","物料全局监管","全局台账中心"]` |
+| 政府端四页**都有数字**（不是空壳） | digits `179 / 243 / 376 / 247`，rows `0 / 10 / 30 / 40` |
+| 政府账号 → `/platform/` | 被挡回 `/gov/` |
+| 平台账号 → `/gov/` | 被挡回 `/platform/` |
+
+### GUI 实测顺带撞到的真缺陷：多行 `{# #}` 注释被渲染成页面正文
+
+政府端与平台端侧栏里都出现了一行字：
+
+```
+{# 第四十二轮：「机构基础管理 / 账号权限管理 / 系统
+```
+
+**Django 的 `{# #}` 只匹配同一行**（跨行要用 `{% comment %}`）。跨行写不会报错、
+不会 500：模板语法合法、接口全 200、全量测试 1205 条全绿，只是那段中文被**原样输出**。
+两处都是我本轮自己写的注释。
+
+- 已修：两处改成单行 `{# … #}`；
+- 已机械化：`core/tests_frontend_consistency.py::TemplateCommentLeakTest`
+  扫描 `templates/**/*.html`，任何未在同一行闭合的 `{#` 直接失败；
+- GUI 脚本里也补了「页面文本不得含 `{#` / `{%`」两条断言。
+
+> 这类缺陷**只有真的读一次页面文本**才会发现。全量单测永远发现不了它 ——
+> 它绿的原因和这段注释毫无关系。
