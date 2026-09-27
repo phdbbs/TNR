@@ -29,7 +29,9 @@
   .portal-wrap {
     position: relative;
     z-index: 1;
-    max-width: 1200px;
+    /* 第四十三轮：门户从 4 端增至 5 端（新增平台管理端），容器同步放宽，
+       否则 5 列每列只剩 ~214px，卡片内文字与标签会挤成一片。 */
+    max-width: 1280px;
     margin: 0 auto;
     padding: 0 var(--sp-6);
   }
@@ -225,6 +227,43 @@
     color: var(--cinnabar);
   }
 
+  /* 演示账号提示（仅未登录时渲染） */
+  /* ⚠ 这里是**公开页面**（`/portal/` 不需要登录），账号口令一旦写进来就是
+     对所有人可见。当前系统是演示环境、口令统一 `123456`，与 `/login/` 页
+     已有的提示同口径，所以可接受；**正式上线删号重建时，这块必须一起删**。 */
+  .portal-demo-hint {
+    max-width: 880px;
+    margin: 0 auto var(--sp-10);
+    padding: var(--sp-3) var(--sp-5);
+    background: var(--azurite-light);
+    border: 1px dashed rgba(43,108,176,0.3);
+    border-radius: var(--r-md);
+    font-size: var(--fs-sm);
+    color: var(--azurite);
+    text-align: center;
+    line-height: 2.1;
+  }
+
+  .portal-demo-hint b {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  .portal-demo-hint code {
+    font-family: var(--font-mono);
+    background: rgba(255,255,255,0.75);
+    padding: 1px 6px;
+    border-radius: var(--r-sm);
+    color: var(--rouge);
+  }
+
+  .portal-demo-hint-note {
+    display: block;
+    font-size: var(--fs-xs);
+    color: var(--ink-light);
+    line-height: 1.8;
+  }
+
   /* 区块标题 */
   .section-head {
     text-align: center;
@@ -261,8 +300,11 @@
   /* 门户卡片网格 */
   .portal-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: var(--sp-5);
+    /* 第四十三轮：5 列（4 个业务端 + 1 个平台管理端）。
+       ⚠ 列数必须与下面的 `.portal-card` 数量一致 —— 少一列会让最后一张卡片
+       被挤到第二行，而页面**不会报错**，只是看起来"少了一个端"。 */
+    grid-template-columns: repeat(5, 1fr);
+    gap: var(--sp-4);
     margin-bottom: var(--sp-10);
   }
 
@@ -284,6 +326,7 @@
   .portal-card:nth-child(2) { animation-delay: 0.12s; }
   .portal-card:nth-child(3) { animation-delay: 0.19s; }
   .portal-card:nth-child(4) { animation-delay: 0.26s; }
+  .portal-card:nth-child(5) { animation-delay: 0.33s; }
 
   @keyframes cardRise {
     from { opacity: 0; transform: translateY(20px); }
@@ -327,6 +370,9 @@
   .portal-card[data-accent="azurite"] { --accent: var(--azurite); --accent-light: var(--azurite-light); }
   .portal-card[data-accent="bamboo"] { --accent: var(--bamboo-green); --accent-light: var(--bamboo-light); }
   .portal-card[data-accent="gold"] { --accent: var(--autumn-gold); --accent-light: var(--autumn-light); }
+  /* 赭石：平台管理端专用。**刻意不复用朱砂/胭脂** —— 那两个是危险/警示色，
+     且朱砂已被捕捉点端占用，同色会让「平台管理」看起来像捕捉点的附属。 */
+  .portal-card[data-accent="ochre"] { --accent: var(--ochre); --accent-light: var(--ochre-light); }
 
   /* 当前用户角色卡片高亮 */
   .portal-card.current-role {
@@ -609,7 +655,9 @@
 
   /* 响应式 */
   @media (max-width: 1024px) {
-    .portal-grid { grid-template-columns: repeat(2, 1fr); }
+    /* 5 张卡片在 2 列下会排成 2+2+1（最后一张孤零零占一行）；3 列是 3+2，
+       两行都排满。改卡片数量时这里要跟着算一遍。 */
+    .portal-grid { grid-template-columns: repeat(3, 1fr); }
   }
 
   @media (max-width: 768px) {
@@ -681,11 +729,11 @@
     {% endif %}
   </section>
 
-  <!-- 四端门户 -->
+  <!-- 五端门户 -->
   <section>
     <div class="section-head">
-      <h2 class="section-head-title">四端门户</h2>
-      <div class="section-head-sub">FOUR PORTALS · 各司其职 · 协同闭环</div>
+      <h2 class="section-head-title">五端门户</h2>
+      <div class="section-head-sub">FIVE PORTALS · 各司其职 · 协同闭环</div>
     </div>
 
     <div class="portal-grid">
@@ -774,7 +822,19 @@
       </a>
 
       <!-- 4. 政府监管端 -->
-      <a class="portal-card {% if user.is_authenticated and user.role in 'gov_city,gov_district' %}current-role{% endif %}"
+      <!-- ⚠ 角色判断必须写成两个相等比较，**不能写 `user.role in 'gov_city,gov_district'`**
+           —— Django 模板里的 `in` 是**子串匹配**而不是列表成员判断：只要角色名是
+           那个字符串的子串就为真（`'gov'`、`'city'`、`'t'` 都会命中）。当前角色集合
+           里碰巧没有别的子串，所以看不出问题，但这是「判据写错却恰好通过」，
+           新增角色时会静默点亮错误的卡片。第四十三轮修正。
+           ⚠ 卡片文案也要跟着权限迁移改：第四十二轮把「机构管理 / 账号权限」搬去了
+           平台管理端，政府端只剩**只读**页面。若文案不改，用户按描述去政府端找
+           「机构管理」，**找不到任何入口而系统不会有任何报错** ——
+           属于「文案承诺了不存在的功能」。
+           ⚠ 说明注释请一律写在 `<a>` **外面**：判据是在渲染结果里找关键词，
+           写在卡片内部会让「注释」被当成「卡片宣传了该功能」
+           （`PortalLandingPageTest` 已剥 HTML 注释，但别再给它添乱）。 -->
+      <a class="portal-card {% if user.is_authenticated and user.role == 'gov_city' or user.is_authenticated and user.role == 'gov_district' %}current-role{% endif %}"
          data-accent="gold" href="{% url 'gov_home' %}">
         <span class="portal-card-current-badge">我的端口</span>
         <span class="portal-card-num">04</span>
@@ -787,12 +847,40 @@
         <div class="portal-card-name">政府监管端</div>
         <div class="portal-card-name-en">Government</div>
         <p class="portal-card-desc">
-          政府监管PC端，数据总览大屏、机构管理、账号权限、全局台账中心、物料全局监管。
+          政府监管PC端，数据总览大屏、全业务监管、物料全局监管、全局台账中心，均为只读查看。
         </p>
         <div class="portal-card-tags">
           <span class="portal-card-tag">数据大屏</span>
+          <span class="portal-card-tag">全业务监管</span>
+          <span class="portal-card-tag">全局台账</span>
+        </div>
+        <span class="portal-card-btn">
+          进入端口
+          <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </span>
+      </a>
+
+      <!-- 5. 平台管理端 -->
+      <a class="portal-card {% if user.is_authenticated and user.role == 'platform_admin' %}current-role{% endif %}"
+         data-accent="ochre" href="{% url 'platform_home' %}">
+        <span class="portal-card-current-badge">我的端口</span>
+        <span class="portal-card-num">05</span>
+        <div class="portal-card-icon">
+          <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="16" cy="16" r="3"/>
+            <path d="M16 4v3.5M16 24.5V28M4 16h3.5M24.5 16H28"/>
+            <path d="M7.6 7.6l2.5 2.5M21.9 21.9l2.5 2.5M24.4 7.6l-2.5 2.5M10.1 21.9l-2.5 2.5"/>
+          </svg>
+        </div>
+        <div class="portal-card-name">平台管理端</div>
+        <div class="portal-card-name-en">Platform</div>
+        <p class="portal-card-desc">
+          平台管理PC端，维护机构与区县、账号权限、编号规则，发布公告并查阅操作日志等全局设置。
+        </p>
+        <div class="portal-card-tags">
           <span class="portal-card-tag">机构管理</span>
-          <span class="portal-card-tag">全局监管</span>
+          <span class="portal-card-tag">账号权限</span>
+          <span class="portal-card-tag">系统配置</span>
         </div>
         <span class="portal-card-btn">
           进入端口
@@ -802,6 +890,24 @@
 
     </div>
   </section>
+
+  {% if not user.is_authenticated %}
+  <!-- ⚠ 演示账号提示。与 `templates/login.html` 的 `.login-demo-hint` 是**同一份信息**，
+       改一处必须改另一处（`core/tests_frontend_consistency.py::PortalLandingPageTest`
+       会同时校验两处）。
+       ⚠ `/portal/` 是**公开页面**，这块内容对未登录访客可见。当前是演示环境、
+       口令统一 `123456`，与 `/login/` 同口径，故可接受；**正式上线删号重建时一并删除**。 -->
+  <div class="portal-demo-hint">
+    <b>演示账号</b>（统一密码 <code>123456</code>）：
+    平台管理 <b>platform</b> · 政府监管 <b>admin</b> ·
+    捕捉点 <b>cy_shelter</b> · 医院 <b>aixin_hosp</b> · 领养人 <b>adopter1</b>
+    <span class="portal-demo-hint-note">
+      区县与机构账号：<b>cy_gov</b> / <b>hd_gov</b> / <b>hd_shelter</b> /
+      <b>ruipeng_hosp</b> / <b>babitang_hosp</b>，密码同为 <code>123456</code>。<br>
+      平台管理端仅平台管理员可进；超级管理员 <b>admin</b> 的角色是政府端，进不去平台端。
+    </span>
+  </div>
+  {% endif %}
 
   <!-- 业务流程链路 -->
   <section class="flow-section">

@@ -248,9 +248,15 @@
       <button type="submit" class="login-submit">登 录</button>
     </form>
 
+    <!-- ⚠ 演示账号提示。与 `templates/portal/index.html` 的 `.portal-demo-hint`
+         是**同一份信息**，改一处必须改另一处
+         （`core/tests_frontend_consistency.py::PortalLandingPageTest` 会同时校验两处）。
+         第四十三轮补上「平台管理 platform」—— 第四十二轮把全局设置迁到
+         `/platform/` 后，这里的账号清单漏了平台端，按提示是进不去管理后台的。 -->
     <div class="login-demo-hint">
       演示账号 · 统一密码 <b>123456</b><br>
-      捕捉点 <b>cy_shelter</b> · 医院 <b>aixin_hosp</b> · 领养人 <b>adopter1</b> · 政府 <b>admin</b>
+      平台管理 <b>platform</b> · 政府监管 <b>admin</b><br>
+      捕捉点 <b>cy_shelter</b> · 医院 <b>aixin_hosp</b> · 领养人 <b>adopter1</b>
     </div>
 
     <div class="login-back">
