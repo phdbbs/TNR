@@ -19,10 +19,13 @@ from django.db.models import F
 
 from accounts.models import User
 from business.models import (
-    Adoption, Capture, Euthanasia, OwnerReturn, Pet, Release, Transfer,
-    Treatment,
+    Adoption, Capture, Euthanasia, Material, MaterialStock, OwnerReturn, Pet,
+    Release, Transfer, Treatment,
 )
-from business.services import validate_operator_district
+from business.services import (
+    get_hospital_stock, get_institution_ledger_total, get_shelter_stock,
+    validate_operator_district,
+)
 from core.models import Institution
 
 # 各检查项统一返回 (总数, 样例列表)
@@ -70,6 +73,9 @@ class Command(BaseCommand):
             ('领养记录区县与宠物区县不一致', self.check_adoption_district),
             ('安乐死记录区县与宠物区县不一致', self.check_euthanasia_district),
             ('宠物未作废但所属捕捉单已作废', self.check_pet_of_deleted_capture),
+            ('机构库存与流水合计不一致', self.check_material_stock_vs_ledger),
+            ('医院机构库存与现算口径不一致', self.check_hospital_stock_dual_run),
+            ('捕捉点库存字段与机构库存合计不一致', self.check_shelter_stock_field),
         ]
 
         total_issues = 0
@@ -145,7 +151,15 @@ class Command(BaseCommand):
     # ============================================
     @staticmethod
     def check_capture_district(limit):
+        """捕捉单区县必须与捕捉点区县自洽。
+
+        ⚠ **市级捕捉点是显式豁免**（第四十五轮 C5）：它挂在「全市（市级）」下，
+        而它登记的捕捉单归属**实际捕捉区县**（Q2 已确认）。两者本来就**应该**
+        不相等 —— 不豁免的话，市级捕捉点每抓一只动物就报一条「脏数据」，
+        巡检会被淹没，真正的归属错误反而看不见。
+        """
         qs = (Capture.objects.filter(is_deleted=False)
+              .exclude(shelter__district__is_city=True)
               .exclude(district_id=F('shelter__district_id')).order_by('id'))
         return _rows(
             qs,
@@ -165,7 +179,9 @@ class Command(BaseCommand):
 
     @staticmethod
     def check_pet_shelter_district(limit):
+        """宠物档案区县必须与所属捕捉点区县自洽（市级捕捉点豁免，同 `check_capture_district`）。"""
         qs = (Pet.objects.filter(is_deleted=False, shelter__isnull=False)
+              .exclude(shelter__district__is_city=True)
               .exclude(district_id=F('shelter__district_id')).order_by('id'))
         return _rows(
             qs,
@@ -175,8 +191,13 @@ class Command(BaseCommand):
 
     @staticmethod
     def check_transfer_district(limit):
-        """转运单归属的是**发出捕捉点**的区县（接收医院可以跨区县）。"""
+        """转运单归属的是**发出捕捉点**的区县（接收医院可以跨区县）。
+
+        ⚠ 市级捕捉点豁免（第四十五轮 C5）：它发出的转运单归属**实际捕捉区县**，
+        与捕捉点自身的「全市（市级）」必然不等。
+        """
         qs = (Transfer.objects.filter(from_shelter__isnull=False)
+              .exclude(from_shelter__district__is_city=True)
               .exclude(district_id=F('from_shelter__district_id')).order_by('id'))
         return _rows(
             qs,
@@ -246,3 +267,97 @@ class Command(BaseCommand):
             lambda p: (f'{p.code}：档案未作废，但捕捉单 '
                        f'{p.capture.ledger_no or p.capture_id} 已作废'),
             limit, related=('capture',))
+
+    # ============================================
+    # 机构库存（第四十五轮）
+    # ============================================
+    @staticmethod
+    def check_material_stock_vs_ledger(limit):
+        """「已经算好的库存」必须等于「按机构把流水加起来」。
+
+        这是第四十五轮新增的那张 `MaterialStock` 表的**核心判据**：
+        它靠「每次入出库在同一个事务里加减那一行」来维护，一旦有哪条路径
+        漏了维护（或者有人绕过 `adjust_stock()` 直接写流水），
+        界面上的库存就与台账对不上 —— **而且不报错**，只是数字慢慢飘。
+
+        口径（含期初）：
+
+            quantity == opening_quantity + 按机构归属的流水合计
+
+        `opening_quantity` 是这张表诞生之前就已存在的量（`shelter_stock`
+        是种子数据直接写字段来的，没有对应流水），不把它算进来，
+        判据从第一天起就恒不成立 —— 那样的判据等于没有。
+        """
+        qs = (MaterialStock.objects
+              .select_related('material', 'institution').order_by('id'))
+        total = 0
+        samples = []
+        for row in qs:
+            ledger = get_institution_ledger_total(row.material, row.institution)
+            expected = row.opening_quantity + ledger
+            if row.quantity == expected:
+                continue
+            total += 1
+            if len(samples) < limit:
+                samples.append(
+                    f'{row.institution.name} / {row.material.name}：'
+                    f'表内 {row.quantity}，应为 期初 {row.opening_quantity} + 流水 {ledger} '
+                    f'= {expected}（差 {row.quantity - expected}）')
+        return total, samples
+
+    @staticmethod
+    def check_shelter_stock_field(limit):
+        """兼容字段 `Material.shelter_stock` 必须等于「该物料捕捉点库存合计」。
+
+        两个真源并存期的看门狗：
+        - 新真源 = `MaterialStock`（按机构）；
+        - 旧字段 = `Material.shelter_stock`（区县合计，界面仍有一处在读）。
+
+        写接口在有机构归属时会**按新表重算**这个字段，所以正常情况下恒等。
+        不等只有两种可能，都值得人看一眼：
+
+        1. 走了**没有机构归属**的旧写入路径（如政府端采购、直接改字段的脚本）；
+        2. 该区县有**多个捕捉点**，而 `shelter_stock` 里还有一份
+           **分不下去的存量**（`0020` 迁移与首次建行都**故意不猜**，
+           见 `services._opening_quantity_for_new_row()`）。
+
+        ⚠ `get_shelter_stock()` 在「该物料还没有任何捕捉点库存行」时会
+        **回退**到旧字段，所以纯存量数据不会在这里误报。
+        """
+        total = 0
+        samples = []
+        for material in Material.objects.select_related('district').order_by('id'):
+            current = get_shelter_stock(material)
+            if current == material.shelter_stock:
+                continue
+            total += 1
+            if len(samples) < limit:
+                samples.append(
+                    f'{material.name}（{_district_name(material)}）：'
+                    f'字段 {material.shelter_stock}，机构库存合计 {current}')
+        return total, samples
+
+    @staticmethod
+    def check_hospital_stock_dual_run(limit):
+        """医院侧**双跑**：新表 `quantity` 必须等于旧算法 `get_hospital_stock()`。
+
+        为什么单列一条（虽然上一条在数学上已经蕴含它）：
+        上一条比的是「新表 ↔ 流水」，这一条比的是「**新表 ↔ 旧算法**」——
+        医院侧读取暂时仍走旧算法，只有这条判据为零，才有据可依地把读取切过去。
+        两者的差异来源不同（一个查漏维护，一个查口径漂移），
+        混在一条里会让「到底是哪边错了」变得难判断。
+        """
+        qs = (MaterialStock.objects.filter(institution__type='hospital')
+              .select_related('material', 'institution').order_by('id'))
+        total = 0
+        samples = []
+        for row in qs:
+            want = get_hospital_stock(row.material, row.institution)
+            if row.quantity == want:
+                continue
+            total += 1
+            if len(samples) < limit:
+                samples.append(
+                    f'{row.institution.name} / {row.material.name}：'
+                    f'机构库存 {row.quantity}，现算 {want}（差 {row.quantity - want}）')
+        return total, samples

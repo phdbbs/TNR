@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928b"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -406,7 +406,12 @@ const Shelter = {
     // Adoption.status 只有 pending_claim/completed/cancelled，用 'pending' 匹配恒为 0。
     const pendingApplication = applications.filter(a => a.status === 'pending').length;
     const pendingClaim = adoptions.filter(a => a.status === 'pending_claim').length;
-    const lowStock = materials.filter(m => (m.shelterStock ?? m.shelter_stock ?? 0) <= (m.safetyStock ?? m.safety_stock ?? 0)).length;
+    /* ⚠ 第四十五轮起「本机构库存」读 `institutionStock`（`MaterialStock` 里本机构
+       那一行），**不是** `shelterStock`。后者是该物料**捕捉点合计**的兼容字段 ——
+       同一区县有两个捕捉点时两者不相等，看板按合计判「低于安全线」会把别人的库存
+       算成我的，于是我的库存明明见底、看板却报「充足」。
+       保留 `shelterStock` 兜底：服务端漏给机构库存时退回旧口径，好过整列变 0。 */
+    const lowStock = materials.filter(m => (m.institutionStock ?? m.shelterStock ?? m.shelter_stock ?? 0) <= (m.safetyStock ?? m.safety_stock ?? 0)).length;
 
     const todoItems = [];
     if (availablePets.length > 0) todoItems.push({ label: availablePets.length + ' 只动物待安排转运到医院', page: 'transfer', badge: 'warning' });
@@ -2013,6 +2018,7 @@ const Shelter = {
         <div class="tab-item active" data-tab="stock">库存台账</div>
         <div class="tab-item" data-tab="purchase">采购入库</div>
         <div class="tab-item" data-tab="outbound">下发出库</div>
+        <div class="tab-item" data-tab="pending">待签收</div>
         <div class="tab-item" data-tab="adjustment">库存异动</div>
         <div class="tab-item" data-tab="flow">流向查询</div>
       </div>
@@ -2025,14 +2031,93 @@ const Shelter = {
         this.renderMatTab(t.dataset.tab);
       });
     });
-    this._materials = await TNR_API.getMaterials();
-    this._matTxns = await TNR_API.getMaterialTransactions();
+    /* ⚠ 这里用**严格读**（失败抛错），不是 `getMaterials()` / `getMaterialTransactions()`。
+     *
+     * 后两者经 `TNR_API._get()` 在**任何**非 2xx 时静默返回 `[]`，于是服务端 400/500
+     * 在界面上就是「库存 0 / 暂无记录」—— 把「加载失败」伪装成「没有数据」。
+     * 本页有「待签收」这类**证据型**列表：渲染成「暂无待接收物料」会让用户
+     * 以为没人给他发过货（真实单据就躺在那儿），比报错难查得多。
+     * （项目约定见 `SilentReadContractTest`：呈现失败的地方必须真的能感知失败。）
+     */
+    try {
+      this._materials = await TNR_API.getMaterialsStrict();
+      this._matTxns = await TNR_API.getMaterialTransactionsStrict();
+    } catch (e) {
+      /* 只用在 CSS 里**真的存在**的类（`card` / `card-body` / `fs-sm` /
+       * `text-muted` / `mt-2`）。本文件里 `empty-state`、`empty-block`、
+       * `loading-state` 这几个类名在 `static/css/` 中**没有任何定义** ——
+       * 写了也是三个裸 div 叠在一起，看着像「样式没加载」。
+       * （同类坑：第三十六轮的 `.alert-warning`，写了个不存在的类名，
+       * 界面看着「有提示」其实一点样式都没有。） */
+      document.getElementById('matContent').innerHTML =
+        '<div class="card"><div class="card-body" style="text-align:center;padding:var(--sp-6);">'
+        + '<div style="font-size:var(--fs-2xl);">⚠️</div>'
+        + '<div style="font-weight:600;margin-top:var(--sp-3);">物料数据加载失败</div>'
+        + '<div class="fs-sm text-muted mt-2">' + TNR_UI.escape(e.message || '') + '</div>'
+        + '</div></div>';
+      return;
+    }
+    this._syncMatPendingBadge();
     this.renderMatTab('stock');
+  },
+
+  /* 本机构 id —— 捕捉点端所有「这是我的」判据都从这一处取。 */
+  _myInstId() {
+    const u = TNR_API.getCurrentUser() || {};
+    const id = (u.institution_id ?? u.institutionId);
+    return (id === undefined || id === null) ? '' : String(id);
+  },
+
+  /* 「下发给**我**、且还没签收」的流水（角标与列表**共用**这一个判据）。
+   *
+   * ⚠ 必须显式按 `hospital`（接收方）收口，不能只判「类型是 dispatch 且未签收」。
+   *
+   * 原因：捕捉点操作员的 `district` 是「全市（市级）」，服务端 `has_global_district_scope()`
+   * 对它返回 True → `_scoped_txn_queryset()` 里 `base` = **全部流水**，
+   * 于是 `this._matTxns` 装着**全城**的下发单。只按类型 + 签收标记过滤，
+   * 每个捕捉点都会看到别人家的待签收单；点「确认入库」必然 404 ——
+   * 服务端 `material_receive` 是按 `hospital_id == 本机构` 取单的。
+   * （医院端没这个问题：医院的 `district` 是具体区县，`base` 已经收敛过。）
+   *
+   * 与医院端 `renderMaterialPending` 的**共同部分**是「`type === 'dispatch'`
+   * 且备注无 `[已签收]`」—— 那是「已办」的唯一凭据（服务端签收时写进 `note`）。
+   */
+  _pendingForMe() {
+    const me = this._myInstId();
+    if (!me) return [];
+    return (this._matTxns || []).filter(t =>
+      t.type === 'dispatch'
+      && !(t.note || '').includes('[已签收]')
+      && String(t.hospital ?? t.hospital_id ?? '') === me);
+  },
+
+  /* 「待签收」标签上的数量角标。
+   * 两端口径必须一致 —— 角标说 3 条、列表里只有 1 条，用户只会怀疑系统坏了。
+   */
+  _syncMatPendingBadge() {
+    const tab = document.querySelector('#matTabs .tab-item[data-tab="pending"]');
+    if (!tab) return;
+    const n = this._pendingForMe().length;
+    tab.textContent = n > 0 ? '待签收（' + n + '）' : '待签收';
   },
 
   async renderMatTab(tab) {
     const wrap = document.getElementById('matContent');
     const materials = this._materials || [];
+    /* 「**我**的库存」统一走这里（第四十五轮）。
+     *
+     * `institutionStock` = `MaterialStock` 里**本机构那一行**（服务端直读，不累加）；
+     * `shelterStock` = 该物料**捕捉点合计**的兼容字段 —— 同一区县两个捕捉点时
+     * 两者不相等。凡是「我能下发多少 / 我够不够用 / 我盘点扣多少」都必须读前者，
+     * 读后者等于拿别人的库存替我决策（能发出我手里没有的货）。
+     * 末尾的 `shelterStock` 只是服务端漏给机构库存时的兜底，好过整列显示 0。
+     */
+    const stockOf = m => (m.institutionStock ?? m.shelterStock ?? m.shelter_stock ?? 0);
+
+    if (tab === 'pending') {
+      this.renderMatPending();
+      return;
+    }
 
     if (tab === 'stock') {
       let html = TNR_UI.renderFilterBar([
@@ -2054,17 +2139,17 @@ const Shelter = {
         { title: '分类', render: r => '<span class="badge badge-default">' + TNR_API.getMaterialCategoryText(r.category) + '</span>' },
         { title: '规格', key: 'specification' },
         { title: '批次', key: 'batchNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.batchNo || '') + '</span>' },
-        { title: '当前库存', render: r => '<span class="font-bold">' + (r.shelterStock ?? 0) + '</span> ' + (r.unit || '') },
+        { title: '当前库存', render: r => '<span class="font-bold">' + stockOf(r) + '</span> ' + (r.unit || '') },
         { title: '安全库存', render: r => (r.safetyStock ?? 0) + ' ' + (r.unit || '') },
         { title: '库存状态', render: r => {
-          const stock = r.shelterStock ?? 0;
+          const stock = stockOf(r);
           const safety = r.safetyStock ?? 0;
           if (stock <= 0) return TNR_UI.statusBadge('耗尽', 'danger');
           if (stock <= safety) return TNR_UI.statusBadge('偏低', 'warning');
           return TNR_UI.statusBadge('充足', 'success');
         }},
         { title: '库存占比', render: r => {
-          const stock = r.shelterStock ?? 0;
+          const stock = stockOf(r);
           const safety = r.safetyStock ?? 0;
           const pct = safety > 0 ? Math.min(100, Math.round(stock / (safety * 2) * 100)) : 100;
           const color = stock <= 0 ? 'var(--rouge)' : (stock <= safety ? 'var(--autumn-gold)' : 'var(--bamboo-green)');
@@ -2086,7 +2171,7 @@ const Shelter = {
             if (!hay.includes(v.keyword)) return false;
           }
           if (v.stock_state) {
-            const stock = r.shelterStock ?? 0;
+            const stock = stockOf(r);
             const safety = r.safetyStock ?? 0;
             const st = stock <= 0 ? 'out' : (stock <= safety ? 'low' : 'ok');
             if (st !== v.stock_state) return false;
@@ -2175,8 +2260,13 @@ const Shelter = {
         });
         if (res && res.success !== false) {
           TNR_UI.toast('采购入库成功：' + (res.data?.ledger_no || ''), 'success');
-          this._materials = await TNR_API.getMaterials();
-          this._matTxns = await TNR_API.getMaterialTransactions();
+          // 同「下发出库」：严格读 + 失败单独提示，别把「刷新失败」说成「提交失败」
+          try {
+            this._materials = await TNR_API.getMaterialsStrict();
+            this._matTxns = await TNR_API.getMaterialTransactionsStrict();
+          } catch (e) {
+            TNR_UI.toast('采购已入库，但列表刷新失败：' + e.message, 'warning');
+          }
           this.renderMatTab('purchase');
         } else {
           TNR_UI.toast('提交失败：' + (res?.message || '未知错误'), 'danger');
@@ -2184,21 +2274,44 @@ const Shelter = {
       });
 
     } else if (tab === 'outbound') {
-      const hospitals = await TNR_API.getInstitutions('hospital');
+      /* 接收方 = 医院 **或** 捕捉点（第四十五轮）。
+       *
+       * 下拉数据**不再由前端拼**（原先是 `getInstitutions('hospital')` 列出全市医院），
+       * 而是问服务端的 `materials/dispatch-targets/` —— 那份列表与 `dispatch_create`
+       * 的校验**共用同一个判据**（`dispatch_targets()`）。
+       * 前端自己拼必然与服务端漂移：市级捕捉点可发全市、区县级只能发本区县，
+       * 老写法两种情况都列全市 → 用户**选了就撞 400**，而界面上看不出哪个能选（C8）。
+       */
       let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>下发出库登记</div></div><div class="card-body">';
       html += '<div class="form-row-3">';
-      html += '<div class="form-group"><label class="form-label">接收医院<span class="req">*</span></label><select class="form-select" id="ob_hospital">' + (hospitals || []).filter(h => h.status === 'active').map(h => '<option value="' + h.id + '" data-name="' + TNR_UI.escape(h.name) + '">' + TNR_UI.escape(h.name) + '</option>').join('') + '</select></div>';
-      html += '<div class="form-group"><label class="form-label">物料名称<span class="req">*</span></label><select class="form-select" id="ob_material">' + materials.map(m => '<option value="' + m.id + '" data-name="' + TNR_UI.escape(m.name) + '" data-unit="' + (m.unit || '') + '" data-category="' + (m.category || '') + '">' + TNR_UI.escape(m.name) + '（库存' + (m.shelterStock ?? 0) + (m.unit || '') + '）' + '</option>').join('') + '</select></div>';
-      html += '<div class="form-group"><label class="form-label">下发数量<span class="req">*</span></label><input type="number" class="form-input" id="ob_qty" min="1" value="1"></div>';
+      html += '<div class="form-group"><label class="form-label">接收方类型<span class="req">*</span></label><select class="form-select" id="ob_target_type"><option value="hospital">医院</option><option value="shelter">捕捉点</option></select></div>';
+      html += '<div class="form-group"><label class="form-label">接收方<span class="req">*</span></label><select class="form-select" id="ob_target"></select><div class="fs-sm text-muted mt-2" id="ob_target_hint"></div></div>';
+      html += '<div class="form-group"><label class="form-label">物料名称<span class="req">*</span></label><select class="form-select" id="ob_material">' + materials.map(m => '<option value="' + m.id + '" data-name="' + TNR_UI.escape(m.name) + '" data-unit="' + (m.unit || '') + '" data-category="' + (m.category || '') + '">' + TNR_UI.escape(m.name) + '（库存' + stockOf(m) + (m.unit || '') + '）' + '</option>').join('') + '</select></div>';
       html += '</div><div class="form-row-3">';
+      html += '<div class="form-group"><label class="form-label">下发数量<span class="req">*</span></label><input type="number" class="form-input" id="ob_qty" min="1" value="1"></div>';
       html += '<div class="form-group"><label class="form-label">批号</label><input class="form-input" id="ob_batchNo" placeholder="批号"></div>';
-      html += '<div class="form-group" id="ob_chipRangeGroup" style="display:none;"><label class="form-label">芯片号段</label><input class="form-input" id="ob_chipRange" placeholder="如：1000010001-1000010010"></div>';
       html += '<div class="form-group"><label class="form-label">备注</label><input class="form-input" id="ob_note" placeholder="备注"></div>';
+      html += '</div><div class="form-row-3">';
+      html += '<div class="form-group" id="ob_chipRangeGroup" style="display:none;"><label class="form-label">芯片号段</label><input class="form-input" id="ob_chipRange" placeholder="如：1000010001-1000010010"></div>';
       html += '</div>';
       html += '<button class="btn btn-primary" id="btnOutbound">提交下发</button>';
       html += '</div></div>';
 
-      const txns = (this._matTxns || []).filter(t => t.type === 'dispatch');
+      /* 「下发出库」= **本机构发起**的下发单。
+       *
+       * ⚠ 不能只判 `type === 'dispatch'`：捕捉点操作员是市级区县账号，
+       * 服务端对它返回**全部**流水，全城每个捕捉点的下发单都会涌进这张表，
+       * 看上去像「我发出去了一堆我没发过的货」（还带上了签收状态）。
+       * `institution` 是**发起方**（第四十五轮起写入），按它收口即可。
+       *
+       * 历史行 `institution` 为空（`dispatch` 行无法回填发起方，见迁移 `0020`），
+       * 一律保留 —— 可见面只减那些**明确属于别的机构**的行，不凭空吞掉旧单据。
+       */
+      const myId = this._myInstId();
+      const txns = (this._matTxns || []).filter(t =>
+        t.type === 'dispatch'
+        && (t.institution === null || t.institution === undefined
+            || String(t.institution) === myId));
       html += TNR_UI.renderFilterBar([
             { key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 物料 / 接收方 / 批号' },
             { key: 'start_date', label: '开始日期', type: 'date' },
@@ -2211,6 +2324,12 @@ const Shelter = {
           { title: '物料', key: 'materialName' },
           { title: '数量', render: r => r.quantity + ' ' + (r.unit || '') },
           { title: '接收方', key: 'fromTo' },
+          /* 签收状态与「待签收」标签**同一判据**（备注里的 `[已签收]` 标记）。
+           * 没有这一列时，「我发出去的货对方收了没」只能靠切标签比对，
+           * 而两个列表的排序/筛选条件并不相同。 */
+          { title: '状态', render: r => (r.note || '').includes('[已签收]')
+              ? TNR_UI.statusBadge('已签收', 'success')
+              : TNR_UI.statusBadge('待签收', 'warning') },
           { title: '批号', key: 'batchNo' },
           { title: '日期', key: 'date' },
           { title: '操作员', key: 'operatorName' }
@@ -2232,35 +2351,102 @@ const Shelter = {
       renderOutbound();
       TNR_UI.bindFilter(renderOutbound, obBar);
 
-      document.getElementById('ob_material').addEventListener('change', (e) => {
+      const matSel = document.getElementById('ob_material');
+      const typeSel = document.getElementById('ob_target_type');
+      const targetSel = document.getElementById('ob_target');
+      const hintEl = document.getElementById('ob_target_hint');
+
+      /* 按「当前物料 + 当前接收方类型」拉可下发机构。
+       *
+       * ⚠ 失败必须**说出来**：`getDispatchTargets` 是严格读（失败抛错），
+       * 若把异常吞掉渲染成空下拉，用户看到的是「没有可选的接收方」——
+       * 而真实原因可能是接口 400/500，两者在界面上**完全一样**。
+       * 所以这里不用 try/catch 静默降级，而是把消息写进提示行。
+       */
+      const loadTargets = async () => {
+        const mat = materials.find(m => String(m.id) === String(matSel.value));
+        targetSel.innerHTML = '';
+        hintEl.textContent = '';
+        if (!mat) { hintEl.textContent = '暂无可下发的物料'; return; }
+        let targets;
+        try {
+          targets = await TNR_API.getDispatchTargets(mat.id);
+        } catch (e) {
+          hintEl.textContent = '接收方加载失败：' + (e.message || '');
+          return;
+        }
+        const want = typeSel.value;
+        const list = (targets || []).filter(t => t.type === want);
+        if (list.length === 0) {
+          /* 空列表有两种成因，文案要能区分：**范围内确实没有** vs **服务端没给**。
+           * 这里明确说「当前范围内」，并注明区县级捕捉点只能发本区县 ——
+           * 否则区县操作员会以为系统坏了（他在别区看到过那些医院）。 */
+          hintEl.textContent = want === 'hospital'
+            ? '当前可下发范围内没有启用中的医院'
+            : '当前可下发范围内没有启用中的捕捉点（区县级只能下发本区县，市级可发全市）';
+          return;
+        }
+        targetSel.innerHTML = list.map(t =>
+          '<option value="' + t.id + '" data-name="' + TNR_UI.escape(t.name) + '">'
+          + TNR_UI.escape(t.name)
+          + (t.districtName ? '（' + TNR_UI.escape(t.districtName) + '）' : '')
+          + '</option>').join('');
+      };
+
+      matSel.addEventListener('change', (e) => {
         const mat = materials.find(m => String(m.id) === String(e.target.value));
         document.getElementById('ob_chipRangeGroup').style.display = (mat && mat.category === 'chip') ? '' : 'none';
+        // 物料换了 → 可下发范围可能跟着变（范围由发起方层级 + 物料区县共同决定）
+        loadTargets();
       });
+      typeSel.addEventListener('change', loadTargets);
       // 下发数量：PC/移动端统一的 −/+ 步进按钮（上限仍由提交时的库存校验兜底）
       TNR_UI.bindQtyStepper('ob_qty');
+      loadTargets();
 
       document.getElementById('btnOutbound').addEventListener('click', async () => {
-        const matSel = document.getElementById('ob_material');
         const mat = materials.find(m => String(m.id) === String(matSel.value));
         const qty = parseInt(document.getElementById('ob_qty').value) || 0;
         if (!mat || qty < 1) { TNR_UI.toast('请填写完整信息', 'warning'); return; }
-        if (qty > (mat.shelterStock ?? 0)) { TNR_UI.toast('库存不足，当前库存：' + (mat.shelterStock ?? 0) + (mat.unit || ''), 'danger'); return; }
-        const hospSel = document.getElementById('ob_hospital');
-        const res = await TNR_API.dispatchMaterial({
+        if (!targetSel.value) { TNR_UI.toast('请先选择接收方', 'warning'); return; }
+        // 预检读 `stockOf`（本机构库存），与服务端余额判据同一口径
+        if (qty > stockOf(mat)) {
+          TNR_UI.toast('库存不足，当前库存：' + stockOf(mat) + (mat.unit || ''), 'danger');
+          return;
+        }
+        const payload = {
           material_id: mat.id,
           material_name: mat.name,
           quantity: qty,
           unit: mat.unit,
           batch_no: document.getElementById('ob_batchNo').value.trim(),
-          to_hospital_id: hospSel.value,
-          to_hospital_name: hospSel.options[hospSel.selectedIndex].dataset.name,
           note: document.getElementById('ob_note').value.trim(),
           chip_range: mat.category === 'chip' ? document.getElementById('ob_chipRange').value : ''
-        });
+        };
+        /* 接收方按类型走**两个不同的字段名**（`hospital_id` / `to_shelter_id`）——
+         * 服务端 `dispatch_create` 靠它区分接收方类型，两个都传直接 400。
+         * 老写法无论发去哪都发 `to_hospital_id`，服务端会把捕捉点 id 当医院查，
+         * 报「医院不存在」—— 用户看着自己明明选的是捕捉点。 */
+        const chosen = targetSel.options[targetSel.selectedIndex];
+        if (typeSel.value === 'shelter') {
+          payload.to_shelter_id = targetSel.value;
+          payload.to_shelter_name = chosen ? chosen.dataset.name : '';
+        } else {
+          payload.hospital_id = targetSel.value;
+          payload.to_hospital_name = chosen ? chosen.dataset.name : '';
+        }
+        const res = await TNR_API.dispatchMaterial(payload);
         if (res && res.success !== false) {
           TNR_UI.toast('下发成功：' + (res.data?.ledger_no || ''), 'success');
-          this._materials = await TNR_API.getMaterials();
-          this._matTxns = await TNR_API.getMaterialTransactions();
+          // 严格读 + 失败单独提示：下发**已经落库了**，刷新失败不能说成「提交失败」，
+          // 否则用户会再点一次，发出去两批货。
+          try {
+            this._materials = await TNR_API.getMaterialsStrict();
+            this._matTxns = await TNR_API.getMaterialTransactionsStrict();
+          } catch (e) {
+            TNR_UI.toast('下发已成功，但列表刷新失败：' + e.message, 'warning');
+          }
+          this._syncMatPendingBadge();
           this.renderMatTab('outbound');
         } else {
           TNR_UI.toast('提交失败：' + (res?.message || '未知错误'), 'danger');
@@ -2300,7 +2486,7 @@ const Shelter = {
         .sort((a, b) => (isExpired(b) ? 1 : 0) - (isExpired(a) ? 1 : 0))
         .map(m => '<option value="' + m.id + '">' + TNR_UI.escape(m.name)
           + (isExpired(m) ? '（已过期）' : '')
-          + ' (库存:' + (m.shelterStock ?? 0) + (m.unit || '') + ')</option>')
+          + ' (库存:' + stockOf(m) + (m.unit || '') + ')</option>')
         .join('');
       const adjRows = adj.map(t => ({
         // 同文件 `flow` tab 读的是 camel 键，这里做兼容取值 —— 第三十六轮
@@ -2398,6 +2584,103 @@ const Shelter = {
       renderFlow();
       TNR_UI.bindFilter(renderFlow, wrap);
     }
+  },
+
+  /* ========== 「待签收」列表（第四十五轮新增） ==========
+   *
+   * 为什么捕捉点也需要它：第四十五轮起**市级捕捉点可以把药品下发给区县级捕捉点**
+   * （Q4 的二级下发）。下发方建单即出库、接收方**签收才入库**（「一进一出」），
+   * 所以在接收方那边必须有一个「货已发出、我还没确认」的入口 ——
+   * 少了它，这批货在系统里就是**凭空消失**：发起方库存已减、接收方库存没加，
+   * 且没有任何界面提示去把它补上。
+   *
+   * 判据与医院端 `renderMaterialPending` **完全一致**（`type === 'dispatch'`
+   * 且备注里没有 `[已签收]`）—— 两端读的是**同一张流水表、同一份服务端过滤**
+   * （`_scoped_txn_queryset` 对捕捉点返回「本区县 ∪ 与本机构相关」）。
+   * 服务端签收时把 `[已签收]` 写进 `note`，这是唯一的「已办」凭据；
+   * 不能改用「`institution` 是不是我」之类的推断 —— 发起方那行 `institution`
+   * 是发起方、`hospital` 才是接收方，两个字段语义本来就不同。
+   */
+  renderMatPending() {
+    const wrap = document.getElementById('matContent');
+    const dispatches = this._pendingForMe()
+      .slice().sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+
+    let html = TNR_UI.renderFilterBar([
+      { key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 物料 / 下发方 / 批号' },
+      { key: 'start_date', label: '开始日期', type: 'date' },
+      { key: 'end_date', label: '结束日期', type: 'date' }
+    ], '', { id: 'matPendingFilterBar' });
+    // 容器必须先随 innerHTML 进 DOM，再 mountTable —— 反过来选择器查不到元素，
+    // 表格会**静默不渲染且不报错**（`core/tests_frontend_consistency.py` 静态锁死）。
+    html += '<div data-mt="shelter.material.pending"></div>';
+    wrap.innerHTML = html;
+
+    const columns = [
+      { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || '') + '</span>' },
+      { title: '物料', key: 'materialName' },
+      { title: '数量', render: r => (r.quantity || 0) + ' ' + (r.unit || '') },
+      { title: '下发方', key: 'fromTo' },
+      { title: '批号', key: 'batchNo' },
+      { title: '下发日期', key: 'date' },
+      { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-mreceive="' + r.id + '">确认入库</button>' }
+    ];
+    const bar = document.getElementById('matPendingFilterBar');
+    const renderPending = () => {
+      const v = TNR_UI.getFilterValues(bar);
+      const rows = dispatches.filter(t => {
+        if (!TNR_UI.inDateRange(t.date, v.start_date, v.end_date)) return false;
+        if (!v.keyword) return true;
+        const hay = [t.ledgerNo, t.materialName, t.fromTo, t.batchNo]
+          .filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(v.keyword);
+      });
+      TNR_UI.mountTable('[data-mt="shelter.material.pending"]', {
+        id: 'shelter.material.pending', columns, data: rows, emptyText: '暂无待接收物料'
+      });
+    };
+    renderPending();
+    TNR_UI.bindFilter(renderPending, bar);
+
+    // 行内按钮统一走事件委托：mountTable 排序 / 翻页会整体重建 tbody，
+    // 绑在行元素上的监听器会跟着丢失。
+    TNR_UI.delegateClick(wrap, {
+      'data-mreceive': (id) => this.confirmMaterialReceive(id)
+    }, 'MatPendingRows');
+  },
+
+  /* 签收：把「待签收」的那笔下发流水确认入库。
+   *
+   * 服务端 `material_receive` 会同时做三件事：把 `[已签收]` 写进 `note`、
+   * 给**本机构**的 `MaterialStock` 加库存、落一条 `receive` 流水（同一事务）。
+   * 前端只负责把结果说清楚 —— 成功提示里带上机构名，让用户确认加到了自己头上
+   * （同一区县两个捕捉点时，加到别人头上是看不出来的）。
+   */
+  async confirmMaterialReceive(txnId) {
+    const ok = await TNR_UI.confirm('确认接收该批物料？签收后库存将计入本机构。', '确认入库');
+    if (!ok) return;
+    let res;
+    try {
+      res = await TNR_API.receiveMaterial(txnId);
+    } catch (e) {
+      TNR_UI.toast(e.message || '操作失败', 'danger');
+      return;
+    }
+    if (!res || !res.success) {
+      TNR_UI.toast((res && res.message) || '入库失败', 'danger');
+      return;
+    }
+    TNR_UI.toast((res.message || '签收成功，库存已增加'), 'success');
+    // 严格读 + 失败单独提示：签收**已经落库**，刷新失败不能说成「入库失败」——
+    // 说成失败用户会再签一次，服务端会因流水已签收而回 400，白折腾一轮。
+    try {
+      this._materials = await TNR_API.getMaterialsStrict();
+      this._matTxns = await TNR_API.getMaterialTransactionsStrict();
+    } catch (e) {
+      TNR_UI.toast('已签收，但列表刷新失败：' + e.message, 'warning');
+    }
+    this._syncMatPendingBadge();
+    this.renderMatTab('pending');
   },
 
   /* 提交库存异动报备（捕捉点侧）。

@@ -44,7 +44,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928b"></script>
 <script>
 /* ============================================
    平台管理端 - SPA 应用逻辑
@@ -353,8 +353,18 @@ const PlatformPortal = {
 
   async showInstitutionModal(id) {
     const districts = await TNR_API.getDistricts();
-    // 捕捉点/医院必须挂具体区县，不能挂市级
-    let selectable = (districts || []).filter(d => d.status === 'active' && !d.is_city);
+    /* 区县可选项：**捕捉点可以挂市级，医院不行**。
+     *
+     * 第四十五轮引入「市级捕捉点」（可采购药品、可下发给全市任何捕捉点/医院、
+     * 捕捉的动物可转运到全市任何医院），服务端 `institution_create` 的判据就是
+     * `if inst_type == 'hospital' and district.is_city: fail` —— 捕捉点从来是放行的。
+     * 但前端一律排除市级，于是**根本建不出市级捕捉点**：下拉里没有这个选项、
+     * 界面也不报错，用户只会以为「系统不支持」，只能靠改种子数据或直接改库。
+     * 这就是「前端收窄选项而服务端不校验」的**反向**形态 —— 服务端允许、
+     * 前端藏起来了，比多给选项更难发现（多给会撞 400，少给是**静默做不到**）。
+     */
+    const isShelter = this.instState.tab === 'shelter';
+    let selectable = (districts || []).filter(d => d.status === 'active' && (isShelter || !d.is_city));
     // 区级管理员只能在本区县建机构，下拉就必须只列本区县 ——
     // 否则随手选一个他区会撞上「无权在其他区县创建机构」，白填一遍。
     // 服务端 `_district_out_of_scope()` 拦的是同一件事（前端只是别让人白填）。
@@ -388,6 +398,7 @@ const PlatformPortal = {
           <select class="form-select" id="inst-district">
             ${activeDistricts.map(d => `<option value="${d.id}" ${inst && inst.district_id === d.id ? 'selected' : ''}>${TNR_UI.escape(d.name)}</option>`).join('')}
           </select>
+          <div class="fs-sm text-muted mt-2" id="inst-district-hint"></div>
         </div>
         <div class="form-group">
           <label class="form-label">状态</label>
@@ -419,6 +430,30 @@ const PlatformPortal = {
       actions: `<button class="btn btn-secondary" data-action="cancel">取消</button><button class="btn btn-primary" id="instSave">保存</button>`
     });
     m.overlay.querySelector('[data-action="cancel"]').addEventListener('click', m.close);
+
+    /* 「所属区县」选到市级时把**后果**写出来（第四十五轮）。
+     *
+     * 市级捕捉点不是「捕捉点挂个市级标签」那么轻 —— 它换掉的是三条业务规则：
+     * 能自行采购、能下发给全市任何机构、能跨区县转运动物。
+     * 不写清楚，运维会以为建出来和普通捕捉点没区别，然后在区县看到
+     * 「明明有医院却发不出去」的单子（因为那个捕捉点是区县级的）。
+     */
+    const cityIds = new Set((districts || []).filter(d => d.is_city).map(d => String(d.id)));
+    const updateDistrictHint = () => {
+      const hint = document.getElementById('inst-district-hint');
+      const sel = document.getElementById('inst-district');
+      if (!hint || !sel) return;
+      if (this.instState.tab === 'hospital') {
+        hint.textContent = '医院必须挂具体区县：只能接收本区县捕捉点的下发。';
+        return;
+      }
+      hint.textContent = cityIds.has(String(sel.value))
+        ? '市级捕捉点：可自行采购药品、可下发给全市任何捕捉点或医院、捕捉的动物可转运到全市任何医院。'
+        : '区县级捕捉点：只能下发给本区县内的医院或捕捉点（跨区县流动需经市级捕捉点中转）。';
+    };
+    document.getElementById('inst-district').addEventListener('change', updateDistrictHint);
+    updateDistrictHint();
+
     m.overlay.querySelector('#instSave').addEventListener('click', async () => {
       const name = document.getElementById('inst-name').value.trim();
       if (!name) { TNR_UI.toast('请输入名称', 'warning'); return; }

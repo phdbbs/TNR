@@ -186,6 +186,13 @@ const TNR_API = {
   async getMaterialTransactions() { return this._get('/api/business/materials/transactions/'); },
   async getShelterLedger() { return this._get('/api/business/materials/shelter-ledger/'); },
   async getHospitalLedger() { return this._get('/api/business/materials/hospital-ledger/'); },
+  /* 可下发的接收机构（第四十五轮）：由**服务端**给出可选项，
+     不要在前端自己拼「全市医院」—— 那正是「下拉里选得到、一发就 400」的成因。
+     失败时抛错（严格读），让调用方能把失败显示出来而不是渲染一个空下拉。 */
+  async getDispatchTargets(materialId) {
+    const qs = materialId ? `?material_id=${encodeURIComponent(materialId)}` : '';
+    return this.getData(`/api/business/materials/dispatch-targets/${qs}`);
+  },
   async getReleases() { return this._get('/api/business/releases/'); },
   async createRelease(data) { return this._post('/api/business/releases/create/', data); },
   async confirmRelease(id, data) { return this._post(`/api/business/releases/${id}/confirm/`, data); },

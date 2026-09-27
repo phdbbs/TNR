@@ -1374,8 +1374,10 @@ class PageReachabilityTest(SimpleTestCase):
 class StaticAssetCacheBustTest(SimpleTestCase):
     """静态资源的 `?v=` 必须**全局同一个值**。
 
-    改 `static/` 下任何文件都要同时升 5 个模板里的 **6 处** `?v=`
-    （`base.html` 的 CSS + `tnr-common.js`，以及 4 个门户各自引入的 `tnr-api.js`）。
+    改 `static/` 下任何文件都要同时升 **6 个模板里的 7 处** `?v=`
+    （`base.html` 的 CSS + `tnr-common.js`，以及 5 个门户各自引入的 `tnr-api.js`）。
+    ⚠ 数量随门户增加而变（第四十三轮新增 `/platform/` 后从 6 处变 7 处）——
+    别照抄旧数字，以 `PORTALS` 为准。
     漏升任何一处，那个页面就会继续读浏览器缓存里的旧文件 ——
     表现为「改了没生效」，而且**只在某一个端上不生效**，极难排查。
     第十轮给 4 处补版本号、第二十二轮升 `20260918k` → `20260919a` 时都靠人工核对，
@@ -2212,14 +2214,46 @@ class InactiveEntityContractTest(SimpleTestCase):
             '它应当只是服务层判据的薄封装。')
 
     def test_shelter_portal_excludes_inactive_institutions(self):
-        """捕捉点端的机构下拉必须与政府端一样排除停用机构。"""
+        """捕捉点端的机构下拉必须与政府端一样排除停用机构。
+
+        ⚠ 第四十五轮起只剩**两处**：新建捕捉单的捕捉点、转运单的接收医院。
+        原来第三处（下发出库的接收医院）**过滤责任转移到了服务端** ——
+        那个下拉改成由 `materials/dispatch-targets/` 提供，服务端在
+        `dispatch_targets()` 里 `status='active'` 收口（见下一条用例）。
+        闸门跟着责任走，而不是钉在「前端要出现 3 次这个写法」上。
+        """
         html = read(PORTALS['shelter'])
         found = (html.count("i.status === 'active'")
                  + html.count("h.status === 'active'"))
         self.assertGreaterEqual(
-            found, 3,
-            '捕捉点端至少三处机构下拉要排除停用机构：新建捕捉单的捕捉点、\n'
-            '转运单与下发出库的接收医院。政府端早就过滤了，只写一半就是跨端漂移。')
+            found, 2,
+            '捕捉点端的机构下拉要排除停用机构：新建捕捉单的捕捉点、转运单的接收医院。\n'
+            '政府端早就过滤了，只写一半就是跨端漂移。')
+
+    def test_shelter_dispatch_targets_come_from_server_and_exclude_inactive(self):
+        """「下发出库」的接收方下拉改由服务端给，服务端必须自己排除停用机构。
+
+        第四十五轮：这个下拉从「前端拼全市医院」改成 `materials/dispatch-targets/`
+        （与 `dispatch_create` 的校验**共用同一个判据** `dispatch_targets()`）。
+        前端不再过滤 `status === 'active'` —— 过滤责任**转移**了，
+        所以闸门必须跟着转移：只把上面那条的计数从 3 改成 2，
+        等于把「少了一处过滤」这件事一起删掉。
+        """
+        html = read(PORTALS['shelter'])
+        self.assertIn(
+            'TNR_API.getDispatchTargets(', html,
+            '捕捉点端「下发出库」的接收方下拉没有走服务端接口 ——\n'
+            '前端自己拼列表必然与服务端校验漂移：用户**选得到、发不出去**（撞 400），\n'
+            '而且从下拉里看不出哪个能选。')
+        self.assertNotIn(
+            'id="ob_hospital"', html,
+            '接收方下拉还叫 `ob_hospital` —— 第四十五轮起接收方是**医院/捕捉点二选一**，\n'
+            '写死成医院会把捕捉点 id 当医院 id 提交，服务端报「医院不存在」。')
+        body = self._py_func(read('business/views_material.py'), 'dispatch_targets')
+        self.assertIn(
+            "status='active'", body,
+            '`dispatch_targets()` 没有排除停用机构 —— 停用机构仍会出现在下拉里，\n'
+            '且因为下拉已经不看前端过滤，这一处漏了就是**整条链路**漏了。')
 
     def test_capture_district_dropdowns_exclude_inactive_district(self):
         """区县下拉要排除停用区县，且必须留「当前值」的兜底。"""

@@ -12,7 +12,8 @@ from django.views.decorators.csrf import csrf_exempt
 from accounts.decorators import api_login_required, role_required
 from accounts.models import User
 from business.models import (
-    Pet, Capture, Transfer, Treatment, Material, MaterialTransaction,
+    Pet, Capture, Transfer, Treatment, Material, MaterialStock,
+    MaterialTransaction,
     Release, Adoption, CheckIn, Blacklist, Euthanasia, OwnerReturn, Message,
 )
 from business.services import (
@@ -960,15 +961,24 @@ def material_supervision(request):
     ⚠ 不能逐条调 `get_hospital_stock()`：那是 4 次聚合 × (物料 × 医院)，
     16 个物料 × 6 家医院 = 384 次查询。这里合成**一条 GROUP BY**、再在内存里按同一
     口径相加 —— 两个数必须对得上，否则「物料监管」与「医院端库存」会各说各话。
+
+    **第四十五轮新增**：
+    - `materials[].shelter_stocks` = `{捕捉点id: 库存}`，直接读
+      `MaterialStock`（**已经算好的结果，不做累加**）—— 同一区县有两个捕捉点时
+      顶层那个 `shelter_stock` 是**合计**，选到具体捕捉点时必须用这一份；
+    - 医院侧聚合加 `hospital__type='hospital'`：第四十五轮起下发单的接收方
+      也可以是捕捉点，不加这个条件会把「发给捕捉点的货」算进**医院**库存。
     """
     material_qs = list(_scope_filter(Material.objects.all(), request))
+    material_ids = [m.id for m in material_qs]
 
     # 物料 × 医院 × 类型 的合计（一条查询）。只统计本响应返回的物料，
     # 免得把别区县医院的数字也带进响应体。
     hospital_totals = {}   # material_id -> {hospital_id: {type: 合计}}
     if material_qs:
         agg = (MaterialTransaction.objects
-               .filter(material_id__in=[m.id for m in material_qs], hospital__isnull=False)
+               .filter(material_id__in=material_ids, hospital__isnull=False,
+                       hospital__type='hospital')
                .values('material_id', 'hospital_id', 'type')
                .annotate(total=Sum('quantity')))
         for row in agg:
@@ -983,6 +993,18 @@ def material_supervision(request):
             for hid, by_type in (hospital_totals.get(mid) or {}).items()
         }
 
+    # 捕捉点侧按机构：**直读** `MaterialStock`（一条查询），不做累加。
+    # 没有机构库存行的物料不在这里出现，前端会退回顶层 `shelter_stock`
+    # （= 该物料捕捉点合计），所以存量数据的显示不变。
+    shelter_stocks = {}    # material_id -> {institution_id: 数量}
+    if material_ids:
+        for row in (MaterialStock.objects
+                    .filter(material_id__in=material_ids,
+                            institution__type='shelter')
+                    .values('material_id', 'institution_id', 'quantity')):
+            shelter_stocks.setdefault(row['material_id'], {})[
+                str(row['institution_id'])] = row['quantity']
+
     materials = []
     alerts = []
     for m in material_qs:
@@ -990,6 +1012,7 @@ def material_supervision(request):
         item['category_display'] = m.get_category_display()
         item['district_name'] = m.district.name if m.district else ''
         item['hospital_stocks'] = _hospital_stocks(m.id)
+        item['shelter_stocks'] = shelter_stocks.get(m.id, {})
         # 预警：库存低于安全库存
         if m.shelter_stock < m.safety_stock:
             alerts.append({

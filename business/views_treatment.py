@@ -19,6 +19,7 @@ from business.services import (
     generate_ledger_no, get_district_filtered_queryset,
     adjust_stock, use_chip, get_hospital_stock,
     get_active_pet, get_scoped_object, expired_material_error,
+    find_hospital_chip_material,
 )
 
 
@@ -150,8 +151,12 @@ def treatment_create(request):
             # 芯片物料在这里**一并取好并校验**，保持「先全校验 → 再落库」的两段式。
             # 原先它在下面的事务块内才查询 —— 一次可能失败的 DB 查询落在落库之后，
             # 且过期判据会漏掉这条路径。
-            chip_material = Material.objects.filter(
-                category='chip', district_id=district_id).first()
+            #
+            # ⚠ 取法必须是「**该医院实际有库存**的芯片物料」（第四十五轮 C7）。
+            #   原先按 `district_id`（宠物区县）取，跨区县送医时会取到**别的
+            #   区县**的芯片物料，本院那条一颗都不减、外区那条被凭空扣掉，
+            #   而且不报错。
+            chip_material = find_hospital_chip_material(hospital, district_id)
             err = expired_material_error(chip_material, '用于诊疗')
             if err:
                 return json_fail(err)
@@ -197,6 +202,7 @@ def treatment_create(request):
                     hospital=hospital,
                     quantity=vaccine_qty,
                     txn_type='consume',
+                    institution=hospital,
                     operator=user,
                     operator_name=user.get_full_name() or user.username,
                     from_to='诊疗消耗',
@@ -216,6 +222,7 @@ def treatment_create(request):
                     hospital=hospital,
                     quantity=deworming_qty,
                     txn_type='consume',
+                    institution=hospital,
                     operator=user,
                     operator_name=user.get_full_name() or user.username,
                     from_to='诊疗消耗',
@@ -236,6 +243,7 @@ def treatment_create(request):
                         hospital=hospital,
                         quantity=1,
                         txn_type='consume',
+                        institution=hospital,
                         operator=user,
                         operator_name=user.get_full_name() or user.username,
                         from_to='诊疗消耗',

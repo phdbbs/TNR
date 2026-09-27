@@ -4,6 +4,7 @@ Task 5: 转运拆分下发
 - 支持拆分至多家医院
 """
 from django.contrib.auth.decorators import login_required
+from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
@@ -15,9 +16,32 @@ from business.services import (
     generate_ledger_no, get_district_filtered_queryset,
     resolve_district_scope, recalc_capture_status, get_scoped_object,
     busy_transfer_codes, inactive_institution_error,
-    get_own_institution_object,
+    get_own_institution_object, is_city_shelter,
 )
 from core.models import Institution
+
+
+def _requested_pets(items):
+    """本次转运**实际涉及**的动物（筛选条件与落库时保持一致）。
+
+    用于「市级捕捉点」推导归属区县（第四十五轮 C1/Q2）：市级捕捉点自己挂在
+    「全市（市级）」下，推不出具体区县，只能看这批动物实际是在哪个区县抓的。
+    两种提交格式（`pet_ids` / `pet_codes`）都要认。
+    """
+    codes, ids = set(), set()
+    for item in items:
+        codes |= {c for c in (item.get('pet_codes') or []) if c}
+        ids |= {i for i in (item.get('pet_ids') or []) if i}
+    qs = Pet.objects.filter(status='in_transit', is_deleted=False)
+    if codes and ids:
+        qs = qs.filter(Q(code__in=codes) | Q(id__in=ids))
+    elif codes:
+        qs = qs.filter(code__in=codes)
+    elif ids:
+        qs = qs.filter(id__in=ids)
+    else:
+        return []
+    return list(qs)
 
 
 @csrf_exempt
@@ -89,11 +113,13 @@ def transfer_create(request):
     # 现场两个捕捉点操作员都挂在「全市（市级）」下，而前端并不提交 district_id，
     # 取操作员区县会让转运单全部落到市级 —— 本区县政府在区县隔离下看不到本区
     # 转运单（捕捉单当初就是这么错的）。
-    district, err = resolve_district_scope(user, shelter, body_int(data, 'district_id'))
-    if err:
-        return json_fail(err)
-    district_id = district.id
-
+    #
+    # ⚠ 第四十五轮：**市级捕捉点**连捕捉点自己都推不出区县（它的 district 是
+    #   「全市（市级）」），原先这里直接 400「归属区县不能是市级」，
+    #   于是市级捕捉点**连一张转运单都发不出去**（C1）。Q2 已确认归属
+    #   「**实际捕捉区县**」—— 所以从本次实际转运的动物上推导，
+    #   见下面 `extra_anchors`。
+    #
     # 停用的捕捉点也不能再发起转运（与 `capture_create` 是同一条判据）。
     # 停用一个捕捉点意味着它不再运营，它的操作员不该继续往外送动物。
     shelter_err = inactive_institution_error(shelter, '捕捉点')
@@ -133,6 +159,28 @@ def transfer_create(request):
     requested_codes = set()
     for item in items:
         requested_codes |= {c for c in (item.get('pet_codes') or []) if c}
+
+    # 归属区县：优先用显式提交的，否则从**本次实际转运的动物**推导。
+    # 市级捕捉点（第四十五轮）只能靠后者 —— 它自己挂在「全市（市级）」下，
+    # 拿它当锚点会把记录落到市级、击穿区县隔离（Q2 已确认按实际捕捉区县）。
+    batch_pets = _requested_pets(items)
+    anchors = ([capture] if capture is not None else []) + batch_pets
+    district, err = resolve_district_scope(
+        user, shelter, body_int(data, 'district_id'), extra_anchors=anchors)
+    if err:
+        return json_fail(err)
+    district_id = district.id
+
+    # 一张转运单只能有一个归属区县。市级捕捉点的动物可能来自不同区县 ——
+    # 混合时**明确要求分单**，不要静默按「第一只的区县」归属：那会把别的
+    # 区县的动物记到本区县名下，区县政府看到本区没有的动物、另一区看不到
+    # 本区被带走的动物，而且**全程不报错**。
+    # 只对市级捕捉点判：区县级捕捉点提交外区动物由下面的「不属于本区县」
+    # 判据拦（文案更贴合那个场景，历史用例也在匹配它）。
+    if is_city_shelter(shelter):
+        batch_districts = {p.district_id for p in batch_pets if p.district_id}
+        if len(batch_districts) > 1:
+            return json_fail('本单动物来自多个区县，请按区县分单后再转运')
 
     if requested_codes:
         busy = busy_transfer_codes(requested_codes, district_id)

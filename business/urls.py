@@ -53,6 +53,10 @@ urlpatterns = [
     path('materials/<int:pk>/receive/', views_material.material_receive, name='material_receive'),
     path('materials/adjustment/', views_material.stock_adjustment, name='stock_adjustment'),
     path('materials/transactions/', views_material.material_transactions, name='material_transactions'),
+    # 可下发的接收机构（第四十五轮）——与 `dispatch_create` 共用同一份范围判据，
+    # 前端照单渲染就不会再出现「下拉里选得到、一发就 400」。
+    path('materials/dispatch-targets/', views_material.dispatch_target_options,
+         name='dispatch_target_options'),
     path('materials/shelter-ledger/', views_material.shelter_stock_ledger, name='shelter_stock_ledger'),
     path('materials/hospital-ledger/', views_material.hospital_stock_ledger, name='hospital_stock_ledger'),
 

@@ -64,7 +64,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928b"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -997,24 +997,48 @@ const GovPortal = {
   },
 
   /* 「机构」视角 —— 下拉里同时有捕捉点与医院，两者的库存口径不同：
-       - 未选：全局视角，库存取 `shelter_stock`（各区县捕捉点库存）；
-       - 捕捉点 S：只看 S 所在区县的物料，库存仍取 `shelter_stock`（那正是 S 自己的库存）；
-       - 医院 H：只看 H 所在区县的物料，库存取 `hospital_stocks[H.id]`
-         —— 后端按 `business.services.get_hospital_stock()` 的口径算好
+       - 未选：全局视角，库存取 `shelter_stock`（各区县捕捉点库存**合计**）；
+       - 捕捉点 S：库存取 `shelter_stocks[S.id]`（第四十五轮新增）
+         —— 后端**直读** `MaterialStock` 里 S 那一行，不做累加。
+         顶层 `shelter_stock` 是**合计**：同一区县两个捕捉点时两者不相等，
+         选到具体捕捉点还用合计值，就是把别人的库存算到它头上。
+       - 医院 H：库存取 `hospital_stocks[H.id]`，后端按
+         `business.services.get_hospital_stock()` 的口径算好
          （采购 + 签收 − 消耗 − 异动），与医院端「实时库存」是同一个数。
-     返回 { inst, name, districtId, isHospital, stock(m) }。 */
+     返回 { inst, name, districtId, isHospital, stock(m), matches(m) }。 */
   materialView(instId) {
     const all = this._matInstitutions || [];
     const inst = instId ? all.find(i => String(i.id) === String(instId)) : null;
     if (!inst) {
-      return { inst: null, name: '', districtId: '', isHospital: false, stock: (m) => m.shelter_stock || 0 };
+      return { inst: null, name: '', districtId: '', isHospital: false,
+               stock: (m) => m.shelter_stock || 0, matches: () => true };
     }
     const isHospital = inst.type === 'hospital';
+    if (isHospital) {
+      return {
+        inst, name: inst.name, districtId: String(inst.district || ''), isHospital: true,
+        stock: (m) => ((m.hospital_stocks || {})[String(inst.id)] || 0),
+        matches: (m) => String(m.district || '') === String(inst.district || '')
+      };
+    }
+    /* 捕捉点的行范围**不能再只按「物料区县 == 捕捉点区县」收**（第四十五轮）。
+     *
+     * 捕捉点现在能持有**不属于本区县**的物料：市级下发给区县级捕捉点（Q4 二级下发），
+     * 这批物料的 `district` 是**发起方那一侧**的区县（市级采购时建的，多半是
+     * 「全市（市级）」）。只按区县收会把它们**整批漏掉** ——
+     * 于是「我确实收到过这批货」在监管页面上根本不存在，而列表看起来只是「少了点行」。
+     *
+     * 正确判据是「**该捕捉点在 `shelter_stocks` 里有这一行**」= 确实持有它，
+     * 这正是服务端 `MaterialStock` 的语义。
+     * ⚠ 用**并集**（持有 ∪ 本区县）而不是「换成持有」：升级库时若某物料还没建
+     * 机构库存行，只按持有判会让它从监管页面**消失**；并集只会多不会少，
+     * 此时 `stock` 退回顶层 `shelter_stock`，显示与升级前完全一致。 */
+    const stockMap = (m) => (m.shelter_stocks || {});
+    const hasRow = (m) => Object.prototype.hasOwnProperty.call(stockMap(m), String(inst.id));
     return {
-      inst, name: inst.name, districtId: String(inst.district || ''), isHospital,
-      stock: isHospital
-        ? (m) => ((m.hospital_stocks || {})[String(inst.id)] || 0)
-        : (m) => m.shelter_stock || 0
+      inst, name: inst.name, districtId: String(inst.district || ''), isHospital: false,
+      stock: (m) => (hasRow(m) ? (stockMap(m)[String(inst.id)] || 0) : (m.shelter_stock || 0)),
+      matches: (m) => hasRow(m) || String(m.district || '') === String(inst.district || '')
     };
   },
 
@@ -1101,8 +1125,11 @@ const GovPortal = {
       const m = r.m;
       // 区县按 **id** 比（下拉 value 是 id），不要再拿名称比 —— 名称会被人在界面上改。
       if (v.district && String(m.district || '') !== String(v.district)) return false;
-      // 选机构时只看该机构所在区县的物料（未选机构则不限）
-      if (view.inst && String(m.district || '') !== view.districtId) return false;
+      // 选机构时按该机构的「持有范围」收（未选机构则不限）。
+      // ⚠ 判据在 `materialView().matches()` 里 —— 医院按区县、捕捉点按
+      // `shelter_stocks` 是否持有该物料（第四十五轮：捕捉点可能持有外区县物料）。
+      // 别在这里写死区县比较，那会把「收到过市级下发的货」整批滤掉。
+      if (view.inst && !view.matches(m)) return false;
       if (tab === 'alert' && !r.low) return false;
       if (!v.keyword) return true;
       return [m.name, m.category_display, m.category, m.unit, m.district_name]
