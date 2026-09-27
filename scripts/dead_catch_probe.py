@@ -43,7 +43,9 @@ from jslex import SCRIPT_RE, match_brace, strip_js  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 API_PATH = ROOT / 'static/js/tnr-api.js'
-PORTALS = ('shelter', 'gov', 'hospital', 'adopter')
+#: ⚠ 新增门户必须加进来，否则清点器看不见它 —— 覆盖面无声明地缩水。
+#: `platform` 是第四十二轮新增的平台管理端（全局设置页从政府端迁入）。
+PORTALS = ('shelter', 'gov', 'hospital', 'adopter', 'platform')
 
 CALL_RE = re.compile(r'TNR_API\.([A-Za-z_]\w*)\s*\(')
 CATCH_RE = re.compile(r'\s*catch\s*(\([^)]*\))?\s*\{')

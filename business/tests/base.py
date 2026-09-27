@@ -262,6 +262,10 @@ class BusinessTestBase(ApiMixin, TestCase):
         cls.gov_city = make_user("gov_city_t", role="gov_city", district=cls.city)
         cls.gov_a = make_user("gov_a_t", role="gov_district", district=cls.district_a)
         cls.gov_b = make_user("gov_b_t", role="gov_district", district=cls.district_b)
+        # 第四十二轮：全局设置（机构/区县/账号/编号规则/公告/日志）迁到平台端，
+        # 这些接口的角色白名单是 `platform_admin`。它**不挂区县** ——
+        # 可见范围由 `core/scope.py` 的 `GLOBAL_SCOPE_ROLES` 决定。
+        cls.platform_admin = make_user("platform_t", role="platform_admin")
         cls.shelter_user_a = make_user("shelter_a_t", role="shelter",
                                        district=cls.district_a, institution=cls.shelter_a)
         cls.shelter_user_b = make_user("shelter_b_t", role="shelter",

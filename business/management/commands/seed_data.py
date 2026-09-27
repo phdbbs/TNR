@@ -221,6 +221,9 @@ class Command(BaseCommand):
         self.stdout.write('创建用户...')
         data = [
             # (username, name, role, district_code, inst_id, phone)
+            # ⚠ 平台管理员**不挂区县**（`district_code=None`）：它是全局角色，
+            #   可见范围由 `core/scope.py` 的 `GLOBAL_SCOPE_ROLES` 决定。
+            ('platform', '平台管理员', 'platform_admin', None, None, '13800000000'),
             ('admin', '市级管理员', 'gov_city', 'D000', None, '13800000001'),
             ('cy_gov', '襄城区政府管理员', 'gov_district', 'D001', None, '13800000002'),
             ('hd_gov', '樊城区政府管理员', 'gov_district', 'D002', None, '13800000003'),
@@ -242,7 +245,7 @@ class Command(BaseCommand):
                     'role': role,
                     'phone': phone,
                     'status': 'active',
-                    'is_staff': role in ('gov_city', 'gov_district'),
+                    'is_staff': role in ('platform_admin', 'gov_city', 'gov_district'),
                 }
             )
 
@@ -267,7 +270,7 @@ class Command(BaseCommand):
             if user.first_name != name:
                 user.first_name = name
                 changed.append('first_name')
-            want_staff = role in ('gov_city', 'gov_district')
+            want_staff = role in ('platform_admin', 'gov_city', 'gov_district')
             if user.is_staff != want_staff:
                 user.is_staff = want_staff
                 changed.append('is_staff')

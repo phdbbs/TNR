@@ -1001,6 +1001,7 @@ class BodyValueGuardTest(SimpleTestCase):
 #: ⚠ 新增门户 / JS 时必须加进来，否则闸门看不见它读的键（覆盖面无声明地缩水）。
 FRONTEND_SOURCE_FILES = (
     'templates/portal/gov/portal.html',
+    'templates/portal/platform/portal.html',
     'templates/portal/shelter/portal.html',
     'templates/portal/hospital/portal.html',
     'templates/portal/adopter/portal.html',

@@ -22,21 +22,22 @@ from business.tests.base import (
 from core import audit
 from core.models import AuditLog, District
 
-GOV_PORTAL = 'templates/portal/gov/portal.html'
+#: 操作日志的渲染/搜索在**平台端**（第四十二轮从政府端迁入）。
+LOG_PORTAL = 'templates/portal/platform/portal.html'
 
 
 def _log_render_fields():
-    """从政府端门户里取出日志渲染/搜索实际读取的响应字段名。
+    """从平台端门户里取出日志渲染/搜索实际读取的响应字段名。
 
     日志渲染是模板里的两段 JS（`renderLogList` / `logSearchFields`），
     这里从源码提取 `log.<name>`，用来和接口真实返回的键做交叉校验。
     """
-    source = Path(GOV_PORTAL).read_text(encoding='utf-8')
+    source = Path(LOG_PORTAL).read_text(encoding='utf-8')
     fields = set()
     for method in ('renderLogList', 'logSearchFields'):
         m = re.search(rf'{method}\((?:\w+)\)\s*\{{(.*?)\n  \}}', source, re.S)
         if m is None:
-            raise AssertionError(f'{GOV_PORTAL} 里找不到 {method}，测试本身可能已失效')
+            raise AssertionError(f'{LOG_PORTAL} 里找不到 {method}，测试本身可能已失效')
         fields |= set(re.findall(r'\blog\.([A-Za-z_$][\w$]*)', m.group(1)))
     return fields
 
@@ -142,7 +143,13 @@ class AuditDistrictAttributionTest(BusinessTestBase):
 
 
 class AuditLogViewScopeTest(BusinessTestBase):
-    """政府端日志接口的区县隔离与筛选。"""
+    """平台端日志接口的全局可见性与筛选。
+
+    第四十二轮：操作日志随全局设置一并迁到平台端（`/api/supervision/logs/`
+    的 `role_required` 从 gov_* 收成 `platform_admin`）。平台管理员是
+    **全局角色**（不挂区县），所以日志不再按区县收敛 —— 原先那几条
+    「区县政府只看得到本区」的用例随之改写成「平台端看得到全部区县」。
+    """
 
     @classmethod
     def setUpTestData(cls):
@@ -165,35 +172,40 @@ class AuditLogViewScopeTest(BusinessTestBase):
     def _logs(self, url='/api/supervision/logs/'):
         return self.ok(self.get_json(url))['data']
 
-    def test_city_admin_sees_all(self):
-        self.login_as(self.gov_city)
-        self.assertEqual(len(self._logs()), 3)
-
-    def test_district_admin_sees_only_own_district(self):
-        self.login_as(self.gov_a)
+    def test_platform_admin_sees_every_district(self):
+        """平台管理员是全局角色：甲乙两区 + 无归属的日志都要看得到。"""
+        self.login_as(self.platform_admin)
         rows = self._logs()
-        self.assertEqual([r['objectRepr'] for r in rows], ['CAP-T0001'],
-                         '区县政府只应看到归属本区县的日志')
-        self.assertTrue(all(r['districtId'] == self.district_a.id for r in rows))
+        self.assertEqual(len(rows), 3)
+        self.assertEqual({r['objectRepr'] for r in rows},
+                         {'CAP-T0001', 'TRF-T0002', ''})
 
-    def test_unattributed_log_is_hidden_from_district_admin(self):
-        """没有归属区县的日志不对区县政府展示，否则等于绕开区县隔离。"""
-        self.login_as(self.gov_a)
-        self.assertNotIn('系统配置', [r['module'] for r in self._logs()])
+    def test_platform_admin_sees_unattributed_log(self):
+        """没有归属区县的日志（如系统配置）对平台端同样可见。"""
+        self.login_as(self.platform_admin)
+        self.assertIn('系统配置', [r['module'] for r in self._logs()])
+
+    def test_gov_roles_are_rejected(self):
+        """收口：政府端角色（含市级）读日志一律 403。"""
+        for user in (self.gov_city, self.gov_a):
+            with self.subTest(role=user.role):
+                self.login_as(user)
+                self.assertEqual(
+                    self.get_json('/api/supervision/logs/').status_code, 403)
 
     def test_module_filter(self):
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         rows = self._logs('/api/supervision/logs/?module=转运下发')
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['objectRepr'], 'TRF-T0002')
 
     def test_action_flag_filter(self):
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         rows = self._logs('/api/supervision/logs/?action_flag=1')
         self.assertEqual([r['objectRepr'] for r in rows], ['CAP-T0001'])
 
     def test_keyword_search_covers_summary_and_operator(self):
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         self.assertEqual(len(self._logs('/api/supervision/logs/?q=签收')), 1)
         self.assertEqual(len(self._logs('/api/supervision/logs/?q=shelter_b_t')), 1)
 
@@ -209,13 +221,13 @@ class AuditLogViewScopeTest(BusinessTestBase):
             district=self.district_a, district_name=self.district_a.name,
             module='用户管理', action_flag=AuditLog.ACTION_CHANGE,
             object_repr='账号 #12', summary='用户管理·启停')
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         rows = self._logs(f'/api/supervision/logs/?q={self.gov_city.username}')
         self.assertIn(log.id, [r['id'] for r in rows])
 
     def test_payload_has_camel_and_snake_keys(self):
         """手工聚合的接口必须自己补驼峰，否则前端读 `r.actionTime` 得 undefined。"""
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         row = self._logs()[0]
         for key in ('action_time', 'actionTime', 'action_flag', 'actionFlag',
                     'object_repr', 'objectRepr', 'user_name', 'userName',
@@ -249,7 +261,7 @@ class AuditLogSearchFieldContractTest(BusinessTestBase):
             district=self.district_a, district_name=self.district_a.name,
             module='捕捉登记', action_flag=AuditLog.ACTION_ADD,
             object_repr='CAP-T0001', summary='捕捉登记·新增 CAP-T0001')
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         row = self.ok(self.get_json('/api/supervision/logs/'))['data'][0]
 
         missing = sorted(f for f in _log_render_fields() if f not in row)
@@ -434,13 +446,13 @@ class AuditWriteCoverageTest(BusinessTestBase):
         self._assert_attributed(self.district_a, '领养业务')
 
     def test_institution_toggle(self):
-        self.login_as(self.gov_a)
+        self.login_as(self.platform_admin)
         self.ok(self.post_json(
             f'/api/supervision/institutions/{self.hospital_a.id}/toggle/'))
         self._assert_attributed(self.district_a, '机构管理')
 
     def test_district_create(self):
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         self.ok(self.post_json('/api/supervision/districts/create/',
                                {'name': '新城区', 'code': 'TAUDIT'}))
         created = District.objects.get(code='TAUDIT')
@@ -453,7 +465,7 @@ class AuditWriteCoverageTest(BusinessTestBase):
         报错，整条日志被吞掉 —— 删除区县这种最该留痕的操作反而没有记录。
         """
         temp = make_district(name='待删区', code='TDEL')
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         self.ok(self.post_json(f'/api/supervision/districts/{temp.id}/delete/'))
         log = self._last()
         self.assertIsNotNone(log, '区县删除的日志丢失了')
@@ -461,7 +473,7 @@ class AuditWriteCoverageTest(BusinessTestBase):
         self.assertIn('待删区', log.summary)
 
     def test_user_create(self):
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         self.ok(self.post_json('/api/supervision/users/create/', {
             'username': 'audit_new_user', 'name': '新用户',
             'role': 'gov_district', 'district_id': self.district_a.id,
@@ -471,7 +483,7 @@ class AuditWriteCoverageTest(BusinessTestBase):
     def test_user_toggle(self):
         target = make_user('audit_toggle_t', role='hospital',
                            district=self.district_a, institution=self.hospital_a)
-        self.login_as(self.gov_city)
+        self.login_as(self.platform_admin)
         self.ok(self.post_json(f'/api/supervision/users/{target.id}/toggle/'))
         log = self._assert_attributed(self.district_a, '用户管理')
         self.assertEqual(log.object_repr, 'audit_toggle_t')

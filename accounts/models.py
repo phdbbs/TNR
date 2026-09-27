@@ -4,6 +4,11 @@ from django.db import models
 
 class User(AbstractUser):
     ROLE_CHOICES = [
+        # ⚠ `platform_admin` 是**平台管理端**专用角色，与其它角色**不同端**：
+        #   全局主数据的维护（区县 / 机构 / 账号 / 编号规则 / 公告）都在它名下，
+        #   政府端（gov_city / gov_district）只保留查看。它不挂区县 ——
+        #   可见范围恒为「全部」，见 core.scope.has_global_district_scope。
+        ('platform_admin', '平台管理员'),
         ('gov_city', '市级政府管理员'),
         ('gov_district', '区级政府管理员'),
         ('shelter', '捕捉点操作员'),
@@ -19,6 +24,10 @@ class User(AbstractUser):
 
     def __str__(self):
         return f'{self.username} ({self.get_role_display()})'
+
+    @property
+    def is_platform_admin(self):
+        return self.role == 'platform_admin'
 
     @property
     def is_gov_city(self):

@@ -22,16 +22,14 @@ from business.services import (
 )
 
 
-# ============================================
-# 捕捉点门户页面
-# ============================================
-@never_cache  # 门户页面禁用缓存，避免手机浏览器缓存旧版本页面
-@role_required('shelter', 'gov_city', 'gov_district')
-@login_required
-def shelter_portal(request):
-    """捕捉点端门户页面。"""
-    user = request.user
-    user_data = {
+def _portal_user_data(user):
+    """门户页注入给前端的 `user_data`。
+
+    ⚠ 四个门户原本各抄了一份这段字典 —— 第四个（平台端）再加一份必然漂移：
+    前端 `isCityLevel()` / 区县下拉 / 归属判断全靠这几个键，漏一个键就是
+    「某个端看起来正常、某个字段恒为空」。
+    """
+    return {
         'id': user.id,
         'username': user.username,
         'name': user.get_full_name() or user.username,
@@ -43,9 +41,23 @@ def shelter_portal(request):
         'institution_name': user.institution.name if user.institution else '',
         'phone': user.phone,
     }
-    return render(request, 'portal/shelter/portal.html', {
-        'user_data': json.dumps(user_data, ensure_ascii=False),
+
+
+def _render_portal(request, template):
+    return render(request, template, {
+        'user_data': json.dumps(_portal_user_data(request.user), ensure_ascii=False),
     })
+
+
+# ============================================
+# 捕捉点门户页面
+# ============================================
+@never_cache  # 门户页面禁用缓存，避免手机浏览器缓存旧版本页面
+@role_required('shelter', 'gov_city', 'gov_district')
+@login_required
+def shelter_portal(request):
+    """捕捉点端门户页面。"""
+    return _render_portal(request, 'portal/shelter/portal.html')
 
 
 # ============================================
@@ -56,22 +68,7 @@ def shelter_portal(request):
 @login_required
 def hospital_portal(request):
     """宠物医院端门户页面。"""
-    user = request.user
-    user_data = {
-        'id': user.id,
-        'username': user.username,
-        'name': user.get_full_name() or user.username,
-        'role': user.role,
-        'role_display': user.get_role_display(),
-        'district_id': user.district_id,
-        'district_name': user.district.name if user.district else '',
-        'institution_id': user.institution_id,
-        'institution_name': user.institution.name if user.institution else '',
-        'phone': user.phone,
-    }
-    return render(request, 'portal/hospital/portal.html', {
-        'user_data': json.dumps(user_data, ensure_ascii=False),
-    })
+    return _render_portal(request, 'portal/hospital/portal.html')
 
 
 # ============================================
@@ -81,23 +78,25 @@ def hospital_portal(request):
 @role_required('gov_city', 'gov_district')
 @login_required
 def gov_portal(request):
-    """政府监管端门户页面。"""
-    user = request.user
-    user_data = {
-        'id': user.id,
-        'username': user.username,
-        'name': user.get_full_name() or user.username,
-        'role': user.role,
-        'role_display': user.get_role_display(),
-        'district_id': user.district_id,
-        'district_name': user.district.name if user.district else '',
-        'institution_id': user.institution_id,
-        'institution_name': user.institution.name if user.institution else '',
-        'phone': user.phone,
-    }
-    return render(request, 'portal/gov/portal.html', {
-        'user_data': json.dumps(user_data, ensure_ascii=False),
-    })
+    """政府监管端门户页面（只查看业务，主数据维护已在平台端）。"""
+    return _render_portal(request, 'portal/gov/portal.html')
+
+
+# ============================================
+# 平台管理门户页面
+# ============================================
+@never_cache
+@role_required('platform_admin')
+@login_required
+def platform_portal(request):
+    """平台管理端门户页面。
+
+    ⚠ **只有 `platform_admin` 能进**，政府角色（含 `gov_city`）一律 403 ——
+    主数据维护（区县 / 机构 / 账号 / 编号规则 / 公告 / 操作日志）已经整体
+    迁到这里。放行 gov_city 会让「政府端只能查看」这道约束形同虚设：
+    它只是从另一个入口拿到了同一批写接口。
+    """
+    return _render_portal(request, 'portal/platform/portal.html')
 
 
 # ============================================

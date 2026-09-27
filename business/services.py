@@ -23,6 +23,9 @@ from core.http import (body_dict, body_list, body_str,  # noqa: F401
                        json_fail, json_ok, read_json_body, to_camel_key,
                        with_camel_keys)
 from core.models import District, Institution
+# ⚠「谁能看到全部区县」的判据只有一份，在 core.scope —— 不要在这里再写一遍
+from core.scope import (EMPTY_DISTRICT_SCOPE, is_empty_scope,
+                        resolve_user_district_scope)
 
 
 # ============================================
@@ -701,19 +704,16 @@ def get_district_filtered_queryset(model, user):
     :param user: 已登录的 User 对象
     :return: QuerySet
     """
-    if user.role == 'gov_city':
+    # ⚠ 「谁能看到什么」必须**派生自** `resolve_user_district_scope()`，
+    #   而不是在这里再判一遍角色。早先这里自己写了一遍（只认 gov_city + is_city），
+    #   中间件另写一遍，两边对「账号没挂区县」的解释相反：
+    #   列表 `none()`（什么都看不到）、写接口却当 `None` = 可见全部。
+    scope = resolve_user_district_scope(user)
+    if scope is None:
         return model.objects.all()
-
-    # 市级用户（如捕捉点操作员）可见全部数据
-    district = getattr(user, 'district', None)
-    if district and getattr(district, 'is_city', False):
-        return model.objects.all()
-
-    district_id = getattr(user, 'district_id', None)
-    if district_id:
-        lookup = district_lookup_path(model)
-        return model.objects.filter(**{f'{lookup}_id': district_id})
-    return model.objects.none()
+    if is_empty_scope(scope):
+        return model.objects.none()
+    return model.objects.filter(**{f'{district_lookup_path(model)}_id': scope})
 
 
 def get_scoped_object(model, pk, user, **extra):
@@ -1202,22 +1202,23 @@ def get_district_scope(request):
     """从 request 中获取区县范围。
 
     优先使用中间件设置的 user_district_scope，其次从 user.district_id 获取。
-    None 表示可见全部（市级管理员或所属区县为市级的用户）。
+
+    ⚠ 返回值有**三种**语义，别再当成二值：
+      - `None`                  → 可见全部
+      - `EMPTY_DISTRICT_SCOPE`  → 什么都看不到（该账号没挂区县）
+      - 具体区县 id             → 仅该区县
+
+    历史上 `None` 同时承担了前两种含义，于是「没挂区县的账号」会
+    **列表全空、写接口却全部放行**。
     """
     # 中间件已设置 user_district_scope（可能为 None 表示可见全部）
     if hasattr(request, 'user_district_scope'):
         return request.user_district_scope
-    # 兜底：中间件未设置时手动计算
+    # 兜底：中间件未设置时手动计算（与中间件**同一个函数**，不是抄一份）
     user = getattr(request, 'user', None)
     if user and user.is_authenticated:
-        if user.role == 'gov_city':
-            return None
-        # 所属区县为市级的用户可见全部
-        district = getattr(user, 'district', None)
-        if district and getattr(district, 'is_city', False):
-            return None
-        return user.district_id
-    return None
+        return resolve_user_district_scope(user)
+    return EMPTY_DISTRICT_SCOPE
 
 
 def resolve_district_scope(user, anchor, submitted):
@@ -1348,6 +1349,7 @@ def cascade_operator_district(institution, old_district_id):
 # 这类「前端做了、后端没做」的校验特别危险：界面上根本点不出这个选项，
 # 所以无论怎么点都发现不了，只有直接打接口才会暴露。
 MANAGEABLE_ROLES = {
+    'platform_admin': ('platform_admin', 'gov_city', 'gov_district', 'shelter', 'hospital'),
     'gov_city': ('gov_city', 'gov_district', 'shelter', 'hospital'),
     'gov_district': ('shelter', 'hospital'),
 }

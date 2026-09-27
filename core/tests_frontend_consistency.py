@@ -7,6 +7,7 @@
 
 新增后端枚举值 / 新增接口时，这些测试会失败并指向需要同步的前端文件。
 """
+import glob
 import os
 import re
 
@@ -23,6 +24,8 @@ PORTALS = {
     'hospital': 'templates/portal/hospital/portal.html',
     'gov': 'templates/portal/gov/portal.html',
     'adopter': 'templates/portal/adopter/portal.html',
+    # 第四十二轮新增：全局设置（机构/区县/账号/编号规则/公告/日志）迁到平台端
+    'platform': 'templates/portal/platform/portal.html',
 }
 
 FRONTEND_FILES = list(PORTALS.values()) + [
@@ -914,6 +917,7 @@ BASE_TEMPLATES = {
     'hospital': 'templates/portal/hospital_base.html',
     'gov': 'templates/portal/gov_base.html',
     'adopter': 'templates/portal/adopter_base.html',
+    'platform': 'templates/portal/platform_base.html',
 }
 
 # 各端门户对象名（adopter 端是散落的全局函数，没有统一对象）
@@ -921,6 +925,7 @@ PORTAL_OBJECTS = {
     'shelter': 'Shelter',
     'hospital': 'Hospital',
     'gov': 'GovPortal',
+    'platform': 'PlatformPortal',
 }
 
 NAV_LABEL = re.compile(r'<span class="nav-item-label">([^<]+)</span>')
@@ -1854,7 +1859,7 @@ class TableHeightFloorTest(SimpleTestCase):
 class ManageableRolesContractTest(SimpleTestCase):
     """「谁能建哪些角色的账号」前后端必须同一套，后端是**唯一真源**。
 
-    这里锁的是一类真实漏洞：`GovPortal.canCreateRole()` 早就把规则写在界面上
+    这里锁的是一类真实漏洞：`canCreateRole()` 早就把规则写在界面上
     （只是把角色下拉的选项过滤掉），而 `supervision.user_create`
     **没有任何对应校验** —— 实测区级管理员直接 POST `role=gov_city` +
     市级 `district_id` 就建出了一个**市级管理员**账号（口令还是他自己填的），
@@ -1863,37 +1868,39 @@ class ManageableRolesContractTest(SimpleTestCase):
     这类「前端做了、后端没做」的校验特别难被发现：界面上根本点不出这个选项，
     所以怎么点都正常，**只有直接打接口才会暴露**。所以两侧必须用一条断言绑死：
     改一侧不改另一侧就红。
+
+    ⚠ 第四十二轮：账号管理迁到**平台端**，前端真源随之变成
+    `platform/portal.html` 的 `canCreateRole()`，判据也从
+    `currentUser.role === 'gov_city'` 改成 `this.isGlobalScope()`。
     """
 
-    # `if (this.currentUser.role === 'gov_city') return ['a', 'b'].includes(role);`
-    PATTERN = re.compile(
-        r"this\.currentUser\.role\s*===\s*'(\w+)'\)\s*return\s*\[([^\]]*)\]")
+    # `if (this.isGlobalScope()) return ['a', 'b'].includes(role);`
+    PATTERN = re.compile(r"isGlobalScope\(\)\)\s*return\s*\[([^\]]*)\]")
 
     def _frontend_roles(self):
-        source = read(PORTALS['gov'])
+        source = read(PORTALS['platform'])
         m = re.search(r'canCreateRole\(role\)\s*\{', source)
-        self.assertIsNotNone(m, 'gov portal 里找不到 canCreateRole —— 本测试需要同步更新')
+        self.assertIsNotNone(m, 'platform portal 里找不到 canCreateRole —— 本测试需要同步更新')
         body = brace_body(source, source.index('{', m.start()))
         self.assertIsNotNone(body, 'canCreateRole 方法体的花括号不配对')
-        return {
-            role: [x.strip().strip('\'"') for x in roles.split(',') if x.strip()]
-            for role, roles in self.PATTERN.findall(body)
-        }
+        lists = self.PATTERN.findall(body)
+        self.assertTrue(lists, 'canCreateRole 里没解析到角色白名单 —— 本测试需要同步更新')
+        return [x.strip().strip('\'"') for x in lists[0].split(',') if x.strip()]
 
     def test_frontend_role_lists_match_backend(self):
         self.assertEqual(
             self._frontend_roles(),
-            {role: list(roles) for role, roles in MANAGEABLE_ROLES.items()},
-            '前端 `canCreateRole()` 与后端 `services.MANAGEABLE_ROLES` 不一致。\n'
+            list(MANAGEABLE_ROLES['platform_admin']),
+            '平台端 `canCreateRole()` 与后端 `services.MANAGEABLE_ROLES` 不一致。\n'
             '后端才是真正生效的那一份 —— 前端只过滤下拉选项，改错了不会有任何提示，\n'
             '只会让界面上少一个（或凭空多一个）角色选项。')
 
     def test_backend_roles_cover_every_non_adopter_role(self):
-        """市级管理员必须能建出全部非领养人角色，否则会「建不出第二个管理员」。"""
+        """平台管理员必须能建出全部非领养人角色，否则会「建不出第二个管理员」。"""
         self.assertEqual(
-            set(MANAGEABLE_ROLES['gov_city']),
-            {'gov_city', 'gov_district', 'shelter', 'hospital'},
-            '市级管理员可建角色集合变了 —— 领养人不在政府端创建，其余四种都应可建。')
+            set(MANAGEABLE_ROLES['platform_admin']),
+            {'platform_admin', 'gov_city', 'gov_district', 'shelter', 'hospital'},
+            '平台管理员可建角色集合变了 —— 领养人不在管理端创建，其余五种都应可建。')
 
 
 class InstitutionFormScopeContractTest(SimpleTestCase):
@@ -1951,23 +1958,29 @@ class InstitutionFormScopeContractTest(SimpleTestCase):
                 '两个接口必须共用同一个判据，各写一份必然会漂移。')
 
     def _institution_modal(self):
-        source = read(PORTALS['gov'])
+        # 第四十二轮：机构管理迁到平台端
+        source = read(PORTALS['platform'])
         m = re.search(r'showInstitutionModal\(id\)\s*\{', source)
-        self.assertIsNotNone(m, 'gov portal 里找不到 showInstitutionModal —— 本测试需要同步更新')
+        self.assertIsNotNone(m, 'platform portal 里找不到 showInstitutionModal —— 本测试需要同步更新')
         # 用 m.start() 定位方法体的那个 `{`：用 m.end() 会**跳过**它，
         # 从方法体内部的下一个 `{` 开始配对，取到的是一段无关片段。
         body = brace_body(source, source.index('{', m.start()))
         self.assertIsNotNone(body, 'showInstitutionModal 方法体的花括号不配对')
         return body
 
-    def test_frontend_narrows_district_options_for_district_admin(self):
-        """区级管理员的区县下拉必须收敛到本区县（服务端会拒，前端别让人白填）。"""
+    def test_frontend_narrows_district_options_only_for_district_scoped_operator(self):
+        """区县下拉的收窄必须以「**不是**全局角色」为前提。
+
+        平台管理员没有区县归属。若把政府端的 `isCityLevel()` 判据照抄过来
+        （`!isCityLevel()` 对平台管理员恒为真），收窄分支会**永远生效**，
+        把下拉过滤成空集 —— 界面上「所属区县」一个选项都没有，而服务端并不拒绝，
+        用户纯粹白填一遍。
+        """
         body = self._institution_modal()
         self.assertRegex(
-            body, r"isCityLevel\(\)[\s\S]{0,200}?currentUser\.district_id",
-            '机构表单的区县下拉没有按操作员区县收敛 ——\n'
-            '区级管理员会看到全部区县，选了他区才被服务端拒绝，白填一遍。\n'
-            '（账号表单 `showAccountModal` 早就这么做了，机构表单漏了。）')
+            body, r"!this\.isGlobalScope\(\)[\s\S]{0,200}?currentUser\.district_id",
+            '机构表单的区县下拉收窄没有以「非全局角色」为前提 ——\n'
+            '平台管理员会被误判成区级管理员，下拉退化成空集。')
 
     def test_frontend_preserves_institution_current_district(self):
         """编辑时必须把机构当前区县兜底加回选项。
@@ -2196,7 +2209,7 @@ class ShelterStockAdjustmentEntryTest(SimpleTestCase):
             "@role_required('shelter', 'hospital', 'gov_city', 'gov_district')",
             decorators,
             'stock_adjustment 的角色白名单里没有 shelter —— 捕捉点的过期物料'
-            '就没有任何正规出口（既不能报废、也不能下发）。')
+            '就没有任何正规出口（既不能报废，也不能下发）。')
 
     def test_shelter_portal_has_adjustment_entry(self):
         html = read(PORTALS['shelter'])
@@ -2210,6 +2223,50 @@ class ShelterStockAdjustmentEntryTest(SimpleTestCase):
         self.assertIn(
             'TNR_API.adjustStock(', html,
             '捕捉点门户没有真正调用异动接口')
+
+
+class TemplateCommentLeakTest(SimpleTestCase):
+    """`{# … #}` 是**单行**注释 —— 跨行写会把注释正文渲染到页面上。
+
+    Django 的 `{# #}` 只匹配**同一行**（跨行要用 `{% comment %}`）。跨行写
+    既不报错也不 500：模板语法合法、接口全 200、测试全绿，只是那段中文
+    被**原样输出**。第四十二轮实测两处 —— 政府端与平台端侧栏里都出现了
+    `{# 第四十二轮：「机构基础管理 / 账号权限管理 …` 这样一行字。
+
+    这类缺陷只有「真的打开页面看一眼」才会发现（本轮是 GUI 脚本读
+    `body.innerText` 时顺带撞到的），所以必须机械化。
+    """
+
+    #: 允许的例外：(相对路径, 行号) → 理由。没有理由的例外就是下一个洞。
+    EXEMPT = {}
+
+    def test_no_multiline_django_comment(self):
+        files = sorted(glob.glob(
+            os.path.join(ROOT, 'templates', '**', '*.html'), recursive=True))
+        self.assertGreater(len(files), 10,
+                           '一个模板都没扫到 —— 扫描逻辑失效了，不是「全部通过」')
+        offenders = []
+        for path in files:
+            rel = os.path.relpath(path, ROOT)
+            in_comment_block = False
+            with open(path, encoding='utf-8') as f:
+                for lineno, line in enumerate(f, 1):
+                    if '{% comment %}' in line:
+                        in_comment_block = True
+                    if '{% endcomment %}' in line:
+                        in_comment_block = False
+                        continue
+                    if in_comment_block:
+                        continue
+                    # 先剥掉**同一行内**已经闭合的注释
+                    if '{#' in re.sub(r'\{#.*?#\}', '', line):
+                        if (rel, lineno) in self.EXEMPT:
+                            continue
+                        offenders.append(f'{rel}:{lineno}: {line.strip()[:80]}')
+        self.assertEqual(
+            offenders, [],
+            '以下 `{#` 没有在同一行闭合 —— 注释内容会被当成正文渲染出来：\n  '
+            + '\n  '.join(offenders))
 
 
 def css_rule(css, selector):

@@ -237,11 +237,13 @@ class DeadCatchIsZeroTest(SimpleTestCase):
 
         这条是整个套件里最重要的一条 —— 没有它，上面 `test_no_dead_catch_anywhere`
         可能因为「判据写错、永远返回空」而假绿。
+
+        ⚠ 第四十二轮：操作日志页从政府端迁到平台端，这处植入点随之搬家。
         """
-        gov = read(PORTAL_FILES['gov'])
-        self.assertIn('TNR_API.getOperationLogsStrict()', gov)
-        broken = gov.replace('TNR_API.getOperationLogsStrict()',
-                             'TNR_API.getOperationLogs()')
+        portal = read(PORTAL_FILES['platform'])
+        self.assertIn('TNR_API.getOperationLogsStrict()', portal)
+        broken = portal.replace('TNR_API.getOperationLogsStrict()',
+                                'TNR_API.getOperationLogs()')
         rows = survey(broken, self.api)
         dead = [r for r in rows if classify(r) in ('死', '半死')]
         self.assertTrue(dead, '把严格读改回软版本，清点器竟然没报 —— 判据是空转的')

@@ -25,6 +25,7 @@ from business.services import (
 )
 from core.audit import ACTION_LABELS
 from core.models import AuditLog, District, Institution
+from core.scope import is_empty_scope
 from .models import SystemConfig
 
 
@@ -34,26 +35,39 @@ from .models import SystemConfig
 def _scope_filter(qs, request, field='district'):
     """根据用户区县范围过滤 QuerySet。
 
-    - gov_city (scope=None): 返回全部
-    - gov_district (scope=district_id): 仅返回所属区县
+    - 全局角色 (scope=None): 返回全部
+    - 区县角色 (scope=district_id): 仅返回所属区县
+    - 没挂区县的账号 (scope=EMPTY_DISTRICT_SCOPE): **返回空**
+
+    ⚠ 第三种不能漏：早先「没挂区县」也用 `None` 表示，于是这类账号
+    **列表全空、写接口却全部放行**（`None` 被下游当成了「可见全部」）。
     """
     scope = get_district_scope(request)
     if scope is None:
         return qs
+    if is_empty_scope(scope):
+        return qs.none()
     return qs.filter(**{f'{field}_id': scope})
 
 
 def _district_out_of_scope(request, district_id):
-    """目标区县是否超出操作员的管辖范围（市级管理员永远返回 False）。
+    """目标区县是否超出操作员的管辖范围（全局角色永远返回 False）。
 
     **创建与编辑必须共用这一个判据。** 本轮实测的漏洞正是两处各写一份、
     然后漂移：`institution_edit` 有这条校验、`institution_create` 没有，
     于是区级管理员可以 POST 一个他区 `district_id`，直接把机构建到别的区县。
     新建机构**不会**被 `resolve_district_scope` 兜住 —— 那是给业务记录用的，
     且它禁止市级归属，而机构是可以挂市级的。
+
+    ⚠ 没挂区县的账号：任何目标区县都算越权（返回 True），不能沿用
+    「`scope is None` = 全局」的旧语义放行。
     """
     scope = get_district_scope(request)
-    return scope is not None and str(district_id) != str(scope)
+    if scope is None:
+        return False
+    if is_empty_scope(scope):
+        return True
+    return str(district_id) != str(scope)
 
 
 def _district_references(district_id):
@@ -201,7 +215,7 @@ def _next_institution_code(inst_type):
 
 
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def institution_create(request):
     """创建机构"""
@@ -225,7 +239,10 @@ def institution_create(request):
         return json_fail('无权在其他区县创建机构')
     if not district_id:
         scope = get_district_scope(request)
-        if scope:
+        # ⚠ 必须排除 EMPTY_DISTRICT_SCOPE（哨兵是**真值**，`if scope:` 会放它过去，
+        #   然后拿着 -1 去查 District → 报「区县不存在」，把「没挂区县」伪装成
+        #   「区县填错了」）。没挂区县的账号本来就不该建机构。
+        if scope is not None and not is_empty_scope(scope):
             district_id = scope
     if not district_id:
         return json_fail('缺少区县信息')
@@ -266,7 +283,7 @@ def institution_create(request):
 # 4. 编辑机构
 # ============================================
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def institution_edit(request, pk):
     """编辑机构
@@ -356,7 +373,7 @@ def institution_edit(request, pk):
 # 5. 机构状态切换
 # ============================================
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def institution_toggle_status(request, pk):
     """切换机构启用/停用状态（按区县范围校验）"""
@@ -393,7 +410,7 @@ def district_list(request):
 # 7. 创建区县
 # ============================================
 @csrf_exempt
-@role_required('gov_city')
+@role_required('platform_admin')
 @login_required
 def district_create(request):
     """创建区县（仅市级管理员）"""
@@ -424,7 +441,7 @@ def district_create(request):
 # 7.1 编辑区县
 # ============================================
 @csrf_exempt
-@role_required('gov_city')
+@role_required('platform_admin')
 @login_required
 def district_edit(request, pk):
     """编辑区县（仅市级管理员）"""
@@ -491,7 +508,7 @@ def district_edit(request, pk):
 # 7.2 切换区县状态
 # ============================================
 @csrf_exempt
-@role_required('gov_city')
+@role_required('platform_admin')
 @login_required
 def district_toggle_status(request, pk):
     """切换区县启用/停用状态（仅市级管理员）"""
@@ -513,7 +530,7 @@ def district_toggle_status(request, pk):
 # 7.3 删除区县
 # ============================================
 @csrf_exempt
-@role_required('gov_city')
+@role_required('platform_admin')
 @login_required
 def district_delete(request, pk):
     """删除区县（仅市级管理员，且未被业务数据引用）"""
@@ -540,7 +557,7 @@ def district_delete(request, pk):
 # 8. 用户列表
 # ============================================
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def user_list(request):
     """用户列表（按区县范围过滤）"""
@@ -578,16 +595,17 @@ def user_list(request):
 # 9. 创建用户
 # ============================================
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def user_create(request):
     """创建用户
 
     强制逻辑约束：
+    - platform_admin：全局角色，不要求关联区县
     - gov_city：所属区域必须是市级（is_city=True）
     - gov_district / hospital：必须选具体区县（is_city=False），不能选市级
     - shelter：可挂市级或区县（归属市级的捕捉点，各区县管理账号无权查看其数据）
-    - adopter：不在政府端创建（由捕捉点在领养登记时自动创建）
+    - adopter：不在平台/政府端创建（由捕捉点在领养登记时自动创建）
     - hospital：必须关联医院机构（institution.type='hospital'）
     - shelter：必须关联捕捉点机构（institution.type='shelter'）
     """
@@ -604,10 +622,10 @@ def user_create(request):
         return json_fail('密码长度不能少于6位')
 
     role = data.get('role')
-    # 政府端不允许创建领养人
+    # 平台端不允许创建领养人
     if role == 'adopter':
-        return json_fail('领养人不在政府端创建，请在捕捉点领养登记时自动创建')
-    if role not in ('gov_city', 'gov_district', 'shelter', 'hospital'):
+        return json_fail('领养人不在管理端创建，请在捕捉点领养登记时自动创建')
+    if role not in ('platform_admin', 'gov_city', 'gov_district', 'shelter', 'hospital'):
         return json_fail('角色无效')
 
     name = body_str(data, 'name').strip()
@@ -618,27 +636,35 @@ def user_create(request):
     institution_id = body_int(data, 'institution_id')
 
     # 区县逻辑校验
-    if not district_id:
-        return json_fail('请选择所属区县')
+    district = None
+    if role == 'platform_admin':
+        # 平台管理员是全局角色（见 `core/scope.py` 的 `GLOBAL_SCOPE_ROLES`），
+        # 可见范围与区县无关，因此**不要求**填区县。
+        if district_id:
+            try:
+                district = District.objects.get(id=district_id)
+            except District.DoesNotExist:
+                return json_fail('所选区县不存在')
+    else:
+        if not district_id:
+            return json_fail('请选择所属区县')
+        try:
+            district = District.objects.get(id=district_id)
+        except District.DoesNotExist:
+            return json_fail('所选区县不存在')
+        inactive_err = _inactive_district_error(district)
+        if inactive_err:
+            return json_fail(inactive_err)
 
-    try:
-        district = District.objects.get(id=district_id)
-    except District.DoesNotExist:
-        return json_fail('所选区县不存在')
-
-    inactive_err = _inactive_district_error(district)
-    if inactive_err:
-        return json_fail(inactive_err)
-
-    # 市级角色（gov_city）必须选市级区县
-    if role == 'gov_city':
-        if not district.is_city:
-            return json_fail('市管理员的所属区域必须为市级')
-    # 区县级角色（gov_district / hospital）必须选具体区县，不能选市级
-    elif role in ('gov_district', 'hospital'):
-        if district.is_city:
-            return json_fail('区级管理员/医院操作员必须选择具体区县，不能选市级')
-    # shelter 可挂市级或区县，不做限制
+        # 市级角色（gov_city）必须选市级区县
+        if role == 'gov_city':
+            if not district.is_city:
+                return json_fail('市管理员的所属区域必须为市级')
+        # 区县级角色（gov_district / hospital）必须选具体区县，不能选市级
+        elif role in ('gov_district', 'hospital'):
+            if district.is_city:
+                return json_fail('区级管理员/医院操作员必须选择具体区县，不能选市级')
+        # shelter 可挂市级或区县，不做限制
 
     # 机构关联校验
     institution = None
@@ -659,14 +685,13 @@ def user_create(request):
 
     # 账号区县必须与机构所在区县自洽：账号的 district 决定**读取**侧的区县
     # 隔离范围，而 institution 决定它代表谁。不一致的账号会「看到 A 区县的档案、
-    # 以 B 区县的机构身份操作」，而政府端用户管理没有编辑入口、事后改不回来。
+    # 以 B 区县的机构身份操作」，而平台端用户管理没有编辑入口、事后改不回来。
     district_err = validate_operator_district(role, district, institution)
     if district_err:
         return json_fail(district_err)
 
     # 操作员自己的管辖范围：角色白名单 + 只能管本区县。
-    # 前端 canCreateRole() / 区县下拉只过滤了选项，**接口不做同一套校验就等于没校验** ——
-    # 实测区级管理员直接 POST `role=gov_city` 能建出一个市级管理员账号。
+    # 前端 canCreateRole() / 区县下拉只过滤了选项，**接口不做同一套校验就等于没校验**。
     scope_err = validate_user_manage_scope(request.user, role, district, institution)
     if scope_err:
         return json_fail(scope_err)
@@ -697,7 +722,7 @@ def user_create(request):
 # 10. 用户状态切换
 # ============================================
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def user_toggle_status(request, pk):
     """切换用户启用/停用状态（带自锁保护 + 区县范围校验）"""
@@ -717,6 +742,12 @@ def user_toggle_status(request, pk):
             return json_fail('不能停用当前登录账号自己')
         if user.is_superuser:
             return json_fail('超级管理员账号不可停用')
+        if user.role == 'platform_admin':
+            has_other = User.objects.filter(
+                role='platform_admin', is_active=True,
+            ).exclude(id=user.id).exists()
+            if not has_other:
+                return json_fail('系统至少需保留一个启用中的平台管理员账号')
         if user.role == 'gov_city':
             has_other = User.objects.filter(
                 role='gov_city', is_active=True,
@@ -1273,7 +1304,7 @@ def ledger_center(request):
 # 14. 操作日志
 # ============================================
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def operation_logs(request):
     """业务操作审计日志。
@@ -1386,7 +1417,7 @@ SYSTEM_CONFIG_VALUE_MAX = 20
 
 
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def system_config(request):
     """系统配置
@@ -1428,9 +1459,9 @@ def system_config(request):
                 data[k] = v
         return json_ok(data)
 
-    # POST: 更新配置（仅市级管理员）
-    if request.user.role != 'gov_city':
-        return json_fail('仅市级管理员可修改系统配置', status=403)
+    # POST: 更新配置（仅平台管理员）
+    if request.user.role != 'platform_admin':
+        return json_fail('仅平台管理员可修改系统配置', status=403)
     data = parse_json_body(request)
 
     # ① 键必须在白名单内 —— 否则任意 key 都能写进配置表
@@ -1478,8 +1509,12 @@ NOTICE_CONTENT_MAX = 2000
 NOTICE_TARGET_ROLES = ('adopter',)
 
 
-def _notice_recipients(request, target_role):
-    """公告的收件人：启用中、角色匹配、且**归属**落在发布者区县范围内。
+def _notice_recipients(target_role, scope):
+    """公告的收件人：启用中、角色匹配、且**归属**落在 `scope` 区县范围内。
+
+    :param scope: 目标区县 id；`None` = 全市（不收敛）；
+        `EMPTY_DISTRICT_SCOPE`（哨兵）= 空集（不能拿哨兵去 filter，
+        它不是真实区县 id，会撞外键约束）。
 
     ⚠⚠ **区县归属从业务对象（`Adoption`）推导，绝不能读 `User.district`。**
 
@@ -1499,32 +1534,43 @@ def _notice_recipients(request, target_role):
     教训（捕捉单区县 / 操作日志 / 账号区县↔机构区县）是同一条纪律：
     **归属要从业务对象推导，不能从账号自身字段推导。**
 
-    市级（`scope is None`）不做收敛：全市领养人都是受众。
+    `scope is None`（全市）不做收敛：全市领养人都是受众。
     """
     qs = User.objects.filter(role=target_role, is_active=True, status='active')
-    scope = get_district_scope(request)
     if scope is None:
         return qs
+    if is_empty_scope(scope):
+        # 没挂区县且未指定目标区县：收件人集合为空（不能拿哨兵 -1 去 filter，
+        # 那会撞外键约束 —— 哨兵不是真实区县 id）
+        return qs.none()
     return qs.filter(adoptions__district_id=scope).distinct()
 
 
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def notice_publish(request):
     """发布公告：给目标角色的每位用户各写一条 `notice` 类型消息。
 
     请求体::
 
-        {"title": "标题", "content": "正文", "target_role": "adopter"}
+        {"title": "标题", "content": "正文", "target_role": "adopter",
+         "district_id": 3}   # 可省；省 = 全市公告
 
-    权限边界：市级可向全部区县发布；**区级只能发给本区县**（按 `district`
-    收敛）。否则区级管理员就能向全市广播 —— 与「账号只能管本区县」
-    是同一条边界，不能在批量接口上单独放宽。
+    ⚠ **第四十二轮起本接口只对 `platform_admin` 开放**（公告发布随全局设置
+    迁到平台端）。平台管理员是**全局角色**、本身不挂区县，所以「发给哪个
+    区县」必须由请求**显式指定**：不传 = 全市公告，传 = 该区县公告。
+    若照搬旧口径（按发布者的 `get_district_scope()` 收敛），平台管理员
+    的 scope 恒为 `None`，结果是**只能发全市公告** —— 区县公告这项既有能力
+    会在迁移中静默消失，而界面上看不出少了什么。
 
-    ⚠ 「本区县」的判定走 `_notice_recipients()`：领养人的区县**由他的领养
+    ⚠ `district_id` 的取值是**三态**：缺省 / `''` = 全市；合法 id = 该区县
+    （`is_city` 的市级区划归一成全市）；**其它任何值一律 400** ——
+    非法值不能静默降级成全市广播（广播不可撤回，见函数体内注释）。
+
+    ⚠ 「某区县的收件人」走 `_notice_recipients()`：领养人的区县**由他的领养
     记录（`Adoption.district`）推导**，不是读账号的 `district` 字段 ——
-    后者对领养人恒为空，会把区级公告的收件人收敛成空集。
+    后者对领养人恒为空，会把区县公告的收件人收敛成空集。
 
     ⚠ 这是**批量写**接口：一次请求创建 N 条 `Message`。因此校验必须
     **全部前置**（两段式），否则「标题超长」这类错误会在已经建了 300 条
@@ -1548,19 +1594,54 @@ def notice_publish(request):
         return json_fail('不支持的目标角色：%s（可选：%s）'
                          % (target_role, '、'.join(NOTICE_TARGET_ROLES)))
 
-    # 目标用户：启用中、角色匹配、且**归属落在发布者的区县范围内**。
+    # 目标区县：**显式指定优先**（平台端），否则退回发布者自身的区县范围。
+    #
+    # ⚠⚠ 这里必须是**三态**，不能把「非法」静默当成「没传」：
+    # `body_int()` 对非法值一律返回 `None`，与「未提供」不可区分。若直接写
+    # `if district_id:`，`{"district_id": "abc"}` 会被当成「未指定」→ 一次
+    # 本想发给甲区的误操作变成**发给全市**。广播不可撤回，且界面上显示成功。
+    # 宁可 400。（同一条纪律：查询参数契约里「不许非法就静默忽略」。）
+    raw_district = data.get('district_id')
+    if raw_district is None or raw_district == '':
+        district_id = None
+    else:
+        district_id = body_int(data, 'district_id')
+        if district_id is None:
+            return json_fail('所选区县无效')
+
+    if district_id is not None:
+        # 「市级区划」（is_city=True）等价于「全市」，归一成 None —— 否则公告会
+        # 带上一个 `district_id=<市级>`，`notice_list` 的区县归属就多出一个
+        # 「只有挂在市级的人看得到」的第三种状态，而受众其实是全部区县。
+        target_district = District.objects.filter(id=district_id).first()
+        if target_district is None:
+            return json_fail('所选区县不存在')
+        if _inactive_district_error(target_district):
+            return json_fail(_inactive_district_error(target_district))
+        scope = None if target_district.is_city else target_district.id
+    else:
+        # 兜底：发布者自身的区县范围。**当前不可达** —— 本接口只对
+        # `platform_admin` 开放，而它是全局角色（`GLOBAL_SCOPE_ROLES`），
+        # `get_district_scope()` 恒为 `None`。保留这一分支是为了将来若有
+        # 区县角色重新获得发布权限时不会静默退化成全市广播。
+        scope = get_district_scope(request)
+
+    # ⚠ 防御：哨兵不是真实区县 id，写进 `district_id` 外键会撞约束。
+    if is_empty_scope(scope):
+        return json_fail('当前账号未关联区县，请指定要发布的区县')
+
+    # 目标用户：启用中、角色匹配、且**归属落在目标区县范围内**。
     # ⚠ 归属走 `_notice_recipients()`（从 `Adoption` 推导），**不要**改回
     # `_scope_filter(..., field='district')` —— 那读的是 `User.district`，
-    # 领养人账号没有区县，会让区级公告的收件人恒为空集。
-    recipients = list(_notice_recipients(request, target_role))
+    # 领养人账号没有区县，会让区县公告的收件人恒为空集。
+    recipients = list(_notice_recipients(target_role, scope))
 
     if not recipients:
         return json_fail('该范围内没有可接收公告的用户')
 
     # 校验全过之后再落库（两段式）
-    # 公告**自带发布方区县**：市级发的是全市公告（None），区级发的是本区县公告。
+    # 公告**自带发布方区县**：全市公告为 None，区县公告为具体区县。
     # `notice_list` 靠这个字段做区县收敛，不靠接收人反查（见该视图注释）。
-    scope = get_district_scope(request)
     with transaction.atomic():
         Message.objects.bulk_create([
             Message(user=u, type='notice', title=title, content=content,
@@ -1573,7 +1654,7 @@ def notice_publish(request):
 
 
 @csrf_exempt
-@role_required('gov_city', 'gov_district')
+@role_required('platform_admin')
 @login_required
 def notice_list(request):
     """已发布公告列表（按标题聚合，且**按发布方区县收敛**）。
@@ -1593,17 +1674,25 @@ def notice_list(request):
 
     | 角色 | 可见范围 |
     |---|---|
-    | `gov_city`（scope=None） | 全部 |
-    | `gov_district` | 本区县发布的 + 市级发布的（`district IS NULL`） |
+    | `platform_admin`（scope=None，第四十二轮起唯一调用方） | 全部 |
+    | `gov_district`（**当前不可达**，见下方代码注释） | 本区县发布的 + 全市发布的（`district IS NULL`） |
 
-    市级公告对区级可见是有意的：那类公告**本来就发给了本区县的领养人**，
+    全市公告对区级可见是有意的：那类公告**本来就发给了本区县的领养人**，
     对区级隐藏只会让「已发布公告」列表与实际触达情况不一致。
+
+    ⚠ **聚合键必须带 `district_id`**：平台端可以分别给甲区、乙区发同名同文的
+    公告，只按 `title + content` 分组会把两条**不同受众**的公告并成一行，
+    `sent_count` 变成两区之和 —— 运营看到的触达人数与任何一次实际发布都对不上。
     """
     scope = get_district_scope(request)
     rows = Message.objects.filter(type='notice')
     if scope is not None:
+        # ⚠ **当前不可达**：本接口只对 `platform_admin` 开放，它是全局角色
+        # （`GLOBAL_SCOPE_ROLES`），`get_district_scope()` 恒为 `None`。
+        # 保留这一分支是为了将来若有区县角色重新获得读权限时不会漏掉隔离 ——
+        # 它只做**收窄**，不会在当下放宽任何东西。
         rows = rows.filter(Q(district_id=scope) | Q(district__isnull=True))
-    rows = (rows.values('title', 'content')
+    rows = (rows.values('title', 'content', 'district_id')
             .annotate(sent_count=Count('id'), last_at=Max('created_at'))
             .order_by('-last_at')[:200])
     return json_ok(with_camel_keys(list(rows)))

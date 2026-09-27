@@ -15,6 +15,9 @@ from core.http import body_str, json_fail, json_ok, read_json_body
 def _redirect_by_role(user):
     """根据用户角色重定向到对应门户。"""
     role_map = {
+        # 平台管理端是**独立的一端**：全局主数据的维护都在它名下，
+        # 政府端（gov_city / gov_district）只保留查看。
+        'platform_admin': '/platform/',
         'gov_city': '/gov/',
         'gov_district': '/gov/',
         'shelter': '/shelter/',

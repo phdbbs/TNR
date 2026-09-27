@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% load static %}
 
-{% block title %}政府监管端 · 流浪动物TNR管理系统{% endblock %}
+{% block title %}平台管理端 · 流浪动物TNR管理系统{% endblock %}
 
 {% block extra_head %}
 <style>
@@ -168,28 +168,25 @@
 
   <aside class="portal-sidebar" id="portalSidebar">
     <div class="portal-sidebar-brand">
-      <div class="seal-icon">政</div>
+      <div class="seal-icon">台</div>
       <div>
-        <div class="portal-sidebar-brand-text">政府监管端</div>
-        <div class="portal-sidebar-brand-sub">Government Console</div>
+        <div class="portal-sidebar-brand-text">平台管理端</div>
+        <div class="portal-sidebar-brand-sub">Platform Console</div>
       </div>
     </div>
 
+    {# ⚠ 标签文本必须与 portal.html 的 navMap 一一对应（点击按 label 文本找 render 方法）。 #}
     <nav class="portal-sidebar-nav">
       <div class="nav-group-title">主菜单</div>
-      <a class="nav-item {% block nav_dashboard %}{% endblock %}" href="{% url 'gov_home' %}">
-        <span class="nav-item-icon">📈</span><span class="nav-item-label">数据总览大屏</span>
+      <a class="nav-item {% block nav_institution %}{% endblock %}" href="{% url 'platform_home' %}">
+        <span class="nav-item-icon">🏢</span><span class="nav-item-label">机构基础管理</span>
       </a>
-      <a class="nav-item {% block nav_supervision %}{% endblock %}" href="{% url 'gov_home' %}">
-        <span class="nav-item-icon">🔍</span><span class="nav-item-label">全业务监管</span>
+      <a class="nav-item {% block nav_account %}{% endblock %}" href="{% url 'platform_home' %}">
+        <span class="nav-item-icon">🔑</span><span class="nav-item-label">账号权限管理</span>
       </a>
-      <a class="nav-item {% block nav_material %}{% endblock %}" href="{% url 'gov_home' %}">
-        <span class="nav-item-icon">📦</span><span class="nav-item-label">物料全局监管</span>
+      <a class="nav-item {% block nav_config %}{% endblock %}" href="{% url 'platform_home' %}">
+        <span class="nav-item-icon">⚙️</span><span class="nav-item-label">系统配置</span>
       </a>
-      <a class="nav-item {% block nav_ledger %}{% endblock %}" href="{% url 'gov_home' %}">
-        <span class="nav-item-icon">📒</span><span class="nav-item-label">全局台账中心</span>
-      </a>
-      {# 第四十二轮：「机构基础管理 / 账号权限管理 / 系统配置」三个全局设置页已迁至平台管理端（/platform/）。 #}
     </nav>
 
     <div class="portal-sidebar-footer">
@@ -197,7 +194,7 @@
         <div class="sidebar-user-avatar">{{ user.username|slice:":1"|upper }}</div>
         <div class="sidebar-user-info">
           <div class="sidebar-user-name">{{ user.username|default:"未登录" }}</div>
-          <div class="sidebar-user-role">{{ user.get_role_display|default:"政府管理员" }}</div>
+          <div class="sidebar-user-role">{{ user.get_role_display|default:"平台管理员" }}</div>
         </div>
       </div>
     </div>
@@ -209,7 +206,7 @@
     <header class="portal-topbar">
       <div class="portal-topbar-left">
         <button class="portal-topbar-toggle" id="portalSidebarToggle">☰</button>
-        <div class="portal-topbar-title">{% block page_title %}政府监管端{% endblock %}</div>
+        <div class="portal-topbar-title">{% block page_title %}平台管理端{% endblock %}</div>
       </div>
       <div class="portal-topbar-right">
         <a href="{% url 'portal' %}" class="btn btn-ghost btn-sm">门户</a>
@@ -242,7 +239,6 @@
       });
       overlay.addEventListener('click', closeSidebar);
     }
-    // 手机上点击菜单项后自动收起侧边栏，避免遮挡内容
     var nav = document.querySelector('.portal-sidebar-nav');
     if (nav) {
       nav.addEventListener('click', function(e) {

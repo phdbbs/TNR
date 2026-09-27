@@ -33,6 +33,7 @@ class SupervisionBase(ApiMixin, TestCase):
                                      district=cls.district_a, institution=cls.shelter_a)
         cls.hospital_user = make_user("sv_hospital", role="hospital",
                                       district=cls.district_a, institution=cls.hospital_a)
+        cls.platform_admin = make_user("sv_platform", role="platform_admin")
         cls.adopter = make_user("sv_adopter", role="adopter")
 
 
@@ -88,18 +89,20 @@ class InstitutionApiTest(SupervisionBase):
     def test_list_scoped_by_district(self):
         make_institution(type='hospital', district=self.district_a, name='甲区医院2')
         make_institution(type='hospital', district=self.district_b, name='乙区医院2')
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         data = self.ok(self.client.get(f'{API}/institutions/'))['data']
-        self.assertEqual({i['district_id'] for i in data}, {self.district_a.id})
+        ids = {i['district_id'] for i in data}
+        self.assertIn(self.district_a.id, ids)
+        self.assertIn(self.district_b.id, ids)
 
     def test_list_type_filter(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         data = self.ok(self.client.get(f'{API}/institutions/?type=hospital'))['data']
         self.assertTrue(data)
         self.assertTrue(all(i['type'] == 'hospital' for i in data))
 
     def test_create_success(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         body = self.ok(self.post_json(f'{API}/institutions/create/', {
             'name': '新医院', 'type': 'hospital',
             'district_id': self.district_a.id,
@@ -114,7 +117,7 @@ class InstitutionApiTest(SupervisionBase):
         创建接口此前不写 `code`，界面上「机构编号」列永远是空的，也让界面
         建的机构与 seed 建的那批不在同一套编号体系里。
         """
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         hospital = self.ok(self.post_json(f'{API}/institutions/create/', {
             'name': '编号测试医院', 'type': 'hospital',
             'district_id': self.district_a.id,
@@ -129,26 +132,26 @@ class InstitutionApiTest(SupervisionBase):
         self.assertNotEqual(hospital['code'], community['code'])
 
     def test_create_hospital_on_city_district_rejected(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/institutions/create/', {
             'name': '市医院', 'type': 'hospital', 'district_id': self.city.id,
         }), message='医院必须挂具体区县')
 
     def test_create_missing_name(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/institutions/create/',
                                         {'type': 'hospital', 'district_id': self.district_a.id}),
                          message='机构名称不能为空')
 
     def test_create_invalid_type(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/institutions/create/',
                                         {'name': 'X', 'type': 'factory',
                                          'district_id': self.district_a.id}),
                          message='机构类型无效')
 
     def test_create_bad_phone(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/institutions/create/', {
             'name': 'X', 'type': 'hospital',
             'district_id': self.district_a.id, 'phone': 'abc123',
@@ -156,7 +159,7 @@ class InstitutionApiTest(SupervisionBase):
 
     def test_edit_and_toggle(self):
         institution = make_institution(type='hospital', district=self.district_a)
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/institutions/{institution.id}/edit/',
                                {'name': '改名医院'}))
         institution.refresh_from_db()
@@ -166,34 +169,54 @@ class InstitutionApiTest(SupervisionBase):
         self.assertEqual(body['data']['status'], 'inactive')
 
     def test_edit_unknown_404(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/institutions/999999/edit/', {}),
                          status=404)
 
-    def test_edit_other_district_404(self):
-        """区级管理员不得编辑其他区县的机构（与 institution_list 范围一致）。"""
+    def test_edit_other_district_allowed_for_platform_admin(self):
+        """平台管理员不受区县限制，可编辑任何区县的机构。"""
+        self.client.force_login(self.platform_admin)
+        self.ok(self.post_json(f'{API}/institutions/{self.hospital_b.id}/edit/',
+                               {'name': '合法改名'}))
+        self.hospital_b.refresh_from_db()
+        self.assertEqual(self.hospital_b.name, '合法改名')
+
+    def test_edit_other_district_403_for_gov(self):
+        """第四十二轮收口：机构管理仅限 platform_admin，gov 连接口都进不来。"""
         self.client.force_login(self.gov_a)
         self.expect_fail(self.post_json(f'{API}/institutions/{self.hospital_b.id}/edit/',
                                         {'name': '越权改名'}),
-                         status=404, message='无权访问')
+                         status=403)
         self.hospital_b.refresh_from_db()
         self.assertNotEqual(self.hospital_b.name, '越权改名')
 
-    def test_toggle_other_district_404(self):
+    def test_toggle_other_district_allowed_for_platform_admin(self):
+        self.client.force_login(self.platform_admin)
+        self.ok(self.post_json(f'{API}/institutions/{self.hospital_b.id}/toggle/'))
+        self.hospital_b.refresh_from_db()
+        self.assertEqual(self.hospital_b.status, 'inactive')
+        # 切回来，不影响后续测试
+        self.ok(self.post_json(f'{API}/institutions/{self.hospital_b.id}/toggle/'))
+
+    def test_toggle_other_district_403_for_gov(self):
         self.client.force_login(self.gov_a)
         self.expect_fail(self.post_json(f'{API}/institutions/{self.hospital_b.id}/toggle/'),
-                         status=404, message='无权访问')
+                         status=403)
         self.hospital_b.refresh_from_db()
         self.assertEqual(self.hospital_b.status, 'active')
 
-    def test_edit_cannot_move_institution_to_other_district(self):
-        """区级管理员不得把机构调整到其他区县。"""
-        self.client.force_login(self.gov_a)
-        self.expect_fail(self.post_json(
+    def test_edit_platform_admin_can_move_institution_to_other_district(self):
+        """平台管理员不受区县限制，可把机构调整到其他区县。"""
+        self.client.force_login(self.platform_admin)
+        self.ok(self.post_json(
             f'{API}/institutions/{self.hospital_a.id}/edit/',
-            {'district_id': self.district_b.id}), message='无权将机构调整到其他区县')
+            {'district_id': self.district_b.id}))
         self.hospital_a.refresh_from_db()
-        self.assertEqual(self.hospital_a.district_id, self.district_a.id)
+        self.assertEqual(self.hospital_a.district_id, self.district_b.id)
+        # 恢复原状，避免影响后续测试
+        self.ok(self.post_json(
+            f'{API}/institutions/{self.hospital_a.id}/edit/',
+            {'district_id': self.district_a.id}))
 
     # ---------- 新建机构的区县范围（与编辑同一条判据） ----------
     #
@@ -202,19 +225,19 @@ class InstitutionApiTest(SupervisionBase):
     # 就能把机构种到别的区县。两处各写一份校验必然会漂移，故改为共用
     # `_district_out_of_scope()`，下面正反两组用例把这条判据钉死。
 
-    def test_create_district_admin_cannot_create_in_other_district(self):
-        self.client.force_login(self.gov_a)
+    def test_create_platform_admin_can_create_in_any_district(self):
+        self.client.force_login(self.platform_admin)
         before = Institution.objects.filter(district=self.district_b).count()
-        self.expect_fail(self.post_json(f'{API}/institutions/create/', {
-            'name': '越权机构', 'type': 'shelter',
+        self.ok(self.post_json(f'{API}/institutions/create/', {
+            'name': '跨区机构', 'type': 'shelter',
             'district_id': self.district_b.id,
-        }), message='无权在其他区县创建机构')
+        }))
         self.assertEqual(Institution.objects.filter(district=self.district_b).count(),
-                         before, '被拒后不得落库')
+                         before + 1)
 
     def test_create_district_admin_can_create_in_own_district(self):
         """正向对照：只加拦截不测放行，过紧的校验发现不了。"""
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         body = self.ok(self.post_json(f'{API}/institutions/create/', {
             'name': '本区新捕捉点', 'type': 'shelter',
             'district_id': self.district_a.id,
@@ -222,18 +245,16 @@ class InstitutionApiTest(SupervisionBase):
         inst = Institution.objects.get(id=body['data']['id'])
         self.assertEqual(inst.district_id, self.district_a.id)
 
-    def test_create_district_admin_without_district_id_falls_back_to_own(self):
-        """不传 district_id 时按操作员区县兜底，仍不得落到他区。"""
-        self.client.force_login(self.gov_a)
-        body = self.ok(self.post_json(f'{API}/institutions/create/', {
-            'name': '兜底机构', 'type': 'shelter',
-        }))
-        inst = Institution.objects.get(id=body['data']['id'])
-        self.assertEqual(inst.district_id, self.district_a.id)
+    def test_create_platform_admin_without_district_id_requires_it(self):
+        """平台管理员无区县，不传 district_id 时应报错（无法兜底）。"""
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.post_json(f'{API}/institutions/create/', {
+            'name': '无区县机构', 'type': 'shelter',
+        }), message='缺少区县信息')
 
     def test_create_city_admin_can_create_in_any_district(self):
         """市级管理员不受区县限制。"""
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         body = self.ok(self.post_json(f'{API}/institutions/create/', {
             'name': '市级建的乙区机构', 'type': 'shelter',
             'district_id': self.district_b.id,
@@ -259,7 +280,7 @@ class InstitutionApiTest(SupervisionBase):
         op = make_user('cascade_api_op', role='hospital',
                        district=self.district_a, institution=hospital)
 
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         body = self.ok(self.post_json(f'{API}/institutions/{hospital.id}/edit/',
                                       {'district_id': self.district_b.id}))
 
@@ -274,7 +295,7 @@ class InstitutionApiTest(SupervisionBase):
         op = make_user('cascade_api_city', role='shelter',
                        district=self.city, institution=shelter)
 
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         body = self.ok(self.post_json(f'{API}/institutions/{shelter.id}/edit/',
                                       {'district_id': self.district_b.id}))
 
@@ -295,7 +316,7 @@ class InstitutionApiTest(SupervisionBase):
         op = make_user('esc_hosp_op', role='hospital',
                        district=self.district_a, institution=hospital)
 
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(
             f'{API}/institutions/{hospital.id}/edit/', {'district_id': self.city.id}),
             message='医院必须挂具体区县，不能挂市级')
@@ -313,7 +334,7 @@ class InstitutionApiTest(SupervisionBase):
         只看单个字段会漏掉这种组合 —— 两个字段各自「看起来没问题」。
         """
         shelter = make_institution(type='shelter', district=self.district_a)
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/institutions/{shelter.id}/edit/', {
             'type': 'hospital', 'district_id': self.city.id,
         }), message='医院必须挂具体区县，不能挂市级')
@@ -323,7 +344,7 @@ class InstitutionApiTest(SupervisionBase):
     def test_edit_still_allows_city_level_shelter(self):
         """正向对照：捕捉点挂市级是现场约定，必须仍然放行。"""
         shelter = make_institution(type='shelter', district=self.district_a)
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/institutions/{shelter.id}/edit/',
                                {'district_id': self.city.id}))
         shelter.refresh_from_db()
@@ -331,7 +352,7 @@ class InstitutionApiTest(SupervisionBase):
 
     def test_edit_rejects_bad_phone_like_create_does(self):
         """电话格式：create 有校验、edit 原来没有（前端拦着，接口没拦）。"""
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(
             f'{API}/institutions/{self.hospital_a.id}/edit/', {'phone': 'abc123'}),
             message='联系电话格式不正确')
@@ -340,23 +361,24 @@ class InstitutionApiTest(SupervisionBase):
 
 
 class DistrictApiTest(SupervisionBase):
-    def test_create_only_gov_city(self):
+    def test_create_only_platform_admin(self):
+        """第四十二轮：区县创建仅限平台管理员。"""
         self.client.force_login(self.gov_a)
         self.expect_fail(self.post_json(f'{API}/districts/create/',
                                         {'name': 'X区', 'code': 'XZ1'}), status=403)
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         body = self.ok(self.post_json(f'{API}/districts/create/',
                                       {'name': '新城区', 'code': 'XC1'}))
         self.assertTrue(District.objects.filter(code='XC1').exists())
 
     def test_create_duplicate_code(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/districts/create/',
                                         {'name': '重复区', 'code': 'SA'}),
                          message='区县代码已存在')
 
     def test_delete_unreferenced(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         district = make_district()
         body = self.ok(self.post_json(f'{API}/districts/{district.id}/delete/'))
         self.assertEqual(body['data']['id'], district.id)
@@ -364,14 +386,14 @@ class DistrictApiTest(SupervisionBase):
 
     def test_delete_referenced_blocked(self):
         make_pet(district=self.district_a)
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         body = self.expect_fail(self.post_json(f'{API}/districts/{self.district_a.id}/delete/'),
                                 message='不可删除')
         self.assertIn('宠物档案', body['message'])
         self.assertTrue(District.objects.filter(id=self.district_a.id).exists())
 
     def test_edit(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/districts/{self.district_a.id}/edit/',
                                {'name': '甲区改名'}))
         self.district_a.refresh_from_db()
@@ -381,12 +403,16 @@ class DistrictApiTest(SupervisionBase):
 class UserApiTest(SupervisionBase):
     def test_list_scoped(self):
         make_user(role='shelter', district=self.district_b)
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         data = self.ok(self.client.get(f'{API}/users/'))['data']
-        self.assertEqual({u['district_id'] for u in data}, {self.district_a.id})
+        # 平台管理员是全局角色（scope=None），返回全部账号（含自身 district_id=None）
+        ids = {u['district_id'] for u in data}
+        self.assertIn(self.district_a.id, ids)
+        self.assertIn(self.district_b.id, ids)
+        self.assertIn(None, ids)
 
     def test_list_role_filter(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         data = self.ok(self.client.get(f'{API}/users/?role=hospital'))['data']
         self.assertTrue(data)
         self.assertTrue(all(u['role'] == 'hospital' for u in data))
@@ -399,7 +425,7 @@ class UserApiTest(SupervisionBase):
         return payload
 
     def test_create_shelter_operator(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         body = self.ok(self.post_json(f'{API}/users/create/', self._create_payload()))
         user = User.objects.get(id=body['data']['id'])
         self.assertEqual(user.role, 'shelter')
@@ -408,31 +434,31 @@ class UserApiTest(SupervisionBase):
         self.assertEqual(user.status, 'active')
 
     def test_create_duplicate_username(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(username='sv_gov_a')),
                          message='用户名已存在')
 
     def test_create_adopter_rejected(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(role='adopter')),
-                         message='领养人不在政府端创建')
+                         message='领养人不在管理端创建')
 
     def test_create_invalid_role(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(role='boss')),
                          message='角色无效')
 
     def test_create_short_password(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(password='123')),
                          message='密码长度不能少于6位')
 
     def test_create_gov_city_requires_city_district(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(role='gov_city',
                                                              institution_id=None)),
@@ -443,7 +469,7 @@ class UserApiTest(SupervisionBase):
                                                     institution_id=None)))
 
     def test_create_gov_district_rejects_city_district(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(role='gov_district',
                                                              district_id=self.city.id,
@@ -451,7 +477,7 @@ class UserApiTest(SupervisionBase):
                          message='不能选市级')
 
     def test_create_hospital_requires_hospital_institution(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(role='hospital',
                                                              institution_id=None)),
@@ -465,7 +491,7 @@ class UserApiTest(SupervisionBase):
                                                     institution_id=self.hospital_a.id)))
 
     def test_create_shelter_requires_shelter_institution(self):
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(institution_id=None)),
                          message='捕捉点操作员必须关联一个捕捉点机构')
@@ -479,7 +505,7 @@ class UserApiTest(SupervisionBase):
         实测库里存在过一个这样的账号（区县=南漳县、机构=东津新区的宠安宠物诊所）：
         它会看到南漳县的档案，却以一家东津新区的医院身份写数据。
         """
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/', self._create_payload(
             username='mismatch_hosp', role='hospital',
             district_id=self.district_b.id, institution_id=self.hospital_a.id)),
@@ -490,7 +516,7 @@ class UserApiTest(SupervisionBase):
 
     def test_create_shelter_operator_district_rule(self):
         """捕捉点操作员：挂「市级」放行（现场约定），挂具体区县则必须与机构一致。"""
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
             username='shelter_city_ok', district_id=self.city.id,
             institution_id=self.shelter_a.id)))
@@ -501,11 +527,9 @@ class UserApiTest(SupervisionBase):
     def test_district_admin_cannot_create_government_roles(self):
         """区级管理员不得建市级/区级管理员账号（服务端必须自己拦）。
 
-        前端 `canCreateRole()` 只是把角色下拉的选项过滤掉 —— 接口不做同一套校验
-        就等于没校验：直接 POST `role=gov_city` + 市级 `district_id` 会建出一个
-        **市级管理员**账号（口令还是攻击者自己填的），登录后
-        `get_district_scope()` 返回 `None`，**全部区县的数据都看得到**。
-        界面上点不出这个选项，所以怎么点都发现不了 —— 只有打接口才会暴露。
+        第四十二轮把账号管理迁到平台端：user_create 现在是 platform_admin 专属，
+        gov_a 连接口都进不来（403）。保留这条用例是为了确保「收口」真的生效，
+        而不是前端隐藏按钮、后端照样放行。
         """
         self.client.force_login(self.gov_a)
         for role, district_id in (('gov_city', self.city.id),
@@ -517,16 +541,18 @@ class UserApiTest(SupervisionBase):
                                                     role=role,
                                                     district_id=district_id,
                                                     institution_id=None)),
-                                 message='无权创建或修改该角色的账号')
+                                 status=403)
         self.assertFalse(User.objects.filter(username__startswith='esc_').exists())
 
     def test_district_admin_cannot_create_user_in_other_district(self):
-        """区级管理员只能管本区县 —— 否则等于给自己开一个跨区县的后门账号。"""
+        """区级管理员只能管本区县 —— 否则等于给自己开一个跨区县的后门账号。
+
+        第四十二轮收口后：user_create 仅限 platform_admin，gov_a 直接 403。"""
         self.client.force_login(self.gov_a)
         self.expect_fail(self.post_json(f'{API}/users/create/', self._create_payload(
             username='cross_hosp', role='hospital',
             district_id=self.district_b.id, institution_id=self.hospital_b.id)),
-            message='无权管理其他区县的账号')
+            status=403)
         self.assertFalse(User.objects.filter(username='cross_hosp').exists())
 
     def test_district_admin_can_create_own_district_operators(self):
@@ -535,7 +561,7 @@ class UserApiTest(SupervisionBase):
         捕捉点操作员按现场约定挂「市级」，判据必须看**机构**而不是账号区县 ——
         判错就会把区级管理员唯一能建的那类账号全挡掉。
         """
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
             username='own_hosp', role='hospital',
             district_id=self.district_a.id, institution_id=self.hospital_a.id)))
@@ -545,7 +571,7 @@ class UserApiTest(SupervisionBase):
 
     def test_city_admin_can_still_create_government_roles(self):
         """正向对照：市级管理员不受这条限制（否则整个系统建不出第二个管理员）。"""
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
             username='city_new_dist', role='gov_district',
             district_id=self.district_a.id, institution_id=None)))
@@ -555,54 +581,52 @@ class UserApiTest(SupervisionBase):
 
     def test_toggle_self_rejected(self):
         """管理员不能停用自己（防止自锁）"""
-        self.client.force_login(self.gov_a)
-        self.expect_fail(self.post_json(f'{API}/users/{self.gov_a.id}/toggle/'),
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.post_json(f'{API}/users/{self.platform_admin.id}/toggle/'),
                          message='不能停用当前登录账号自己')
-        self.gov_a.refresh_from_db()
-        self.assertTrue(self.gov_a.is_active)
+        self.platform_admin.refresh_from_db()
+        self.assertTrue(self.platform_admin.is_active)
 
     def test_toggle_superuser_rejected(self):
         target = make_user(role='shelter', district=self.district_a, is_superuser=True)
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/{target.id}/toggle/'),
                          message='超级管理员账号不可停用')
 
     def test_district_admin_cannot_toggle_city_admin(self):
         """区级管理员不得操作市级管理员账号（越权提权）。
 
-        与 user_list 的区县过滤保持一致：列表里看不到的账号，写接口也不能操作。
+        第四十二轮收口后：user_toggle_status 仅限 platform_admin，
+        gov_a 直接 403（连列表都看不到，更不可能操作）。
         """
         self.client.force_login(self.gov_a)
         self.expect_fail(self.post_json(f'{API}/users/{self.gov_city.id}/toggle/'),
-                         status=404, message='无权访问')
+                         status=403)
         self.gov_city.refresh_from_db()
         self.assertTrue(self.gov_city.is_active)
 
     def test_district_admin_cannot_toggle_other_district_user(self):
-        """区级管理员不得操作其他区县的账号。"""
+        """区级管理员不得操作其他区县的账号。
+
+        收口后：platform_admin 专属，gov_a 直接 403。"""
         target = make_user(role='shelter', district=self.district_b)
         self.client.force_login(self.gov_a)
         self.expect_fail(self.post_json(f'{API}/users/{target.id}/toggle/'),
-                         status=404, message='无权访问')
+                         status=403)
         target.refresh_from_db()
         self.assertTrue(target.is_active)
 
-    def test_district_admin_can_toggle_own_district_user(self):
+    def test_platform_admin_can_toggle_any_user(self):
         target = make_user(role='shelter', district=self.district_a)
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/users/{target.id}/toggle/'))
         target.refresh_from_db()
         self.assertFalse(target.is_active)
 
-    def test_city_admin_can_toggle_other_city_admin(self):
-        """市级管理员之间仍可互相停用（兜底逻辑不过度拦截）。
-
-        说明：「至少保留一个启用中的市级管理员」兜底在收紧区县范围后，
-        已无法从区级管理员路径触达（他们看不到也操作不了市级账号），
-        现仅作为市级管理员互相操作时的最后一道防线保留。
-        """
+    def test_platform_admin_can_toggle_city_admin(self):
+        """平台管理员可停用市级管理员（兜底：不能停最后一个启用中的市级管理员）。"""
         target = make_user(role='gov_city', district=self.city)
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/users/{target.id}/toggle/'))
         target.refresh_from_db()
         self.assertFalse(target.is_active)
@@ -610,7 +634,7 @@ class UserApiTest(SupervisionBase):
     def test_district_rename_propagates(self):
         """区县改名后所有引用处联动展示新名称（外键实时读取，无名称快照）"""
         new_name = '联动新区'
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/districts/{self.district_a.id}/edit/',
                                {'name': new_name}))
         # 用户列表中的区县名
@@ -628,7 +652,7 @@ class UserApiTest(SupervisionBase):
 
     def test_toggle_status(self):
         target = make_user(role='shelter', district=self.district_a)
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         body = self.ok(self.post_json(f'{API}/users/{target.id}/toggle/'))
         self.assertEqual(body['data']['is_active'], False)
         target.refresh_from_db()
@@ -754,12 +778,12 @@ class SupervisionDataTest(SupervisionBase):
             district=self.district_a, district_name=self.district_a.name,
             module='机构管理', action_flag=AuditLog.ACTION_ADD,
             object_repr='I999', summary='机构管理·新增 I999')
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         data = self.ok(self.client.get(f'{API}/logs/'))['data']
         self.assertTrue(any(log['summary'] == '机构管理·新增 I999' for log in data))
 
     def test_operation_logs_records_real_business_write(self):
-        """端到端：捕捉点写业务 → 政府端日志里能看到，且归属区县按业务记录算。"""
+        """端到端：捕捉点写业务 → 平台端日志里能看到，且归属区县按业务记录算。"""
         self.client.force_login(self.shelter_user)
         self.ok(self.post_json('/api/business/captures/create/', {
             'shelter_id': self.shelter_a.id,
@@ -770,15 +794,16 @@ class SupervisionDataTest(SupervisionBase):
             'contact_phone': '13800000000',
         }))
 
-        self.client.force_login(self.gov_a)
+        self.client.force_login(self.platform_admin)
         data = self.ok(self.client.get(f'{API}/logs/'))['data']
         row = next((r for r in data if r['module'] == '捕捉登记'), None)
-        self.assertIsNotNone(row, '本区县政府的日志页里看不到本区捕捉点刚登记的操作')
+        self.assertIsNotNone(row, '平台端日志页里看不到捕捉点刚登记的操作')
         self.assertEqual(row['districtId'], self.district_a.id)
         self.assertEqual(row['actionLabel'], '新增')
         self.assertEqual(row['userName'], 'sv_shelter')
 
-    def test_operation_logs_hidden_from_other_district(self):
+    def test_operation_logs_platform_admin_sees_all_districts(self):
+        """平台管理员是全局角色，日志不受区县隔离约束。"""
         self.client.force_login(self.shelter_user)
         self.ok(self.post_json('/api/business/captures/create/', {
             'shelter_id': self.shelter_a.id,
@@ -788,37 +813,28 @@ class SupervisionDataTest(SupervisionBase):
             'contact_person': '张三',
             'contact_phone': '13800000000',
         }))
-        self.client.force_login(self.gov_b)
+        self.client.force_login(self.platform_admin)
         data = self.ok(self.client.get(f'{API}/logs/'))['data']
-        self.assertFalse([r for r in data if r['module'] == '捕捉登记'],
-                         '乙区政府不应看到甲区的操作日志')
+        self.assertTrue([r for r in data if r['module'] == '捕捉登记'],
+                        '平台管理员应能看到全部区县的日志')
 
     def test_system_config_get_defaults(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         data = self.ok(self.client.get(f'{API}/config/'))['data']
         self.assertEqual(data['pet_code_prefix'], 'TNR')
         self.assertEqual(data['capture_prefix'], 'CAP')
 
     def test_system_config_post_updates(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/config/', {'capture_prefix': 'ZB'}))
         self.assertEqual(SystemConfig.objects.get(key='capture_prefix').value, 'ZB')
         data = self.ok(self.client.get(f'{API}/config/'))['data']
         self.assertEqual(data['capture_prefix'], 'ZB')
 
-    def test_system_config_gov_district_can_read(self):
-        """区级管理员必须能读到**真实**前缀，而不是空串。
-
-        第十九轮：此前 GET 也限死 `gov_city`，区级拿 403 后
-        `TNR_API._get()` 静默返回 `[]`，政府端「系统配置」页把
-        CAP/TRF/… 渲染成**空白输入框** —— 看上去像「编号规则没配置」。
-        这与「兜底谎报业务状态」同族：无权限时不能拿空值冒充真实值。
-        """
+    def test_system_config_gov_district_get_403(self):
+        """第四十二轮：系统配置迁至平台端，政府端角色一律 403。"""
         self.client.force_login(self.gov_a)
-        data = self.ok(self.client.get(f'{API}/config/'))['data']
-        self.assertEqual(data['pet_code_prefix'], 'TNR')
-        self.assertEqual(data['capture_prefix'], 'CAP')
-        self.assertEqual(data['transfer_prefix'], 'TRF')
+        self.expect_fail(self.client.get(f'{API}/config/'), status=403)
 
     def test_system_config_gov_district_cannot_write(self):
         """区级只读：POST 必须 403，且**库里的值不能被改**。"""
@@ -857,18 +873,18 @@ class SystemConfigPageContractTest(SupervisionBase):
         from supervision import views
         src = inspect.getsource(views.system_config)
         self.assertRegex(
-            src, r"@role_required\('gov_city',\s*'gov_district'\)",
-            'GET 必须对区级管理员开放')
-        self.assertRegex(
-            src, r"if request\.user\.role != 'gov_city':\s*\n\s*return json_fail\([^)]*status=403\)",
-            'POST 必须保留市级守卫')
+            src, r"@role_required\('platform_admin'\)",
+            '系统配置仅限平台管理员')
+        self.assertIn(
+            "if request.user.role != 'platform_admin':", src)
         self.assertNotRegex(
             src, r"@role_required\('gov_city'\)\s*\n@login_required\ndef system_config",
             '整函数限市级会让区级读到空值')
 
     def test_frontend_gates_write_and_surfaces_read_failure(self):
-        src = self._read('templates/portal/gov/portal.html')
-        self.assertIn("const canEdit = this.isCityLevel();", src)
+        # 第四十二轮：系统配置页迁至 platform/portal.html，政府端不再含配置页
+        src = self._read('templates/portal/platform/portal.html')
+        self.assertIn("const canEdit = this.isGlobalScope();", src)
         # 输入框只读门禁
         self.assertIn("canEdit ? '' : ' readonly'", src)
         # 保存按钮受同一门禁
@@ -876,9 +892,7 @@ class SystemConfigPageContractTest(SupervisionBase):
         # 读失败必须显式报错，不得静默渲染空值
         self.assertIn("await TNR_API.get('/api/supervision/config/')", src)
         self.assertIn('加载配置失败', src)   # 失败要显式渲染，不能只是吞掉
-        # 反向断言：整个政府端都不得再用静默封装读配置。
-        # 注意不能写成 `assertNotIn('config = await TNR_API.getSystemConfig();')`
-        # —— 改写成 `const json = await ...` 就绕过去了，是空转断言。
+        # 反向断言：整个平台端都不得再用静默封装读配置。
         self.assertNotIn(
             'TNR_API.getSystemConfig()', src,
             '静默封装会把 403 渲染成「编号规则没配置」')
@@ -905,7 +919,7 @@ class DistrictIsCityGuardTest(SupervisionBase):
     """
 
     def test_flip_to_city_with_accounts_rejected(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(
             f'{API}/districts/{self.district_a.id}/edit/', {'is_city': True}))
         self.district_a.refresh_from_db()
@@ -915,7 +929,7 @@ class DistrictIsCityGuardTest(SupervisionBase):
         """主断言：翻完之后区级账号仍只看得到本区数据。"""
         make_pet(district=self.district_a, shelter=self.shelter_a)
         make_pet(district=self.district_b, shelter=self.hospital_b)
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.post_json(f'{API}/districts/{self.district_a.id}/edit/', {'is_city': True})
         self.login_as(self.gov_a)
         data = self.ok(self.client.get(f'{API}/dashboard/'))['data']
@@ -923,7 +937,7 @@ class DistrictIsCityGuardTest(SupervisionBase):
 
     def test_demote_city_district_with_accounts_rejected(self):
         """反向：把市级区县降级会让市级账号失去全部可见性。"""
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(
             f'{API}/districts/{self.city.id}/edit/', {'is_city': False}))
         self.city.refresh_from_db()
@@ -932,14 +946,14 @@ class DistrictIsCityGuardTest(SupervisionBase):
     def test_flip_empty_district_allowed(self):
         """正向对照：没有账号/数据挂靠的区县仍可改为市级。"""
         empty = make_district(name='空区', code='SEMPTY')
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/districts/{empty.id}/edit/', {'is_city': True}))
         empty.refresh_from_db()
         self.assertTrue(empty.is_city)
 
     def test_plain_edit_without_is_city_unaffected(self):
         """正向对照：不动 is_city 的普通改名不受影响。"""
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(
             f'{API}/districts/{self.district_a.id}/edit/', {'name': '甲区改名'}))
         self.district_a.refresh_from_db()
@@ -947,7 +961,7 @@ class DistrictIsCityGuardTest(SupervisionBase):
 
     def test_same_value_is_city_is_noop(self):
         """正向对照：提交与当前值相同的 is_city 不算「改动」。"""
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(
             f'{API}/districts/{self.district_a.id}/edit/', {'is_city': False}))
 
@@ -964,7 +978,7 @@ class InactiveDistrictAssignmentTest(SupervisionBase):
     def setUp(self):
         self.district_b.status = 'inactive'
         self.district_b.save(update_fields=['status'])
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
 
     def test_create_institution_in_inactive_district_rejected(self):
         self.expect_fail(self.post_json(f'{API}/institutions/create/', {
@@ -1026,7 +1040,7 @@ class SystemConfigWriteWhitelistTest(SupervisionBase):
     """
 
     def test_unknown_key_is_rejected_and_not_written(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         before = SystemConfig.objects.count()
         for key in ('district_id', 'count', 'old_password', 'status', 'action',
                     'id', 'anything_at_all'):
@@ -1044,7 +1058,7 @@ class SystemConfigWriteWhitelistTest(SupervisionBase):
         守卫不能做成「一律禁止」—— 那样测试会全绿、功能却废了。
         这是本项目的固定套路：**每个守卫都要有正向对照**。
         """
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         self.ok(self.post_json(f'{API}/config/', {'capture_prefix': 'ZB'}))
         self.assertEqual(SystemConfig.objects.get(key='capture_prefix').value, 'ZB')
 
@@ -1063,7 +1077,7 @@ class SystemConfigWriteWhitelistTest(SupervisionBase):
         """
         from core.http import to_camel_key
         from supervision.views import SYSTEM_CONFIG_DEFAULTS
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         data = self.ok(self.client.get(f'{API}/config/'))['data']
 
         snake_keys = {k for k in data if '_' in k}
@@ -1079,7 +1093,7 @@ class SystemConfigWriteWhitelistTest(SupervisionBase):
             '配置项的 camelCase 孪生缺失（前端读 camel 会拿到 undefined）')
 
     def test_non_string_values_are_rejected(self):
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
         before = SystemConfig.objects.count()
         for payload in ({'capture_prefix': None},
                         {'capture_prefix': [1, 2, 3]},
@@ -1095,7 +1109,7 @@ class SystemConfigWriteWhitelistTest(SupervisionBase):
         self.assertEqual(SystemConfig.objects.count(), before)
 
     def test_district_admin_cannot_write(self):
-        """锚点：写权限仍然只有市级 —— 白名单不能顺手放宽了角色。"""
+        """锚点：写权限仅限平台管理员 —— 白名单不能顺手放宽了角色。"""
         self.client.force_login(self.gov_a)
         self.expect_fail(
             self.post_json(f'{API}/config/', {'capture_prefix': 'ZZ'}), status=403)
@@ -1117,7 +1131,7 @@ class DistrictEditStatusEnumTest(SupervisionBase):
 
     def setUp(self):
         super().setUp()
-        self.client.force_login(self.gov_city)
+        self.client.force_login(self.platform_admin)
 
     def test_malformed_status_is_rejected_and_not_written(self):
         for value in ('zzz', '', '   ', 'ACTIVE', 'active ', None, [1, 2, 3]):

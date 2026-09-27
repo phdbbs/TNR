@@ -16,7 +16,7 @@ from django.views.generic import TemplateView
 
 from business.views_portal import (
     adopter_portal, adoption_hall_public, hospital_portal, shelter_portal,
-    gov_portal,
+    gov_portal, platform_portal,
 )
 from core.http import is_api_request
 
@@ -29,6 +29,7 @@ urlpatterns = [
     path('adopter/', adopter_portal, name='adopter_home'),
     path('adopter/hall/', adoption_hall_public, name='adoption_hall_public'),
     path('gov/', gov_portal, name='gov_home'),
+    path('platform/', platform_portal, name='platform_home'),
     path('api/business/', include('business.urls')),
     path('api/supervision/', include('supervision.urls')),
 ]
