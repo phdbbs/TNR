@@ -7061,3 +7061,181 @@ grep -c 'navGroups:' shelter.html   →   0
 
 
 
+
+## 第四十三轮：门户首页补平台管理端入口、政府端文案纠偏、两处演示账号提示对齐（2026-09-27）
+
+**起因**：磊哥问「管理后台的访问网址是什么？默认的账号密码是什么？门户页面的提示几个端口的
+账号密码也要跟着修改」。查下去发现第四十二轮的迁移在**门户层**留下三个洞 —— 三个都
+不抛异常、接口全 200、测试全绿。
+
+| # | 问题 | 后果 |
+|---|---|---|
+| 1 | 门户首页没有平台管理端卡片 | `/platform/` **在首页上完全不存在**，只有知道 URL 的人能手输进去 |
+| 2 | 政府监管端卡片仍写着「机构管理、账号权限」 | 用户按文案去政府端找，**找不到任何入口而系统不会有任何报错** |
+| 3 | 登录页演示账号提示漏了 `platform` | 照着提示走**没有任何办法**进管理后台 |
+
+> 这三条都属于「**文案承诺了不存在的功能 / 新功能没有入口**」—— 比漏一处校验更隐蔽：
+> 搜「机构管理」到处都是（卡片文案、侧栏注释、JS 注释），但**没有一处是判据**。
+
+### 一、答案（磊哥问的三件事）
+
+| 问题 | 答案 |
+|---|---|
+| 管理后台网址 | `http://100.99.98.71/platform/`（登录入口 `http://100.99.98.71/login/`） |
+| 默认账号 | `platform` / `123456`（平台管理员） |
+| 其余账号 | `admin` / `cy_gov` / `hd_gov` / `cy_shelter` / `hd_shelter` / `aixin_hosp` / `ruipeng_hosp` / `babitang_hosp` / `adopter1`，密码同为 `123456` |
+
+⚠ **超级管理员 `admin` 进不去 `/platform/`** —— 它建出来是 `role='gov_city'`，
+而 `role_required` 只比对业务角色、不看 `is_superuser`。已写进两处提示与 `DEMO_ACCOUNTS.md`。
+
+### 二、改动
+
+| 文件 | 改动 |
+|---|---|
+| `templates/portal/index.html` | 新增平台端卡片（`05`/`data-accent="ochre"`/`href=platform_home`）；政府端文案改为「全业务监管 / 物料全局监管 / 全局台账，均为只读查看」；「四端门户」→「五端门户」；栅格 4→5 列、`gap` 20→16px、容器 1200→1280px、≤1024px 由 2 列改 3 列；新增未登录时的 `.portal-demo-hint`（列全 10 个账号） |
+| `templates/portal/index.html` | 修正政府端卡片的角色判断：`user.role in 'gov_city,gov_district'` 是**子串匹配**（Django 模板的 `in` 不做列表成员判断），改写成两个相等比较 |
+| `templates/login.html` | `.login-demo-hint` 补「平台管理 `platform`」 |
+| `accounts/views.py` | `_redirect_by_role` 内的 `role_map` 提为模块常量 `ROLE_PORTAL_MAP`（供判据引用） |
+| `core/tests_frontend_consistency.py` | 新增 `PortalLandingPageTest`（7 条） |
+| `scripts/check_inline_js.py` | `PAGES` 支持 `user=None`（匿名），把公开的 `/portal/` 纳入检查 |
+| `start_dev.sh` / `deploy/README.txt` / `DEMO_ACCOUNTS.md` | 启动横幅补 `platform`；README 的「默认账号」由过时的 `admin / admin123456` 改为实际值；文档写明两处提示必须同步 |
+
+### 三、判据（`PortalLandingPageTest`，7 条）
+
+判据来源**刻意不写死列表**（写死的话，将来加一个端而忘了加卡片，闸门照样是绿的）：
+
+* 「有几个端」→ `accounts.views.ROLE_PORTAL_MAP`（登录后往哪跳的权威定义）；
+* 「有哪些演示账号」→ `DEMO_ACCOUNTS.md` 的表格。
+
+1. `test_doc_and_urlconf_are_parsed` —— 守卫的守卫：解析失效时下面几条会**静默变绿**；
+2. `test_every_portal_has_a_landing_card` —— 渲染 `/portal/`，每个端都要有 `href`；
+3. `test_card_count_matches_portal_count` —— 卡片数**恰好**等于端数；
+4. `test_gov_card_no_longer_advertises_platform_only_pages` —— 政府端卡片不得再提
+   「机构管理/账号权限/系统配置」，且这些词必须**真的**出现在平台端卡片上（正向对照）；
+5. `test_demo_hints_only_list_real_accounts` —— 两处提示里的用户名都必须在
+   `DEMO_ACCOUNTS.md` 里（防手滑写成 `platform1`）；
+6. `test_portal_hint_covers_every_demo_account` —— 门户提示必须**列全**全部演示账号；
+7. `test_both_hints_mention_the_platform_account` —— 两个提示都必须给出 `platform`。
+
+#### 3.1 变异验证 6/6 全部被捕获
+
+| 变异 | 变红的判据 |
+|---|---|
+| 删除平台端卡片 | 入口卡片 / 卡片计数 / 政府端正向对照（3 条） |
+| 政府端恢复旧文案（含「机构管理」） | 政府端文案 |
+| 登录页提示漏掉 `platform` | 提示含平台端账号 |
+| 门户提示漏掉 `hd_shelter` | 提示列全账号 |
+| 提示写成不存在的 `platform1` | 账号真实性 + 含平台端账号（2 条） |
+| 多复制一张卡片 | 卡片计数 |
+
+#### 3.2 三个坑（都写进代码注释了）
+
+1. **必须用 `TestCase` 而不是本文件惯用的 `SimpleTestCase`**：这几条要渲染真实页面
+   （走完整请求栈），`request_started` 上挂着 `business.apps` 的启动补偿，它要查库；
+   在 `SimpleTestCase` 里会被禁库拦下并记一条 ERROR 堆栈 —— 只是测试噪音，
+   但会盖住真正的失败信号（同 `core/tests.py::ApiAwareCsrfFailureEndToEndTest`）。
+   第一版就是这么写的，实测撞到才改。
+2. **先剥 HTML 注释再断言**：判据是「渲染结果里有没有出现 X」，而修复时顺手写的
+   说明注释正好包含 X —— 本文件已经**两次**栽在这个形态上（见 `strip_html_comments`）。
+3. **卡片计数要用 `class="portal-card[\s"]` 收口**：`class="portal-card-current-badge"`
+   也以 `class="portal-card` 开头，裸 `count()` 会把 5 张卡片数成 10。
+
+#### 3.3 变异脚本自身的坑
+
+`mut43.py` 第一版判「变异是否被捕获」时只看 `subprocess` 的 **stdout** ——
+而 **unittest 把结果写到 stderr**，于是得到「`exit=1` 但失败用例为空」这种自相矛盾的
+结论，把 6 个「已捕获」全部误报成「判据是假绿」。改成 `stdout + stderr` 后 6/6 正常。
+
+### 四、验证记录
+
+| 项 | 结果 |
+|---|---|
+| 本地全量 | `Ran 1214 tests in 378.928s` **OK**（1207 → +7） |
+| 逐提交 worktree | `c387a74` → 1207 OK；`cc98d2a` → 1214 OK；`9c46669` → 1214 OK |
+| 变异验证 | 6/6 被捕获 |
+| 内联 JS 检查 | `/portal/` 纳入后 11 → **13 段**，0 失败 |
+| 推送 | `origin`(cnb.cool) / `gitee` / `github` 三远程均 `9c46669`（`git ls-remote` 核对） |
+
+### 五、生产增量部署（`60a53d0` → `9c46669`）
+
+| 项 | 值 |
+|---|---|
+| 改动文件 | 9 个（`templates/` 2 + `accounts/views.py` + `scripts/` + 4 个文档/脚本） |
+| 依赖判定 | `collectstatic=0  migrate=0  restart=1`（改了模板与视图 → 必须重启） |
+| 备份 | `/root/tnr-backup-20260927-170220`，dump **395333 字节 / 33 表** |
+| 属主修正 | 文件 9、目录 0；复检 root 属主文件 **0** / 目录 **0** |
+| 重复执行 | 只生成 1 个备份目录（`170220`）→ 本次只跑了一遍 |
+| 重启 | `tnr-gunicorn` / `tnr-qworker` 均 RUNNING，uptime 归零 |
+| 日志 | 重启后 Traceback **0**、`Bad Request` **0**、`Internal Server Error` **0** |
+| 行数 | 部署前后均 `6 14 6 1 10 10`（未变） |
+| 一致性 | `check_data_integrity` → `未发现一致性问题` |
+| 探活 | `/login/`=200、`/portal/`=200、`/platform/`=302、`/gov/`=302、`/shelter/`=302 |
+
+#### 5.1 下发内容判据（不看退出码，抓服务**实际返回**的 HTML）
+
+| 判据 | 结果 |
+|---|---|
+| `/portal/` 匿名 GET | 200，30849 字节 |
+| 入口卡片数 | **5** |
+| 含 `href="/platform/"` | 1 |
+| 含 `portal-demo-hint` | 6 |
+| 含「四端门户」 | **0** |
+| 含「五端门户」 | 2（注释 + `<h2>`） |
+| 含旧政府端文案「数据总览大屏、机构管理」 | **0** |
+| 含 `<b>babitang_hosp</b>` | 1 |
+| 漏出模板语法 `{#` | 0 |
+| `/login/` 匿名 GET | 200，8221 字节，含 `<b>platform</b>` |
+| 角色跳转（`ROLE_PORTAL_MAP` 重构后） | `platform`→`/platform/`、`admin`→`/gov/`、`cy_shelter`→`/shelter/` 3/3 |
+| 对照组 `/platform/` 下发长度 | **65117**（第四十二轮基线 65117，逐字节一致 —— 本轮未改平台端模板） |
+
+### 六、对外端到端验收 38/38 PASS（打 `http://100.99.98.71`）
+
+分四组：A 门户首页 21 项、B 登录页 3 项、C **核心判据** 10 项、D 越权 4 项。
+
+**C 组是这一轮的真正判据** —— 「提示里写的账号，真的能进它对应的那个端」：
+
+| 账号 | 落到 | 页面可读 |
+|---|---|---|
+| `platform` | `/platform/` | 含「机构基础管理」 |
+| `admin` | `/gov/` | 含「全局台账中心」 |
+| `cy_shelter` | `/shelter/` | 含「捕捉点」 |
+| `aixin_hosp` | `/hospital/` | 含「医院」 |
+| `adopter1` | `/adopter/` | 含「领养」 |
+
+D 组：`admin → /platform/` 被挡回 `/gov/`，且政府端侧栏只有 4 个只读页
+（数据总览大屏 / 全业务监管 / 物料全局监管 / 全局台账中心），没有平台端入口。
+
+#### 6.1 一条**假失败**（第四次栽在同一个形态上）
+
+D2「挡回后看不到平台端功能」最初判 FAIL —— 原始 HTML 里「账号权限管理」出现 1 次。
+追下去：那是 `gov/portal.html` 里**我第四十二轮写的 JS 块注释**
+（「第四十二轮把『机构基础管理 / 账号权限管理 / 系统配置』三个全局设置页搬去了平台管理端」）。
+
+剥掉 `<script>` 与 HTML 注释后：**可见文本 0 次**，政府端侧栏可见标签恰好是 4 个只读页。
+
+> **这是本项目第四次栽在「关键词计数把注释也算进去」上**（前三次：机构基础管理、
+> Traceback 窗口、`navGroups`）。修法：判据一律先剥注释再匹配，或改用结构化解析。
+> 已在 `MEMORY-testing.md` 里把这条从「注意」升级为**强制前置步骤**。
+
+### 七、GUI 实测 16/16 PASS（Playwright 打生产地址）
+
+| 组 | 判据 |
+|---|---|
+| 1440×900 | 卡片数 5；**5 张排在同一行**（y 值集合只有 1 个值）；最窄卡片 234px；卡片内文字/标签**未溢出**；页面无横向滚动；提示块可见且列全 10 个账号；政府端卡片不再提「机构管理」；平台端卡片提到「机构」 |
+| 1024×900 | 每行张数 **3/2**（无孤行）；无横向滚动 |
+| 390×844 | 无横向滚动 |
+| `/login/` | 提示含 `platform` |
+| GUI 真登录 | `platform/123456` 登录后**落在 `/platform/`**，侧栏 3 项（机构基础管理 / 账号权限管理 / 系统配置） |
+
+截图 5 张：`portal-1440.png` / `portal-1024.png` / `portal-390.png` /
+`login-1440.png` / `platform-after-login.png`（`/tmp/tnr-gui/shots43/`）。
+
+### 八、诚实记录
+
+* 判据脚本与验收脚本**各写过一版错的**：`PortalLandingPageTest` 第一版用
+  `SimpleTestCase`（撞禁库噪音）；`mut43.py` 只看 stdout（把 6 个已捕获误报成假绿）；
+  `accept43.py` 的 D2 数了注释（假失败）；`portal43.js` 用 `innerText` 比字符串
+  （图标换行导致假失败）。**四个都是「脚本自身错」而不是产品错** ——
+  已在本文档与记忆里逐条写明，避免下次重踩。
+* 本轮**没有**跑 `collectstatic`（`static/` 未改动，`?v=` 无需升版）。
+* 文档提交（`TEST_REPORT.md`）按既有惯例**不单独部署** —— 它不参与运行时。
