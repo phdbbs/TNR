@@ -780,40 +780,68 @@ const GovPortal = {
   },
 
   /* ========== 5. 物料全局监管 ========== */
+  /* 三个标签：库存数据 / 异常数据 / 台账 —— 与「全局台账中心」同一套
+     `.tabs` / `.tab-item` + `data-*-tab` + 状态字段的写法。
+     拆标签顺带修掉一个真实缺陷：原先「物料库存明细」与「物料流水追踪」两条筛选条
+     同屏，`position: sticky; top: 46px` 一模一样 —— 一旦都冻结就会**互相压住**。
+     现在同一时刻只有一个标签、一条筛选条。 */
+  materialState: { tab: 'stock' },
+  materialTabs: [
+    { id: 'stock', label: '库存数据' },
+    { id: 'alert', label: '异常数据' },
+    { id: 'ledger', label: '台账' }
+  ],
+  matTxnTypes: [
+    { value: 'purchase', label: '采购入库' },
+    { value: 'dispatch', label: '下发出库' },
+    { value: 'receive', label: '签收入库' },
+    { value: 'consume', label: '消耗' },
+    { value: 'adjustment', label: '调整' }
+  ],
+
   async render_material() {
     const el = document.getElementById('page-material');
-    /* ⚠ 本函数会**整页重建**（顶部「统计区间」的预设按钮与起止输入都走这里），
-       而且进门第一件事就是把 DOM 清成「加载中」。不先把列表筛选条的值抄下来，
-       用户填在「物料库存明细 / 物料流水追踪」里的条件会被**静默清空**、
-       列表悄悄回到全量 —— 界面不报错、接口也 200，是最难发现的一类失效。
-       按**筛选条容器 id** 分组记（两条都有 `keyword`，按字段名存会互相覆盖）。 */
-    const keepFilters = {};
-    el.querySelectorAll('[id$="FilterBar"]').forEach(bar => {
+    /* ⚠ 本函数会**整页重建**（顶部「统计区间」的预设按钮与起止输入走这里，
+       切换标签也走这里），进门第一件事就是把 DOM 清成「加载中」。不先把列表筛选条的
+       值抄下来，用户填的条件会被**静默清空**、列表悄悄回到全量 ——
+       界面不报错、接口也 200，是最难发现的一类失效。
+       ⚠ 按**标签**分别记：切到别的标签再切回来，条件必须还在。 */
+    this._matFilters = this._matFilters || {};
+    const curBar = el.querySelector('.filter-bar');
+    if (curBar) {
       const m = {};
-      bar.querySelectorAll('[data-filter]').forEach(i => { m[i.dataset.filter] = i.value; });
-      if (Object.keys(m).length) keepFilters[bar.id] = m;
-    });
+      curBar.querySelectorAll('[data-filter]').forEach(i => { m[i.dataset.filter] = i.value; });
+      this._matFilters[this.materialState.tab] = m;
+    }
     el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⏳</div><div class="table-empty-text">加载中...</div></div>';
     try {
       const sup = await TNR_API.getMaterialSupervisionStrict();
       const materials = sup.materials || [];
       const txns = sup.transactions || [];
-      const alerts = sup.alerts || [];
       const stats = sup.stats || {};
 
-      const hospitals = (await TNR_API.getInstitutionsStrict('hospital')).filter(h => h.status === 'active');
+      /* 机构下拉：**捕捉点 + 医院**（需求明确要求两者都在）。
+         机构基础数据不在本接口里，单独取一次并缓存 —— 后面按机构换算库存还要用。 */
+      const allInst = (await TNR_API.getInstitutionsStrict() || []).filter(i => i.status === 'active');
+      this._matInstitutions = allInst;
+      const instOptions = allInst
+        .filter(i => i.type === 'shelter' || i.type === 'hospital')
+        .map(i => ({ value: String(i.id), label: i.name + '（' + (i.type_display || (i.type === 'shelter' ? '捕捉点' : '医院')) + '）' }));
 
-      const txnTypeMap = { purchase: { text: '采购入库', badge: 'badge-success' }, dispatch: { text: '下发出库', badge: 'badge-info' }, receive: { text: '签收入库', badge: 'badge-cinnabar' }, consume: { text: '消耗', badge: 'badge-cinnabar' }, adjustment: { text: '调整', badge: 'badge-default' } };
+      /* 区县下拉：取**区县接口**并按 id 过滤，不要从业务数据里现推 `district_name`。
+         现推有两个毛病：
+           ① 「全市（市级）」会混进来。它排在第一位、很容易被当成「全部」，
+              而业务记录归属区县一律落到具体区县 —— 选中它只会得到一张空表
+              （`core/tests_frontend_consistency.py::DistrictFilterExcludesCityTest` 就是钉这个）；
+           ② 一旦某个区县暂时没有物料/流水，它就从这个下拉里消失，用户选不到。
+         与同页「全业务监管」「全局台账中心」的区县下拉保持同一写法。 */
+      const allDistricts = await TNR_API.getDistrictsStrict() || [];
+      const districts = allDistricts.filter(x => x.status === 'active')
+        .map(x => ({ value: x.id, label: x.name, is_city: x.is_city }));
 
-      /* 「物料库存明细」「物料流水追踪」原先是手写 <table class="data-table">：
-         既没有搜索条件也没有分页，流水追踪还被硬截断成「最近 10 条」——数据一多就
-         查不到历史。现统一改造成标准列表（mountTable：客户端分页 + 点击排序 + 列宽记忆），
-         各自带一条筛选条。 */
-      const matDistricts = [...new Set(materials.map(m => m.district_name).filter(Boolean))]
-        .map(n => ({ value: n, label: n }));
+      this._matData = { materials, txns, instOptions, districts };
 
-      /* 顶部 4 张汇总卡原先直接取后端 `stats`（**没有任何时间条件**），
-         是一组只增不减的累计值。这里补「统计区间」并按区间在内存里重算 ——
+      /* 顶部 4 张汇总卡取后端 `stats` 并按「统计区间」在内存里重算 ——
          与其它端「数据概览」同一套口径（`TNR_UI.inDateRange`）。
          库存预警是**当前值**，卡片标题明确标注「当前」，不与区间数字混为一谈。 */
       const mr = this._matRange = this._matRange || { start: '', end: '' };
@@ -845,63 +873,21 @@ const GovPortal = {
               <div class="stat-card green"><div class="stat-card-icon">📦</div><div><div class="stat-card-value">${sumOf('purchase')}</div><div class="stat-card-label">采购总量（${matRangeText}）</div></div></div>
               <div class="stat-card blue"><div class="stat-card-icon">📤</div><div><div class="stat-card-value">${sumOf('dispatch')}</div><div class="stat-card-label">下发总量（${matRangeText}）</div></div></div>
               <div class="stat-card"><div class="stat-card-icon">🔬</div><div><div class="stat-card-value">${sumOf('consume')}</div><div class="stat-card-label">消耗总量（${matRangeText}）</div></div></div>
-              <div class="stat-card rouge"><div class="stat-card-icon">⚠️</div><div><div class="stat-card-value">${stats.alert_count || 0}</div><div class="stat-card-label">库存预警（当前）</div></div></div>
+              <div class="stat-card rouge"><div class="stat-card-icon">⚠️</div><div><div class="stat-card-value">${stats.alert_count || 0}</div><div class="stat-card-label">库存预警（当前·全局捕捉点）</div></div></div>
             </div>
           </div>
         </div>
 
-        <div id="govMatStockFilterBar">${TNR_UI.renderFilterBar([
-          { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料名称 / 分类 / 单位' },
-          { key: 'district', label: '区县', type: 'select', options: matDistricts }
-        ])}</div>
-        <div class="card">
-          <div class="card-body card-body-flush">
-            <div id="govMatStockTable"></div>
-          </div>
+        <div class="tabs">
+          ${this.materialTabs.map(t => `<div class="tab-item ${this.materialState.tab === t.id ? 'active' : ''}" data-material-tab="${t.id}">${t.label}</div>`).join('')}
         </div>
-
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title"><span class="card-title-bar"></span>库存异常预警</div>
-          </div>
-          <div class="card-body">
-            ${alerts.length ? alerts.map(a => `
-              <div class="alert-item warning">
-                <span class="alert-icon">🟡</span>
-                <span class="alert-text">${TNR_UI.escape(a.name)} 库存 ${a.shelter_stock} ${a.unit || ''}，低于安全库存 ${a.safety_stock} ${a.unit || ''}（缺口 ${a.shortage}）</span>
-              </div>
-            `).join('') : '<div class="table-empty"><div class="table-empty-icon">✅</div><div class="table-empty-text">暂无异常</div></div>'}
-          </div>
-        </div>
-
-        <div id="govMatTxnFilterBar">${TNR_UI.renderFilterBar([
-          { key: 'keyword', label: '搜索', type: 'search', placeholder: '单据号 / 物料 / 批号 / 操作人' },
-          { key: 'type', label: '类型', type: 'select', options: [
-            { value: 'purchase', label: '采购入库' },
-            { value: 'dispatch', label: '下发出库' },
-            { value: 'receive', label: '签收入库' },
-            { value: 'consume', label: '消耗' },
-            { value: 'adjustment', label: '调整' }
-          ]},
-          { key: 'start_date', label: '开始日期', type: 'date' },
-          { key: 'end_date', label: '结束日期', type: 'date' }
-        ])}</div>
-        <div class="card">
-          <div class="card-body card-body-flush">
-            <div id="govMatTxnTable"></div>
-          </div>
-        </div>
+        <div id="materialContent"></div>
       `;
 
-      /* 回填进门时抄下来的列表筛选条值 —— 重建后控件是全新的，值全为空，
-         不回填就等于把用户刚填的条件抹掉。回填必须在下面的
-         `renderMatStock()` / `renderMatTxn()` 之前，它们一读就是最终值。 */
-      Object.keys(keepFilters).forEach(barId => {
-        const bar = document.getElementById(barId);
-        if (!bar) return;
-        const m = keepFilters[barId];
-        bar.querySelectorAll('[data-filter]').forEach(i => {
-          if (m[i.dataset.filter] !== undefined) i.value = m[i.dataset.filter];
+      el.querySelectorAll('[data-material-tab]').forEach(tab => {
+        tab.addEventListener('click', () => {
+          this.materialState.tab = tab.dataset.materialTab;
+          this.render_material();
         });
       });
 
@@ -949,65 +935,217 @@ const GovPortal = {
         });
       });
 
-      /* 两个列表的列定义与渲染。mountTable 必须在容器随 innerHTML 进入 DOM 之后调用 ——
-         反过来的话选择器查不到元素，表格会静默不渲染且不报错。 */
-      const matStockCols = [
-        { title: '物料名称', key: 'name', render: r => '<strong>' + TNR_UI.escape(r.name || '') + '</strong>' },
-        { title: '分类', render: r => TNR_UI.escape(r.category_display || r.category || '—') },
-        { title: '捕捉点库存', render: r => '<span class="' + ((r.shelter_stock || 0) < (r.safety_stock || 0) ? 'text-danger font-bold' : '') + '">' + (r.shelter_stock || 0) + '</span>' },
-        { title: '安全库存', render: r => String(r.safety_stock || 0) },
-        { title: '单位', render: r => TNR_UI.escape(r.unit || '—') },
-        { title: '区县', render: r => TNR_UI.escape(r.district_name || '—') }
-      ];
-      const matTxnCols = [
-        { title: '单据号', render: r => TNR_UI.escape(r.ledger_no || '—') },
-        { title: '类型', render: r => {
-            const tm = txnTypeMap[r.type] || { text: r.type, badge: 'badge-default' };
-            return '<span class="badge ' + tm.badge + '">' + tm.text + '</span>';
-          } },
-        { title: '物料', render: r => TNR_UI.escape(r.material_name || '') },
-        { title: '数量', render: r => (r.quantity || 0) + ' ' + (r.unit || '') },
-        { title: '批号', render: r => TNR_UI.escape(r.batch_no || '—') },
-        { title: '来源/去向', render: r => TNR_UI.escape(r.from_to || '—') },
-        { title: '操作人', render: r => TNR_UI.escape(r.operator_name || '—') },
-        { title: '区县', render: r => TNR_UI.escape(r.district_name || '—') },
-        { title: '日期', render: r => TNR_UI.formatDate(r.date) }
-      ];
-
-      const matStockBar = document.getElementById('govMatStockFilterBar');
-      const renderMatStock = () => {
-        const v = TNR_UI.getFilterValues(matStockBar);
-        const rows = materials.filter(m => {
-          // 物料建档时间（Material.created_at）—— 控件既然在，就必须真的生效。
-          if (!TNR_UI.inDateRange(m.createdAt || m.created_at, v.start_date, v.end_date)) return false;
-          if (v.district && String(m.district_name || '').toLowerCase() !== v.district) return false;
-          if (!v.keyword) return true;
-          return [m.name, m.category_display, m.category, m.unit, m.district_name]
-            .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
-        });
-        TNR_UI.mountTable('govMatStockTable', { id: 'gov.material.stock', columns: matStockCols, data: rows, emptyText: '暂无物料数据' });
-      };
-      renderMatStock();
-      TNR_UI.bindFilter(renderMatStock, matStockBar);
-
-      const matTxnBar = document.getElementById('govMatTxnFilterBar');
-      const renderMatTxn = () => {
-        const v = TNR_UI.getFilterValues(matTxnBar);
-        const rows = txns.filter(t => {
-          if (v.type && String(t.type) !== v.type) return false;
-          // `t.date` 是 DateField（纯日期），`inDateRange` 内部对纯日期串原样返回。
-          if (!TNR_UI.inDateRange(t.date, v.start_date, v.end_date)) return false;
-          if (!v.keyword) return true;
-          return [t.ledger_no, t.material_name, t.batch_no, t.from_to, t.operator_name, t.district_name]
-            .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
-        });
-        TNR_UI.mountTable('govMatTxnTable', { id: 'gov.material.txn', columns: matTxnCols, data: rows, emptyText: '暂无物料流水' });
-      };
-      renderMatTxn();
-      TNR_UI.bindFilter(renderMatTxn, matTxnBar);
+      this.renderMaterialTab();
     } catch (e) {
       el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⚠️</div><div class="table-empty-text">加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
     }
+  },
+
+  /* 渲染当前标签的筛选条 + 列表。
+     ⚠ 筛选条的 id **直接写在 `.filter-bar` 上**（`renderFilterBar(..., { id })`），
+     **绝不**再套一层 `<div id="xxxFilterBar">` —— 那一层与筛选条同高，
+     `position: sticky` 的包含块就是它自己，筛选条**一点可移动空间都没有**、
+     冻结直接失效（跟随内容滚走）。本项目曾在 18 处这么写，是「冻结的筛选条漂移」
+     的根因；这里按新写法来。 */
+  renderMaterialTab() {
+    const tab = this.materialState.tab;
+    const d = this._matData || {};
+    const contentEl = document.getElementById('materialContent');
+    if (!contentEl) return;
+
+    const barId = 'mat' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'FilterBar';
+    const instField = { key: 'institution_id', label: '机构', type: 'select', options: d.instOptions || [] };
+    let filters;
+    let opts = { id: barId };
+    if (tab === 'ledger') {
+      filters = [
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '单据号 / 物料 / 批号 / 操作人' },
+        { key: 'type', label: '类型', type: 'select', options: this.matTxnTypes },
+        instField,
+        { key: 'start_date', label: '开始日期', type: 'date' },
+        { key: 'end_date', label: '结束日期', type: 'date' }
+      ];
+    } else {
+      filters = [
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料名称 / 分类 / 单位' },
+        { key: 'district', label: '区县', type: 'select',
+          options: (d.districts || []).filter(x => !x.is_city).map(x => ({ value: x.value, label: x.label })) },
+        instField
+      ];
+      /* 库存数据 / 异常数据都是**当前快照**，不挂时间条件 —— 时间条件只挂在
+         「台账」（时间序列）上，这是一条能一句话说清的规则。
+         原先「物料库存明细」上的起止日期是 `renderFilterBar` **自动追加**带出来的，
+         筛的是 `Material.created_at`（物料建档时间），对「当前库存」没有意义：
+         留着就是一个「能点、能填、但没人说得清它在筛什么」的控件。
+         注意异常数据必须关掉，否则就是一个**设了完全没反应**的假控件。 */
+      opts = Object.assign({}, opts, { noDateRange: true });
+    }
+
+    contentEl.innerHTML = TNR_UI.renderFilterBar(filters, '', opts)
+      + '<div class="card"><div class="card-body card-body-flush"><div id="matTableHost"></div></div></div>';
+
+    const bar = document.getElementById(barId);
+    // 回填该标签上次填的条件（重建后控件是全新的，不回填等于把用户刚填的抹掉）
+    const saved = (this._matFilters || {})[tab] || {};
+    if (bar) bar.querySelectorAll('[data-filter]').forEach(i => {
+      if (saved[i.dataset.filter] !== undefined) i.value = saved[i.dataset.filter];
+    });
+
+    const render = () => this.renderMaterialRows(bar);
+    render();
+    if (bar) TNR_UI.bindFilter(render, bar);
+  },
+
+  /* 「机构」视角 —— 下拉里同时有捕捉点与医院，两者的库存口径不同：
+       - 未选：全局视角，库存取 `shelter_stock`（各区县捕捉点库存）；
+       - 捕捉点 S：只看 S 所在区县的物料，库存仍取 `shelter_stock`（那正是 S 自己的库存）；
+       - 医院 H：只看 H 所在区县的物料，库存取 `hospital_stocks[H.id]`
+         —— 后端按 `business.services.get_hospital_stock()` 的口径算好
+         （采购 + 签收 − 消耗 − 异动），与医院端「实时库存」是同一个数。
+     返回 { inst, name, districtId, isHospital, stock(m) }。 */
+  materialView(instId) {
+    const all = this._matInstitutions || [];
+    const inst = instId ? all.find(i => String(i.id) === String(instId)) : null;
+    if (!inst) {
+      return { inst: null, name: '', districtId: '', isHospital: false, stock: (m) => m.shelter_stock || 0 };
+    }
+    const isHospital = inst.type === 'hospital';
+    return {
+      inst, name: inst.name, districtId: String(inst.district || ''), isHospital,
+      stock: isHospital
+        ? (m) => ((m.hospital_stocks || {})[String(inst.id)] || 0)
+        : (m) => m.shelter_stock || 0
+    };
+  },
+
+  /* 该物料所属机构名：选了机构就是它；没选则显示该区县的捕捉点
+     （`shelter_stock` 本来就是那个捕捉点的库存）。 */
+  materialOwnerName(m, view) {
+    if (view.name) return view.name;
+    const s = (this._matInstitutions || []).find(i => i.type === 'shelter' && String(i.district) === String(m.district));
+    return s ? s.name : '';
+  },
+
+  renderMaterialRows(bar) {
+    const v = bar ? TNR_UI.getFilterValues(bar) : {};
+    const tab = this.materialState.tab;
+    const d = this._matData || {};
+    const view = this.materialView(v.institution_id);
+    const host = 'matTableHost';
+
+    if (tab === 'ledger') {
+      const txnTypeMap = {
+        purchase: { text: '采购入库', badge: 'badge-success' },
+        dispatch: { text: '下发出库', badge: 'badge-info' },
+        receive: { text: '签收入库', badge: 'badge-cinnabar' },
+        consume: { text: '消耗', badge: 'badge-cinnabar' },
+        adjustment: { text: '调整', badge: 'badge-default' }
+      };
+      const rows = (d.txns || []).filter(t => {
+        if (v.type && String(t.type) !== v.type) return false;
+        // `t.date` 是 DateField（纯日期），`inDateRange` 内部对纯日期串原样返回。
+        if (!TNR_UI.inDateRange(t.date, v.start_date, v.end_date)) return false;
+        /* 机构口径分两种（下拉里同时有捕捉点和医院）：
+           - 医院：该笔流水就是这家医院的（`hospital` 外键）；
+           - 捕捉点：**捕捉点自己发起**的流水（采购 / 下发 / 异动都是 hospital 为空）
+             且属于该捕捉点所在区县。 */
+        if (view.inst) {
+          if (view.isHospital) {
+            if (String(t.hospital || '') !== String(view.inst.id)) return false;
+          } else if (t.hospital || String(t.district || '') !== view.districtId) {
+            return false;
+          }
+        }
+        if (!v.keyword) return true;
+        return [t.ledger_no, t.material_name, t.batch_no, t.from_to,
+          t.operator_name, t.district_name, t.hospital_name]
+          .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
+      });
+      // 机构列：医院流水显示医院名；捕捉点侧流水（`hospital` 为空）显示该区县捕捉点名。
+      // 先算好 district → 捕捉点名的映射，别在每行的 render 里现查（133 行 × 线性查找）。
+      const shelterByDistrict = {};
+      (this._matInstitutions || []).filter(i => i.type === 'shelter')
+        .forEach(i => { shelterByDistrict[String(i.district)] = i.name; });
+      const ownerName = (r) => r.hospital_name || shelterByDistrict[String(r.district)] || '';
+
+      TNR_UI.mountTable(host, {
+        id: 'gov.material.txn',
+        columns: [
+          { title: '单据号', render: r => TNR_UI.escape(r.ledger_no || '—') },
+          { title: '类型', render: r => {
+              const tm = txnTypeMap[r.type] || { text: r.type, badge: 'badge-default' };
+              return '<span class="badge ' + tm.badge + '">' + tm.text + '</span>';
+            } },
+          { title: '物料', render: r => TNR_UI.escape(r.material_name || '') },
+          { title: '数量', render: r => (r.quantity || 0) + ' ' + (r.unit || '') },
+          { title: '批号', render: r => TNR_UI.escape(r.batch_no || '—') },
+          { title: '机构', render: r => TNR_UI.escape(ownerName(r) || '—') },
+          { title: '来源/去向', render: r => TNR_UI.escape(r.from_to || '—') },
+          { title: '操作人', render: r => TNR_UI.escape(r.operator_name || '—') },
+          { title: '区县', render: r => TNR_UI.escape(r.district_name || '—') },
+          { title: '日期', render: r => TNR_UI.formatDate(r.date) }
+        ],
+        data: rows,
+        emptyText: '暂无物料流水'
+      });
+      return;
+    }
+
+    // 库存数据 / 异常数据 共用一套行构造，只是过滤条件与列不同
+    const build = (m) => {
+      const stock = view.stock(m);
+      const safety = m.safety_stock || 0;
+      return { m, stock, safety, shortage: safety - stock, low: stock < safety };
+    };
+    let rows = (d.materials || []).map(build).filter(r => {
+      const m = r.m;
+      // 区县按 **id** 比（下拉 value 是 id），不要再拿名称比 —— 名称会被人在界面上改。
+      if (v.district && String(m.district || '') !== String(v.district)) return false;
+      // 选机构时只看该机构所在区县的物料（未选机构则不限）
+      if (view.inst && String(m.district || '') !== view.districtId) return false;
+      if (tab === 'alert' && !r.low) return false;
+      if (!v.keyword) return true;
+      return [m.name, m.category_display, m.category, m.unit, m.district_name]
+        .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
+    });
+
+    if (tab === 'alert') {
+      TNR_UI.mountTable(host, {
+        id: 'gov.material.alert',
+        columns: [
+          { title: '物料名称', render: r => '<strong>' + TNR_UI.escape(r.m.name || '') + '</strong>' },
+          { title: '分类', render: r => TNR_UI.escape(r.m.category_display || r.m.category || '—') },
+          { title: '机构', render: r => TNR_UI.escape(this.materialOwnerName(r.m, view) || '—') },
+          { title: '当前库存', render: r => '<span class="text-danger font-bold">' + r.stock + '</span>' },
+          { title: '安全库存', render: r => String(r.safety) },
+          { title: '缺口', render: r => '<span class="text-danger font-bold">' + r.shortage + '</span>' },
+          { title: '单位', render: r => TNR_UI.escape(r.m.unit || '—') },
+          { title: '区县', render: r => TNR_UI.escape(r.m.district_name || '—') }
+        ],
+        data: rows,
+        emptyText: view.name
+          ? '「' + view.name + '」暂无低于安全库存的物料'
+          : '暂无异常'
+      });
+      return;
+    }
+
+    TNR_UI.mountTable(host, {
+      id: 'gov.material.stock',
+      columns: [
+        { title: '物料名称', render: r => '<strong>' + TNR_UI.escape(r.m.name || '') + '</strong>' },
+        { title: '分类', render: r => TNR_UI.escape(r.m.category_display || r.m.category || '—') },
+        { title: '机构', render: r => TNR_UI.escape(this.materialOwnerName(r.m, view) || '—') },
+        // 列名随视角变：选医院时这是「该院库存」，否则是「捕捉点库存」
+        { title: view.isHospital ? '该院库存' : '捕捉点库存',
+          render: r => '<span class="' + (r.low ? 'text-danger font-bold' : '') + '">' + r.stock + '</span>' },
+        { title: '安全库存', render: r => String(r.safety) },
+        { title: '单位', render: r => TNR_UI.escape(r.m.unit || '—') },
+        { title: '区县', render: r => TNR_UI.escape(r.m.district_name || '—') }
+      ],
+      data: rows,
+      emptyText: '暂无物料数据'
+    });
   },
 
   /* ========== 6. 全局台账中心 ========== */
