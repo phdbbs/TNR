@@ -10,6 +10,7 @@
 
 | 账号 | 角色 | 归属 |
 |------|------|------|
+| `platform` | **平台管理员**（全局） | —（不挂区县/机构） |
 | `admin` | 市级政府管理员 | 全市 |
 | `cy_gov` | 区级政府管理员 | 襄城区 |
 | `hd_gov` | 区级政府管理员 | 樊城区 |
@@ -21,6 +22,13 @@
 | `adopter1` | 领养人 | — |
 
 账号与密码的定义位置：`business/management/commands/seed_data.py` 的 `_seed_users()`。
+
+> **第四十二轮：全局设置迁到平台端 `/platform/`。** 机构 / 区县 / 账号权限 /
+> 编号规则 / 公告发布 / 操作日志只在平台端可写；政府端只剩四个**只读**页面
+> （数据总览大屏、全业务监管、物料全局监管、全局台账中心）。
+> ⚠ **超级管理员 `admin` 进不去 `/platform/`** —— 它建出来是 `role='gov_city'`，
+> 而 `role_required` 只比对业务角色、不看 `is_superuser`。
+> 平台端账号由 `manage.py ensure_platform_admin` 负责（部署脚本已内置）。
 
 ## 各启动方式如何保障账号可用
 
@@ -45,8 +53,17 @@
   u.set_password('123456')
   u.save()
   ```
-- 演示账号被停用后，除 `seed_data` 校准外，也可由市级管理员在
-  「机构与用户管理」里重新启用。
+- 演示账号被停用后，除 `seed_data` 校准外，也可由**平台管理员**在
+  「账号权限管理」里重新启用（第四十二轮起政府端不再有此功能）。
+- **平台管理员口令**（第四十二轮）与超管同口径：`deploy.sh` 写 `.env` 的
+  `PLATFORM_ADMIN_PASSWORD`，第 7 步执行
+  `manage.py ensure_platform_admin --username platform --reset-password`。
+  优先级：命令行 `PLATFORM_ADMIN_PASSWORD` → **继承已有 `.env`** → 随机生成。
+  单独改口令：
+  ```bash
+  cd /opt/tnr && PLATFORM_ADMIN_PASSWORD=新口令 ./venv/bin/python manage.py \
+      ensure_platform_admin --username platform --reset-password
+  ```
 - **生产环境 `admin` 的口令固定为 `123456`**（演示期约定，第三十七轮磊哥决策）。
   `deploy.sh` 第 5 步会写 `.env`，第 7 步执行
   `manage.py ensure_superuser --username admin --reset-password`，

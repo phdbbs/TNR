@@ -50,6 +50,14 @@ if [ -z "$ADMIN_PASSWORD" ] && [ -f "$PROJECT_DIR/.env" ]; then
     ADMIN_PASSWORD="$(sed -n 's/^ADMIN_PASSWORD=//p' "$PROJECT_DIR/.env" | tail -n 1)"
 fi
 
+# 平台管理员口令（第四十二轮新增）。口径与 ADMIN_PASSWORD 完全一致：
+# 命令行传入 > 已有 .env 里的值 > 空（空则首次随机生成一次）。
+# ⚠ 同样必须继承旧 .env —— 第 5 步是 `cat >` **覆盖**写。
+PLATFORM_ADMIN_PASSWORD="${PLATFORM_ADMIN_PASSWORD:-}"
+if [ -z "$PLATFORM_ADMIN_PASSWORD" ] && [ -f "$PROJECT_DIR/.env" ]; then
+    PLATFORM_ADMIN_PASSWORD="$(sed -n 's/^PLATFORM_ADMIN_PASSWORD=//p' "$PROJECT_DIR/.env" | tail -n 1)"
+fi
+
 echo "============================================"
 echo "  TNR 流浪动物管理系统 - 部署脚本"
 echo "============================================"
@@ -118,6 +126,10 @@ LOG_LEVEL=INFO
 # ⚠ 这是明文口令，与 DB_PASSWORD 同级敏感，.env 权限已收紧为 640。
 ADMIN_PASSWORD=$ADMIN_PASSWORD
 
+# 平台管理员口令（第四十二轮新增）。与 ADMIN_PASSWORD 同级敏感。
+# 有值 → 每次部署把 platform 的口令强制重置为该值；留空 → 不重置。
+PLATFORM_ADMIN_PASSWORD=$PLATFORM_ADMIN_PASSWORD
+
 # 地图服务（高德开放平台 https://lbs.amap.com 申请 Web 服务类型 Key）
 # 用于捕捉登记「定位」功能的逆地理编码，必须配置否则定位不可用。
 TNR_AMAP_KEY=
@@ -160,6 +172,29 @@ else
     ADMIN_SUMMARY="超级管理员: 已存在，口令未改动（重置：ADMIN_PASSWORD=新口令 重跑本脚本）"
 fi
 echo "  $ADMIN_SUMMARY"
+
+# 平台管理员（第四十二轮）。
+#
+# 全局设置（机构 / 区县 / 账号权限 / 编号规则 / 公告发布 / 操作日志）
+# 迁到 `/platform/`，该入口只对 `role='platform_admin'` 开放。
+#
+# ⚠⚠ 上面那个超级管理员**进不去 `/platform/`** —— 它建出来是
+# `role='gov_city'`（见 `ensure_superuser`），而 `role_required` 只比对
+# 业务角色、**不看 `is_superuser`**。少了这一步，部署完成后
+# 「没有任何账号能进入平台端」，而部署脚本会一路显示成功。
+if [ -n "$PLATFORM_ADMIN_PASSWORD" ]; then
+    PLATFORM_OUTPUT="$(PLATFORM_ADMIN_PASSWORD="$PLATFORM_ADMIN_PASSWORD" python manage.py ensure_platform_admin --username platform --reset-password)"
+else
+    PLATFORM_OUTPUT="$(python manage.py ensure_platform_admin --username platform)"
+fi
+echo "$PLATFORM_OUTPUT" | grep -v "^PLATFORM_ADMIN_CREDENTIALS=" | grep -v "^PLATFORM_ADMIN_RESULT="
+PLATFORM_CREDENTIALS="$(echo "$PLATFORM_OUTPUT" | grep "^PLATFORM_ADMIN_CREDENTIALS=" | tail -n 1)"
+if [ -n "$PLATFORM_CREDENTIALS" ]; then
+    PLATFORM_SUMMARY="平台管理员: ${PLATFORM_CREDENTIALS#PLATFORM_ADMIN_CREDENTIALS=}  （由 .env 的 PLATFORM_ADMIN_PASSWORD 固定；如需变更请改 .env 后重跑本脚本）"
+else
+    PLATFORM_SUMMARY="平台管理员: 已存在，口令未改动（重置：PLATFORM_ADMIN_PASSWORD=新口令 重跑本脚本）"
+fi
+echo "  $PLATFORM_SUMMARY"
 
 # === 6.5 目录属主与权限 ===
 # 【历史缺陷】原脚本全程没有 chown。gunicorn / qcluster 以 www-data 运行，
@@ -245,12 +280,17 @@ echo "  部署完成！"
 echo "============================================"
 echo ""
 echo "访问地址: http://$DOMAIN"
+echo "平台管理端: http://$DOMAIN/platform/  （仅平台管理员可登录）"
 echo "$ADMIN_SUMMARY"
+echo "$PLATFORM_SUMMARY"
 echo ""
 echo "演示账号（由 seed_data 创建，密码均为 123456，详见 DEMO_ACCOUNTS.md）:"
-echo "  政府 admin / 捕捉点 cy_shelter / 医院 aixin_hosp / 领养人 adopter1"
+echo "  平台 platform / 政府 admin / 捕捉点 cy_shelter / 医院 aixin_hosp / 领养人 adopter1"
 if [ -n "$ADMIN_CREDENTIALS" ]; then
     echo "  注意：admin 的密码已被上面的超级管理员口令覆盖，不再是 123456。"
+fi
+if [ -n "$PLATFORM_CREDENTIALS" ]; then
+    echo "  注意：platform 的密码已被上面的平台管理员口令覆盖，不再是 123456。"
 fi
 if [ "$DB_PASS_GENERATED" = "1" ]; then
     echo ""
