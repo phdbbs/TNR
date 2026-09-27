@@ -67,7 +67,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260924b"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928a"></script>
 <script>
 /* ====================================================
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
@@ -380,11 +380,11 @@ const Hospital = {
         '<div class="tab-item ' + (this.state.receiveTab === 'void' ? 'active' : '') + '" data-rtab="void">已撤回 (' + vd + ')</div>' +
         '</div>' +
         // 四个状态标签页共用一条筛选条，位置紧跟 .tabs（CSS 里 .tabs 钉 top:0、.filter-bar 钉 top:46px）。
-        '<div id="receiveFilterBar">' + TNR_UI.renderFilterBar([
+        TNR_UI.renderFilterBar([
           { key: 'keyword', label: '搜索', type: 'search', placeholder: '交接单号 / 宠物编号 / 来源捕捉点' },
           { key: 'start_date', label: '开始日期', type: 'date' },
           { key: 'end_date', label: '结束日期', type: 'date' }
-        ]) + '</div>' +
+        ], '', { id: 'receiveFilterBar' }) +
         '<div id="receiveTabContent"></div>';
 
       document.getElementById('page-receive').innerHTML = html;
@@ -881,12 +881,14 @@ const Hospital = {
       });
 
       /* 列表卡不再渲染标题；筛选条放列表容器内 —— 本页有「诊疗操作 / 诊疗记录」两个
-         子标签，筛选条只对记录有意义，放 sub-tabs 下面常驻会在另一个标签页里显得多余。 */
-      c.innerHTML = '<div id="treatListFilterBar">' + TNR_UI.renderFilterBar([
+         子标签，筛选条只对记录有意义，放 sub-tabs 下面常驻会在另一个标签页里显得多余。
+         ⚠ 筛选条的 id 直接写在 `.filter-bar` 上，**不要**再套一层 `<div id="...">`：
+         那一层与筛选条同高，`position: sticky` 的包含块就是它自己，冻结直接失效。 */
+      c.innerHTML = TNR_UI.renderFilterBar([
         { key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号 / 医院 / 医生' },
         { key: 'start_date', label: '开始日期', type: 'date' },
         { key: 'end_date', label: '结束日期', type: 'date' }
-      ]) + '</div><div id="treatTableHolder"></div>';
+      ], '', { id: 'treatListFilterBar' }) + '<div id="treatTableHolder"></div>';
       const treatBar = document.getElementById('treatListFilterBar');
       const renderTreatTable = () => {
         const v = TNR_UI.getFilterValues(treatBar);
@@ -1001,11 +1003,11 @@ const Hospital = {
       '<div class="tab-item ' + (this.state.materialTab === 'ledger' ? 'active' : '') + '" data-mtab="ledger">出入库台账 (' + txns.length + ')</div>' +
       '</div>' +
       // 四个标签页共用一条筛选条，位置紧跟 .tabs（CSS 里 .tabs 钉 top:0、.filter-bar 钉 top:46px）。
-      '<div id="materialFilterBar">' + TNR_UI.renderFilterBar([
+      TNR_UI.renderFilterBar([
         { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料 / 单号 / 批号 / 操作人' },
         { key: 'start_date', label: '开始日期', type: 'date' },
         { key: 'end_date', label: '结束日期', type: 'date' }
-      ]) + '</div>' +
+      ], '', { id: 'materialFilterBar' }) +
       '<div id="materialTabContent"></div>';
 
     page.querySelectorAll('[data-mtab]').forEach(el => {
@@ -1287,9 +1289,9 @@ const Hospital = {
       /* 两个待办列表（待审核申请 / 待领出确认）共用一条筛选条。
          本方法有 3 条分支、每条都重设 page.innerHTML，所以 mountTable 一律走下面两个
          包装函数，避免过滤逻辑在 5 个调用点上各写一遍。 */
-      const infoBarHtml = '<div id="adoptInfoFilterBar">' + TNR_UI.renderFilterBar([
+      const infoBarHtml = TNR_UI.renderFilterBar([
         { key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 申请人 / 电话' }
-      ]) + '</div>';
+      ], '', { id: 'adoptInfoFilterBar' });
       // 行对象是映射后的展示结构（含 HTML 片段），逐字段拼成 haystack 最省事，
       // 也不会漏列 —— 逐列写死字段名在字段改名后会静默失效。
       //
@@ -1526,7 +1528,7 @@ const Hospital = {
 
       /* 记录列表：列表卡不再渲染标题（数量看列表下方「共 N 条」），
          筛选条独立于卡片、放页面级 —— 嵌在卡片里时 sticky 的可钉范围被卡片高度限制住。 */
-      html += '<div id="euthFilterBar">' + TNR_UI.renderFilterBar([
+      html += TNR_UI.renderFilterBar([
         { key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号 / 原因 / 操作人' },
         { key: 'body', label: '遗体移交', type: 'select', options: [
           { value: 'done', label: '已移交' },
@@ -1534,7 +1536,7 @@ const Hospital = {
         ]},
         { key: 'start_date', label: '开始日期', type: 'date' },
         { key: 'end_date', label: '结束日期', type: 'date' }
-      ]) + '</div>';
+      ], '', { id: 'euthFilterBar' });
       html += '<div class="card"><div class="card-body-flush">';
       html += '<div id="hospitalEuthTable"></div></div></div>';
 
@@ -1650,11 +1652,11 @@ const Hospital = {
         '</div>' +
         // 四个标签页共用一条筛选条（关键词 + 日期区间）：字段同构，分四条只会多一次维护。
         // 位置紧跟 .tabs —— CSS 里 .tabs 钉 top:0、.filter-bar 钉 top:46px，是配套的。
-        '<div id="ledgerFilterBar">' + TNR_UI.renderFilterBar([
+        TNR_UI.renderFilterBar([
           { key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 物料 / 操作人' },
           { key: 'start_date', label: '开始日期', type: 'date' },
           { key: 'end_date', label: '结束日期', type: 'date' }
-        ]) + '</div>' +
+        ], '', { id: 'ledgerFilterBar' }) +
         '<div id="ledgerTabContent"></div>';
 
       page.querySelectorAll('[data-ltab]').forEach(el => {

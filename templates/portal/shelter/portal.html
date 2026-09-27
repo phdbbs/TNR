@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260924b"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928a"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -1856,11 +1856,9 @@ const Shelter = {
       html += '</div></div>';
 
       const pendingOrders = all.filter(t => t.status === 'pending');
-      html += '<div id="trPendingFilterBar">'
-        + TNR_UI.renderFilterBar([
+      html += TNR_UI.renderFilterBar([
             { key: 'keyword', label: '搜索', type: 'search', placeholder: '转运单号 / 医院 / 宠物编号' }
-          ])
-        + '</div>';
+          ], '', { id: 'trPendingFilterBar' });
       html += '<div data-mt="shelter.transfers.pending"></div>';
       const columns = [
         { title: '转运单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
@@ -1932,8 +1930,10 @@ const Shelter = {
       ];
       // 注意顺序：容器先随 innerHTML 写进 DOM，再 mountTable —— 反过来选择器查不到元素，
       // 表格会**静默不渲染且不报错**（core/tests_frontend_consistency.py 静态锁死）。
-      const detailHtml = '<div class="card mb-4"><div class="card-body" style="padding-bottom:0;">'
-        + TNR_UI.renderFilterBar(filters) + '</div></div>'
+      // ⚠ 筛选条原先被包在一张 `.card` 里，而 `.card-body` 只比筛选条高 20px ——
+      // `position: sticky` 的包含块就是那 20px，筛选条**只能滑 20px**，等于没冻结。
+      // `.filter-bar` 自带边框/圆角/阴影，本来就长得像卡片，这层卡是多余的，直接去掉。
+      const detailHtml = TNR_UI.renderFilterBar(filters, '', { id: 'trDetailFilterBar' })
         + '<div data-mt="shelter.transfers.detail"></div>';
       wrap.innerHTML = detailHtml;
 
@@ -2035,8 +2035,7 @@ const Shelter = {
     const materials = this._materials || [];
 
     if (tab === 'stock') {
-      let html = '<div id="matStockFilterBar">'
-        + TNR_UI.renderFilterBar([
+      let html = TNR_UI.renderFilterBar([
             { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料名称 / 规格 / 批次' },
             { key: 'category', label: '分类', type: 'select', options: [
               { value: 'vaccine', label: '疫苗' },
@@ -2048,8 +2047,7 @@ const Shelter = {
               { value: 'low', label: '偏低' },
               { value: 'ok', label: '充足' }
             ]}
-          ])
-        + '</div>';
+          ], '', { id: 'matStockFilterBar' });
       html += '<div data-mt="shelter.material.stock"></div>';
       const columns = [
         { title: '物料名称', key: 'name' },
@@ -2119,13 +2117,11 @@ const Shelter = {
       html += '</div></div>';
 
       const txns = (this._matTxns || []).filter(t => t.type === 'purchase');
-      html += '<div id="matPurchaseFilterBar">'
-        + TNR_UI.renderFilterBar([
+      html += TNR_UI.renderFilterBar([
             { key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 物料 / 供应商 / 批号' },
             { key: 'start_date', label: '开始日期', type: 'date' },
             { key: 'end_date', label: '结束日期', type: 'date' }
-          ])
-        + '</div>';
+          ], '', { id: 'matPurchaseFilterBar' });
       html += '<div data-mt="shelter.material.purchase"></div>';
       wrap.innerHTML = html;
       const puCols = [
@@ -2203,13 +2199,11 @@ const Shelter = {
       html += '</div></div>';
 
       const txns = (this._matTxns || []).filter(t => t.type === 'dispatch');
-      html += '<div id="matOutboundFilterBar">'
-        + TNR_UI.renderFilterBar([
+      html += TNR_UI.renderFilterBar([
             { key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 物料 / 接收方 / 批号' },
             { key: 'start_date', label: '开始日期', type: 'date' },
             { key: 'end_date', label: '结束日期', type: 'date' }
-          ])
-        + '</div>';
+          ], '', { id: 'matOutboundFilterBar' });
       html += '<div data-mt="shelter.material.outbound"></div>';
       wrap.innerHTML = html;
       const obCols = [
@@ -2536,15 +2530,29 @@ const Shelter = {
 
       /* 本标签页有**两个**列表（待回收动物 / 回收记录），各自带一个筛选条。
          两个筛选条必须各自绑定自己的容器：getFilterValues 会遍历作用域内全部
-         [data-filter]，而两边的 key 都叫 keyword —— 共用 scope 会互相覆盖。 */
-      let html = '<div id="recovFilterBar">'
-        + TNR_UI.renderFilterBar([{ key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号 / 品种' }])
+         [data-filter]，而两边的 key 都叫 keyword —— 共用 scope 会互相覆盖。
+         ⚠ 两条筛选条还各自**单独成块**（bar + 它自己的列表放同一个 div）。
+         原因：`position: sticky` 的包含块是最近的块级祖先 —— 两条 bar 若都直接挂在
+         `#relContent` 下，包含块就是这个整标签页，于是**两条都钉在 top:46px 互相压住**。
+         各自成块后，滚过第一块时第一条 bar 随它一起滚走、第二条才接手钉住，
+         这才是「分区冻结」应有的样子。 */
+      const returnFilters = [
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '编号/姓名/电话/住址' },
+        { key: 'start_date', label: '开始时间', type: 'date' },
+        { key: 'end_date', label: '结束时间', type: 'date' },
+        { key: 'owner_name', label: '回收人', type: 'text', placeholder: '回收人姓名' },
+        { key: 'owner_phone', label: '电话', type: 'text', placeholder: '联系电话' },
+        { key: 'owner_address', label: '住址', type: 'text', placeholder: '住址关键词' },
+        { key: 'pet_breed', label: '品种', type: 'text', placeholder: '宠物品种' }
+      ];
+      let html = '<div>'
+        + TNR_UI.renderFilterBar([{ key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号 / 品种' }], '', { id: 'recovFilterBar' })
+        + '<div data-mt="shelter.release.recovery"></div>'
         + '</div>';
-      html += '<div data-mt="shelter.release.recovery"></div>';
-      html += '<div style="margin-top:var(--sp-6);">';
-      html += '<div id="ownerReturnFilterBar"></div>';
-      html += '<div data-mt="shelter.release.return-records"></div>';
-      html += '</div>';
+      html += '<div style="margin-top:var(--sp-6);">'
+        + TNR_UI.renderFilterBar(returnFilters, '', { id: 'ownerReturnFilterBar', noButtons: false })
+        + '<div data-mt="shelter.release.return-records"></div>'
+        + '</div>';
       wrap.innerHTML = html;
 
       // 1) 待回收动物列表
@@ -2568,18 +2576,7 @@ const Shelter = {
       renderRecoverable();
       TNR_UI.bindFilter(renderRecoverable, recovBar);
 
-      // 2) 回收记录列表（筛选栏 + 表格 + 分页）
-      const returnFilters = [
-        { key: 'keyword', label: '搜索', type: 'search', placeholder: '编号/姓名/电话/住址' },
-        { key: 'start_date', label: '开始时间', type: 'date' },
-        { key: 'end_date', label: '结束时间', type: 'date' },
-        { key: 'owner_name', label: '回收人', type: 'text', placeholder: '回收人姓名' },
-        { key: 'owner_phone', label: '电话', type: 'text', placeholder: '联系电话' },
-        { key: 'owner_address', label: '住址', type: 'text', placeholder: '住址关键词' },
-        { key: 'pet_breed', label: '品种', type: 'text', placeholder: '宠物品种' }
-      ];
-      document.getElementById('ownerReturnFilterBar').innerHTML = TNR_UI.renderFilterBar(returnFilters, '', { noButtons: false });
-
+      // 2) 回收记录列表（筛选栏 + 表格 + 分页）—— 筛选条已随上面的 html 一起渲染。
       const returnBar = document.getElementById('ownerReturnFilterBar');
       const renderReturnTable = () => {
         const vals = TNR_UI.getFilterValues(returnBar);
@@ -2681,9 +2678,7 @@ const Shelter = {
 
       /* 待放养 / 已放养两张表的字段完全一致，共用一条筛选条即可 ——
          分两条只会让人多点一次，且两个 key 相同的筛选条会互相覆盖取值。 */
-      html += '<div id="releaseFilterBar">'
-        + TNR_UI.renderFilterBar([{ key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 小区 / 接收人 / 电话' }])
-        + '</div>';
+      html += TNR_UI.renderFilterBar([{ key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 小区 / 接收人 / 电话' }], '', { id: 'releaseFilterBar' });
       html += '<div class="card mb-4"><div class="card-body" style="padding:0;"><div data-mt="shelter.release.pending"></div></div></div>';
       html += '<div class="card"><div class="card-body" style="padding:0;"><div data-mt="shelter.release.released"></div></div></div>';
       wrap.innerHTML = html;
@@ -2765,9 +2760,7 @@ const Shelter = {
     } else if (tab === 'adoption') {
       // 领养：诊疗后进入领养大厅完成领养审核的动物
       const adoptedPets = adoptions.filter(a => a.status === 'completed' || a.status === 'pending_claim');
-      let html = '<div id="relAdoptionFilterBar">'
-        + TNR_UI.renderFilterBar([{ key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 领养人 / 电话' }])
-        + '</div>';
+      let html = TNR_UI.renderFilterBar([{ key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 领养人 / 电话' }], '', { id: 'relAdoptionFilterBar' });
       html += '<div data-mt="shelter.release.adoption"></div>';
       const columns = [
         { title: '领养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
@@ -2810,15 +2803,13 @@ const Shelter = {
       const euthOf = (pet) => this._euthanasia.find(
         e => (e.petCode || e.pet_code) === pet.code);
 
-      let html = '<div id="relDeathFilterBar">'
-        + TNR_UI.renderFilterBar([
+      let html = TNR_UI.renderFilterBar([
             { key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号 / 品种 / 死亡原因' },
             { key: 'body', label: '遗体移交', type: 'select', options: [
               { value: 'done', label: '已移交' },
               { value: 'todo', label: '未移交' }
             ]}
-          ])
-        + '</div>';
+          ], '', { id: 'relDeathFilterBar' });
       html += '<div data-mt="shelter.release.death"></div>';
       const columns = [
         { title: '宠物编号', key: 'code', render: r => '<span class="pet-code-chip" data-pet-code="' + r.code + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + r.code + '</span>' },
@@ -3549,7 +3540,7 @@ const Shelter = {
         <div class="tab-item" data-tab="adoptions">领养台账</div>
         <div class="tab-item" data-tab="materials">物料台账</div>
       </div>
-      <div id="ledgerFilter">${TNR_UI.renderFilterBar(filters)}</div>
+      ${TNR_UI.renderFilterBar(filters, '', { id: 'ledgerFilter' })}
       <div id="ledgerContent"></div>
     `;
     el.querySelectorAll('.tab-item').forEach(t => {

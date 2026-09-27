@@ -1664,6 +1664,22 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
   margin-bottom: var(--sp-4);
   flex-wrap: wrap;
 }
+/* 「数据总览大屏」的页头（标题 + 统计区间控件）整体冻结。
+   ⚠ 不能让里面的 `.filter-bar` 自己 sticky：它是这个 flex 行里的一个子项，
+   `position: sticky` 的包含块就是这一行 —— 行只比它高 10px，**只能滑 10px**，
+   等于没冻结，往下滚一点统计控件就没了（实测余量 = 10px）。
+   把 sticky 提到整行上，包含块变成整个页面，标题与统计控件一起钉住。
+   全站只有政府端「数据总览大屏」用 `.std-page-head`（`TNR_UI.stdPageHead()`
+   没有任何调用点），且该页没有标签栏，所以不会和 `.tabs` 抢 sticky 层级。 */
+body .page-view .std-page-head {
+  position: sticky;
+  top: 0;
+  z-index: 35;
+  background: var(--rice-paper);
+  padding-bottom: var(--sp-3);
+}
+/* 页头里的控件组不再单独 sticky —— 整行已经是冻结单元，再叠一层会互相压。 */
+body .page-view .std-page-head .filter-bar { position: static; }
 .std-page-title { font-family: var(--font-display, serif); font-size: 20px; font-weight: 700; color: var(--ink-text); }
 .std-page-desc { font-size: var(--fs-xs, 12px); color: var(--ink-light); margin-top: 4px; }
 .std-page-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
@@ -1716,6 +1732,14 @@ body .page-view .filter-bar {
   box-shadow: 0 2px 8px rgba(28, 28, 28, 0.06);
   margin-bottom: 10px;
 }
+/* 上面那个 46px 是「钉在标签栏下沿」的偏移，前提是页面**真的有**钉住的 `.tabs`。
+   没有标签栏的页面（捕捉管理 / 领养审核管理 / 领养回访管控 / 黑名单管理 /
+   领养信息维护 / 安乐死处置 / 账号权限管理 …）头上什么都没有，46px 会让筛选条
+   凭空下移一条，**上方漏出 46px 的滚动内容** —— 这就是「冻结条漂移」。
+   用 `:not(:has(.tabs))` 把这类页面的偏移归零。
+   ⚠ 老浏览器不认 `:has()` 时整条规则失效、自动退回上面的 46px（= 改动前行为），
+   所以降级是安全的，不会比现在更糟。 */
+body .page-view:not(:has(.tabs)) .filter-bar { top: 0; }
 /* 表头冻结：表头钉在列表自身滚动区的顶部。
    `.table-wrapper` 的高度由 `TNR_UI._fitTableHeight()` 按视口算出来（max-height），
    这样它才是真正的纵向滚动容器，`position: sticky` 才会生效 —— 详见该方法的注释。

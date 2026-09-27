@@ -569,8 +569,12 @@ const TNR_UI = {
   },
 
   /* 统计页面里「钉住的头部」占用的高度：取所有 sticky 头部（标签栏 top:0、
-     筛选条 top:46px）中 `top + offsetHeight` 的**最大值**，而非累加 ——
+     筛选条 top:46px、标准页头 top:0）中 `top + offsetHeight` 的**最大值**，而非累加 ——
      它们是叠着钉的，最大下沿才是真正被占掉的高度。
+
+     ⚠ `.std-page-head` 必须一起算：政府端「数据总览大屏」把整行页头做成 sticky
+     （里面的 `.filter-bar` 反而被置为 static，因为 flex 行只比它高 10px、钉不住），
+     漏掉它就会把表头的 top 算成 0 —— 表头被页头**压住**，看起来又是「冻结的标题漂移」。
 
      注意**不要再回到「沿 wrapper 的 previousElementSibling 逐层找」的写法**：
      筛选条与列表并不总在同一层兄弟位置，那种写法会漏算 —— 实测「动物去向/回收」
@@ -579,7 +583,7 @@ const TNR_UI = {
      高度为 0 的节点（隐藏的其它 .page-view）直接跳过。 */
   _pinnedHeight(root) {
     let maxEdge = 0;
-    root.querySelectorAll('.tabs, .filter-bar').forEach((el) => {
+    root.querySelectorAll('.tabs, .filter-bar, .std-page-head').forEach((el) => {
       if (!el.offsetHeight) return;
       const cs = getComputedStyle(el);
       if (cs.position !== 'sticky' && cs.position !== 'fixed') return;
@@ -1221,13 +1225,21 @@ const TNR_UI = {
      * 用户在上面那组输入的值会被下面那组**静默抹掉**。
      *
      * 显式关掉传 `{ noDateRange: true }`（目前只有「实体本身没有任何时间字段」才需要）。
+     *
+     * `opts.id`：把 id **直接写在 `.filter-bar` 上**。
+     * ⚠⚠ 千万不要在调用处再套一层 `<div id="xxxFilterBar">` 把返回值包起来
+     * （本项目曾在 18 处这么写）。那一层与 `.filter-bar` **同高**，
+     * 于是 `position: sticky` 的包含块就是筛选条自己 —— **一点可移动空间都没有**，
+     * 筛选条根本不冻结、跟着内容一起滚走；而表头是钉住的，视觉上就是
+     * 「冻结的筛选条被表头撞飞」。用 `opts.id` 让筛选条自己带 id，
+     * `getFilterValues(bar)` / `bindFilter(fn, bar)` 照旧按 id 取，零改动。
      */
     const list = Array.isArray(filters) ? filters : [];
     const hasDateRange = list.some(f => f && f.key === 'start_date');
     const all = (opts.noDateRange || hasDateRange)
       ? list : list.concat(this.DATE_RANGE_FILTERS);
 
-    let html = '<div class="filter-bar">';
+    let html = `<div class="filter-bar"${opts.id ? ` id="${this.escape(opts.id)}"` : ''}>`;
     all.forEach(f => {
       html += '<div class="filter-item">';
       html += `<div class="filter-item-label">${f.label}</div>`;

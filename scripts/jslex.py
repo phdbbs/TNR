@@ -225,6 +225,26 @@ def stripped_kinds(src):
     return strip_html_js_kinds(src) if '<script' in src.lower() else lex(src)
 
 
+def blank_comments(src):
+    """只抹**注释**，字符串 / 模板 / 正则原样保留（长度不变）。
+
+    什么时候需要它：断言里要匹配**字面量文本**时。
+
+    - `strip_js` / `strip_html_js` 会把字符串一起抹掉 —— 于是
+      `assertIn('库存数据', stripped)` **永远为假**，看着像「功能被删了」，
+      实际是被自己的剥离器抹没了（典型的判据空转）。
+    - 反过来完全不做剥离，注释里提到同一个词就会让判据**恒真**
+      （本项目里大量注释在解释这些字段名）。
+
+    所以这一层是两者的折中：注释抹平（不再恒真），字面量留着（不再恒假）。
+    """
+    stripped, kinds = stripped_kinds(src)
+    return ''.join(
+        '\n' if c == '\n' else (' ' if k == 'comment' else c)
+        for c, k in zip(src, kinds)
+    )
+
+
 def match_brace(stripped, open_idx):
     """从 `open_idx`（指向 `{`）按大括号配对找到匹配的 `}` 偏移，找不到返回 -1。"""
     depth = 0
