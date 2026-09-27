@@ -37,9 +37,12 @@ from django.test import Client  # noqa: E402
 # 测试客户端默认用 Host: testserver，生产配置的 ALLOWED_HOSTS 里没有它
 settings.ALLOWED_HOSTS = list(settings.ALLOWED_HOSTS) + ['testserver']
 
-#: 要覆盖的门户页。**新增门户必须加进来** —— 漏一个端就是漏一个端的校验，
+#: 要覆盖的页面。**新增门户必须加进来** —— 漏一个端就是漏一个端的校验，
 #: 而脚本照样打印「全部通过」。
+#: 用户名写 `None` 表示**匿名访问**（第四十三轮补上公开的门户首页 `/portal/`：
+#: 它是唯一不需要登录就能打开的模板页，同样带内联脚本）。
 PAGES = [
+    (None, '/portal/'),
     ('cy_shelter', '/shelter/'),
     ('aixin_hosp', '/hospital/'),
     ('cy_gov', '/gov/'),
@@ -69,7 +72,7 @@ def main():
     checked = 0
     for user, url in PAGES:
         c = Client()
-        if not c.login(username=user, password='123456'):
+        if user is not None and not c.login(username=user, password='123456'):
             print(f'  ✗ 登录失败：{user}（先跑 seed_data）')
             failures += 1
             continue

@@ -33,7 +33,12 @@
      - DB_USER / DB_NAME: 视需要调整
 
 【默认账号】
-  超级管理员: admin / admin123456
+  平台管理端: platform / 123456   （访问 /platform/，仅平台管理员可进）
+  政府端:     admin    / 123456
+  其余演示账号（捕捉点 cy_shelter、医院 aixin_hosp、领养人 adopter1 等）
+  密码同为 123456，完整清单见项目根目录 DEMO_ACCOUNTS.md。
+  ⚠ 平台管理端与政府端是**两个不同的端**：admin 是超级管理员但角色是
+    gov_city，进不去 /platform/。
   首次登录后请立即修改密码！
 
 【常用运维命令】

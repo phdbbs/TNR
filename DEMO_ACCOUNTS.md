@@ -55,6 +55,14 @@
   ```
 - 演示账号被停用后，除 `seed_data` 校准外，也可由**平台管理员**在
   「账号权限管理」里重新启用（第四十二轮起政府端不再有此功能）。
+- **演示账号提示落在两处 UI 上**（第四十三轮）：
+  `templates/login.html` 的 `.login-demo-hint` 与
+  `templates/portal/index.html` 的 `.portal-demo-hint`（仅未登录时渲染）。
+  两处都是**公开页面**、都写着 `123456`，**改一处必须改另一处**。
+  判据在 `core/tests_frontend_consistency.py::PortalLandingPageTest`：
+  提示里出现的账号必须在本文件清单内、门户首页提示必须**列全**本文件的所有账号、
+  两个提示都必须给出平台端账号 `platform`。
+  ⚠ 正式上线删号重建时，这两块提示要一并删除。
 - **平台管理员口令**（第四十二轮）与超管同口径：`deploy.sh` 写 `.env` 的
   `PLATFORM_ADMIN_PASSWORD`，第 7 步执行
   `manage.py ensure_platform_admin --username platform --reset-password`。

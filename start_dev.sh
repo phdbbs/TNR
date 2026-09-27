@@ -73,7 +73,7 @@ echo ""
 echo "============================================"
 echo "  启动开发服务器: http://127.0.0.1:$PORT"
 echo "  演示账号（密码均为 123456）:"
-echo "    政府 admin / 捕捉点 cy_shelter / 医院 aixin_hosp / 领养人 adopter1"
+echo "    平台 platform / 政府 admin / 捕捉点 cy_shelter / 医院 aixin_hosp / 领养人 adopter1"
 echo "============================================"
 echo ""
 
