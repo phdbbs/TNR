@@ -413,7 +413,7 @@ def district_list(request):
 @role_required('platform_admin')
 @login_required
 def district_create(request):
-    """创建区县（仅市级管理员）"""
+    """创建区县（仅平台管理员，第四十二轮起）"""
     data = parse_json_body(request)
 
     name = body_str(data, 'name').strip()
@@ -444,7 +444,7 @@ def district_create(request):
 @role_required('platform_admin')
 @login_required
 def district_edit(request, pk):
-    """编辑区县（仅市级管理员）"""
+    """编辑区县（仅平台管理员，第四十二轮起）"""
     try:
         district = District.objects.get(id=pk)
     except District.DoesNotExist:
@@ -511,7 +511,7 @@ def district_edit(request, pk):
 @role_required('platform_admin')
 @login_required
 def district_toggle_status(request, pk):
-    """切换区县启用/停用状态（仅市级管理员）"""
+    """切换区县启用/停用状态（仅平台管理员，第四十二轮起）"""
     try:
         district = District.objects.get(id=pk)
     except District.DoesNotExist:
@@ -533,7 +533,7 @@ def district_toggle_status(request, pk):
 @role_required('platform_admin')
 @login_required
 def district_delete(request, pk):
-    """删除区县（仅市级管理员，且未被业务数据引用）"""
+    """删除区县（仅平台管理员，且未被业务数据引用）"""
     try:
         district = District.objects.get(id=pk)
     except District.DoesNotExist:
@@ -736,7 +736,8 @@ def user_toggle_status(request, pk):
     if user is None:
         return json_fail('用户不存在或无权访问', status=404)
 
-    # 停用方向的保护：防止管理员把自己或最后一个市级管理员锁在系统外
+    # 停用方向的保护：防止管理员把自己、或最后一个平台管理员 / 最后一个
+    # 市级管理员锁在系统外。
     if user.is_active:
         if request.user.id == user.id:
             return json_fail('不能停用当前登录账号自己')
@@ -1422,17 +1423,22 @@ SYSTEM_CONFIG_VALUE_MAX = 20
 def system_config(request):
     """系统配置
 
-    GET: 返回当前配置（市级 / 区级管理员都可**读取**）
-    POST: 更新配置（键值对，**仅市级管理员**）
+    GET: 返回当前配置
+    POST: 更新配置（键值对）
 
-    读、写权限必须分开。政府端「系统配置」页对区级管理员是**可见**的
-    （同一页的「操作日志」标签页本就允许区级访问），前端也按「可读」渲染
-    编号前缀表，提示文案写的正是「仅市级管理员可**修改**编号规则配置」。
+    ⚠⚠ **第四十二轮起读、写都只对 `platform_admin` 开放** —— 「系统配置」页
+    已从政府端迁到平台管理端（`/platform/`）。迁移前是「所有管理员可读、
+    仅市级管理员可写」，当时的取舍如下（**保留作历史依据，勿据此放宽权限**）：
+    政府端「系统配置」页对区级管理员是**可见**的（同一页的「操作日志」标签页
+    本就允许区级访问），所以 GET 不能一并限死 `gov_city` —— 区级拿到 403 后
+    `TNR_API._get()` 会**静默返回 `[]`**，界面把真实的 CAP/TRF/… 前缀渲染成
+    **空串**，用户看到的是「编号规则没配置」。这与「兜底谎报业务状态」同族：
+    无权限时不能拿空值冒充真实值。
 
-    此前 GET 一并限死 `gov_city`，区级拿到 403 后 `TNR_API._get()` 静默返回
-    `[]`，界面把真实的 CAP/TRF/… 前缀渲染成**空串** —— 用户看到的是
-    「编号规则没配置」。这与「兜底谎报业务状态」同族：无权限时不能拿空值
-    冒充真实值。
+    ⚠ 现在调用方只剩全局角色，那个「读/写分离」的取舍已不适用；但**不要**
+    因为「反正只有平台端能调」就把 `@role_required('platform_admin')` 放宽回
+    `gov_city` / `gov_district` —— 那等于把「改编号规则」的能力重新放回政府端，
+    与第四十二轮「政府端只读业务」的口径直接冲突。
 
     ⚠⚠ **写入端必须有键白名单（第三十五轮）。** 此前 POST 是
 
