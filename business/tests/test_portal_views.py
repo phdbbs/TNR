@@ -44,6 +44,40 @@ class PortalPageTest(BusinessTestBase):
         resp = self.client.get('/adopter/hall/')
         self.assertEqual(resp.status_code, 200)
 
+    # ---------- 第四十五轮：新控件必须随页面一起下发 ----------
+
+    def test_shelter_portal_serves_new_material_controls(self):
+        """捕捉点端渲染出的 HTML 必须带上「待签收」标签与「接收方二选一」。
+
+        ⚠ 这条断言能证明的只是「页面渲染成功且内容确实下发」——
+        它是 `scripts/check_inline_js.py`（内联 JS 语法）与
+        `core/tests_frontend_consistency.py`（静态锁）之外的**第三道**：
+        前两道都在源码上跑，跑不出「模板渲染时就抛错」或
+        「服务端读的是旧模板」。Django 5.0 起 `Engine.__init__` 无条件包
+        `cached.Loader`，`--noreload` 下改了模板不重启进程就不生效，
+        表现是**页面 200、内容却是旧的** —— 只能靠读实际下发的字节发现。
+        """
+        self.client.force_login(self.shelter_user_a)
+        html = self.client.get('/shelter/').content.decode()
+        for marker in ('data-tab="pending"',       # 待签收标签
+                       'ob_target_type',           # 接收方类型下拉
+                       'ob_target_hint',           # 「当前范围内没有可下发机构」提示位
+                       'getDispatchTargets(',      # 下拉数据源走服务端
+                       'renderMatPending',         # 列表实现
+                       'institutionStock'):        # 库存口径改本机构
+            self.assertIn(marker, html, f'捕捉点端没有下发 `{marker}`')
+
+    def test_platform_portal_allows_city_level_shelter(self):
+        """平台端机构管理必须**放行**市级捕捉点（第四十五轮）。
+
+        后端 `institution_create` 从来允许捕捉点挂市级，前端却一律滤掉 ——
+        于是「市级捕捉点」只能靠改库造出来。这条盯的就是那个下拉。
+        """
+        self.client.force_login(self.platform_admin)
+        html = self.client.get('/platform/').content.decode()
+        self.assertIn('inst-district-hint', html)
+        self.assertIn('市级捕捉点', html)
+
     def test_adoption_hall_public_page_adopter_gets_full_portal(self):
         self.client.force_login(self.adopter)
         resp = self.client.get('/adopter/hall/')
