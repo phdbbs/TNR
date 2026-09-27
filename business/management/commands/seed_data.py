@@ -14,10 +14,12 @@ from django.utils import timezone
 
 from accounts.models import User
 from business.models import (
-    Pet, Capture, Transfer, Treatment, Material, MaterialTransaction,
+    Pet, Capture, Transfer, Treatment, Material, MaterialStock,
+    MaterialTransaction,
     Chip, Release, Adoption, AdoptionHallListing, CheckIn, Blacklist,
     Euthanasia, Message,
 )
+from business.stock_init import initialize as init_material_stock
 from core.models import District, Institution
 
 # ============================================
@@ -130,6 +132,7 @@ class Command(BaseCommand):
             self._seed_transfers(districts, institutions, users, captures)
             self._seed_treatments(districts, institutions, users, pets)
             self._seed_material_txns(districts, institutions, users, materials)
+            self._seed_material_stocks()
             self._seed_releases(districts, institutions, users, pets)
             self._seed_adoptions(districts, institutions, users, pets)
             self._seed_hall_listings(institutions, pets)
@@ -147,7 +150,10 @@ class Command(BaseCommand):
         self.stdout.write('清空现有数据...')
         models_to_clear = [
             Message, Euthanasia, Blacklist, CheckIn, Adoption, Release,
-            MaterialTransaction, Treatment, Transfer, Pet, Capture,
+            # ⚠ `MaterialStock` 必须在 `MaterialTransaction` 之前清：
+            #   它按「按机构归属的流水合计」对账，流水先没了会让中间态看起来
+            #   像数据损坏（虽然紧接着也会被清掉）。
+            MaterialStock, MaterialTransaction, Treatment, Transfer, Pet, Capture,
             Chip, Material,
         ]
         for model in models_to_clear:
@@ -183,6 +189,15 @@ class Command(BaseCommand):
         data = [
             # (code, 名称, 类型, 区县, 地址, 联系人, 电话)
             # 捕捉点
+            #
+            # ⚠ 第四十五轮：捕捉点分**市级**与**区县级**两级，靠所属区县表达
+            #   （市级捕捉点挂在「全市（市级）」下，判据是
+            #   `services.is_city_shelter()`）。行为差异：
+            #     市级   → 看得到全市数据、可采购、可跨区县下发（下发给区县级
+            #              捕捉点或任意医院）、可转运到全市任何医院；
+            #     区县级 → 只在本区县内下发。
+            #   市级捕捉点必须排在最前（id 稳定、演示账号 `city_shelter` 指向它）。
+            ('I012', '市级流浪动物捕捉点', 'shelter', 'D000', '全市机动（襄城区集中收容）', '市主任', '13800001000'),
             ('I001', '襄城流浪动物捕捉点', 'shelter', 'D001', '襄城区檀溪路88号', '王主任', '13800001001'),
             ('I002', '樊城流浪动物捕捉点', 'shelter', 'D002', '樊城区长虹路15号', '李主任', '13800001002'),
             # 医院
@@ -229,6 +244,10 @@ class Command(BaseCommand):
             ('hd_gov', '樊城区政府管理员', 'gov_district', 'D002', None, '13800000003'),
             ('cy_shelter', '襄城捕捉点操作员', 'shelter', 'D000', 'I001', '13800000004'),
             ('hd_shelter', '樊城捕捉点操作员', 'shelter', 'D000', 'I002', '13800000005'),
+            # 市级捕捉点操作员（第四十五轮）：账号区县同样是「全市（市级）」，
+            # 与 `cy_shelter` / `hd_shelter` 一样 —— 区分市级与区县级的是
+            # **所属机构**（`is_city_shelter` 看机构区县），不是账号区县。
+            ('city_shelter', '市级捕捉点操作员', 'shelter', 'D000', 'I012', '13800000010'),
             ('aixin_hosp', '爱心宠物医院', 'hospital', 'D001', 'I003', '13800000006'),
             ('ruipeng_hosp', '瑞鹏宠物医院', 'hospital', 'D001', 'I004', '13800000007'),
             ('babitang_hosp', '芭比堂动物医院', 'hospital', 'D002', 'I005', '13800000008'),
@@ -660,6 +679,13 @@ class Command(BaseCommand):
                     'supplier': supplier,
                     'from_to': from_to,
                     'hospital': institutions[hosp_id] if hosp_id else None,
+                    # 库存归属机构（第四十五轮）：种子数据里**是确定的** ——
+                    # 医院侧就是那家医院；捕捉点侧就是操作员所属的捕捉点。
+                    # ⚠ 迁移里 `dispatch` 行回填不了（历史数据没记发起方），
+                    #   但种子数据知道，所以这里必须填上，否则演示数据的
+                    #   机构库存会对不上流水（`check_data_integrity` 直接报错）。
+                    'institution': (institutions[hosp_id] if (hosp_id and txn_type != 'dispatch')
+                                    else getattr(users[operator], 'institution', None)),
                     'operator': users[operator],
                     'operator_name': users[operator].get_full_name() or users[operator].username,
                     'date': txn_date,
@@ -667,6 +693,25 @@ class Command(BaseCommand):
                     'note': note,
                 }
             )
+
+    # ============================================
+    # 11b. 机构库存（第四十五轮）
+    # ============================================
+    def _seed_material_stocks(self):
+        """把存量的 `Material.shelter_stock` 与流水搬进「机构库存」表。
+
+        ⚠ 与 `0020_backfill_material_stock` 迁移**共用同一份实现**
+        （`business/stock_init.initialize`）：全新库（走这里）与升级库（走迁移）
+        必须得到同一种数据形态，两处各写一份迟早漂移，而且两边都「跑成功」、
+        只是数字不同 —— 极难发现。
+        """
+        self.stdout.write('创建机构库存...')
+        filled, shelter_rows, hospital_rows = init_material_stock(
+            Material, MaterialStock, MaterialTransaction, Institution)
+        if shelter_rows or hospital_rows:
+            self.stdout.write(
+                f'  流水归属回填 {filled} 行；捕捉点库存 {shelter_rows} 行；'
+                f'医院库存 {hospital_rows} 行')
 
     # ============================================
     # 12. 放养记录

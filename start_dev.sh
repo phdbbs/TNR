@@ -10,6 +10,7 @@
 #   hd_gov      - 樊城区政府管理员
 #   cy_shelter  - 捕捉点操作员（襄城流浪动物捕捉点）
 #   hd_shelter  - 捕捉点操作员（樊城流浪动物捕捉点）
+#   city_shelter- 市级捕捉点操作员（可采购、可跨区县下发、可转运到全市医院）
 #   aixin_hosp  - 医院操作员（爱心宠物医院）
 #   ruipeng_hosp- 医院操作员（瑞鹏宠物医院）
 #   babitang_hosp- 医院操作员（芭比堂动物医院）
@@ -73,7 +74,7 @@ echo ""
 echo "============================================"
 echo "  启动开发服务器: http://127.0.0.1:$PORT"
 echo "  演示账号（密码均为 123456）:"
-echo "    平台 platform / 政府 admin / 捕捉点 cy_shelter / 医院 aixin_hosp / 领养人 adopter1"
+echo "    平台 platform / 政府 admin / 捕捉点 cy_shelter / 市级捕捉点 city_shelter / 医院 aixin_hosp / 领养人 adopter1"
 echo "============================================"
 echo ""
 

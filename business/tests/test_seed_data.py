@@ -36,6 +36,10 @@ from core.models import District, Institution
 
 SEED_USERNAMES = [
     'admin', 'cy_gov', 'hd_gov', 'cy_shelter', 'hd_shelter',
+    # `city_shelter` = 市级捕捉点操作员（第四十五轮）。必须一起列进来 ——
+    # 这条清单是「演示账号都能用 123456 登录」的覆盖面，
+    # 少一个就是**新账号没被这条闸门覆盖**（而不是它不存在）。
+    'city_shelter',
     'aixin_hosp', 'ruipeng_hosp', 'babitang_hosp', 'adopter1',
 ]
 
@@ -122,9 +126,13 @@ class SeedIdempotencyTest(SeedDataTestBase):
         codes = list(Institution.objects.exclude(code__isnull=True)
                      .values_list('code', flat=True))
         self.assertEqual(len(codes), len(set(codes)), '机构编号必须唯一')
+        # 快照锁：种子数据产出的机构编号集合必须**恰好**是这些。
+        # ⚠ 往 `seed_data` 的机构清单里加一个机构，就要同步加到这里 ——
+        # 这条断言的价值正在于「种子清单变了必须有人看一眼」。
+        # `I012` = 市级捕捉点（第四十五轮）。
         self.assertEqual(
             set(codes),
-            {'I001', 'I002', 'I003', 'I004', 'I005', 'I006',
+            {'I001', 'I002', 'I003', 'I004', 'I005', 'I006', 'I012',
              'C001', 'C002', 'C003', 'C004'})
 
 
