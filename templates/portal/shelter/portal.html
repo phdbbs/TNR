@@ -164,35 +164,9 @@
    ==================================================== */
 
 const Shelter = {
-  navGroups: [
-    { title: '核心业务', items: [
-      { id: 'dashboard', icon: '📊', label: '首页看板' },
-      { id: 'capture-list', icon: '📋', label: '捕捉记录' },
-      { id: 'capture-add', icon: '➕', label: '新增捕捉登记' },
-      { id: 'owner-return', icon: '🏠', label: '主人领回' }
-    ]},
-    { title: '转运交接', items: [
-      { id: 'transfer', icon: '🚚', label: '转运管理' }
-    ]},
-    { title: '物料管理', items: [
-      { id: 'material', icon: '📦', label: '物料供应链' }
-    ]},
-    { title: '动物去向', items: [
-      { id: 'release', icon: '🌿', label: '动物去向' }
-    ]},
-    { title: '领养管理', items: [
-      { id: 'adoption', icon: '👤', label: '领养审核管理' },
-      { id: 'followup', icon: '📝', label: '领养回访管控' },
-      { id: 'blacklist', icon: '⛔', label: '黑名单管理' }
-    ]},
-    { title: '台账中心', items: [
-      { id: 'ledger', icon: '📊', label: '全量台账' }
-    ]},
-    { title: '系统', items: [
-      { id: 'profile', icon: '⚙️', label: '个人中心' }
-    ]}
-  ],
-
+  /* ⚠ 侧边栏由 `shelter_base.html` **服务端渲染**，不要在这里放导航结构：
+     曾经有一份 28 行的 `navGroups` 字面量留在这里，改了它对界面没有任何影响
+     —— 「数据结构存在但无人读」比缺一个字段更误导。第四十二轮删除。 */
   titles: {
     'dashboard': '首页看板',
     'capture-list': '捕捉记录',

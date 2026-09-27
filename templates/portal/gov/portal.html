@@ -71,11 +71,8 @@
    ============================================ */
 
 const GovPortal = {
-  currentUser: window.TNR_USER || null,
-  instState: { tab: 'district' },
   supState: { tab: 'capture' },
   ledgerState: { tab: 'pet' },
-  settingsState: { tab: 'prefix' },
   /* ⚠ 这里的键必须与 `gov_base.html` 侧边栏的标签文本一一对应。
      第四十二轮把「机构基础管理 / 账号权限管理 / 系统配置」三个**全局设置**页
      搬去了平台管理端（`/platform/`），政府端只留查看类页面。

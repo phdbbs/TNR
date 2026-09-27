@@ -1055,6 +1055,10 @@ class UndeclaredInstancePropertyTest(SimpleTestCase):
             body = portal_object_body(source, var)
             self.assertIsNotNone(body, f'{name}: 未找到门户对象 {var}')
             checked += 1
+            # ⚠ `body` 是 `source` 的切片：`body.find(...)` 是**相对偏移**，
+            # 必须加上切片起点才是 `source` 里的位置，否则报出的行号退回
+            # 「对象体内部的行号」，把排查者送到错误的位置。
+            offset = source.index(body)
             methods = set(re.findall(
                 r'(?m)^  (?:async\s+)?([A-Za-z_$][\w$]*)\s*\(', body))
             declared = object_keys(body) | methods
@@ -1062,7 +1066,7 @@ class UndeclaredInstancePropertyTest(SimpleTestCase):
             for prop in sorted(set(re.findall(r'\bthis\.([A-Za-z_$][\w$]*)', body))):
                 if prop in declared or prop in assigned:
                     continue
-                line_no = source.count('\n', 0, body.find('this.' + prop)) + 1
+                line_no = source.count('\n', 0, offset + body.find('this.' + prop)) + 1
                 problems.append(
                     f'{name}:{line_no} {var} 里用了 `this.{prop}`，'
                     '但它既不是对象的键/方法，也没有被赋值 → 运行时 TypeError')
@@ -1070,6 +1074,50 @@ class UndeclaredInstancePropertyTest(SimpleTestCase):
         self.assertFalse(
             problems,
             '门户对象引用了未声明的属性：\n  ' + '\n  '.join(problems))
+
+
+class DeadPortalStateTest(SimpleTestCase):
+    """门户对象里声明的顶层数据键必须**至少有一个读取点**。
+
+    第四十二轮实测的四个（都是「声明了、但零引用」）：
+
+    | 端 | 键 | 为什么是死的 |
+    |---|---|---|
+    | gov | `instState` / `settingsState` | 对应的两个页已迁到平台端 |
+    | gov | `currentUser` | 冗余副本 —— `TNR_API.getCurrentUser()` 直接读 `window.TNR_USER` |
+    | shelter | `navGroups` | 28 行导航结构，而侧边栏是 `shelter_base.html` **服务端渲染**的 |
+
+    这与后端「字段存在但无人读」是同一个洞（`Institution.status` 曾零读取点，
+    见 `InactiveEntityContractTest`）。危害不是报错，而是**误导**：
+    读者会以为改这里能改行为，改完发现没反应，再去查别处。
+
+    判据：键名在对象体内出现次数 < 2（= 只有声明那一次）。
+    正常键至少是「声明 + 一次读取」= 2 次（如 `this.titles[pageId]`）。
+    """
+
+    def test_declared_keys_are_read(self):
+        problems = []
+        checked = 0
+        for name, var in PORTAL_OBJECTS.items():
+            source = strip_js_comments(read(PORTALS[name]))   # 等长替换，行号不变
+            body = portal_object_body(source, var)
+            self.assertIsNotNone(body, f'{name}: 未找到门户对象 {var}')
+            # ⚠ `body` 是 `source` 的**切片**，`body.find(key)` 是相对偏移 ——
+            # 少了这一步，报出来的行号会退回「对象体内部的行号」（如 gov:1），
+            # 把排查者送到错误的位置。
+            offset = source.index(body)
+            for key in sorted(object_keys(body)):
+                checked += 1
+                if len(re.findall(r'\b' + re.escape(key) + r'\b', body)) >= 2:
+                    continue
+                line_no = source.count('\n', 0, offset + body.find(key)) + 1
+                problems.append(
+                    f'{name}:{line_no} {var}.{key} 只有声明、没有任何读取点'
+                    ' → 死状态（改了不会有任何效果）')
+        self.assertGreater(checked, 0, '没有解析到任何顶层键，测试本身可能已失效')
+        self.assertFalse(
+            problems,
+            '门户对象里有「声明了但无人读」的键：\n  ' + '\n  '.join(problems))
 
 
 # ============================================================
