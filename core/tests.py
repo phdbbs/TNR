@@ -12,6 +12,7 @@ from django.db import IntegrityError, transaction
 from django.http.multipartparser import MultiPartParserError
 from django.test import (
     Client, RequestFactory, SimpleTestCase, TestCase, override_settings,
+    tag,
 )
 
 from business.tests.base import (
@@ -724,6 +725,7 @@ def model_counts():
     return out
 
 
+@tag('slow')
 class AllApiPostRoutesContractTest(BusinessTestBase):
     """枚举全部 `/api/` 路由的 **POST 请求体契约闸门**（第三十五轮）。
 
