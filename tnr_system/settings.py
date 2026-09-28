@@ -102,8 +102,9 @@ DEBUG = _env_bool('DEBUG', False)
 SECRET_KEY = os.environ.get('SECRET_KEY', '').strip()
 if not SECRET_KEY:
     if DEBUG:
-        # 开发环境图省事：随机生成临时密钥（重启进程即失效，会要求重新登录）
-        SECRET_KEY = 'django-insecure-dev-%s' % secrets.token_urlsafe(32)
+        # 开发环境图省事：随机生成临时密钥（重启进程即失效，会要求重新登录）。
+        # 不内嵌任何字面量前缀 —— 源码里不得出现「长得像密钥的字符串」。
+        SECRET_KEY = secrets.token_urlsafe(50)
     else:
         raise ImproperlyConfigured(
             '未配置 SECRET_KEY。生产环境必须显式设置，否则会话 Cookie 可被伪造。\n'

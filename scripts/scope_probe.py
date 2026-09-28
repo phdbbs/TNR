@@ -190,7 +190,7 @@ def victim_for(name, attacker):
 
     if name == 'release_confirm':
         obj = _by_district(Release, d, **extra)
-        return (obj, '跨区县放养单') if obj else (None, '无跨区县放养单')
+        return (obj, '跨区县放归单') if obj else (None, '无跨区县放归单')
 
     if name == 'body_receive':
         obj = _by_district(Euthanasia, d, **extra)

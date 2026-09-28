@@ -6,6 +6,12 @@ from business.tests.base import (
     ApiMixin, make_district, make_institution, make_user,
 )
 from django.test import TestCase
+from django.utils.crypto import get_random_string
+
+
+def _test_password():
+    """测试用口令：进程内随机生成，源码不出现口令字面量。"""
+    return 'Np1-' + get_random_string(12)
 
 
 class LoginViewTest(ApiMixin, TestCase):
@@ -156,29 +162,31 @@ class ChangePasswordTest(ApiMixin, TestCase):
 
     def test_change_success_and_session_kept(self):
         self.client.force_login(self.user)
+        new_pw = _test_password()
         body = self.ok(self.post_json(self.URL, {
             'old_password': '123456',
-            'new_password': 'newPass2026',
-            'confirm_password': 'newPass2026',
+            'new_password': new_pw,
+            'confirm_password': new_pw,
         }))
         self.assertIn('成功', body['message'])
         self.user.refresh_from_db()
-        self.assertTrue(self.user.check_password('newPass2026'))
+        self.assertTrue(self.user.check_password(new_pw))
         # 改密后会话仍有效，可直接访问门户
         self.assertEqual(self.client.get('/api/me/').status_code, 200)
 
     def test_wrong_old_password(self):
         self.client.force_login(self.user)
+        new_pw = _test_password()
         self.expect_fail(self.post_json(self.URL, {
-            'old_password': 'wrong', 'new_password': 'newPass2026',
-            'confirm_password': 'newPass2026',
+            'old_password': 'wrong', 'new_password': new_pw,
+            'confirm_password': new_pw,
         }), message='原密码错误')
 
     def test_mismatched_confirm(self):
         self.client.force_login(self.user)
         self.expect_fail(self.post_json(self.URL, {
-            'old_password': '123456', 'new_password': 'newPass2026',
-            'confirm_password': 'otherPass2026',
+            'old_password': '123456', 'new_password': _test_password(),
+            'confirm_password': _test_password(),
         }), message='两次输入的新密码不一致')
 
     def test_same_as_old_rejected(self):
@@ -219,8 +227,8 @@ class ChangePasswordTest(ApiMixin, TestCase):
         """
         self.client.force_login(self.user)
         big = json.dumps({'old_password': 'a' * 3_000_000,
-                          'new_password': 'newPass2026',
-                          'confirm_password': 'newPass2026'})
+                          'new_password': _test_password(),
+                          'confirm_password': _test_password()})
         resp = self.client.post(self.URL, data=big,
                                 content_type='application/json')
         self.assertEqual(resp.status_code, 400)
@@ -231,14 +239,15 @@ class ChangePasswordTest(ApiMixin, TestCase):
     def test_oversized_body_does_not_change_password(self):
         """超大请求体被拒时，密码必须**一字未改**（拒绝要发生在写库之前）。"""
         self.client.force_login(self.user)
+        hack_pw = _test_password()
         big = json.dumps({'old_password': '123456',
-                          'new_password': 'HackedPass#2026',
-                          'confirm_password': 'HackedPass#2026',
+                          'new_password': hack_pw,
+                          'confirm_password': hack_pw,
                           'pad': 'a' * 3_000_000})
         self.client.post(self.URL, data=big, content_type='application/json')
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password('123456'), '原密码不应被改动')
-        self.assertFalse(self.user.check_password('HackedPass#2026'))
+        self.assertFalse(self.user.check_password(hack_pw))
 
 
 class UserModelTest(TestCase):
