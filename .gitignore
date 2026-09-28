@@ -42,3 +42,4 @@ gui-test-scripts/
 # 只忽略这个具体文件、不忽略整个 scripts/ 目录 —— 整目录忽略会让以后正常加入的
 # 脚本被静默吞掉（git status 里不出现），排查起来很费劲。
 scripts/strip_mounttable_titles.py
+gui-test-scripts/
