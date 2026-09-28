@@ -44,7 +44,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928b"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928c"></script>
 <script>
 /* ============================================
    平台管理端 - SPA 应用逻辑
@@ -557,7 +557,7 @@ const PlatformPortal = {
       { role: 'platform_admin', name: '平台管理员', desc: '全局设置：区县与机构管理、账号权限管理、编号规则、公告发布、操作日志。可见范围：全部区县，不受区县约束。' },
       { role: 'gov_city', name: '市级管理员', desc: '全市数据查看、机构管理、账号管理、区县管理、系统配置、全业务监管。所属区域：市级。' },
       { role: 'gov_district', name: '区级管理员', desc: '本区县数据查看、本区县机构管理、本区县账号管理（限捕捉点/医院）。所属区域：具体区县。' },
-      { role: 'shelter', name: '捕捉点操作员', desc: '捕捉登记、转运派单、物料采购下发、放养管理、领养审核、回访管控。所属区域：市级，须关联捕捉点。' },
+      { role: 'shelter', name: '捕捉点操作员', desc: '捕捉登记、转运派单、物料采购下发、放归管理、领养审核、回访管控。所属区域：市级，须关联捕捉点。' },
       { role: 'hospital', name: '医院操作员', desc: '动物接收、诊疗绝育、物料消耗、领养资料维护、安乐死处置。所属区域：具体区县，须关联医院。' }
     ];
     document.getElementById('rolePermGrid').innerHTML = perms.map(p => `
@@ -800,7 +800,7 @@ const PlatformPortal = {
         { type: '捕捉记录', key: 'capture_prefix', example: 'CAP-2025-0110-001' },
         { type: '转运记录', key: 'transfer_prefix', example: 'TRF-2025-0111-001' },
         { type: '诊疗记录', key: 'treatment_prefix', example: 'TRE-2025-0115-001' },
-        { type: '放养记录', key: 'release_prefix', example: 'REL-2025-0124-001' },
+        { type: '放归记录', key: 'release_prefix', example: 'REL-2025-0124-001' },
         { type: '领养记录', key: 'adoption_prefix', example: 'ADP-2025-0128-001' },
         { type: '安乐死记录', key: 'euthanasia_prefix', example: 'EUT-2025-0120-001' },
         { type: '物料采购', key: 'purchase_prefix', example: 'PUR-2025-0105-001' },

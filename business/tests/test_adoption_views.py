@@ -477,7 +477,7 @@ class AdoptionScopeGuardTest(BusinessTestBase):
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json('/api/business/adoptions/register/', {
             'pet_id': pet.id, 'adopter_name': '甲', 'adopter_phone': '13800000012',
-        }), message='待放养')
+        }), message='待放归')
 
     def test_register_blocked_when_already_pending_claim(self):
         pet = make_pet(district=self.district_a, shelter=self.shelter_a,

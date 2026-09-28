@@ -699,7 +699,7 @@
 {% endblock %}
 
 {% block extra_js %}
-<script src="{% static 'js/tnr-api.js' %}?v=20260928b"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928c"></script>
 <script>
 /* ============================================
    领养人端 H5 门户 - 应用逻辑（对接 Django API）
@@ -1452,7 +1452,7 @@ async function showLifecycle(adoptionId) {
         desc = `医院：${TNR_UI.escape(ev.hospital_name || '—')}<br>项目：${TNR_UI.escape((ev.items || []).join('、') || '—')}<br>状态：${TNR_UI.escape(ev.status === 'completed' ? '已完成' : '进行中')}`;
         if (ev.chip_no) desc += `<br>芯片号：${TNR_UI.escape(ev.chip_no)}`;
       } else if (ev.type === 'release') {
-        desc = `小区：${TNR_UI.escape(ev.community_name || '—')}<br>接收人：${TNR_UI.escape(ev.receiver_name || '—')}<br>状态：${TNR_UI.escape(ev.status === 'released' ? '已放养' : '待放养')}`;
+        desc = `小区：${TNR_UI.escape(ev.community_name || '—')}<br>接收人：${TNR_UI.escape(ev.receiver_name || '—')}<br>状态：${TNR_UI.escape(ev.status === 'released' ? '已放归' : '待放归')}`;
       } else if (ev.type === 'adoption') {
         desc = `领养人：${TNR_UI.escape(ev.adopter_name || '—')}<br>医院：${TNR_UI.escape(ev.hospital_name || '—')}`;
       } else if (ev.type === 'euthanasia') {
@@ -1870,7 +1870,7 @@ function aboutApp() {
         <div style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--ink);margin-bottom:4px;">TNR流浪动物管理系统</div>
         <div style="font-size:13px;color:var(--ink-light);margin-bottom:16px;">领养人端 v1.0.0</div>
         <div style="font-size:13px;color:var(--ink-muted);line-height:1.8;text-align:left;padding:0 16px;">
-          TNR（捕捉-绝育-放养）是一种人道化的流浪动物治理模式。本系统致力于规范流浪动物管理全流程，实现可溯源、可监管、可闭环治理。
+          TNR（捕捉-绝育-放归）是一种人道化的流浪动物治理模式。本系统致力于规范流浪动物管理全流程，实现可溯源、可监管、可闭环治理。
         </div>
         <div style="margin-top:16px;font-size:12px;color:var(--ink-light);">
           © 2025 TNR管理系统

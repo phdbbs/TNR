@@ -1,5 +1,5 @@
 """全生命周期端到端集成测试：捕捉 → 转运 → 签收 → 诊疗（含库存与芯片）→
-自动转待领养 → 领养大厅 → 在线申请与线下登记 → 确认领出 / 放养闭环。"""
+自动转待领养 → 领养大厅 → 在线申请与线下登记 → 确认领出 / 放归闭环。"""
 from business.models import (
     Adoption, AdoptionApplication, AdoptionHallListing, Capture, Message, Pet, Release,
 )
@@ -12,7 +12,7 @@ API = '/api/business'
 class FullLifecycleTest(BusinessTestBase):
     """两条支线：
     宠物A：诊疗完成 → 待领养 → 在线申请 → 审核通过；
-    宠物B：放养闭环（小区确认）。
+    宠物B：放归闭环（小区确认）。
     """
 
     @classmethod
@@ -132,7 +132,7 @@ class FullLifecycleTest(BusinessTestBase):
             'pet_id': pet_b.id, 'items': {}, 'status': 'completed',
         }))
 
-        # 7. 放养闭环（宠物B 走放养而不是领养）
+        # 7. 放归闭环（宠物B 走放归而不是领养）
         self._login(self.shelter_user_a)
         body = self.ok(self._post(f'{API}/releases/create/', {'pet_id': pet_b.id}))
         release_id = body['data']['id']
@@ -141,7 +141,7 @@ class FullLifecycleTest(BusinessTestBase):
         pet_b.refresh_from_db()
         self.assertEqual(pet_b.status, 'released')
 
-        # 8. 溯源：宠物B 应有 捕捉→转运→诊疗→放养 完整事件链
+        # 8. 溯源：宠物B 应有 捕捉→转运→诊疗→放归 完整事件链
         body = self.ok(self.client.get(f'{API}/pets/{pet_b.id}/lifecycle/'))
         types = [e['type'] for e in body['data']['events']]
         self.assertEqual(types, ['capture', 'transfer', 'treatment', 'release'])

@@ -1,4 +1,4 @@
-"""放养闭环视图测试。"""
+"""放归闭环视图测试。"""
 from business.models import Release
 from business.tests.base import (
     BusinessTestBase, make_capture, make_institution, make_pet,
@@ -25,7 +25,7 @@ class ReleaseCreateTest(BusinessTestBase):
         self.assertEqual(release.community, self.community_a)
         self.assertTrue(release.ledger_no.startswith('REL-'))
         pet.refresh_from_db()
-        self.assertEqual(pet.status, 'in_treatment', '确认放养前状态不变')
+        self.assertEqual(pet.status, 'in_treatment', '确认放归前状态不变')
 
     def test_create_with_explicit_community(self):
         pet = self._pet(with_capture_community=False)
@@ -48,7 +48,7 @@ class ReleaseCreateTest(BusinessTestBase):
         pet = make_pet(district=self.district_a, status='adopted')
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
-                  message='不可放养')
+                  message='不可放归')
 
     def test_create_unknown_pet(self):
         self.login_as(self.shelter_user_a)
@@ -71,7 +71,7 @@ class ReleaseCreateTest(BusinessTestBase):
                   status=404, message='无权访问')
 
     def test_create_blocked_when_active_adoption(self):
-        """宠物有待领出的领养记录时不允许同时进入放养流程。"""
+        """宠物有待领出的领养记录时不允许同时进入放归流程。"""
         from business.models import Adoption
         pet = self._pet()
         Adoption.objects.create(pet=pet, pet_code=pet.code, adopter_name='领养人',
@@ -86,7 +86,7 @@ class ReleaseCreateTest(BusinessTestBase):
         self.login_as(self.hospital_user_a)
         self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id}))
         self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
-                  message='已有待放养记录')
+                  message='已有待放归记录')
 
 
 class ReleaseConfirmTest(BusinessTestBase):
@@ -133,7 +133,7 @@ class ReleaseConfirmTest(BusinessTestBase):
                   status=404, message='无权访问')
 
     def test_hospital_cannot_confirm(self):
-        """确认放养由小区/捕捉点侧完成，医院无权限。"""
+        """确认放归由小区/捕捉点侧完成，医院无权限。"""
         _, release = self._pending()
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json(f'{URL}{release.id}/confirm/'), status=403)

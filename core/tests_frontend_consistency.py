@@ -202,7 +202,7 @@ class StatusEnumMappingTest(SimpleTestCase):
         self._assert_covers(PORTALS['shelter'], 'map', expected, occurrence=1)
 
     def test_shelter_pet_status_badge_covers_pet(self):
-        """捕捉点端放养/回收页用 TNR_API 的宠物状态映射。"""
+        """捕捉点端放归/回收页用 TNR_API 的宠物状态映射。"""
         expected = {c[0] for c in Pet._meta.get_field('status').choices}
         source = read('static/js/tnr-api.js')
         self._assert_covers('static/js/tnr-api.js', 'map', expected, occurrence=0)
@@ -408,7 +408,7 @@ class CheckInStatusMappingTest(SimpleTestCase):
 #
 # 下面两个用例锁的是**只有真实浏览器渲染才会暴露**的一类缺陷：模板语法完全合法、
 # 静态检查也看不出问题，但页面一渲染就抛错或静默空白。GUI 实测（Playwright）
-# 在捕捉点端「动物回收放养 → 待回收」页签上抓到两处：
+# 在捕捉点端「动物回收放归 → 待回收」页签上抓到两处：
 #
 #   1. `TNR_UI.mountTable('[data-mt="shelter.release.recovery"]', ...)` 写在
 #      `wrap.innerHTML = html` **之前** —— 选择器查不到元素，mountTable 直接
@@ -1427,8 +1427,8 @@ class StaticAssetCacheBustTest(SimpleTestCase):
 # `TNR_API.post(url, ...)` / `TNR_API._postForm(url, fd)`，根本不经过具名方法。
 #
 # 真实案例：`/api/business/releases/create/` 一直存在，两端门户却都没调用，
-# 「动物去向 → 放养」里的「待放养确认」列表永远是空的 ——
-# **整个放养流程在界面上不可达**（只能靠直接调接口或脚本造数据）。
+# 「动物去向 → 放归」里的「待放归确认」列表永远是空的 ——
+# **整个放归流程在界面上不可达**（只能靠直接调接口或脚本造数据）。
 FLOW_ENTRY_POINTS = {
     '捕捉登记': '/api/business/captures/create/',
     '主人领回（回收）': 'ownerReturn(',
@@ -1444,8 +1444,8 @@ FLOW_ENTRY_POINTS = {
     '物料下发': 'dispatchMaterial(',
     '物料签收': 'receiveMaterial(',
     '物料库存异动': 'adjustStock(',
-    '放养发起': 'createRelease(',
-    '放养确认': 'confirmRelease(',
+    '放归发起': 'createRelease(',
+    '放归确认': 'confirmRelease(',
     '领养登记': 'registerAdoption(',
     '领养资料编辑/上下架': 'editAdoptionInfo(',
     '领养确认领出': 'confirmAdoptionClaim(',
@@ -1462,7 +1462,7 @@ class BusinessFlowEntryPointTest(SimpleTestCase):
     """每个业务环节都必须能在界面上点到，不能只有接口没有入口。
 
     接口存在、界面没接 = 流程死掉，而且**不会报错** —— 页面只是永远空着，
-    看起来像「还没有数据」。靠人工走查很容易漏（放养流程就这样漏了很久）。
+    看起来像「还没有数据」。靠人工走查很容易漏（放归流程就这样漏了很久）。
     """
 
     def test_every_flow_has_a_ui_entry(self):
@@ -1490,11 +1490,11 @@ TAB_CALL = re.compile(r"render(\w+)Tab\('([\w-]+)'\)")
 class TabIdConsistencyTest(SimpleTestCase):
     """`renderXxxTab('id')` 引用的页签 id 必须真实存在于对应的 `#xxxTabs` 容器里。
 
-    真实案例：捕捉端 `showReleaseConfirmModal` 在「确认放养成功」之后调的是
+    真实案例：捕捉端 `showReleaseConfirmModal` 在「确认放归成功」之后调的是
     `this.renderRelTab('released')`，而 `#relTabs` 里的 id 是 **`release`**
-    —— `released` 是放养记录的**状态**，不是页签名。`renderRelTab` 没有匹配分支，
+    —— `released` 是放归记录的**状态**，不是页签名。`renderRelTab` 没有匹配分支，
     紧接着的 `document.querySelector('[data-tab="released"]').click()` 直接对
-    null 取属性，抛**未捕获 TypeError**：界面上提示「放养确认成功」，但列表不刷新、
+    null 取属性，抛**未捕获 TypeError**：界面上提示「放归确认成功」，但列表不刷新、
     停留在旧状态，控制台里才看得到报错。用户会以为操作没生效而反复重试。
 
     这类拼写错误没有任何静态约束（模板里没有 `released` 这个页签，JS 里也没有

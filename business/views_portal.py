@@ -337,7 +337,7 @@ def _stage_photos(pet, *fields):
 def pet_lifecycle(request, pet_id):
     """返回指定宠物的全生命周期溯源记录。
 
-    按时间顺序返回：捕捉、转运、诊疗、放养、领养、安乐死记录。
+    按时间顺序返回：捕捉、转运、诊疗、放归、领养、安乐死记录。
     按角色收敛可见范围：领养人仅限自己领养/申请过的动物，
     **医院限本院在治或本院经手过（诊疗）的动物**，
     其余角色按所属区县过滤，避免只凭主键即可遍历全量动物档案。
@@ -420,12 +420,12 @@ def pet_lifecycle(request, pet_id):
             'photos': _stage_photos(pet, 'photo_before', 'photo_after', 'photo_treatment'),
         })
 
-    # 放养记录
+    # 放归记录
     releases = Release.objects.filter(pet=pet).order_by('created_at')
     for r in releases:
         events.append({
             'type': 'release',
-            'type_display': '放养记录',
+            'type_display': '放归记录',
             'date': r.released_at.isoformat() if r.released_at else (timezone.localdate(r.created_at).isoformat() if r.created_at else ''),
             'ledger_no': r.ledger_no,
             'community_name': r.community_name,

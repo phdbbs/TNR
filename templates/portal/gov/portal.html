@@ -64,7 +64,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928b"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928c"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -247,7 +247,7 @@ const GovPortal = {
     (D.captures || []).forEach(c => { if (this._dashInRange(c.created_at)) activities.push({ time: c.created_at, title: '捕捉登记', desc: (c.community_name || '') + ' · ' + (c.pet_count || 0) + '只', type: 'capture' }); });
     (D.transfers || []).forEach(t => { if (this._dashInRange(t.created_at)) activities.push({ time: t.created_at, title: '转运交接', desc: (t.from_shelter_name || '') + ' → ' + (t.to_hospital_name || ''), type: 'transfer' }); });
     (D.treatments || []).forEach(t => { if (this._dashInRange(t.created_at)) activities.push({ time: t.created_at, title: '诊疗记录', desc: (t.pet_code || '') + ' · ' + (t.hospital_name || ''), type: 'treatment' }); });
-    (D.releases || []).forEach(r => { if (this._dashInRange(r.created_at)) activities.push({ time: r.created_at, title: '放养登记', desc: (r.pet_code || '') + ' → ' + (r.community_name || ''), type: 'release' }); });
+    (D.releases || []).forEach(r => { if (this._dashInRange(r.created_at)) activities.push({ time: r.created_at, title: '放归登记', desc: (r.pet_code || '') + ' → ' + (r.community_name || ''), type: 'release' }); });
     (D.adoptions || []).forEach(a => { if (this._dashInRange(a.created_at)) activities.push({ time: a.created_at, title: '领养登记', desc: (a.pet_code || '') + ' · ' + (a.adopter_name || ''), type: 'adoption' }); });
     (D.euthanasia || []).forEach(e => { if (this._dashInRange(e.euthanized_at) || this._dashInRange(e.created_at)) activities.push({ time: e.euthanized_at || e.created_at, title: '安乐死处置', desc: (e.pet_code || '') + ' · ' + (e.hospital_name || ''), type: 'euthanasia' }); });
     activities.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
@@ -286,7 +286,7 @@ const GovPortal = {
         </div>
         <div class="stat-card green">
           <div class="stat-card-icon">🌱</div>
-          <div><div class="stat-card-value">${sumReleases}</div><div class="stat-card-label">放养（单）</div></div>
+          <div><div class="stat-card-value">${sumReleases}</div><div class="stat-card-label">放归（单）</div></div>
         </div>
         <div class="stat-card gold">
           <div class="stat-card-icon">🏠</div>
@@ -317,7 +317,7 @@ const GovPortal = {
               <table class="data-table district-compare-table">
                 <thead><tr>
                   <th style="text-align:left;">区县</th>
-                  <th>捕捉(只)</th><th>诊疗</th><th>放养</th><th>领养</th><th>安乐死</th>
+                  <th>捕捉(只)</th><th>诊疗</th><th>放归</th><th>领养</th><th>安乐死</th>
                 </tr></thead>
                 <tbody>
                   ${districtStats.length ? districtStats.map(ds => `
@@ -417,7 +417,7 @@ const GovPortal = {
       { id: 'capture', label: '捕捉监管' },
       { id: 'transfer', label: '转运监管' },
       { id: 'treatment', label: '诊疗监管' },
-      { id: 'release', label: '放养监管' },
+      { id: 'release', label: '放归监管' },
       { id: 'adoption', label: '领养回访监管' },
       { id: 'euthanasia', label: '安乐死监管' }
     ];
@@ -517,12 +517,12 @@ const GovPortal = {
       columns = [
         { key: 'ledger_no', title: '单据号', width: '160px' },
         { key: 'pet_code', title: '编号', width: '130px' },
-        { key: 'community_name', title: '放养地点', render: r => TNR_UI.escape(r.community_name) },
+        { key: 'community_name', title: '放归地点', render: r => TNR_UI.escape(r.community_name) },
         { key: 'pet_count', title: '数量', width: '70px', render: () => '1' },
         { key: 'receiver_name', title: '接收人', render: r => TNR_UI.escape(r.receiver_name || '—') },
         { key: 'district_id', title: '区县', render: districtRender },
-        { key: 'released_at', title: '放养时间', width: '120px', render: r => TNR_UI.formatDateTime(r.released_at) },
-        { key: 'status', title: '状态', render: r => r.status === 'released' ? `<span class="badge badge-success">已放养</span>` : `<span class="badge badge-warning">待放养</span>` }
+        { key: 'released_at', title: '放归时间', width: '120px', render: r => TNR_UI.formatDateTime(r.released_at) },
+        { key: 'status', title: '状态', render: r => r.status === 'released' ? `<span class="badge badge-success">已放归</span>` : `<span class="badge badge-warning">待放归</span>` }
       ];
     } else if (type === 'adoption') {
       data = sup.adoptions || [];
@@ -556,7 +556,7 @@ const GovPortal = {
       ];
     }
 
-    /* 起止时间：6 个标签页的**时间字段不同**（放养看放养时间、领养看领养时间、
+    /* 起止时间：6 个标签页的**时间字段不同**（放归看放归时间、领养看领养时间、
        安乐死看处置时间，其余看创建时间）。统一在这里收口，而不是在 6 个分支里
        各写一遍 —— 各写一遍必然漂移，且漂移只表现为「某一页筛出来的条数不对」，
        接口照样 200、界面照样有数据。
@@ -721,14 +721,14 @@ const GovPortal = {
         { label: '单据号', value: record.ledger_no },
         { label: '宠物编号', value: record.pet_code },
         { label: '动物数量', value: 1 },
-        { label: '放养地点', value: record.community_name || '—' },
+        { label: '放归地点', value: record.community_name || '—' },
         { label: '接收人', value: record.receiver_name || '—' },
         { label: '接收电话', value: record.receiver_phone || '—' },
         { label: '操作人', value: record.operator_name || '—' },
         { label: '区县', value: record.district_name || '—' },
-        { label: '放养时间', value: TNR_UI.formatDateTime(record.released_at) }
+        { label: '放归时间', value: TNR_UI.formatDateTime(record.released_at) }
       ];
-      if (record.pet) extraHtml += this.renderPetPhotos(record.pet, '放养动物照片');
+      if (record.pet) extraHtml += this.renderPetPhotos(record.pet, '放归动物照片');
     } else if (type === 'adoption') {
       const checkIns = (sup.checkins || []).filter(c => c.pet_id === record.pet_id);
       items = [
@@ -1183,7 +1183,7 @@ const GovPortal = {
       { id: 'capture', label: '捕捉台账' },
       { id: 'transfer', label: '转运台账' },
       { id: 'treatment', label: '诊疗台账' },
-      { id: 'release', label: '放养台账' },
+      { id: 'release', label: '放归台账' },
       { id: 'adoption', label: '领养台账' },
       { id: 'material', label: '物料台账' },
       { id: 'euthanasia', label: '安乐死台账' }
@@ -1227,7 +1227,7 @@ const GovPortal = {
       <button class="btn btn-secondary btn-sm" id="btnPrintLedger">🖨️ 打印</button>
     `) + '<div class="table-wrapper" id="ledgerTableWrapper"></div>';
     document.getElementById('btnExportLedger').addEventListener('click', () => {
-      const tabLabels = { capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放养', adoption: '领养', material: '物料', euthanasia: '安乐死' };
+      const tabLabels = { capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放归', adoption: '领养', material: '物料', euthanasia: '安乐死' };
       TNR_UI.toast(`${tabLabels[this.ledgerState.tab] || ''}台账导出成功（模拟）`, 'success');
     });
     document.getElementById('btnPrintLedger').addEventListener('click', () => window.print());
@@ -1281,7 +1281,7 @@ const GovPortal = {
     }
 
     const tab = this.ledgerState.tab;
-    const typeLabelMap = { capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放养', adoption: '领养', material: '物料', euthanasia: '安乐死' };
+    const typeLabelMap = { capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放归', adoption: '领养', material: '物料', euthanasia: '安乐死' };
     const typeBadge = r => `<span class="badge badge-default">${typeLabelMap[r.business_type] || r.business_type}</span>`;
     const dateRender = r => TNR_UI.formatDateTime(r.date);
     const esc = v => TNR_UI.escape(v || '—');
@@ -1292,7 +1292,7 @@ const GovPortal = {
       const petStatus = {
         in_transit: ['在途', 'badge-info'], in_treatment: ['待诊疗', 'badge-warning'],
         pending_adopt: ['待领养', 'badge-info'], pending_claim: ['待领出', 'badge-warning'],
-        adopted: ['已领养', 'badge-success'], released: ['已放养', 'badge-success'],
+        adopted: ['已领养', 'badge-success'], released: ['已放归', 'badge-success'],
         euthanized: ['已死亡', 'badge-danger'], owner_returned: ['主人领回', 'badge-default'],
       };
       columns = [
@@ -1368,7 +1368,7 @@ const GovPortal = {
         { key: 'pet_code', title: '编号', render: r => `<strong>${esc(r.pet_code)}</strong>` },
         { key: 'date', title: '日期', width: '140px', render: dateRender },
         { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
-        { key: 'community_name', title: '放养地点', render: r => esc(r.community_name) },
+        { key: 'community_name', title: '放归地点', render: r => esc(r.community_name) },
         { key: 'pet_count', title: '数量', width: '80px', render: r => `<strong>${r.pet_count || 1}</strong>` },
         { key: 'receiver_name', title: '接收人', render: r => esc(r.receiver_name) },
         { key: 'operator_name', title: '操作人', render: r => esc(r.operator_name) },
@@ -1544,14 +1544,14 @@ const GovPortal = {
         { label: '单据号', value: r.ledger_no },
         { label: '宠物编号', value: r.pet_code },
         { label: '动物数量', value: r.pet_count || 1 },
-        { label: '放养地点', value: r.community_name || '—' },
+        { label: '放归地点', value: r.community_name || '—' },
         { label: '接收人', value: r.receiver_name || '—' },
         { label: '接收电话', value: d.receiver_phone || '—' },
         { label: '操作人', value: r.operator_name || '—' },
         { label: '区县', value: r.district_name || '—' },
-        { label: '放养时间', value: d.released_at ? TNR_UI.formatDateTime(d.released_at) : '—' },
+        { label: '放归时间', value: d.released_at ? TNR_UI.formatDateTime(d.released_at) : '—' },
       ];
-      if (d.pet) extraHtml += this.renderPetPhotos(d.pet, '放养动物照片');
+      if (d.pet) extraHtml += this.renderPetPhotos(d.pet, '放归动物照片');
     } else if (tab === 'adoption') {
       items = [
         { label: '单据号', value: r.ledger_no },
@@ -1601,7 +1601,7 @@ const GovPortal = {
     }
 
     TNR_UI.drawer({
-      title: '台账详情 · ' + ({ pet: '一宠一档', capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放养', adoption: '领养', material: '物料', euthanasia: '安乐死' }[tab] || tab),
+      title: '台账详情 · ' + ({ pet: '一宠一档', capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放归', adoption: '领养', material: '物料', euthanasia: '安乐死' }[tab] || tab),
       body: bodyEl => { bodyEl.innerHTML = TNR_UI.renderDescList(items) + extraHtml; }
     });
     // 各阶段照片点击放大（与捕捉端「一宠一档」档案同一套交互）

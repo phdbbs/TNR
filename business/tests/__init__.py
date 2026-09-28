@@ -8,7 +8,7 @@
 - test_transfer_views.py   转运拆分下发 / 签收 / 驳回 / 重发
 - test_treatment_views.py  诊疗与库存联动
 - test_material_views.py   物料供应链双台账
-- test_release_views.py    放养闭环
+- test_release_views.py    放归闭环
 - test_adoption_views.py   领养登记 / 在线申请 / 领养大厅
 - test_checkin_views.py    回访打卡审核
 - test_blacklist_views.py  黑名单

@@ -69,7 +69,7 @@ class Command(BaseCommand):
             ('转运单区县与发出捕捉点区县不一致', self.check_transfer_district),
             ('诊疗记录区县与宠物区县不一致', self.check_treatment_district),
             ('主人领回区县与宠物区县不一致', self.check_owner_return_district),
-            ('放养记录区县与宠物区县不一致', self.check_release_district),
+            ('放归记录区县与宠物区县不一致', self.check_release_district),
             ('领养记录区县与宠物区县不一致', self.check_adoption_district),
             ('安乐死记录区县与宠物区县不一致', self.check_euthanasia_district),
             ('宠物未作废但所属捕捉单已作废', self.check_pet_of_deleted_capture),
@@ -231,7 +231,7 @@ class Command(BaseCommand):
               .exclude(district_id=F('pet__district_id')).order_by('id'))
         return _rows(
             qs,
-            lambda r: (f'{r.ledger_no or r.id}（{r.pet_code}）：放养={_district_name(r)} '
+            lambda r: (f'{r.ledger_no or r.id}（{r.pet_code}）：放归={_district_name(r)} '
                        f'宠物={_district_name(r.pet)}'),
             limit, related=('district', 'pet__district'))
 

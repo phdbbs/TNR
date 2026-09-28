@@ -31,7 +31,7 @@ MODULE_BY_PREFIX = [
     ('/api/business/transfers/', '转运下发', '转运单'),
     ('/api/business/treatments/', '诊疗记录', '诊疗单'),
     ('/api/business/materials/', '物料台账', '物料记录'),
-    ('/api/business/releases/', '放养闭环', '放养记录'),
+    ('/api/business/releases/', '放归闭环', '放归记录'),
     ('/api/business/adoptions/', '领养业务', '领养记录'),
     ('/api/business/checkins/', '回访打卡', '回访记录'),
     ('/api/business/blacklist/', '黑名单', '黑名单'),

@@ -546,7 +546,7 @@ def capture_create(request):
     with transaction.atomic():
         # 小区外键回填：前端「所在小区」是自由文本（不做下拉枚举），这里按名称
         # 匹配已有的小区机构。不回填的话 `Capture.community` 永远是 None，
-        # 后续「放养」只认这个外键 → 放养流程在界面上完全走不通。
+        # 后续「放归」只认这个外键 → 放归流程在界面上完全走不通。
         community = resolve_community(
             district, body_int(data, 'community_id'), community_name)
 
@@ -693,7 +693,7 @@ def capture_update(request, pk):
         changed.append('signature')
 
     # 小区改名后要重新解析外键：否则改完名字外键仍指向旧小区，
-    # 放养时会把动物放回**改名前的那个小区**（或外键仍为空而彻底无法放养）。
+    # 放归时会把动物放回**改名前的那个小区**（或外键仍为空而彻底无法放归）。
     if 'community_name' in data or 'district_id' in data:
         community = resolve_community(
             capture.district, body_int(data, 'community_id'), capture.community_name)

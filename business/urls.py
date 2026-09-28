@@ -61,7 +61,7 @@ urlpatterns = [
     path('materials/hospital-ledger/', views_material.hospital_stock_ledger, name='hospital_stock_ledger'),
 
     # ============================================
-    # Task 8: 放养闭环
+    # Task 8: 放归闭环
     # ============================================
     path('releases/', views_release.release_list, name='release_list'),
     path('releases/create/', views_release.release_create, name='release_create'),

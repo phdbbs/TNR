@@ -364,7 +364,7 @@ class PetArchiveApiTest(BusinessTestBase):
 
 
 class PetArchiveOutboundTest(BusinessTestBase):
-    """一宠一档台账的「去向」推导：放养 / 领养 / 死亡 / 主人领回。"""
+    """一宠一档台账的「去向」推导：放归 / 领养 / 死亡 / 主人领回。"""
 
     def _row(self, pet):
         return pet_archive_records([pet])[0]
@@ -375,7 +375,7 @@ class PetArchiveOutboundTest(BusinessTestBase):
             pet=pet, pet_code=pet.code, community_name='甲区小区',
             status='released', district=self.district_a)
         row = self._row(pet)
-        self.assertEqual(row['outbound_reason'], '放养')
+        self.assertEqual(row['outbound_reason'], '放归')
         self.assertEqual(row['delivery_unit'], '甲区小区')
 
     def test_adopted(self):

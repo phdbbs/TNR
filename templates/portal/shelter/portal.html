@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928b"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928c"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -256,7 +256,7 @@ const Shelter = {
       rejected: ['已驳回', 'danger'],
       void: ['已撤回', 'default'],
       completed: ['已完成', 'success'],
-      released: ['已放养', 'success'],
+      released: ['已放归', 'success'],
       adopted: ['已领养', 'success'],
       pending_adopt: ['待领养', 'cinnabar'],
       /* Adoption.status：待领出 / 已撤销 */
@@ -417,7 +417,7 @@ const Shelter = {
     if (availablePets.length > 0) todoItems.push({ label: availablePets.length + ' 只动物待安排转运到医院', page: 'transfer', badge: 'warning' });
     if (pendingApplication > 0) todoItems.push({ label: pendingApplication + ' 笔领养申请待审核', page: 'adoption', badge: 'info' });
     if (pendingClaim > 0) todoItems.push({ label: pendingClaim + ' 只动物待领出', page: 'adoption', badge: 'cinnabar' });
-    if (pendingRelease > 0) todoItems.push({ label: pendingRelease + ' 只动物待放养确认', page: 'release', badge: 'cinnabar' });
+    if (pendingRelease > 0) todoItems.push({ label: pendingRelease + ' 只动物待放归确认', page: 'release', badge: 'cinnabar' });
     if (lowStock > 0) todoItems.push({ label: lowStock + ' 项物料库存低于安全线', page: 'material', badge: 'danger' });
     if (todoItems.length === 0) todoItems.push({ label: '暂无待办任务，今天也是善待动物的一天', page: null, badge: null });
 
@@ -427,7 +427,7 @@ const Shelter = {
       { icon: '🏠', text: '回收登记', desc: '主人领回 / 动物回收', page: 'release', tab: 'recovery' },
       { icon: '🚚', text: '安排转运', desc: '把捕捉的动物转运到医院', page: 'transfer' },
       { icon: '📦', text: '物料采购', desc: '采购入库登记', page: 'material' },
-      { icon: '🌿', text: '放养登记', desc: '动物放养登记', page: 'release' }
+      { icon: '🌿', text: '放归登记', desc: '动物放归登记', page: 'release' }
     ];
 
     const rangeOptions = [
@@ -487,7 +487,7 @@ const Shelter = {
     html += '<div class="stat-grid">';
     html += '<div class="stat-card"><div class="stat-card-icon">📋</div><div><div class="stat-card-value" style="font-size:28px;font-weight:700;">' + totalCaptures + '<span style="font-size:14px;font-weight:400;color:var(--ink-muted);margin-left:4px;">单</span> / ' + totalAnimals + '<span style="font-size:14px;font-weight:400;color:var(--ink-muted);margin-left:4px;">只</span></div><div class="stat-card-label">捕捉登记（' + rangeLabel + '）</div></div></div>';
     html += '<div class="stat-card blue"><div class="stat-card-icon">🚚</div><div><div class="stat-card-value">' + totalTransfers + '</div><div class="stat-card-label">转运单（' + rangeLabel + '）</div></div></div>';
-    html += '<div class="stat-card green"><div class="stat-card-icon">🌿</div><div><div class="stat-card-value">' + totalReleases + '</div><div class="stat-card-label">放养单（' + rangeLabel + '）</div></div></div>';
+    html += '<div class="stat-card green"><div class="stat-card-icon">🌿</div><div><div class="stat-card-value">' + totalReleases + '</div><div class="stat-card-label">放归单（' + rangeLabel + '）</div></div></div>';
     html += '<div class="stat-card gold"><div class="stat-card-icon">👤</div><div><div class="stat-card-value">' + totalAdoptions + '</div><div class="stat-card-label">领养登记（' + rangeLabel + '）</div></div></div>';
     html += '</div>';
 
@@ -495,7 +495,7 @@ const Shelter = {
     html += '<div class="stat-grid">';
     html += '<div class="stat-card blue"><div class="stat-card-icon">🚚</div><div><div class="stat-card-value">' + availablePets.length + '</div><div class="stat-card-label">待转运（可安排转运的动物）</div></div></div>';
     html += '<div class="stat-card"><div class="stat-card-icon">⏳</div><div><div class="stat-card-value">' + busyTransfer + '</div><div class="stat-card-label">已下发待医院签收</div></div></div>';
-    html += '<div class="stat-card green"><div class="stat-card-icon">🌿</div><div><div class="stat-card-value">' + pendingRelease + '</div><div class="stat-card-label">待放养确认</div></div></div>';
+    html += '<div class="stat-card green"><div class="stat-card-icon">🌿</div><div><div class="stat-card-value">' + pendingRelease + '</div><div class="stat-card-label">待放归确认</div></div></div>';
     html += '<div class="stat-card gold"><div class="stat-card-icon">👤</div><div><div class="stat-card-value">' + pendingApplication + '</div><div class="stat-card-label">待领养审核</div></div></div>';
     html += '<div class="stat-card rouge"><div class="stat-card-icon">📦</div><div><div class="stat-card-value">' + lowStock + '</div><div class="stat-card-label">物料库存预警</div></div></div>';
     html += '</div>';
@@ -1016,7 +1016,7 @@ const Shelter = {
             </div>
           </div>
           <div class="form-group"><label class="form-label">单只照片与档案信息（逐只填写）<span class="req">*</span></label>
-            <div class="form-hint" style="margin-bottom:8px;">每只动物单独选择猫/狗、公/母并填写品种，信息会随该动物带入转运、回收、诊疗、领养、放养、死亡全流程</div>
+            <div class="form-hint" style="margin-bottom:8px;">每只动物单独选择猫/狗、公/母并填写品种，信息会随该动物带入转运、回收、诊疗、领养、放归、死亡全流程</div>
             <div class="pet-entry-list" id="ca_petEntries">
               <div class="text-light fs-sm">正在生成单只信息项…</div>
             </div>
@@ -2736,7 +2736,7 @@ const Shelter = {
     el.innerHTML = `
       <div class="tabs" id="relTabs">
         <div class="tab-item active" data-tab="recovery">回收</div>
-        <div class="tab-item" data-tab="release">放养</div>
+        <div class="tab-item" data-tab="release">放归</div>
         <div class="tab-item" data-tab="adoption">领养</div>
         <div class="tab-item" data-tab="death">死亡</div>
       </div>
@@ -2788,7 +2788,7 @@ const Shelter = {
       'data-act': (act, node) => {
         if (act !== 'view') return;
         const id = node.dataset.id;
-        // 放养单与领养单是两套独立主键，必须按当前子标签取，否则会张冠李戴
+        // 放归单与领养单是两套独立主键，必须按当前子标签取，否则会张冠李戴
         if (this._relTab === 'adoption') {
           const rec = (this._adoptions || []).find(r => String(r.id) === String(id));
           if (rec) this.showAdoptionDetail(rec);
@@ -2914,16 +2914,16 @@ const Shelter = {
       TNR_UI.bindFilter(renderReturnTable, returnBar);
 
     } else if (tab === 'release') {
-      // 放养：诊疗后放回本小区的动物
-      // 子标签：待放养 / 已放养
+      // 放归：诊疗后放回本小区的动物
+      // 子标签：待放归 / 已放归
       const pendingReleases = releases.filter(r => r.status === 'pending');
       const releasedReleases = releases.filter(r => r.status === 'released');
 
-      /* 发起放养：把诊疗结束后待安置的动物放回**原捕捉小区**。
+      /* 发起放归：把诊疗结束后待安置的动物放回**原捕捉小区**。
          这一步原先界面上没有入口 —— `/api/business/releases/create/` 接口存在，
-         但两端门户都没有调用它，于是「待放养确认」列表永远是空的：
-         放养流程在界面上**完全不可达**（死页面）。
-         可放养 = 已诊疗/待领养 且 本单没有未确认的放养记录（后端还会再校验
+         但两端门户都没有调用它，于是「待放归确认」列表永远是空的：
+         放归流程在界面上**完全不可达**（死页面）。
+         可放归 = 已诊疗/待领养 且 本单没有未确认的放归记录（后端还会再校验
          「无未完结领养」「原小区可匹配」，重复发起会被明确拒绝）。
 
          小区是**可编辑文本框**：本项目「小区」一律手填（政府端已取消小区管理，
@@ -2943,23 +2943,23 @@ const Shelter = {
         return cap.communityName || cap.community_name || '';
       };
 
-      let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>发起放养（放回原捕捉小区）</div></div><div class="card-body">';
+      let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>发起放归（放回原捕捉小区）</div></div><div class="card-body">';
       if (!releasable.length) {
-        html += '<div class="empty-block"><div class="empty-block-icon">🏡</div>暂无可放养动物（需已完成诊疗，且尚无待放养记录）</div>';
+        html += '<div class="empty-block"><div class="empty-block-icon">🏡</div>暂无可放归动物（需已完成诊疗，且尚无待放归记录）</div>';
       } else {
         html += '<div class="form-row">';
         html += '<div class="form-group"><label class="form-label">选择动物<span class="req">*</span></label><select class="form-select" id="rel_pet">'
           + releasable.map(p => '<option value="' + p.id + '" data-comm="'
             + esc(captureCommunityOf(p)) + '">'
             + esc(p.code) + ' · ' + esc(TNR_API.petAttrText(p)) + '</option>').join('') + '</select></div>';
-        html += '<div class="form-group"><label class="form-label">放养小区<span class="req">*</span></label><input class="form-input" id="rel_community" placeholder="默认带出捕捉单登记的小区，可修改"></div>';
+        html += '<div class="form-group"><label class="form-label">放归小区<span class="req">*</span></label><input class="form-input" id="rel_community" placeholder="默认带出捕捉单登记的小区，可修改"></div>';
         html += '</div>';
-        html += '<div class="form-hint" style="color:var(--ink-muted);font-size:var(--fs-sm);margin-bottom:var(--sp-3);">放养确认时由小区物业签字。</div>';
-        html += '<button class="btn btn-primary" id="btnCreateRelease">发起放养</button>';
+        html += '<div class="form-hint" style="color:var(--ink-muted);font-size:var(--fs-sm);margin-bottom:var(--sp-3);">放归确认时由小区物业签字。</div>';
+        html += '<button class="btn btn-primary" id="btnCreateRelease">发起放归</button>';
       }
       html += '</div></div>';
 
-      /* 待放养 / 已放养两张表的字段完全一致，共用一条筛选条即可 ——
+      /* 待放归 / 已放归两张表的字段完全一致，共用一条筛选条即可 ——
          分两条只会让人多点一次，且两个 key 相同的筛选条会互相覆盖取值。 */
       html += TNR_UI.renderFilterBar([{ key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 小区 / 接收人 / 电话' }], '', { id: 'releaseFilterBar' });
       html += '<div class="card mb-4"><div class="card-body" style="padding:0;"><div data-mt="shelter.release.pending"></div></div></div>';
@@ -2971,12 +2971,12 @@ const Shelter = {
       const renderReleaseTables = () => {
         const v = TNR_UI.getFilterValues(relBar);
         /* 两张表共用一条筛选条，但**时间口径不同**：
-           待放养还没放养 → 只能看创建时间；已放养 → 看放养时间（released_at）。
+           待放归还没放归 → 只能看创建时间；已放归 → 看放归时间（released_at）。
            两者常常跨天（登记当天发起、小区隔天才签字），用同一个 key 会让
-           「按放养时间筛」在待放养表上对不上，反之亦然。
+           「按放归时间筛」在待放归表上对不上，反之亦然。
            所以把「要比哪个时间字段」作为参数传进来，而不是在里面写死。
 
-           ⚠ 已放养表必须**带上创建时间兜底**：`Release.released_at` 可空，
+           ⚠ 已放归表必须**带上创建时间兜底**：`Release.released_at` 可空，
            缺兜底时用户圈一个「全部」区间（2000~2099）反而会把这类行藏起来
            —— GUI 实测抓到过（`before=4 wide=2`）。 */
         const hit = (r, dateValue) => {
@@ -2988,25 +2988,25 @@ const Shelter = {
           return hay.includes(v.keyword);
         };
         const pendingCols = [
-          { title: '放养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
+          { title: '放归单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
           { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip" data-pet-code="' + esc(r.petCode || r.pet_code) + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + esc(r.petCode || r.pet_code) + '</span>' },
           { title: '类别/品种/性别', render: r => esc(petAttrOf(r.petCode || r.pet_code)) },
-          { title: '放养小区', key: 'communityName', render: r => esc(r.communityName || r.community_name || '—') },
+          { title: '放归小区', key: 'communityName', render: r => esc(r.communityName || r.community_name || '—') },
           { title: '接收人', key: 'receiverName', render: r => esc(r.receiverName || r.receiver_name || '—') },
           { title: '联系电话', key: 'receiverPhone', render: r => esc(r.receiverPhone || r.receiver_phone || '—') },
-          { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-confirm-release="' + r.id + '">确认放养</button>' }
+          { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-confirm-release="' + r.id + '">确认放归</button>' }
         ];
-        TNR_UI.mountTable('[data-mt="shelter.release.pending"]', { id: 'shelter.release.pending', columns: pendingCols, data: pendingReleases.filter(r => hit(r, r.createdAt || r.created_at)), emptyText: '暂无待放养记录' });
+        TNR_UI.mountTable('[data-mt="shelter.release.pending"]', { id: 'shelter.release.pending', columns: pendingCols, data: pendingReleases.filter(r => hit(r, r.createdAt || r.created_at)), emptyText: '暂无待放归记录' });
 
         const releasedCols = [
-          { title: '放养单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
+          { title: '放归单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-act="view" data-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
           { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip" data-pet-code="' + esc(r.petCode || r.pet_code) + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + esc(r.petCode || r.pet_code) + '</span>' },
           { title: '类别/品种/性别', render: r => esc(petAttrOf(r.petCode || r.pet_code)) },
-          { title: '放养小区', key: 'communityName', render: r => esc(r.communityName || r.community_name || '—') },
+          { title: '放归小区', key: 'communityName', render: r => esc(r.communityName || r.community_name || '—') },
           { title: '接收人', key: 'receiverName', render: r => esc(r.receiverName || r.receiver_name || '—') },
-          { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt || r.released_at) }
+          { title: '放归时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt || r.released_at) }
         ];
-        TNR_UI.mountTable('[data-mt="shelter.release.released"]', { id: 'shelter.release.released', columns: releasedCols, data: releasedReleases.filter(r => hit(r, r.releasedAt || r.released_at || r.createdAt || r.created_at)), emptyText: '暂无放养记录' });
+        TNR_UI.mountTable('[data-mt="shelter.release.released"]', { id: 'shelter.release.released', columns: releasedCols, data: releasedReleases.filter(r => hit(r, r.releasedAt || r.released_at || r.createdAt || r.created_at)), emptyText: '暂无放归记录' });
       };
       renderReleaseTables();
       TNR_UI.bindFilter(renderReleaseTables, relBar);
@@ -3025,13 +3025,13 @@ const Shelter = {
       document.getElementById('btnCreateRelease')?.addEventListener('click', async () => {
         const sel = document.getElementById('rel_pet');
         const comm = document.getElementById('rel_community');
-        if (!sel || !sel.value) { TNR_UI.toast('请选择要放养的动物', 'warning'); return; }
-        if (!comm || !comm.value.trim()) { TNR_UI.toast('请填写放养小区', 'warning'); return; }
+        if (!sel || !sel.value) { TNR_UI.toast('请选择要放归的动物', 'warning'); return; }
+        if (!comm || !comm.value.trim()) { TNR_UI.toast('请填写放归小区', 'warning'); return; }
         const res = await TNR_API.createRelease({
           pet_id: sel.value, community_name: comm.value.trim()
         });
         if (res && res.success !== false) {
-          TNR_UI.toast('放养记录创建成功，待小区确认', 'success');
+          TNR_UI.toast('放归记录创建成功，待小区确认', 'success');
           this._pets = await TNR_API.getPets();
           this._releases = await TNR_API.getReleases();
           this.renderRelTab('release');
@@ -3079,7 +3079,7 @@ const Shelter = {
       /* 死亡：已登记死亡的动物 + **遗体移交**。
          `/api/business/euthanasia/<id>/body-receive/` 原先界面上没有任何入口 ——
          捕捉点既看不到自己该去领哪具遗体，也没有「领取」按钮，
-         死亡流程的最后一步在界面上不可达（与放养流程同一类问题）。 */
+         死亡流程的最后一步在界面上不可达（与放归流程同一类问题）。 */
       const deadPets = pets.filter(p => p.status === 'euthanized');
       const euths = await TNR_API.getEuthanasia();
       this._euthanasia = euths || [];
@@ -3168,13 +3168,13 @@ const Shelter = {
     TNR_UI.bindPhotoZoom(document);
   },
 
-  /* 放养详情抽屉 */
+  /* 放归详情抽屉 */
   showReleaseDetail(rec) {
     const esc = TNR_UI.escape.bind(TNR_UI);
-    TNR_UI.drawer({ title: '放养详情 · ' + esc(rec.ledgerNo || rec.id), body: TNR_UI.renderDescList([
-      { label: '放养单号', value: rec.ledgerNo || rec.id },
+    TNR_UI.drawer({ title: '放归详情 · ' + esc(rec.ledgerNo || rec.id), body: TNR_UI.renderDescList([
+      { label: '放归单号', value: rec.ledgerNo || rec.id },
       { label: '宠物编号', value: '<span class="pet-code-chip">' + esc(rec.petCode || rec.pet_code) + '</span>' },
-      { label: '放养小区', value: rec.communityName || rec.community_name || '—' },
+      { label: '放归小区', value: rec.communityName || rec.community_name || '—' },
       { label: '接收人', value: rec.receiverName || rec.receiver_name || '—' },
       { label: '联系电话', value: rec.receiverPhone || rec.receiver_phone || '—' },
       { label: '登记时间', value: TNR_UI.formatDateTime(rec.createdAt || rec.created_at) },
@@ -3299,16 +3299,16 @@ const Shelter = {
     }, 100);
   },
 
-  /* 确认放养 - 弹出签字确认框 */
+  /* 确认放归 - 弹出签字确认框 */
   showReleaseConfirmModal(releaseId, releases) {
     const rec = releases.find(r => String(r.id) === String(releaseId));
-    if (!rec) { TNR_UI.toast('放养记录不存在', 'danger'); return; }
+    if (!rec) { TNR_UI.toast('放归记录不存在', 'danger'); return; }
     const body = (el) => {
       el.innerHTML = `
         <div class="desc-list">
-          <div class="desc-item"><div class="desc-label">放养单号</div><div class="desc-value">${TNR_UI.escape(rec.ledgerNo || rec.id)}</div></div>
+          <div class="desc-item"><div class="desc-label">放归单号</div><div class="desc-value">${TNR_UI.escape(rec.ledgerNo || rec.id)}</div></div>
           <div class="desc-item"><div class="desc-label">宠物编号</div><div class="desc-value"><span class="pet-code-chip">${TNR_UI.escape(rec.petCode || rec.pet_code)}</span></div></div>
-          <div class="desc-item"><div class="desc-label">放养小区</div><div class="desc-value">${TNR_UI.escape(rec.communityName || rec.community_name || '—')}</div></div>
+          <div class="desc-item"><div class="desc-label">放归小区</div><div class="desc-value">${TNR_UI.escape(rec.communityName || rec.community_name || '—')}</div></div>
         </div>
         <div class="form-row">
           <div class="form-group"><label class="form-label">接收人姓名<span class="req">*</span></label><input class="form-input" id="cf_receiverName" value="${TNR_UI.escape(rec.receiverName || rec.receiver_name || '')}"></div>
@@ -3320,10 +3320,10 @@ const Shelter = {
       `;
     };
     const { close } = TNR_UI.modal({
-      title: '确认放养签字',
+      title: '确认放归签字',
       size: 'lg',
       body,
-      actions: '<button class="btn btn-secondary" data-action="close">取消</button><button class="btn btn-success" id="btnConfirmRelease">确认放养</button>'
+      actions: '<button class="btn btn-secondary" data-action="close">取消</button><button class="btn btn-success" id="btnConfirmRelease">确认放归</button>'
     });
 
     setTimeout(() => {
@@ -3340,13 +3340,13 @@ const Shelter = {
           signature: sigPad.getDataURL()
         });
         if (res && res.success !== false) {
-          TNR_UI.toast('放养确认成功！', 'success');
+          TNR_UI.toast('放归确认成功！', 'success');
           close();
           this._pets = await TNR_API.getPets();
           this._releases = await TNR_API.getReleases();
           // 页签 id 是 `release`（见 `#relTabs`），原先这里写的是 `released`：
           // `renderRelTab('released')` 没有对应分支、`querySelector` 也返回 null，
-          // 于是「确认放养成功」之后紧跟一个未捕获的 TypeError ——
+          // 于是「确认放归成功」之后紧跟一个未捕获的 TypeError ——
           // 提示是成功的，但列表不刷新、界面停在旧状态，控制台报错。
           this.renderRelTab('release');
           const relTab = document.querySelector('#relTabs [data-tab="release"]');
@@ -3819,7 +3819,7 @@ const Shelter = {
         <div class="tab-item" data-tab="captures">捕捉台账</div>
         <div class="tab-item" data-tab="transfers">转运台账</div>
         <div class="tab-item" data-tab="treatments">诊疗台账</div>
-        <div class="tab-item" data-tab="releases">放养台账</div>
+        <div class="tab-item" data-tab="releases">放归台账</div>
         <div class="tab-item" data-tab="adoptions">领养台账</div>
         <div class="tab-item" data-tab="materials">物料台账</div>
       </div>
@@ -3939,15 +3939,15 @@ const Shelter = {
         { title: '时间', key: 'createdAt', render: r => TNR_UI.formatDateTime(r.createdAt) }
       ];
     } else if (tab === 'releases') {
-      title = '放养台账';
+      title = '放归台账';
       data = ld.releases || [];
       columns = [
         { title: '台账单号', key: 'ledgerNo', render: ledgerLink },
         { title: '一宠一档', key: 'petCode', render: r => petCodeChip(r.petCode) },
-        { title: '放养小区', key: 'communityName' },
+        { title: '放归小区', key: 'communityName' },
         { title: '接收人', key: 'receiverName' },
-        { title: '状态', render: r => TNR_UI.statusBadge('已放养', 'success') },
-        { title: '放养时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt) }
+        { title: '状态', render: r => TNR_UI.statusBadge('已放归', 'success') },
+        { title: '放归时间', key: 'releasedAt', render: r => TNR_UI.formatDateTime(r.releasedAt) }
       ];
     } else if (tab === 'adoptions') {
       title = '领养台账';
@@ -3984,13 +3984,13 @@ const Shelter = {
     const dKw = (vals.district || '').toLowerCase();
     const kw = vals.keyword || '';
     const hasRange = !!(vals.start_date || vals.end_date);
-    // 7 个标签页的**时间字段各不相同**（一宠一档/物料是 `date`，放养看放养时间、
+    // 7 个标签页的**时间字段各不相同**（一宠一档/物料是 `date`，放归看放归时间、
     // 领养看领养时间…）。写成一张映射表，而不是在 7 个分支里各写一遍 ——
     // 各写一遍必然漂移，而漂移的表现是「某一页筛出来的条数不对」，不报错。
     //
     // ⚠ 值是**字段列表**而不是单个字段名：`released_at` / `adopted_at` 都是
     // 可空的（事件还没发生），只给一个名字的话，「全部」区间反而会把
-    // 待放养/待领出的记录藏起来。按顺序取第一个有值的（见 `TNR_UI.firstDate`）。
+    // 待放归/待领出的记录藏起来。按顺序取第一个有值的（见 `TNR_UI.firstDate`）。
     const LEDGER_DATE_KEYS = {
       pets: ['date'],
       captures: ['createdAt', 'created_at'],
@@ -4173,12 +4173,12 @@ const Shelter = {
       );
     } else if (tab === 'releases') {
       items.push(
-        { label: '放养单号', value: esc(rec.ledgerNo || rec.id) },
+        { label: '放归单号', value: esc(rec.ledgerNo || rec.id) },
         { label: '宠物编号', value: '<span class="pet-code-chip">' + esc(rec.petCode) + '</span>' },
-        { label: '放养小区', value: esc(rec.communityName || '—') },
+        { label: '放归小区', value: esc(rec.communityName || '—') },
         { label: '接收人', value: esc(rec.receiverName || '—') },
         { label: '联系电话', value: esc(rec.receiverPhone || '—') },
-        { label: '放养时间', value: TNR_UI.formatDateTime(rec.releasedAt) },
+        { label: '放归时间', value: TNR_UI.formatDateTime(rec.releasedAt) },
         { label: '操作员', value: esc(rec.operatorName || '—') }
       );
     } else if (tab === 'adoptions') {
@@ -4248,7 +4248,7 @@ const Shelter = {
       : '<span class="text-light fs-sm">暂无照片</span>';
     html += '</div></div>';
 
-    // 流转全过程时间线（捕捉 → 转运 → 诊疗 → 回收/放养/领养/死亡）
+    // 流转全过程时间线（捕捉 → 转运 → 诊疗 → 回收/放归/领养/死亡）
     html += '<div class="desc-item desc-full"><div class="desc-label">流转全过程（' + events.length + ' 条）</div><div class="desc-value">';
     if (!events.length) {
       html += '<span class="text-light fs-sm">暂无流转记录</span>';
@@ -4275,9 +4275,9 @@ const Shelter = {
             + '<br>状态：' + esc(ev.status === 'completed' ? '已完成' : '进行中')
             + (ev.chip_no ? '<br>芯片号：' + esc(ev.chip_no) : '');
         } else if (ev.type === 'release') {
-          desc = '放养小区：' + esc(ev.community_name || '—')
+          desc = '放归小区：' + esc(ev.community_name || '—')
             + '<br>接收人：' + esc(ev.receiver_name || '—')
-            + '<br>状态：' + esc(ev.status === 'released' ? '已放养' : '待放养');
+            + '<br>状态：' + esc(ev.status === 'released' ? '已放归' : '待放归');
         } else if (ev.type === 'adoption') {
           desc = '领养人：' + esc(ev.adopter_name || '—') + '<br>医院：' + esc(ev.hospital_name || '—');
         } else if (ev.type === 'euthanasia') {

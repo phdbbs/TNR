@@ -88,7 +88,7 @@ def _district_references(district_id):
         '诊疗记录': Treatment.objects.filter(district_id=district_id).count(),
         '物料': Material.objects.filter(district_id=district_id).count(),
         '物料流水': MaterialTransaction.objects.filter(district_id=district_id).count(),
-        '放养记录': Release.objects.filter(district_id=district_id).count(),
+        '放归记录': Release.objects.filter(district_id=district_id).count(),
         '领养记录': Adoption.objects.filter(district_id=district_id).count(),
         '黑名单': Blacklist.objects.filter(district_id=district_id).count(),
         '安乐死记录': Euthanasia.objects.filter(district_id=district_id).count(),
@@ -902,7 +902,7 @@ def business_supervision(request):
         for r in qs:
             item = serialize_instance(r)
             item['district_name'] = r.district.name if r.district else ''
-            item['pet_count'] = 1  # 放养按只记录
+            item['pet_count'] = 1  # 放归按只记录
             # 关联宠物照片
             if r.pet:
                 item['pet'] = _pet_brief(r.pet)
@@ -1078,7 +1078,7 @@ def ledger_center(request):
     每笔记录附带详情数据(detail)，包括动物编号、照片、具体字段等。
     """
     # 参数解析统一**前置**：非法值直接 400，不要放进 ORM 里炸成 500。
-    # `institution_id` 被下面**七处**台账分支共用（捕捉/转运/诊疗/放养/领养/
+    # `institution_id` 被下面**七处**台账分支共用（捕捉/转运/诊疗/放归/领养/
     # 安乐死/…），原先每处各写一遍 `qs.filter(xxx_id=institution_id)`，
     # 一个非法值就能在任意一处把接口打成 500 —— 所以必须**只解析一次**。
     # 前端 `TNR_API.get()` 与 `getLedger()` 都会先滤掉空串，正常操作不会触发。
@@ -1115,7 +1115,7 @@ def ledger_center(request):
         """按 `[start_date, end_date]` 过滤（含两端）。
 
         `fallback_field`：业务时间字段**可空**时传记录创建时间字段。
-        `Release.released_at`（待放养为空）、`Adoption.adopted_at`（待领出为空）、
+        `Release.released_at`（待放归为空）、`Adoption.adopted_at`（待领出为空）、
         `Euthanasia.euthanized_at` 三个都是 `null=True` —— 只比它们会让用户
         圈一个**「全部」区间反而把这些行藏起来**。实测（Django test client 直打接口）：
         `adoption` 台账 5 条，圈 2000~2099 只剩 3 条，两条「待领出」的
@@ -1285,7 +1285,7 @@ def ledger_center(request):
                 }
             })
 
-    # 放养台账
+    # 放归台账
     if business_type is None or business_type == 'release':
         qs = _scope_filter(Release.objects.all(), request)
         qs = _date_filter(qs, 'released_at', 'created_at')

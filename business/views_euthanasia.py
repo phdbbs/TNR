@@ -63,7 +63,7 @@ def euthanasia_create(request):
     if pet is None:
         return json_fail('宠物不存在或无权访问', status=404)
 
-    # 仅诊疗中/待领养的在院宠物可安乐死，防止误操作已领养、已放养等终态宠物
+    # 仅诊疗中/待领养的在院宠物可安乐死，防止误操作已领养、已放归等终态宠物
     if pet.status not in ('in_treatment', 'pending_adopt'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可安乐死，仅诊疗中/待领养宠物可登记')
 

@@ -395,11 +395,11 @@ const TNR_API = {
     return this.getData(url);
   },
   getPetStatusText(status) {
-    const map = {'in_transit':'在途','in_treatment':'待诊疗/诊疗中','pending_adopt':'待领养','pending_claim':'待领出','adopted':'已领养','released':'已放养','euthanized':'已死亡','owner_returned':'主人领回'};
+    const map = {'in_transit':'在途','in_treatment':'待诊疗/诊疗中','pending_adopt':'待领养','pending_claim':'待领出','adopted':'已领养','released':'已放归','euthanized':'已死亡','owner_returned':'主人领回'};
     return map[status] || status;
   },
   // 一宠一档：把动物的物种/品种/性别拼成一行可读文案（如「猫 · 中华田园犬 · 公」）。
-  // 转运/回收/诊疗/领养/放养/死亡各环节共用，保证全流程展示口径一致。
+  // 转运/回收/诊疗/领养/放归/死亡各环节共用，保证全流程展示口径一致。
   petAttrText(pet, sep) {
     if (!pet) return '—';
     const parts = [pet.species, pet.breed, pet.gender]

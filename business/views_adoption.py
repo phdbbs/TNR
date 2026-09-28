@@ -203,9 +203,9 @@ def adoption_register(request):
     if pet.status not in ('pending_adopt', 'in_treatment'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可领养')
 
-    # 互斥校验：同一只动物不能被放养流程与领养流程同时占用
+    # 互斥校验：同一只动物不能被放归流程与领养流程同时占用
     if pet_has_pending_release(pet):
-        return json_fail('该宠物已有待放养记录，请先完成或取消放养后再办理领养')
+        return json_fail('该宠物已有待放归记录，请先完成或取消放归后再办理领养')
     if pet_has_active_adoption(pet):
         return json_fail('该宠物已有未完结的领养记录，请勿重复登记')
 
@@ -515,9 +515,9 @@ def adoption_apply(request):
     if not AdoptionHallListing.objects.filter(pet=pet, is_active=True).exists():
         return json_fail('该宠物当前未在领养大厅上架，无法申请')
 
-    # 互斥校验：已有待放养记录的动物不接受领养申请
+    # 互斥校验：已有待放归记录的动物不接受领养申请
     if pet_has_pending_release(pet):
-        return json_fail('该宠物已有待放养记录，暂不可申请领养')
+        return json_fail('该宠物已有待放归记录，暂不可申请领养')
 
     # 黑名单检查
     bl = check_blacklist(body_str(data, 'applicant_id_card'), body_str(data, 'applicant_phone'))
@@ -651,7 +651,7 @@ def adoption_application_review(request, pk):
         if pet_has_active_adoption(pet):
             return json_fail('该宠物已有未完结的领养记录，无法重复通过申请')
         if pet_has_pending_release(pet):
-            return json_fail('该宠物已有待放养记录，无法通过领养申请')
+            return json_fail('该宠物已有待放归记录，无法通过领养申请')
 
     application.status = 'approved' if action == 'approve' else 'rejected'
     application.review_note = body_str(data, 'review_note')

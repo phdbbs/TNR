@@ -11,7 +11,7 @@ class Pet(models.Model):
         ('pending_adopt', '待领养'),
         ('pending_claim', '待领出'),
         ('adopted', '已领养'),
-        ('released', '已放养'),
+        ('released', '已放归'),
         ('euthanized', '已死亡'),
         ('owner_returned', '主人领回'),
     ]
@@ -404,12 +404,12 @@ class Chip(models.Model):
 
 
 # ============================================
-# 放养记录
+# 放归记录
 # ============================================
 class Release(models.Model):
     STATUS_CHOICES = [
-        ('pending', '待放养'),
-        ('released', '已放养'),
+        ('pending', '待放归'),
+        ('released', '已放归'),
     ]
     pet = models.ForeignKey('business.Pet', on_delete=models.CASCADE, related_name='releases', verbose_name='宠物')
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
@@ -419,7 +419,7 @@ class Release(models.Model):
     receiver_phone = models.CharField('接收人电话', max_length=20, blank=True, default='')
     signature = models.TextField('签字', blank=True, default='')
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
-    released_at = models.DateField('放养日期', null=True, blank=True)
+    released_at = models.DateField('放归日期', null=True, blank=True)
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='releases', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
@@ -428,7 +428,7 @@ class Release(models.Model):
 
     class Meta:
         ordering = ['-id']
-        verbose_name = '放养记录'
+        verbose_name = '放归记录'
         verbose_name_plural = verbose_name
 
     def __str__(self):
