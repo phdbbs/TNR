@@ -1,0 +1,2770 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>医院收治处理流程 · 原型 v1（第四十六轮）</title>
+<style>
+/* ==== 以下为 static/css/tnr-traditional.css 的快照（原型自包含用） ==== */
+/* ============================================
+   TNR 流浪动物管理系统 - 水墨丹青设计系统
+   中国传统配色 · PC/移动端自适应
+   ============================================ */
+
+/* === 1. 中国传统色彩设计令牌 === */
+:root {
+  /* 主色调 - 朱砂红系 */
+  --cinnabar: #C3272B;           /* 朱砂 */
+  --cinnabar-deep: #9D2933;      /* 胭脂 */
+  --cinnabar-light: #FBE8E8;     /* 朱砂浅 */
+  --cinnabar-dark: #A02222;      /* 深朱砂 */
+
+  /* 墨色系 - 侧边栏/文字 */
+  --ink: #1C1C1C;                /* 墨色 */
+  --ink-deep: #141414;           /* 玄色 */
+  --ink-blue: #1A1A2E;           /* 墨青 */
+  --ink-soft: #2B2B2B;           /* 柔墨 */
+  --ink-text: #2B2B2B;           /* 正文墨色 */
+  --ink-muted: #6B5D54;          /* 赭灰文字 */
+  --ink-light: #9C8B7E;          /* 浅灰褐 */
+
+  /* 背景色 - 宣纸系 */
+  --rice-paper: #F5F0E8;         /* 宣纸白 */
+  --rice-light: #FAF6F0;         /* 素宣 */
+  --rice-warm: #F0EAE0;          /* 暖宣 */
+  --white: #FFFFFF;              /* 纯白卡片 */
+
+  /* 辅助色 - 传统五色 */
+  --bamboo-green: #5B7A4F;       /* 竹青 - 成功 */
+  --bamboo-light: #E8F0E4;       /* 竹青浅 */
+  --autumn-gold: #C89B3C;        /* 秋香 - 警告 */
+  --autumn-light: #FBF3E0;       /* 秋香浅 */
+  --azurite: #2B6CB0;            /* 石青 - 信息 */
+  --azurite-light: #E0EEF7;     /* 石青浅 */
+  --rouge: #9D2933;              /* 胭脂 - 危险 */
+  --rouge-light: #FBE8E8;        /* 胭脂浅 */
+  --ochre: #864E36;              /* 赭石 */
+  --ochre-light: #F0E0D4;        /* 赭石浅 */
+
+  /* 边框/分隔 */
+  --border-ink: #D4C5B9;         /* 檀色边框 */
+  --border-light: #E8DFD4;      /* 浅檀 */
+  --border-faint: #F0EAE0;      /* 极浅 */
+
+  /* 渐变 */
+  --grad-sidebar: linear-gradient(180deg, #1A1A2E 0%, #16213E 50%, #1C1C1C 100%);
+  --grad-cinnabar: linear-gradient(135deg, #C3272B 0%, #9D2933 100%);
+  --grad-bamboo: linear-gradient(135deg, #5B7A4F 0%, #426666 100%);
+  --grad-gold: linear-gradient(135deg, #C89B3C 0%, #B8860B 100%);
+  --grad-header: linear-gradient(90deg, rgba(195,39,43,0.03) 0%, rgba(245,240,232,0) 100%);
+
+  /* 排版 */
+  --font-display: 'Noto Serif SC', 'Songti SC', 'STSong', serif;
+  --font-body: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'SF Mono', 'Consolas', monospace;
+
+  /* 字号 */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+  --fs-2xl: 20px;
+  --fs-3xl: 24px;
+  --fs-4xl: 28px;
+  --fs-5xl: 34px;
+
+  /* 间距 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* 圆角 */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 12px;
+  --r-2xl: 16px;
+  --r-full: 9999px;
+
+  /* 阴影 */
+  --shadow-xs: 0 1px 2px rgba(28,28,28,0.04);
+  --shadow-sm: 0 2px 8px rgba(28,28,28,0.06);
+  --shadow-md: 0 4px 16px rgba(28,28,28,0.08);
+  --shadow-lg: 0 8px 32px rgba(28,28,28,0.12);
+  --shadow-cinnabar: 0 4px 12px rgba(195,39,43,0.25);
+
+  /* 过渡 */
+  --t-fast: 120ms ease;
+  --t-base: 200ms ease;
+  --t-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* 布局尺寸 */
+  --sidebar-w: 240px;
+  --sidebar-w-collapsed: 64px;
+  --header-h: 56px;
+}
+
+/* === 2. 基础重置 === */
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  color: var(--ink-text);
+  background: var(--rice-paper);
+  overflow-x: hidden;
+}
+
+a { text-decoration: none; color: inherit; }
+ul, ol { list-style: none; }
+img { max-width: 100%; display: block; }
+input, select, textarea, button { font-family: inherit; font-size: inherit; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-ink); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-light); }
+
+/* === 3. 布局系统 === */
+
+/* 管理端布局 */
+.admin-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+/* 侧边栏 */
+.sidebar {
+  width: var(--sidebar-w);
+  background: var(--grad-sidebar);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 200;
+  transition: transform var(--t-slow);
+  overflow: hidden;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-4);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  flex-shrink: 0;
+}
+
+.sidebar-brand-icon {
+  width: 36px;
+  height: 36px;
+  background: var(--grad-cinnabar);
+  border-radius: var(--r-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.sidebar-brand-text {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.sidebar-brand-sub {
+  font-size: var(--fs-xs);
+  color: rgba(255,255,255,0.4);
+  white-space: nowrap;
+}
+
+/* 导航 */
+.sidebar-nav {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--sp-3) var(--sp-2);
+}
+
+.sidebar-nav::-webkit-scrollbar { width: 4px; }
+.sidebar-nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); }
+
+.nav-group-title {
+  font-size: var(--fs-xs);
+  color: rgba(255,255,255,0.35);
+  padding: var(--sp-4) var(--sp-3) var(--sp-2);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-3);
+  border-radius: var(--r-md);
+  margin-bottom: 2px;
+  cursor: pointer;
+  transition: all var(--t-fast);
+  color: rgba(255,255,255,0.65);
+  white-space: nowrap;
+  position: relative;
+}
+
+.nav-item:hover {
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.95);
+}
+
+.nav-item.active {
+  background: var(--grad-cinnabar);
+  color: #fff;
+  box-shadow: var(--shadow-cinnabar);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  background: #fff;
+  border-radius: 0 2px 2px 0;
+}
+
+.nav-item-icon {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.nav-item-label {
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+
+.nav-item-badge {
+  margin-left: auto;
+  background: var(--cinnabar);
+  color: #fff;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--r-full);
+  font-weight: 600;
+}
+
+/* 侧边栏底部用户 */
+.sidebar-footer {
+  padding: var(--sp-3);
+  border-top: 1px solid rgba(255,255,255,0.08);
+  flex-shrink: 0;
+}
+
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+
+.sidebar-user:hover { background: rgba(255,255,255,0.06); }
+
+.sidebar-user-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-full);
+  background: var(--grad-cinnabar);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.sidebar-user-info { flex: 1; min-width: 0; }
+.sidebar-user-name { font-size: var(--fs-sm); color: #fff; font-weight: 500; }
+.sidebar-user-role { font-size: var(--fs-xs); color: rgba(255,255,255,0.5); }
+
+/* 主内容区 */
+.admin-main {
+  flex: 1;
+  margin-left: var(--sidebar-w);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-width: 0;
+}
+
+/* 顶部栏 */
+.topbar {
+  height: var(--header-h);
+  background: var(--white);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--sp-6);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: var(--shadow-xs);
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.topbar-toggle {
+  display: none;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: var(--rice-paper);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  font-size: 18px;
+  color: var(--ink-text);
+  align-items: center;
+  justify-content: center;
+}
+
+.topbar-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.topbar-district {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--rice-paper);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  color: var(--ink-muted);
+}
+
+.topbar-district-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: var(--bamboo-green);
+}
+
+.topbar-time {
+  font-size: var(--fs-sm);
+  color: var(--ink-light);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 内容容器 */
+.admin-content {
+  flex: 1;
+  padding: var(--sp-6);
+  overflow-y: auto;
+}
+
+.page-view { display: none; animation: fadeInUp 0.3s ease; }
+.page-view.active { display: block; }
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* === 4. 卡片 === */
+.card {
+  background: var(--white);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border-light);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--border-faint);
+}
+
+.card-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.card-title-bar {
+  width: 3px;
+  height: 18px;
+  background: var(--grad-cinnabar);
+  border-radius: 2px;
+}
+
+.card-body { padding: var(--sp-5); }
+.card-body-flush { padding: 0; }
+
+/* === 5. 统计卡片 === */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-5);
+}
+
+.stat-card {
+  background: var(--white);
+  border-radius: var(--r-xl);
+  padding: var(--sp-5);
+  border: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  transition: all var(--t-base);
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--cinnabar);
+}
+
+.stat-card.green::before { background: var(--bamboo-green); }
+.stat-card.gold::before { background: var(--autumn-gold); }
+.stat-card.blue::before { background: var(--azurite); }
+.stat-card.rouge::before { background: var(--rouge); }
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.stat-card-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  flex-shrink: 0;
+  background: var(--cinnabar-light);
+}
+
+.stat-card.green .stat-card-icon { background: var(--bamboo-light); }
+.stat-card.gold .stat-card-icon { background: var(--autumn-light); }
+.stat-card.blue .stat-card-icon { background: var(--azurite-light); }
+.stat-card.rouge .stat-card-icon { background: var(--rouge-light); }
+
+.stat-card-value {
+  font-family: var(--font-display);
+  font-size: var(--fs-4xl);
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.2;
+}
+
+.stat-card-label {
+  font-size: var(--fs-sm);
+  color: var(--ink-muted);
+  margin-top: 2px;
+}
+
+/* === 6. 按钮 === */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--r-md);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--t-fast);
+  white-space: nowrap;
+  font-family: var(--font-body);
+  line-height: 1.4;
+}
+
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--grad-cinnabar);
+  color: #fff;
+  box-shadow: var(--shadow-cinnabar);
+}
+.btn-primary:hover { box-shadow: 0 6px 20px rgba(195,39,43,0.35); transform: translateY(-1px); }
+
+.btn-success { background: var(--grad-bamboo); color: #fff; }
+.btn-success:hover { opacity: 0.9; }
+
+.btn-gold { background: var(--grad-gold); color: #fff; }
+.btn-gold:hover { opacity: 0.9; }
+
+.btn-secondary {
+  background: var(--white);
+  color: var(--ink-text);
+  border: 1px solid var(--border-ink);
+}
+.btn-secondary:hover { background: var(--rice-paper); border-color: var(--ink-light); }
+
+.btn-outline {
+  background: transparent;
+  color: var(--cinnabar);
+  border: 1px solid var(--cinnabar);
+}
+.btn-outline:hover { background: var(--cinnabar-light); }
+
+.btn-danger { background: var(--rouge); color: #fff; }
+.btn-danger:hover { opacity: 0.9; }
+
+.btn-ghost { background: transparent; color: var(--ink-muted); }
+.btn-ghost:hover { background: var(--rice-paper); color: var(--ink-text); }
+
+.btn-sm { padding: 5px 10px; font-size: var(--fs-sm); border-radius: var(--r-sm); }
+.btn-lg { padding: 12px 24px; font-size: var(--fs-lg); }
+.btn-icon { width: 32px; height: 32px; padding: 0; border-radius: var(--r-md); }
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--cinnabar);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  padding: 2px 6px;
+  border-radius: var(--r-sm);
+  transition: background var(--t-fast);
+}
+.btn-link { white-space: nowrap; }
+.btn-link:hover { background: var(--cinnabar-light); }
+/* 表格操作列：多个操作按钮保持一行，避免竖排折行 */
+.table-wrapper td:last-child { white-space: nowrap; }
+
+.btn-link.danger { color: var(--rouge); }
+.btn-link.danger:hover { background: var(--rouge-light); }
+.btn-link.success { color: var(--bamboo-green); }
+.btn-link.success:hover { background: var(--bamboo-light); }
+
+/* === 7. 表格 === */
+.data-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.data-table thead th {
+  background: var(--rice-warm);
+  padding: var(--sp-3) var(--sp-4);
+  text-align: left;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink-muted);
+  border-bottom: 1px solid var(--border-ink);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.data-table thead th:first-child { border-top-left-radius: var(--r-lg); }
+.data-table thead th:last-child { border-top-right-radius: var(--r-lg); }
+
+.data-table tbody td {
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-faint);
+  font-size: var(--fs-md);
+  color: var(--ink-text);
+  vertical-align: middle;
+}
+
+.data-table tbody tr {
+  transition: background var(--t-fast);
+}
+
+.data-table tbody tr:hover { background: var(--rice-light); }
+.data-table tbody tr:last-child td { border-bottom: none; }
+
+/* 表格容器 */
+.table-wrapper {
+  overflow-x: auto;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border-light);
+}
+
+.table-wrapper .data-table thead th:first-child { border-top-left-radius: 0; }
+.table-wrapper .data-table thead th:last-child { border-top-right-radius: 0; }
+
+/* 空状态 */
+.table-empty {
+  text-align: center;
+  padding: var(--sp-12) var(--sp-6);
+  color: var(--ink-light);
+}
+
+.table-empty-icon { font-size: 48px; margin-bottom: var(--sp-3); opacity: 0.4; }
+.table-empty-text { font-size: var(--fs-md); }
+
+/* === 8. 表单 === */
+.form-group { margin-bottom: var(--sp-4); }
+
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--sp-4);
+}
+
+.form-row-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-4); }
+
+.form-label {
+  display: block;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--ink-muted);
+  margin-bottom: var(--sp-2);
+}
+
+.form-label .req { color: var(--cinnabar); margin-left: 2px; }
+
+.form-input,
+.form-select,
+.form-textarea {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-ink);
+  border-radius: var(--r-md);
+  font-size: var(--fs-md);
+  color: var(--ink-text);
+  background: var(--white);
+  transition: all var(--t-fast);
+  font-family: var(--font-body);
+}
+
+.form-input:focus,
+.form-select:focus,
+.form-textarea:focus {
+  outline: none;
+  border-color: var(--cinnabar);
+  box-shadow: 0 0 0 3px rgba(195,39,43,0.1);
+}
+
+.form-input::placeholder { color: var(--ink-light); }
+
+.form-textarea {
+  min-height: 80px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.form-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236B5D54' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 32px;
+}
+
+.form-hint {
+  font-size: var(--fs-xs);
+  color: var(--ink-light);
+  margin-top: var(--sp-1);
+}
+
+.form-section {
+  border: 1px solid var(--border-light);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  margin-bottom: var(--sp-5);
+}
+
+.form-section-header {
+  background: var(--rice-warm);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.form-section-header-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  background: var(--cinnabar-light);
+  color: var(--cinnabar);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.form-section-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.form-section-body { padding: var(--sp-5); }
+
+/* 复选框 */
+.form-check {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-ink);
+  border-radius: var(--r-md);
+  transition: all var(--t-fast);
+  background: var(--white);
+}
+
+.form-check:hover { border-color: var(--cinnabar); }
+.form-check.checked { border-color: var(--cinnabar); background: var(--cinnabar-light); }
+
+.form-check input[type="checkbox"],
+.form-check input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--cinnabar);
+  cursor: pointer;
+}
+
+.form-check-label { font-size: var(--fs-md); color: var(--ink-text); }
+
+/* === 9. 搜索筛选栏 === */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  background: var(--white);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border-light);
+  margin-bottom: var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.filter-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.filter-item-label {
+  font-size: var(--fs-xs);
+  color: var(--ink-light);
+  font-weight: 500;
+}
+
+.filter-item .form-input,
+.filter-item .form-select {
+  min-width: 140px;
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+}
+
+.filter-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+
+/* 搜索框 */
+.search-input {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search-input-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--ink-light);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.search-input .form-input {
+  padding-left: 32px;
+  min-width: 200px;
+}
+
+/* === 10. 徽章/标签 === */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  line-height: 1.6;
+}
+
+.badge-cinnabar { background: var(--cinnabar-light); color: var(--cinnabar); }
+.badge-success { background: var(--bamboo-light); color: var(--bamboo-green); }
+.badge-warning { background: var(--autumn-light); color: var(--autumn-gold); }
+.badge-danger { background: var(--rouge-light); color: var(--rouge); }
+.badge-info { background: var(--azurite-light); color: var(--azurite); }
+.badge-default { background: var(--rice-warm); color: var(--ink-muted); }
+.badge-ink { background: var(--ink-soft); color: #fff; }
+
+/* 状态点 */
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+.status-dot::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: currentColor;
+}
+
+/* === 11. 模态框/弹窗 === */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(28,28,28,0.5);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+}
+
+.modal-overlay.show { display: flex; animation: fadeIn 0.2s ease; }
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.modal {
+  background: var(--white);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-lg);
+  max-width: 600px;
+  width: 100%;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  animation: slideUp 0.3s ease;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.modal-lg { max-width: 800px; }
+.modal-xl { max-width: 1000px; }
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--border-faint);
+  flex-shrink: 0;
+}
+
+.modal-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.modal-close {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: var(--rice-paper);
+  border-radius: var(--r-md);
+  font-size: 18px;
+  cursor: pointer;
+  color: var(--ink-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--t-fast);
+}
+
+.modal-close:hover { background: var(--rouge-light); color: var(--rouge); }
+
+.modal-body {
+  padding: var(--sp-5);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modal-footer {
+  display: flex;
+  gap: var(--sp-3);
+  justify-content: flex-end;
+  padding: var(--sp-4) var(--sp-5);
+  border-top: 1px solid var(--border-faint);
+  flex-shrink: 0;
+}
+
+/* === 12. 抽屉 === */
+.drawer-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(28,28,28,0.4);
+  z-index: 1000;
+}
+
+.drawer-overlay.show { display: block; animation: fadeIn 0.2s ease; }
+
+.drawer {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 480px;
+  max-width: 90vw;
+  background: var(--white);
+  box-shadow: var(--shadow-lg);
+  transform: translateX(100%);
+  transition: transform var(--t-slow);
+  z-index: 1001;
+  display: flex;
+  flex-direction: column;
+}
+
+.drawer.show { transform: translateX(0); }
+
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--border-faint);
+  flex-shrink: 0;
+}
+
+.drawer-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.drawer-body {
+  padding: var(--sp-5);
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* === 13. 标签页 === */
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 2px solid var(--border-light);
+  margin-bottom: var(--sp-5);
+}
+
+.tab-item {
+  padding: var(--sp-3) var(--sp-5);
+  cursor: pointer;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--ink-muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all var(--t-fast);
+  white-space: nowrap;
+}
+
+.tab-item:hover { color: var(--ink-text); }
+
+.tab-item.active {
+  color: var(--cinnabar);
+  border-bottom-color: var(--cinnabar);
+  font-weight: 600;
+}
+
+.tab-content { display: none; }
+.tab-content.active { display: block; animation: fadeIn 0.2s ease; }
+
+/* === 14. Toast 通知 === */
+.toast-container {
+  position: fixed;
+  top: var(--sp-6);
+  right: var(--sp-6);
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.toast {
+  background: var(--white);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 280px;
+  max-width: 400px;
+  animation: slideInRight 0.3s ease;
+  border-left: 3px solid var(--cinnabar);
+}
+
+.toast.success { border-left-color: var(--bamboo-green); }
+.toast.warning { border-left-color: var(--autumn-gold); }
+.toast.danger { border-left-color: var(--rouge); }
+
+@keyframes slideInRight {
+  from { transform: translateX(120%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.toast-icon { font-size: 18px; flex-shrink: 0; }
+.toast-text { font-size: var(--fs-sm); color: var(--ink-text); flex: 1; }
+
+/* === 15. 分页 === */
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  justify-content: flex-end;
+  padding: var(--sp-4) 0;
+}
+
+.pagination-info {
+  font-size: var(--fs-sm);
+  color: var(--ink-light);
+  margin-right: auto;
+}
+
+.pagination-btn {
+  min-width: 32px;
+  height: 32px;
+  border: 1px solid var(--border-ink);
+  background: var(--white);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  color: var(--ink-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--sp-2);
+  transition: all var(--t-fast);
+}
+
+.pagination-btn:hover:not(:disabled) { border-color: var(--cinnabar); color: var(--cinnabar); }
+.pagination-btn.active { background: var(--cinnabar); color: #fff; border-color: var(--cinnabar); }
+.pagination-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* === 16. 详情描述列表 === */
+.desc-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--sp-4);
+}
+
+.desc-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.desc-label {
+  font-size: var(--fs-xs);
+  color: var(--ink-light);
+  font-weight: 500;
+}
+
+.desc-value {
+  font-size: var(--fs-md);
+  color: var(--ink-text);
+  font-weight: 500;
+}
+
+.desc-full { grid-column: 1 / -1; }
+
+/* === 17. 步骤条 === */
+.steps {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: var(--sp-5);
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1;
+}
+
+.step-num {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-full);
+  background: var(--rice-warm);
+  color: var(--ink-light);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.step.active .step-num { background: var(--cinnabar); color: #fff; }
+.step.done .step-num { background: var(--bamboo-green); color: #fff; }
+
+.step-label {
+  font-size: var(--fs-sm);
+  color: var(--ink-light);
+  white-space: nowrap;
+}
+
+.step.active .step-label { color: var(--cinnabar); font-weight: 600; }
+.step.done .step-label { color: var(--bamboo-green); }
+
+.step-line {
+  flex: 1;
+  height: 2px;
+  background: var(--border-light);
+  margin: 0 var(--sp-2);
+}
+
+.step.done + .step-line { background: var(--bamboo-green); }
+
+/* === 18. 上传区域 === */
+.upload-area {
+  border: 2px dashed var(--border-ink);
+  border-radius: var(--r-lg);
+  padding: var(--sp-8);
+  text-align: center;
+  cursor: pointer;
+  transition: all var(--t-base);
+  background: var(--rice-light);
+}
+
+.upload-area:hover {
+  border-color: var(--cinnabar);
+  background: var(--cinnabar-light);
+}
+
+.upload-icon { font-size: 36px; margin-bottom: var(--sp-2); }
+.upload-text { font-size: var(--fs-md); color: var(--ink-muted); margin-bottom: var(--sp-1); }
+.upload-hint { font-size: var(--fs-xs); color: var(--ink-light); }
+
+/* 照片网格 */
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+
+.photo-item {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--rice-warm);
+}
+
+.photo-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.photo-item-label {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(28,28,28,0.7);
+  color: #fff;
+  font-size: var(--fs-xs);
+  padding: 2px 6px;
+  text-align: center;
+}
+
+.photo-item-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-full);
+  background: rgba(157,41,51,0.9);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* === 19. 签名：页面只预览，手写在弹窗里进行 ===
+ *
+ * 为什么必须这样拆：画布必须写 `touch-action: none`，否则手指一划就去滚页面、
+ * 一个笔画也画不出来。但这一条会**整块吞掉触屏滚动手势** —— 旧版把画布直接
+ * 摆在表单里，用户手指落在签名区想上滑翻页，结果全被当成笔画（磊哥反馈的
+ * 「本来想上下滑动，结果都在输入签名」就是这个原因）。
+ *
+ * 所以页面上只留一张预览图（不拦手势），真正的画布搬进弹窗：
+ * 弹窗里本来就不需要滚动，`touch-action: none` 放在那儿才是正确语义。
+ */
+.sig-field { display: block; }
+
+.sig-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+  padding: var(--sp-3);
+  border: 2px dashed var(--border-ink);
+  border-radius: var(--r-lg);
+  background: var(--white);
+  cursor: pointer;
+  touch-action: auto;   /* 关键：预览块绝不吞滚动手势 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sig-field.has-value .sig-preview { border-style: solid; }
+
+.sig-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 160px;
+}
+
+.sig-preview .sig-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+/* 纯 CSS 的「笔」图标，避免再引一个图标字体 */
+.sig-preview .sig-placeholder::before {
+  content: '';
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  transform: rotate(-8deg);
+}
+
+.sig-tools { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); }
+
+.sig-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  /* 必须高于 TNR_UI.modal 的 1500：签名弹窗是从「编辑捕捉记录」等弹窗里开出来的，
+     低于它就会被压在下面点不到。toast 是 9999，仍在其上。 */
+  z-index: 1600;
+  background: rgba(28, 28, 28, 0.6);
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+}
+
+.sig-modal.show { display: flex; animation: fadeIn 0.15s ease; }
+
+.sig-modal-panel {
+  background: var(--white);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-lg);
+  width: 100%;
+  max-width: 560px;
+  padding: var(--sp-4);
+}
+
+.sig-modal-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.sig-modal-hint {
+  color: var(--ink-muted);
+  font-size: 12px;
+  margin: 4px 0 var(--sp-3);
+}
+
+.sig-canvas {
+  display: block;
+  width: 100%;
+  height: 220px;
+  border: 2px solid var(--border-ink);
+  border-radius: var(--r-lg);
+  background: var(--white);
+  cursor: crosshair;
+  touch-action: none;   /* 只有这里该写：弹窗内不需要滚动，手势全给画笔 */
+}
+
+.sig-modal-actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: var(--sp-4);
+}
+
+.sig-modal-actions .sig-spacer { margin-right: auto; }
+
+/* === 20. 时间线 === */
+.timeline {
+  position: relative;
+  padding-left: var(--sp-6);
+}
+
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border-light);
+}
+
+.timeline-item {
+  position: relative;
+  padding-bottom: var(--sp-5);
+}
+
+.timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -22px;
+  top: 4px;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--r-full);
+  background: var(--cinnabar);
+  border: 2px solid var(--white);
+  box-shadow: 0 0 0 2px var(--cinnabar-light);
+}
+
+.timeline-item.done::before { background: var(--bamboo-green); box-shadow: 0 0 0 2px var(--bamboo-light); }
+
+.timeline-time { font-size: var(--fs-xs); color: var(--ink-light); margin-bottom: 2px; }
+.timeline-title { font-size: var(--fs-md); font-weight: 500; color: var(--ink-text); }
+.timeline-desc { font-size: var(--fs-sm); color: var(--ink-muted); margin-top: 2px; }
+
+/* === 21. 移动端布局（领养人小程序） === */
+.mobile-frame {
+  max-width: 420px;
+  margin: 0 auto;
+  min-height: 100vh;
+  background: var(--rice-paper);
+  position: relative;
+  padding-bottom: 60px;
+  box-shadow: 0 0 40px rgba(0,0,0,0.08);
+}
+
+.mobile-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--grad-sidebar);
+  color: #fff;
+  padding: var(--sp-4) var(--sp-4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mobile-header-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.mobile-bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 420px;
+  background: var(--white);
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  justify-content: space-around;
+  padding: var(--sp-2) 0;
+  z-index: 100;
+}
+
+.mobile-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  color: var(--ink-light);
+  transition: color var(--t-fast);
+}
+
+.mobile-nav-item.active { color: var(--cinnabar); }
+.mobile-nav-icon { font-size: 22px; }
+.mobile-nav-label { font-size: var(--fs-xs); }
+
+.mobile-content { padding: var(--sp-4); }
+
+/* === 22. 响应式 === */
+@media (max-width: 1024px) {
+  .desc-list { grid-template-columns: 1fr; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    transform: translateX(-100%);
+  }
+
+  .sidebar.show {
+    transform: translateX(0);
+  }
+
+  .sidebar-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(28,28,28,0.4);
+    z-index: 199;
+  }
+
+  .sidebar-overlay.show { display: block; }
+
+  .admin-main {
+    margin-left: 0;
+  }
+
+  .topbar-toggle { display: flex; }
+
+  .admin-content {
+    padding: var(--sp-3);
+  }
+
+  .form-row,
+  .form-row-3 {
+    grid-template-columns: 1fr;
+  }
+
+  /* 触屏优化：手机上增大按钮/操作链接的触控目标（推荐 ≥44px） */
+  .btn-sm,
+  .btn-link {
+    min-height: 36px;
+    min-width: 36px;
+    padding: 8px 12px;
+  }
+
+  .table .btn-link {
+    display: inline-block;
+    margin: 2px;
+  }
+
+  .topbar-toggle,
+  .portal-topbar-toggle {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .stat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-actions {
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  .filter-item .form-input,
+  .filter-item .form-select {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .card-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--sp-2);
+  }
+
+  .modal {
+    max-width: 100%;
+    max-height: 95vh;
+  }
+
+  .drawer {
+    width: 100%;
+  }
+
+  .topbar-district,
+  .topbar-time {
+    display: none;
+  }
+}
+
+/* === 23. 工具类 === */
+.text-center { text-align: center; }
+.text-right { text-align: right; }
+.text-muted { color: var(--ink-muted); }
+.text-light { color: var(--ink-light); }
+.text-cinnabar { color: var(--cinnabar); }
+.text-success { color: var(--bamboo-green); }
+.text-warning { color: var(--autumn-gold); }
+.text-danger { color: var(--rouge); }
+
+.font-display { font-family: var(--font-display); }
+.font-bold { font-weight: 700; }
+.font-semibold { font-weight: 600; }
+.font-medium { font-weight: 500; }
+
+.fs-sm { font-size: var(--fs-sm); }
+.fs-md { font-size: var(--fs-md); }
+.fs-lg { font-size: var(--fs-lg); }
+.fs-xl { font-size: var(--fs-xl); }
+
+.flex { display: flex; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.gap-2 { gap: var(--sp-2); }
+.gap-3 { gap: var(--sp-3); }
+.gap-4 { gap: var(--sp-4); }
+
+.mt-2 { margin-top: var(--sp-2); }
+.mt-3 { margin-top: var(--sp-3); }
+.mt-4 { margin-top: var(--sp-4); }
+.mt-5 { margin-top: var(--sp-5); }
+.mb-2 { margin-bottom: var(--sp-2); }
+.mb-3 { margin-bottom: var(--sp-3); }
+.mb-4 { margin-bottom: var(--sp-4); }
+.mb-5 { margin-bottom: var(--sp-5); }
+
+.w-full { width: 100%; }
+.text-nowrap { white-space: nowrap; }
+.cursor-pointer { cursor: pointer; }
+
+/* === 24. 装饰元素 === */
+.seal-decoration {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  background: var(--cinnabar);
+  color: #fff;
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  border-radius: var(--r-md);
+  letter-spacing: -1px;
+  box-shadow: var(--shadow-cinnabar);
+}
+
+.chinese-pattern-bg {
+  background-image:
+    radial-gradient(circle at 20% 50%, rgba(195,39,43,0.02) 0%, transparent 50%),
+    radial-gradient(circle at 80% 80%, rgba(200,155,60,0.02) 0%, transparent 50%);
+}
+
+/* 空行间距 */
+.spacer { height: var(--sp-5); }
+
+/* 隐藏 */
+.hidden { display: none !important; }
+
+/* ============================================
+   标准后台框架层（2026 框架升级）
+   —— 排版规范 / 可折叠侧栏 / 标准表格 / 响应式
+   ============================================ */
+
+/* --- 标准页头 --- */
+.std-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+  flex-wrap: wrap;
+}
+/* 「数据总览大屏」的页头（标题 + 统计区间控件）整体冻结。
+   ⚠ 不能让里面的 `.filter-bar` 自己 sticky：它是这个 flex 行里的一个子项，
+   `position: sticky` 的包含块就是这一行 —— 行只比它高 10px，**只能滑 10px**，
+   等于没冻结，往下滚一点统计控件就没了（实测余量 = 10px）。
+   把 sticky 提到整行上，包含块变成整个页面，标题与统计控件一起钉住。
+   全站只有政府端「数据总览大屏」用 `.std-page-head`（`TNR_UI.stdPageHead()`
+   没有任何调用点），且该页没有标签栏，所以不会和 `.tabs` 抢 sticky 层级。 */
+body .page-view .std-page-head {
+  position: sticky;
+  top: 0;
+  z-index: 35;
+  background: var(--rice-paper);
+  padding-bottom: var(--sp-3);
+}
+/* 页头里的控件组不再单独 sticky —— 整行已经是冻结单元，再叠一层会互相压。 */
+body .page-view .std-page-head .filter-bar { position: static; }
+.std-page-title { font-family: var(--font-display, serif); font-size: 20px; font-weight: 700; color: var(--ink-text); }
+.std-page-desc { font-size: var(--fs-xs, 12px); color: var(--ink-light); margin-top: 4px; }
+.std-page-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+
+/* --- 标准表格：可排序列头 / 列宽拖拽 --- */
+.data-table th.dt-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.data-table th.dt-sortable:hover { color: var(--cinnabar); }
+.data-table .dt-sort { font-size: 10px; margin-left: 4px; opacity: .45; }
+.data-table .dt-sort.on { opacity: 1; color: var(--cinnabar); }
+.data-table .dt-colresizer {
+  position: absolute; top: 0; right: -3px; width: 7px; height: 100%;
+  cursor: col-resize; z-index: 2;
+}
+.data-table thead th { position: relative; }
+.data-table.dt-table { min-width: 100%; }
+.dt-actions-th, .dt-actions-td { white-space: nowrap; }
+.dt-actions-td .btn-link { padding: 4px 8px; }
+.dt-pagesize { appearance: auto; }
+
+/* 分页条布局 */
+.dt-pagination { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; padding: var(--sp-3); justify-content: flex-end; }
+
+/* === 侧栏底部收起/展开按钮 === */
+.sidebar-collapse-btn {
+  width: 100%; height: 42px; border: none; cursor: pointer;
+  background: transparent; color: rgba(255, 255, 255, 0.78);
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 16px; transition: background .15s ease;
+}
+.sidebar-collapse-btn:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+body.tnr-side-collapsed .sidebar-collapse-btn { padding: 0; }
+
+/* === 头部锁定：标签页 / 筛选条件 / 表格标题 不随列表滚动 === */
+/* 头部三级锁定：标签(top:0) → 筛选条(top:46px) → 表格标题(top:100px)，
+   高度固定为 46px/54px，纯 CSS 偏移，稳定不抖动 */
+body .page-view .tabs {
+  position: sticky; top: 0; z-index: 40;
+  height: 46px; align-items: center;
+  background: var(--rice-paper); margin-top: 0;
+}
+body .page-view .filter-bar {
+  position: sticky;
+  top: 46px;
+  z-index: 30;
+  min-height: 54px; align-items: center;
+  background: var(--white);
+  border: 1px solid var(--border-light);
+  border-radius: var(--r-md, 8px);
+  padding: var(--sp-3);
+  box-shadow: 0 2px 8px rgba(28, 28, 28, 0.06);
+  margin-bottom: 10px;
+}
+/* 上面那个 46px 是「钉在标签栏下沿」的偏移，前提是页面**真的有**钉住的 `.tabs`。
+   没有标签栏的页面（捕捉管理 / 领养审核管理 / 领养回访管控 / 黑名单管理 /
+   领养信息维护 / 安乐死处置 / 账号权限管理 …）头上什么都没有，46px 会让筛选条
+   凭空下移一条，**上方漏出 46px 的滚动内容** —— 这就是「冻结条漂移」。
+   用 `:not(:has(.tabs))` 把这类页面的偏移归零。
+   ⚠ 老浏览器不认 `:has()` 时整条规则失效、自动退回上面的 46px（= 改动前行为），
+   所以降级是安全的，不会比现在更糟。 */
+body .page-view:not(:has(.tabs)) .filter-bar { top: 0; }
+/* 表头冻结：表头钉在列表自身滚动区的顶部。
+   `.table-wrapper` 的高度由 `TNR_UI._fitTableHeight()` 按视口算出来（max-height），
+   这样它才是真正的纵向滚动容器，`position: sticky` 才会生效 —— 详见该方法的注释。
+   列表卡里已不再渲染 card-header（汇总标题已移除），原先钉在 top:100px 的规则随之作废。 */
+body .dt-card .table-wrapper {
+  overflow: auto;   /* 保留横向滚动（宽表）；纵向由 max-height 触发 */
+}
+/* 表头冻结覆盖**所有** data-table，不限于 mountTable 生成的 .dt-table ——
+   政府端还有手写 <table class="data-table">（物料库存明细 / 物料流水追踪 /
+   编号规则配置 / 区县业务统计），它们同样不该出现「表头跟着内容滚走」。
+   选择器比后段的 `.data-table thead th { position: relative; }` 更具体，能稳稳盖住；
+   那条 relative 仍要保留 —— 它是列宽拖拽手柄 .dt-colresizer 的定位祖先。 */
+body .table-wrapper > .data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  /* border-collapse: separate 下，sticky 表头的下边框会随内容一起滚走，
+     用 inset 阴影补一条分隔线，滚动过程中始终可见 */
+  box-shadow: inset 0 -1px 0 var(--border-ink);
+}
+
+/* 内容区自身滚动：顶栏（含页面标题）固定，sticky 头部相对内容区生效。
+   中间包裹层（admin-content 等）必须取消滚动，否则 sticky 相对内层失灵 */
+body .portal-main { height: 100vh; }
+body .portal-content { overflow-y: auto; overflow-x: hidden; padding-top: 0; }
+body .page-view { padding-top: var(--sp-6); }
+body .admin-content { overflow: visible; }
+body .chinese-pattern-bg { overflow: visible; }
+
+/* 筛选条操作分组：搜索/重置一组，新增等自定义操作独立分组（左侧分隔+主按钮样式区分） */
+.filter-actions { display: flex; align-items: center; gap: var(--sp-2); }
+.filter-actions-extra { display: flex; align-items: center; gap: var(--sp-2); margin-left: var(--sp-4); padding-left: var(--sp-4); border-left: 1px solid var(--border-light, #e5e0d5); }
+.filter-actions .btn-secondary[data-fb] { color: var(--ink-text); }
+
+/* --- 可折叠侧栏（桌面端图标窄栏） --- */
+.portal-sidebar { transition: width .2s ease; }
+.portal-topbar-toggle { display: inline-flex; align-items: center; justify-content: center; }
+body.tnr-side-collapsed .portal-sidebar { width: 64px; }
+body.tnr-side-collapsed .portal-main { margin-left: 64px; }
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-brand { padding-left: 0; padding-right: 0; justify-content: center; }
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-brand-text,
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-brand-sub,
+body.tnr-side-collapsed .portal-sidebar .nav-item-label,
+body.tnr-side-collapsed .portal-sidebar .nav-group-title,
+body.tnr-side-collapsed .portal-sidebar .sidebar-user-info { display: none; }
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-nav { padding: var(--sp-2); }
+body.tnr-side-collapsed .portal-sidebar .nav-item { justify-content: center; padding-left: 0; padding-right: 0; }
+body.tnr-side-collapsed .portal-sidebar .nav-item-badge { position: absolute; top: 6px; right: 8px; }
+body.tnr-side-collapsed .portal-sidebar .portal-sidebar-user,
+body.tnr-side-collapsed .portal-sidebar .sidebar-user { justify-content: center; }
+
+/* --- 统计卡栅格（自适应换行，移动端 2 列） --- */
+body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--sp-4); }
+
+/* --- 筛选栏规范 --- */
+.filter-bar { display: flex; align-items: flex-end; gap: var(--sp-3); flex-wrap: wrap; }
+.filter-item { min-width: 0; }
+.filter-item .form-input, .filter-item .form-select { min-width: 140px; }
+
+/* --- 移动端适配（捕捉点端 / 医院端高频手机操作） --- */
+@media (max-width: 768px) {
+  .std-page-head { flex-direction: column; align-items: stretch; }
+  .std-page-actions { width: 100%; }
+  .std-page-actions .btn { flex: 1; }
+  .filter-bar { flex-direction: column; align-items: stretch; }
+  .filter-item, .filter-item .form-input, .filter-item .form-select { width: 100%; min-width: 0; }
+  .filter-actions { display: flex; width: 100%; }
+  .filter-actions .btn { flex: 1; }
+  body .stat-grid { grid-template-columns: repeat(2, 1fr); gap: var(--sp-2); }
+  body .filter-bar { flex-direction: column; align-items: stretch; }
+  body .filter-item, body .filter-item .form-input, body .filter-item .form-select { width: 100%; min-width: 0; }
+  body .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  body .portal-content { padding: var(--sp-3); }
+  .stat-card { padding: var(--sp-3); }
+  .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .data-table { font-size: 13px; }
+  .data-table th, .data-table td { padding: 8px 10px; }
+  .dt-actions-td .btn-link { padding: 8px 10px; }   /* 触控热区 */
+  .modal { width: 92vw !important; max-width: 92vw !important; }
+  .modal-lg, .modal-xl { width: 96vw !important; }
+  .drawer { width: 92vw !important; }
+  /* 签名弹窗在手机上从底部升起，画布按视口高度自适应，
+     保证横屏（高度小）时「确定/取消」按钮仍在屏幕内、不用滚动 */
+  .sig-modal { padding: 0; align-items: flex-end; }
+  .sig-modal-panel {
+    max-width: 100%;
+    border-radius: var(--r-xl) var(--r-xl) 0 0;
+  }
+  .sig-canvas { height: 34vh; min-height: 160px; }
+  .sig-modal-actions { flex-wrap: wrap; }
+  .sig-modal-actions .btn { flex: 1 1 30%; }
+  .sig-modal-actions .sig-spacer { flex: 1 1 100%; margin-right: 0; order: 3; }
+  .btn { min-height: 38px; }
+  .form-input, .form-select { min-height: 38px; font-size: 16px; }  /* 16px 防 iOS 聚焦缩放 */
+  .pagination { justify-content: center; }
+}
+
+/* 移动端：筛选条不锁定（堆叠换行会占满屏幕），仅顶栏与标签锁定。
+   表头仍锁定 —— 它钉在列表自身的滚动区里，与页面级 sticky 无关。 */
+@media (max-width: 768px) {
+  body .page-view .filter-bar { position: static; }
+}
+
+/* ============================================
+   数量步进控件（PC/移动端统一）
+   —— 移动端浏览器不显示 number 的原生上下箭头（平台行为，CSS 无法强制显示），
+      因此两端统一用显式 −/+ 按钮，并隐藏 PC 端原生箭头避免同屏两套控件。
+      由 TNR_UI.bindQtyStepper() 生成 .qty-stepper > button/input 结构。
+   ============================================ */
+.qty-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.qty-stepper .qty-step-btn {
+  min-width: 36px;
+  padding-left: 0;
+  padding-right: 0;
+  font-size: 16px;
+  line-height: 1;
+  font-weight: 700;
+  text-align: center;
+  flex: 0 0 auto;
+}
+.qty-stepper input[type="number"] {
+  max-width: 76px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+/* 隐藏 WebKit/Blink 的原生上下箭头（PC 端） */
+.qty-stepper input[type="number"]::-webkit-outer-spin-button,
+.qty-stepper input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+/* Firefox 及标准属性 */
+.qty-stepper input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* ============================================
+   逐只登记卡片（新增捕捉 · 一宠一档）
+   —— 每只动物一行：单只照片 + 猫/狗 + 公/母 + 品种 + 昵称
+   ============================================ */
+.pet-entry-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+.pet-entry {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: flex-start;
+  padding: var(--sp-3);
+  border: 1px solid var(--border-light);
+  border-radius: var(--r-md);
+  background: var(--white);
+}
+
+.pet-entry-photo {
+  flex: 0 0 auto;
+  width: 96px;
+  height: 96px;
+  border: 2px dashed var(--border-light);
+  border-radius: var(--r-md);
+  background: var(--rice-warm);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color .15s ease, background .15s ease;
+}
+
+.pet-entry-photo:hover { border-color: var(--cinnabar); background: var(--cinnabar-light); }
+
+.pet-entry-photo.has-photo {
+  border-style: solid;
+  border-color: var(--bamboo-green);
+  background: var(--bamboo-light);
+  padding: 0;
+}
+
+.pet-entry-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pet-entry-photo-icon { font-size: 22px; }
+.pet-entry-photo-tip { font-size: 11px; color: var(--ink-light); text-align: center; line-height: 1.3; }
+
+.pet-entry-body { flex: 1; min-width: 0; }
+
+.pet-entry-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.pet-entry-index { font-size: var(--fs-xs); color: var(--ink-light); }
+
+.pet-entry-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+.pet-entry-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pet-entry-label { font-size: var(--fs-xs); color: var(--ink-muted); }
+.pet-entry-field .form-input,
+.pet-entry-field .form-select { min-width: 0; width: 100%; }
+
+@media (max-width: 768px) {
+  .pet-entry { flex-direction: column; }
+  .pet-entry-photo { width: 100%; height: 140px; }
+  .pet-entry-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+</style>
+<style>
+/* ============ 原型专用布局（复用系统设计令牌） ============ */
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--rice-paper); color: var(--ink-text);
+  font-family: var(--font-body); font-size: var(--fs-base);
+}
+.proto-banner {
+  background: var(--ink-blue); color: #fff; padding: 10px 20px;
+  font-size: var(--fs-sm); display: flex; align-items: center; gap: 12px;
+  position: sticky; top: 0; z-index: 100;
+}
+.proto-banner b { color: #F0C674; }
+.proto-banner .spacer { flex: 1; }
+.proto-banner code {
+  background: rgba(255,255,255,.12); padding: 2px 6px; border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+}
+.app-shell { display: flex; min-height: calc(100vh - 40px); }
+.proto-sidebar {
+  width: 208px; flex: 0 0 208px; background: var(--grad-sidebar); color: #fff;
+  padding: var(--sp-4) 0;
+}
+.proto-sidebar .brand {
+  padding: 0 var(--sp-4) var(--sp-4); font-family: var(--font-display);
+  font-size: var(--fs-lg); border-bottom: 1px solid rgba(255,255,255,.12);
+  margin-bottom: var(--sp-3);
+}
+.proto-sidebar .brand small { display:block; font-size: var(--fs-xs); color: rgba(255,255,255,.6); margin-top:4px; font-family: var(--font-body); }
+.proto-sidebar .nav-item {
+  padding: 10px var(--sp-4); font-size: var(--fs-md); color: rgba(255,255,255,.72);
+  display: flex; align-items: center; gap: 8px; cursor: default;
+}
+.proto-sidebar .nav-item.active {
+  background: rgba(195,39,43,.28); color: #fff; border-left: 3px solid var(--cinnabar);
+}
+.proto-main { flex: 1; min-width: 0; }
+.proto-topbar {
+  background: var(--white); border-bottom: 1px solid var(--border-light);
+  padding: var(--sp-3) var(--sp-5); display: flex; align-items: center; gap: var(--sp-3);
+}
+.proto-topbar .who { margin-left: auto; font-size: var(--fs-sm); color: var(--ink-muted); }
+.proto-body { padding: var(--sp-5); max-width: 1180px; }
+
+/* 步骤条 */
+.steps { display: flex; align-items: center; gap: 0; margin-bottom: var(--sp-5); flex-wrap: wrap; }
+.step {
+  display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+  border: 1px solid var(--border-light); background: var(--white);
+  cursor: pointer; font-size: var(--fs-md); color: var(--ink-muted);
+}
+.step:first-child { border-radius: var(--r-md) 0 0 var(--r-md); }
+.step:last-child { border-radius: 0 var(--r-md) var(--r-md) 0; }
+.step + .step { border-left: none; }
+.step .num {
+  width: 20px; height: 20px; border-radius: var(--r-full); display: grid; place-items: center;
+  background: var(--border-light); color: var(--ink-muted); font-size: var(--fs-xs); font-weight: 700;
+}
+.step.done { color: var(--bamboo-green); border-color: var(--bamboo-green); }
+.step.done .num { background: var(--bamboo-green); color: #fff; }
+.step.active { background: var(--cinnabar-light); border-color: var(--cinnabar); color: var(--cinnabar-dark); font-weight: 600; }
+.step.active .num { background: var(--cinnabar); color: #fff; }
+.step.locked { opacity: .5; }
+
+/* 三栏：表单 + 留痕 */
+.work-grid { display: grid; grid-template-columns: 1fr 300px; gap: var(--sp-5); align-items: start; }
+@media (max-width: 1080px) { .work-grid { grid-template-columns: 1fr; } .app-shell { flex-direction: column; } .proto-sidebar { width: auto; flex: auto; } }
+
+/* 体征小格 */
+.vitals { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--sp-3); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.chip {
+  border: 1px solid var(--border-ink); border-radius: var(--r-full);
+  padding: 4px 12px; font-size: var(--fs-sm); cursor: pointer; background: var(--white);
+  user-select: none;
+}
+.chip.on { background: var(--cinnabar-light); border-color: var(--cinnabar); color: var(--cinnabar-dark); font-weight: 600; }
+.chip.warn.on { background: var(--autumn-light); border-color: var(--autumn-gold); color: #7a5a10; }
+
+/* 处方行 */
+.rx-row { display: grid; grid-template-columns: 2fr 1.4fr 90px 36px; gap: var(--sp-2); margin-bottom: var(--sp-2); align-items: center; }
+@media (max-width: 720px) { .rx-row { grid-template-columns: 1fr 1fr; } }
+.rx-head { font-size: var(--fs-sm); color: var(--ink-muted); font-weight: 600; }
+.fixed-dose {
+  font-size: var(--fs-sm); color: var(--bamboo-green); background: var(--bamboo-light);
+  border: 1px dashed var(--bamboo-green); border-radius: var(--r-sm); padding: 3px 8px; text-align: center;
+}
+
+/* 操作卡片 */
+.op-card { border: 1px solid var(--border-light); border-radius: var(--r-md); margin-bottom: var(--sp-3); background: var(--white); }
+.op-head { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); }
+.op-head .ico { font-size: 20px; }
+.op-head .t { flex: 1; }
+.op-head .t b { font-size: var(--fs-md); }
+.op-head .t div { font-size: var(--fs-sm); color: var(--ink-muted); margin-top: 2px; }
+.op-body { padding: 0 var(--sp-4) var(--sp-4); border-top: 1px dashed var(--border-light); padding-top: var(--sp-4); }
+.switch { position: relative; width: 42px; height: 24px; flex: 0 0 42px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .sl { position: absolute; inset: 0; background: var(--border-ink); border-radius: var(--r-full); transition: .15s; cursor: pointer; }
+.switch .sl::before { content:''; position:absolute; width:18px; height:18px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.15s; }
+.switch input:checked + .sl { background: var(--bamboo-green); }
+.switch input:checked + .sl::before { transform: translateX(18px); }
+
+/* 签名板 */
+.sign-box { border: 1px dashed var(--border-ink); border-radius: var(--r-md); background: var(--rice-light); }
+.sign-box canvas { display: block; width: 100%; height: 96px; cursor: crosshair; }
+.sign-box .cap { font-size: var(--fs-xs); color: var(--ink-light); padding: 4px 8px; border-top: 1px dashed var(--border-light); display: flex; justify-content: space-between; }
+
+/* 上传占位 */
+.upload {
+  border: 1px dashed var(--border-ink); border-radius: var(--r-md); background: var(--rice-light);
+  padding: var(--sp-4); text-align: center; color: var(--ink-light); font-size: var(--fs-sm); cursor: pointer;
+}
+.upload:hover { border-color: var(--cinnabar); color: var(--cinnabar); }
+.photo-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-2); }
+.photo-thumb {
+  width: 72px; height: 72px; border-radius: var(--r-md); background: var(--rice-warm);
+  border: 1px solid var(--border-light); display: grid; place-items: center; font-size: 20px; color: var(--ink-light);
+}
+
+/* 留痕时间轴 */
+.timeline { position: relative; padding-left: 18px; }
+.timeline::before { content:''; position:absolute; left:5px; top:6px; bottom:6px; width:1px; background: var(--border-light); }
+.tl-item { position: relative; margin-bottom: var(--sp-4); }
+.tl-item::before {
+  content:''; position:absolute; left:-17px; top:5px; width:9px; height:9px; border-radius:50%;
+  background: var(--bamboo-green); border:2px solid var(--white);
+}
+.tl-item.now::before { background: var(--cinnabar); }
+.tl-item.todo::before { background: var(--border-ink); }
+.tl-item .tt { font-size: var(--fs-md); font-weight: 600; }
+.tl-item .tm { font-size: var(--fs-xs); color: var(--ink-light); font-family: var(--font-mono); }
+.tl-item .td { font-size: var(--fs-sm); color: var(--ink-muted); margin-top: 2px; }
+
+/* 去向卡片 */
+.dest-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--sp-3); }
+.dest {
+  border: 2px solid var(--border-light); border-radius: var(--r-md); padding: var(--sp-4);
+  cursor: pointer; background: var(--white); text-align: center;
+}
+.dest .ico { font-size: 26px; }
+.dest .t { font-weight: 600; margin-top: var(--sp-2); }
+.dest .d { font-size: var(--fs-sm); color: var(--ink-muted); margin-top: 4px; }
+.dest.on { border-color: var(--cinnabar); background: var(--cinnabar-light); }
+.dest.on .t { color: var(--cinnabar-dark); }
+
+.notice {
+  background: var(--azurite-light); border-left: 3px solid var(--azurite);
+  padding: var(--sp-3) var(--sp-4); border-radius: var(--r-sm); font-size: var(--fs-sm);
+  color: #1c4e80; margin-bottom: var(--sp-4);
+}
+.notice.warn { background: var(--autumn-light); border-left-color: var(--autumn-gold); color: #7a5a10; }
+.notice b { display: block; margin-bottom: 4px; }
+.diff-list { margin: 6px 0 0; padding-left: 18px; }
+.diff-list li { margin: 3px 0; }
+.hide { display: none !important; }
+.mt0 { margin-top: 0; }
+.row { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; }
+.right { margin-left: auto; }
+.tag-new { background: var(--cinnabar); color:#fff; font-size: var(--fs-xs); padding:1px 6px; border-radius: var(--r-sm); vertical-align: middle; }
+.tag-chg { background: var(--autumn-gold); color:#fff; font-size: var(--fs-xs); padding:1px 6px; border-radius: var(--r-sm); vertical-align: middle; }
+</style>
+</head>
+<body>
+
+<div class="proto-banner">
+  <span>🧪 <b>交互原型 v1</b> — 医院收治处理流程改造（第四十六轮）</span>
+  <span class="spacer"></span>
+  <span>点左侧列表的 <code>操作</code> 按钮进入处置工作台 · 步骤条可点击切换</span>
+</div>
+
+<div class="app-shell">
+  <aside class="proto-sidebar">
+    <div class="brand">襄阳 TNR<small>爱心宠物医院</small></div>
+    <div class="nav-item">🏠 首页看板</div>
+    <div class="nav-item active">🏥 诊疗业务管理</div>
+    <div class="nav-item">📦 物料管理</div>
+    <div class="nav-item">🐾 领养信息</div>
+    <div class="nav-item">📋 台账中心</div>
+  </aside>
+
+  <div class="proto-main">
+    <div class="proto-topbar">
+      <b>诊疗业务管理</b>
+      <span class="who">爱心宠物医院 · 张医生（执业兽医师）</span>
+    </div>
+    <div class="proto-body" id="view"></div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   原型数据（全部为演示数据，非真实接口）
+   ============================================================ */
+const PETS = [
+  { code:'TNR260925003', species:'猫', breed:'中华田园猫', gender:'母', age:'约1岁', weight:'2.8kg',
+    recv:'2026-09-25', from:'襄城流浪动物捕捉点', stage:1,
+    note:'社区群护点捕捉，体表尚可' },
+  { code:'TNR260925001', species:'猫', breed:'中华田园猫', gender:'公', age:'约2岁', weight:'3.6kg',
+    recv:'2026-09-25', from:'襄城流浪动物捕捉点', stage:3,
+    note:'右后肢陈旧性外伤，已清创' },
+  { code:'TNR260924006', species:'狗', breed:'中华田园犬', gender:'母', age:'约3岁', weight:'9.2kg',
+    recv:'2026-09-24', from:'樊城流浪动物捕捉点', stage:4,
+    note:'已完成绝育+免疫，待确定去向' },
+  { code:'TNR260924002', species:'猫', breed:'英国短毛猫', gender:'公', age:'约1岁', weight:'3.1kg',
+    recv:'2026-09-24', from:'樊城流浪动物捕捉点', stage:2,
+    note:'疑似猫瘟，需复核' },
+  { code:'TNR260923001', species:'猫', breed:'中华田园猫', gender:'母', age:'约4岁', weight:'2.2kg',
+    recv:'2026-09-23', from:'襄州区流浪动物捕捉点', stage:5,
+    note:'极度消瘦，已完成全部处置并进入领养大厅' },
+];
+
+const STAGES = ['入院签收','健康评估','诊疗操作','确定去向'];
+const STAGE_BADGE = ['','badge-warning','badge-info','badge-info','badge-success'];
+
+let CUR = null;       // 当前动物
+let STEP = 1;         // 当前步骤
+
+/* ============================================================
+   视图一：入院动物列表
+   ============================================================ */
+function viewList() {
+  let rows = PETS.map(p => {
+    // 流程进度点：已完成的步骤涂实
+    let dots = STAGES.map((s, i) => {
+      const n = i + 1;
+      const cls = n < p.stage ? 'on' : (n === p.stage ? 'cur' : '');
+      return `<span class="pd ${cls}" title="${n}. ${s}"></span>`;
+    }).join('');
+
+    let btn = '';
+    if (p.stage === 1)      btn = `<button class="btn btn-primary btn-sm" onclick="openWork('${p.code}',1)">入院签收</button>`;
+    else if (p.stage === 2) btn = `<button class="btn btn-primary btn-sm" onclick="openWork('${p.code}',2)">健康评估</button>`;
+    else if (p.stage === 3) btn = `<button class="btn btn-primary btn-sm" onclick="openWork('${p.code}',3)">诊疗操作</button>`;
+    else if (p.stage === 4) btn = `<button class="btn btn-primary btn-sm" onclick="openWork('${p.code}',4)">确定去向</button>`;
+    else                    btn = `<button class="btn btn-outline btn-sm" onclick="openWork('${p.code}',1)">查看档案</button>`;
+
+    const stageTxt = p.stage > 4 ? '已办结' : STAGES[p.stage - 1];
+
+    return `<tr>
+      <td><div style="font-weight:600;">${p.code}</div>
+          <div style="font-size:var(--fs-xs);color:var(--ink-light);">${p.note}</div></td>
+      <td>${p.species}<div style="font-size:var(--fs-xs);color:var(--ink-light);">${p.breed}</div></td>
+      <td>${p.gender} · ${p.age}<div style="font-size:var(--fs-xs);color:var(--ink-light);">${p.weight}</div></td>
+      <td>${p.recv}</td>
+      <td>${p.from}</td>
+      <td><div class="pd-row">${dots}</div>
+          <div style="font-size:var(--fs-xs);color:var(--ink-muted);margin-top:4px;">${stageTxt}</div></td>
+      <td>${btn} <button class="btn btn-outline btn-sm" onclick="openWork('${p.code}',0)">档案</button></td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="notice warn">
+    <b>⚠️ 这是原型，用来先对齐方案，还不是最终界面</b>
+    下面每一条都可以点开走完整流程。看完后请重点确认：
+    分步顺序对不对、字段够不够、<b>去向的五种情况</b>是否齐全、医师签名与照片留痕的强度是否合适。
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header"><div class="card-title"><span class="card-title-bar"></span>入院动物列表</div>
+      <div class="right row" style="gap:8px;">
+        <input class="form-input" style="width:200px;" placeholder="搜索 编号 / 种类 / 来源">
+        <select class="form-select" style="width:130px;"><option>全部状态</option><option>待签收</option><option>待评估</option><option>待操作</option><option>待定去向</option><option>已办结</option></select>
+      </div>
+    </div>
+    <div class="card-body">
+      <table class="dt-table">
+        <thead><tr>
+          <th>动物编号</th><th>种类</th><th>性别 / 年龄</th><th>接收日期</th><th>来源捕捉点</th>
+          <th>收治进度</th><th style="width:190px;">操作</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div class="card-title"><span class="card-title-bar"></span>本次改造要点（与现行系统对比）</div></div>
+    <div class="card-body" style="font-size:var(--fs-md);line-height:1.9;">
+      <div class="row" style="align-items:flex-start;gap:var(--sp-5);">
+        <div style="flex:1;min-width:280px;">
+          <b>现行做法</b>
+          <ul class="diff-list">
+            <li>签收后直接进「诊疗操作」，一张表单里勾选 绝育/疫苗/驱虫/芯片 后一次性保存</li>
+            <li><b>没有健康评估环节</b> —— 处置依据无处记录</li>
+            <li>医生只填一个文本姓名，<b>没有签名</b></li>
+            <li>诊疗记录<b>没有照片</b>字段</li>
+            <li>疫苗/驱虫各自只有一个下拉，<b>开不了复方处方</b></li>
+            <li>去向散落在「安乐死」「领养信息」两个独立页面，<b>死亡/无害化、放回、领回在院内没有入口</b></li>
+          </ul>
+        </div>
+        <div style="flex:1;min-width:280px;">
+          <b>本次方案</b>
+          <ul class="diff-list">
+            <li><span class="tag-new">新</span> 收治拆成 <b>签收 → 评估 → 操作 → 去向</b> 四步，<b>不可跳步</b></li>
+            <li><span class="tag-new">新</span> 独立的<b>健康评估</b>：生命体征、体征标签、传染病快检、评估描述、建议方案</li>
+            <li><span class="tag-new">新</span> <b>手写签名</b>（评估医师、操作医师、去向经办人）</li>
+            <li><span class="tag-new">新</span> 每个环节<b>都可传照片</b>留证</li>
+            <li><span class="tag-new">新</span> <b>处方</b>做成可增删的多行药品清单，每种<b>固定一头份</b></li>
+            <li><span class="tag-chg">改</span> 去向收拢成一屏：<b>死亡/无害化 · 安乐死 · 领回 · 放回 · 领养</b></li>
+            <li><span class="tag-chg">改</span> 操作项<b>默认按评估建议预勾选</b>，形成「评估→医嘱」的依据链</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header"><div class="card-title"><span class="card-title-bar"></span>需要你拍板的问题（原型里我按「常见做法」先假设了，可能不对）</div></div>
+    <div class="card-body" style="font-size:var(--fs-md);line-height:1.85;">
+      <div class="row" style="align-items:flex-start;gap:var(--sp-5);">
+        <div style="flex:1;min-width:300px;">
+          <b style="color:var(--cinnabar-dark);">A. 会改变数据结构，最好先定</b>
+          <ol class="diff-list">
+            <li><b>手术用药没有地方放。</b>现在物料只有「疫苗 / 驱虫药 / 芯片」三类，绝育要用的<b>麻醉药、抗生素、止痛药</b>没有类别、开不出处方。要不要加「手术用药」类别？</li>
+            <li><b>「固定一头份」到底多固定？</b>我理解成「每次只开 1 头份、不填数量」。但术后口服抗生素常见「每天 2 次、连用 3 天」——要不要记<b>频次 / 天数</b>？</li>
+            <li><b>医师资质要不要管。</b>签名是否必须是<b>执业兽医师</b>？要不要在系统里维护医师的<b>执业证号</b>，签名时带出来？</li>
+            <li><b>签名形式。</b>手写签名（原型里做的是画板）在电脑上体验一般。能不能改成<b>账号密码二次确认</b>代替手写？或者两者都要？</li>
+            <li><b>评估记录能不能改。</b>保存后发现写错了怎么办？允许改的话，已经依据它做的操作怎么追溯？我倾向<b>只能追加更正、不能覆盖</b>。</li>
+          </ol>
+        </div>
+        <div style="flex:1;min-width:300px;">
+          <b style="color:var(--cinnabar-dark);">B. 流程口径，确认一下就行</b>
+          <ol class="diff-list">
+            <li><b>传染病快检</b>实际做不做？做哪几项？项目要可配置吗？</li>
+            <li><b>「不可跳步」是否严格。</b>急诊动物要不要允许<b>先手术后补评估</b>？</li>
+            <li><b>留观</b>要不要单独的记录（留观期间喂食、排泄、精神状态）？还是只写个备注？</li>
+            <li><b>批量处理。</b>一次转运来 5 只，能否<b>批量打疫苗</b>？还是必须逐只走完四步？</li>
+            <li><b>领回</b>：医院端和捕捉点端是<b>同一张单</b>吗？主人在医院直接领走，捕捉点要不要收到通知？</li>
+            <li><b>放回</b>：放回哪个小区由谁定？需要捕捉点确认吗？</li>
+            <li><b>死亡 / 无害化</b>：系统现在<b>完全没有</b>这个概念。谁确认？要记<b>无害化处理单位</b>吗？政府端要不要复核？</li>
+            <li><b>术后复诊</b>要不要单独一环？出现并发症怎么记？</li>
+            <li><b>政府端可见性</b>：评估、签名、照片这些新记录，政府端要看哪些？</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    .pd-row { display:flex; gap:4px; }
+    .pd { width:16px; height:6px; border-radius:3px; background:var(--border-light); display:inline-block; }
+    .pd.on { background: var(--bamboo-green); }
+    .pd.cur { background: var(--cinnabar); }
+  </style>`;
+}
+
+/* ============================================================
+   视图二：处置工作台
+   ============================================================ */
+function openWork(code, step) {
+  CUR = PETS.find(p => p.code === code);
+  STEP = step || (CUR.stage > 4 ? 1 : CUR.stage);
+  renderWork();
+}
+
+function stepBar() {
+  return `<div class="steps">` + STAGES.map((s, i) => {
+    const n = i + 1;
+    // 已完成的步骤涂绿；当前正在看的步骤涂红；尚未走到的置灰
+    let cls = n < CUR.stage ? 'done' : (n > CUR.stage ? 'locked' : '');
+    if (n === STEP) cls = 'active';
+    return `<div class="step ${cls}" onclick="goStep(${n})" title="点击可预览该步骤">
+      <span class="num">${n < CUR.stage ? '✓' : n}</span>${s}</div>`;
+  }).join('') + `</div>`;
+}
+
+/* 原型允许自由跳到任意步骤，方便逐屏评估。
+ * ⚠ 正式系统里**不可跳步**（未评估不能做操作），这里只是原型为了方便评审而放开。 */
+function goStep(n) { STEP = n; renderWork(); }
+
+function renderWork() {
+  const p = CUR;
+  const head = `
+  <div class="row mb-4">
+    <button class="btn btn-secondary btn-sm" onclick="renderList()">← 返回列表</button>
+    <div class="right" style="font-size:var(--fs-sm);color:var(--ink-muted);">
+      当前环节：<b style="color:var(--cinnabar-dark);">${STAGES[STEP - 1]}</b>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-body" style="display:flex;gap:var(--sp-5);align-items:center;flex-wrap:wrap;">
+      <div class="photo-thumb" style="width:88px;height:88px;font-size:30px;">🐾</div>
+      <div>
+        <div style="font-size:var(--fs-xl);font-weight:600;">${p.code}</div>
+        <div style="color:var(--ink-muted);margin-top:4px;">
+          ${p.species} · ${p.breed} · ${p.gender} · ${p.age} · ${p.weight}
+        </div>
+      </div>
+      <div style="border-left:1px solid var(--border-light);padding-left:var(--sp-5);">
+        <div style="font-size:var(--fs-sm);color:var(--ink-muted);">接收日期</div>
+        <div style="font-weight:600;">${p.recv}</div>
+      </div>
+      <div>
+        <div style="font-size:var(--fs-sm);color:var(--ink-muted);">来源捕捉点</div>
+        <div style="font-weight:600;">${p.from}</div>
+      </div>
+      <div>
+        <div style="font-size:var(--fs-sm);color:var(--ink-muted);">收治进度</div>
+        <div style="font-weight:600;color:var(--cinnabar-dark);">${p.stage > 4 ? '已办结' : STAGES[p.stage - 1]}</div>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('view').innerHTML =
+    head + stepBar() + `<div class="work-grid"><div id="stepPane"></div>${tracePane()}</div>`;
+  renderStep();
+}
+
+/* ---------- 留痕时间轴 ---------- */
+function tracePane() {
+  const p = CUR;
+  const items = [];
+  const mk = (n, tt, tm, td, state) => ({ n, tt, tm, td, state });
+
+  items.push(mk(1, '入院签收', p.stage > 1 ? p.recv + ' 09:12' : '', p.stage > 1 ? '李护士 · 已签收' : '待办',
+    p.stage > 1 ? 'done' : (p.stage === 1 ? 'now' : 'todo')));
+  items.push(mk(2, '健康评估', p.stage > 2 ? p.recv + ' 10:40' : '', p.stage > 2 ? '张医生 · 已签名' : '待办',
+    p.stage > 2 ? 'done' : (p.stage === 2 ? 'now' : 'todo')));
+  items.push(mk(3, '诊疗操作', p.stage > 3 ? p.recv + ' 14:05' : '', p.stage > 3 ? '张医生 · 绝育+免疫+芯片' : '待办',
+    p.stage > 3 ? 'done' : (p.stage === 3 ? 'now' : 'todo')));
+  items.push(mk(4, '确定去向', p.stage > 4 ? p.recv + ' 16:30' : '', p.stage > 4 ? '去向：进入领养大厅' : '待办',
+    p.stage > 4 ? 'done' : (p.stage === 4 ? 'now' : 'todo')));
+
+  return `<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>操作留痕</div></div>
+    <div class="card-body">
+      <div class="timeline">
+        ${items.map(i => `<div class="tl-item ${i.state}">
+            <div class="tt">${i.tt}</div>
+            ${i.tm ? `<div class="tm">${i.tm}</div>` : ''}
+            <div class="td">${i.td}</div></div>`).join('')}
+      </div>
+      <div style="border-top:1px dashed var(--border-light);margin-top:var(--sp-4);padding-top:var(--sp-3);font-size:var(--fs-sm);color:var(--ink-muted);">
+        <div>🖊️ 签名：<b>2</b> 处（评估医师 / 主刀医师）</div>
+        <div style="margin-top:4px;">📷 照片：<b>5</b> 张</div>
+        <div style="margin-top:4px;">💊 处方：<b>3</b> 条（均一头份）</div>
+      </div>
+      <div class="notice" style="margin:var(--sp-4) 0 0;font-size:var(--fs-xs);">
+        全部记录<b>不可删除、不可覆盖</b>，只能追加；每条都带操作人 + 时间戳。政府端与平台端可查。
+      </div>
+    </div></div>`;
+}
+
+/* ---------- 各步骤内容 ---------- */
+function renderStep() {
+  const fn = [null, stepReceive, stepAssess, stepOperate, stepDisposition][STEP];
+  document.getElementById('stepPane').innerHTML = fn(CUR);
+  // 签名板在 ②③④ 三步都有，渲染完统一初始化
+  initSignPads();
+}
+
+/* 步骤 1：入院签收 */
+function stepReceive(p) {
+  return `<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>① 入院签收</div></div>
+  <div class="card-body">
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">📄</div><div class="form-section-title">交接信息（只读，来自转运单）</div></div>
+      <div class="form-section-body"><div class="desc-list">
+        <div class="desc-item"><div class="desc-label">交接单号</div><div class="desc-value">TRF-2026-0925-003</div></div>
+        <div class="desc-item"><div class="desc-label">来源捕捉点</div><div class="desc-value">${p.from}</div></div>
+        <div class="desc-item"><div class="desc-label">送交人 / 电话</div><div class="desc-value">王师傅 / 138****6612</div></div>
+        <div class="desc-item"><div class="desc-label">送达日期</div><div class="desc-value">${p.recv}</div></div>
+      </div></div></div>
+
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">🔍</div><div class="form-section-title">接收时外观初检</div></div>
+      <div class="form-section-body">
+        <div class="chips mb-4">
+          <span class="chip on">体表完好</span><span class="chip">明显外伤</span><span class="chip">毛发脏乱</span>
+          <span class="chip warn on">偏瘦</span><span class="chip">精神萎靡</span><span class="chip">疑似怀孕</span>
+          <span class="chip">体表寄生虫</span><span class="chip">疑似哺乳期</span>
+        </div>
+        <div class="vitals">
+          <div class="form-group"><label class="form-label">体温 (℃)</label><input class="form-input" value="38.4"></div>
+          <div class="form-group"><label class="form-label">体重 (kg)</label><input class="form-input" value="${p.weight.replace('kg','')}"></div>
+          <div class="form-group"><label class="form-label">精神状态</label><select class="form-select"><option>良好</option><option>一般</option><option>沉郁</option><option>兴奋</option></select></div>
+          <div class="form-group"><label class="form-label">体况评分 BCS</label><select class="form-select"><option>3/9 偏瘦</option><option>4/9</option><option>5/9 理想</option><option>6/9</option><option>7/9 偏胖</option></select></div>
+        </div>
+      </div></div>
+
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">📷</div><div class="form-section-title">送达照片</div></div>
+      <div class="form-section-body">
+        <div class="photo-row"><div class="photo-thumb">📷</div><div class="photo-thumb">📷</div><div class="photo-thumb">＋</div></div>
+      </div></div>
+
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">🖊️</div><div class="form-section-title">接收人</div></div>
+      <div class="form-section-body">
+        <div class="row"><div style="flex:0 0 240px;">
+          <label class="form-label">接收人</label><input class="form-input" value="李护士">
+        </div>
+        <div style="flex:1;min-width:240px;"><label class="form-label">签收时间</label><input class="form-input" value="${p.recv} 09:12" readonly></div></div>
+      </div></div>
+
+    <div class="row right"><button class="btn btn-primary" onclick="advance(2)">确认签收，进入健康评估 →</button></div>
+  </div></div>`;
+}
+
+/* 步骤 2：健康评估 */
+function stepAssess(p) {
+  return `<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>② 健康评估 <span class="tag-new">新增</span></div></div>
+  <div class="card-body">
+    <div class="notice"><b>这一步是整套流程的依据来源</b>
+      后面的「诊疗操作」会按这里的<b>建议方案</b>自动预勾选，形成「评估 → 医嘱」的可追溯链条。评估未保存不能做操作。</div>
+
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">🌡️</div><div class="form-section-title">体格检查</div></div>
+      <div class="form-section-body">
+        <div class="vitals">
+          <div class="form-group"><label class="form-label">评估日期</label><input type="date" class="form-input" value="${p.recv}"></div>
+          <div class="form-group"><label class="form-label">体温 (℃)</label><input class="form-input" value="38.4"></div>
+          <div class="form-group"><label class="form-label">体重 (kg)</label><input class="form-input" value="${p.weight.replace('kg','')}"></div>
+          <div class="form-group"><label class="form-label">心率 (次/分)</label><input class="form-input" value="168"></div>
+          <div class="form-group"><label class="form-label">呼吸 (次/分)</label><input class="form-input" value="28"></div>
+          <div class="form-group"><label class="form-label">体况评分 BCS</label><select class="form-select"><option>3/9 偏瘦</option><option>4/9</option><option>5/9 理想</option></select></div>
+          <div class="form-group"><label class="form-label">脱水程度</label><select class="form-select"><option>无</option><option>轻度 &lt;5%</option><option>中度 5-8%</option><option>重度 &gt;8%</option></select></div>
+          <div class="form-group"><label class="form-label">黏膜颜色</label><select class="form-select"><option>粉红（正常）</option><option>苍白</option><option>发绀</option><option>黄染</option></select></div>
+        </div>
+      </div></div>
+
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">🩺</div><div class="form-section-title">主要体征（多选）</div></div>
+      <div class="form-section-body"><div class="chips">
+        <span class="chip">体表外伤</span><span class="chip">皮肤病/脱毛</span><span class="chip">耳螨</span>
+        <span class="chip on">跳蚤/蜱虫</span><span class="chip on">体内寄生虫</span><span class="chip">呼吸道症状</span>
+        <span class="chip">消化道症状</span><span class="chip">跛行</span><span class="chip warn on">消瘦</span>
+        <span class="chip">口腔疾病</span><span class="chip">眼部异常</span><span class="chip">疑似怀孕</span>
+        <span class="chip">哺乳期</span><span class="chip">无异常</span>
+      </div></div></div>
+
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">🧫</div><div class="form-section-title">传染病快检</div></div>
+      <div class="form-section-body">
+        <div class="vitals" style="grid-template-columns:repeat(auto-fill,minmax(210px,1fr));">
+          <div class="form-group"><label class="form-label">猫瘟 FPV</label><select class="form-select"><option>未做</option><option>阴性</option><option>阳性</option></select></div>
+          <div class="form-group"><label class="form-label">猫艾滋 FIV</label><select class="form-select"><option>未做</option><option>阴性</option><option>阳性</option></select></div>
+          <div class="form-group"><label class="form-label">猫白血病 FeLV</label><select class="form-select"><option>未做</option><option>阴性</option><option>阳性</option></select></div>
+          <div class="form-group"><label class="form-label">犬瘟 CDV</label><select class="form-select"><option>未做</option><option>阴性</option><option>阳性</option></select></div>
+          <div class="form-group"><label class="form-label">犬细小 CPV</label><select class="form-select"><option>未做</option><option>阴性</option><option>阳性</option></select></div>
+        </div>
+      </div></div>
+
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">📝</div><div class="form-section-title">评估记录</div></div>
+      <div class="form-section-body">
+        <div class="form-group"><label class="form-label">主诉 / 检查所见 <span class="req">*</span></label>
+          <textarea class="form-textarea" rows="3">体况偏瘦（BCS 3/9），被毛粗乱，体表可见跳蚤及跳蚤粪便。耳道清洁，未见明显耳螨。心肺听诊未见异常，腹部触诊柔软，未触及明显异常团块。四肢活动正常，无明显外伤。</textarea></div>
+        <div class="form-group"><label class="form-label">初步诊断 <span class="req">*</span></label>
+          <textarea class="form-textarea" rows="2">营养不良（轻度）；体表寄生虫感染；适宜进行绝育手术及基础免疫。</textarea></div>
+        <div class="form-group"><label class="form-label">建议方案（决定下一步可执行的操作） <span class="req">*</span></label>
+          <div class="chips">
+            <span class="chip on">建议绝育</span><span class="chip on">建议免疫</span><span class="chip on">建议驱虫</span>
+            <span class="chip on">建议植入芯片</span><span class="chip">建议留观</span><span class="chip">建议隔离观察</span>
+            <span class="chip">暂不宜手术</span><span class="chip">建议进一步检查</span>
+          </div>
+          <div class="form-group" style="margin-top:var(--sp-3);">
+            <label class="form-label">补充说明</label>
+            <textarea class="form-textarea" rows="2">术后建议留院观察 24 小时；2 周后复种第二针疫苗。</textarea></div>
+        </div>
+      </div></div>
+
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">📷</div><div class="form-section-title">检查照片</div></div>
+      <div class="form-section-body"><div class="photo-row">
+        <div class="photo-thumb">📷</div><div class="photo-thumb">📷</div><div class="photo-thumb">＋</div>
+      </div></div></div>
+
+    <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">🖊️</div><div class="form-section-title">负责医师（签名）</div></div>
+      <div class="form-section-body">
+        <div class="row" style="align-items:flex-start;">
+          <div style="flex:0 0 240px;">
+            <label class="form-label">负责医师 <span class="req">*</span></label>
+            <select class="form-select"><option>张明（执业兽医师）</option><option>李慧（执业兽医师）</option><option>王强（助理兽医师）</option></select>
+            <div style="font-size:var(--fs-xs);color:var(--ink-light);margin-top:6px;">签名即代表对本次评估结论负责</div>
+          </div>
+          <div style="flex:1;min-width:280px;">
+            <label class="form-label">手写签名 <span class="req">*</span></label>
+            <div class="sign-box"><canvas class="signpad"></canvas>
+              <div class="cap"><span>在框内手写签名</span><span style="cursor:pointer;color:var(--cinnabar);" onclick="clearSign(this)">清除重签</span></div>
+            </div>
+          </div>
+        </div>
+      </div></div>
+
+    <div class="row right"><button class="btn btn-secondary">暂存</button><button class="btn btn-primary" onclick="advance(3)">保存评估，进入诊疗操作 →</button></div>
+  </div></div>`;
+}
+
+/* 步骤 3：诊疗操作 */
+function stepOperate(p) {
+  return `<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>③ 诊疗操作（医嘱） <span class="tag-chg">重构</span></div></div>
+  <div class="card-body">
+    <div class="notice"><b>已按健康评估的建议方案预勾选</b>
+      可逐项关闭不需要的操作。每张卡片<b>独立保存</b>、各自留痕，不要求一次填完。
+      药品一律<b>一头份</b>，不填数量，避免记错剂量。</div>
+
+    <!-- 绝育 -->
+    <div class="op-card">
+      <div class="op-head">
+        <span class="ico">✂️</span>
+        <div class="t"><b>绝育手术</b><div>母猫卵巢子宫摘除术 · 消耗麻醉与手术耗材</div></div>
+        <span class="badge badge-success">评估建议执行</span>
+        <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
+      </div>
+      <div class="op-body">
+        <div class="row mb-4" style="align-items:flex-start;">
+          <div class="form-group" style="flex:1;min-width:150px;"><label class="form-label">手术日期 <span class="req">*</span></label><input type="date" class="form-input" value="${p.recv}"></div>
+          <div class="form-group" style="flex:1;min-width:150px;"><label class="form-label">主刀医师 <span class="req">*</span></label><select class="form-select"><option>张明</option><option>李慧</option></select></div>
+          <div class="form-group" style="flex:1;min-width:150px;"><label class="form-label">麻醉方式 <span class="req">*</span></label><select class="form-select"><option>吸入麻醉</option><option>注射麻醉</option><option>复合麻醉</option></select></div>
+          <div class="form-group" style="flex:1;min-width:150px;"><label class="form-label">手术方式</label><select class="form-select"><option>卵巢子宫摘除（母）</option><option>去势（公）</option></select></div>
+        </div>
+        <div class="form-group"><label class="form-label">术前用药 / 麻醉前给药</label>
+          <div class="rx-row rx-head"><span>药品</span><span>用法</span><span>剂量</span><span></span></div>
+          <div class="rx-row"><select class="form-select"><option>阿托品注射液</option><option>盐酸右美托咪定</option></select>
+            <select class="form-select"><option>皮下注射</option><option>肌肉注射</option></select>
+            <span class="fixed-dose">1 头份</span><button class="btn btn-outline btn-sm" style="padding:4px 8px;">✕</button></div>
+          <div class="rx-row"><select class="form-select"><option>头孢曲松钠</option><option>青霉素钾</option></select>
+            <select class="form-select"><option>肌肉注射</option><option>静脉注射</option></select>
+            <span class="fixed-dose">1 头份</span><button class="btn btn-outline btn-sm" style="padding:4px 8px;">✕</button></div>
+          <button class="btn btn-outline btn-sm" onclick="alert('原型：新增一行处方（固定一头份）')">＋ 添加药品</button>
+        </div>
+        <div class="form-group"><label class="form-label">手术过程记录 <span class="req">*</span></label>
+          <textarea class="form-textarea" rows="3">仰卧保定，术部剃毛消毒，铺无菌巾。腹中线切开约 2cm，找到并结扎卵巢血管，摘除卵巢及子宫角，检查腹腔无出血后逐层缝合。术中生命体征平稳，麻醉苏醒顺利。</textarea></div>
+        <div class="form-group"><label class="form-label">术后医嘱</label>
+          <textarea class="form-textarea" rows="2">禁食 6 小时；伊丽莎白圈佩戴 7 天；术后 3 天复查伤口；口服抗生素 3 天。</textarea></div>
+        <div class="form-group"><label class="form-label">手术照片</label>
+          <div class="photo-row"><div class="photo-thumb">📷</div><div class="photo-thumb">📷</div><div class="photo-thumb">＋</div></div></div>
+        <div class="row"><div style="flex:1;min-width:260px;">
+          <label class="form-label">主刀医师签名 <span class="req">*</span></label>
+          <div class="sign-box"><canvas class="signpad"></canvas>
+            <div class="cap"><span>手写签名</span><span style="cursor:pointer;color:var(--cinnabar);" onclick="clearSign(this)">清除重签</span></div></div>
+        </div><div class="right"><button class="btn btn-primary btn-sm">保存绝育记录</button></div></div>
+      </div>
+    </div>
+
+    <!-- 免疫 -->
+    <div class="op-card">
+      <div class="op-head">
+        <span class="ico">💉</span>
+        <div class="t"><b>疫苗接种</b><div>自动扣减医院疫苗库存 1 头份，记录批号与有效期</div></div>
+        <span class="badge badge-success">评估建议执行</span>
+        <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
+      </div>
+      <div class="op-body">
+        <div class="row mb-4" style="align-items:flex-start;">
+          <div class="form-group" style="flex:2;min-width:200px;"><label class="form-label">疫苗 <span class="req">*</span></label>
+            <select class="form-select"><option>猫三联疫苗（库存 12 支 · 批号 20260401 · 效期 2027-03）</option><option>狂犬疫苗（库存 8 支 · 批号 20260312 · 效期 2027-02）</option></select></div>
+          <div class="form-group" style="flex:1;min-width:140px;"><label class="form-label">接种日期 <span class="req">*</span></label><input type="date" class="form-input" value="${p.recv}"></div>
+          <div class="form-group" style="flex:1;min-width:140px;"><label class="form-label">接种途径</label><select class="form-select"><option>皮下注射</option><option>肌肉注射</option></select></div>
+          <div class="form-group" style="flex:1;min-width:140px;"><label class="form-label">接种部位</label><select class="form-select"><option>右后肢</option><option>左后肢</option><option>颈部背侧</option></select></div>
+        </div>
+        <div class="form-group"><label class="form-label">处置内容记录</label>
+          <textarea class="form-textarea" rows="2">接种猫三联疫苗 1 头份。接种前体检体温正常、精神良好，符合接种条件。</textarea></div>
+        <div class="form-group"><label class="form-label">不良反应观察</label>
+          <div class="chips"><span class="chip on">留观 30 分钟无异常</span><span class="chip">面部肿胀</span><span class="chip">呕吐</span><span class="chip">呼吸急促</span></div></div>
+        <div class="form-group"><label class="form-label">疫苗照片 / 批号照片</label>
+          <div class="photo-row"><div class="photo-thumb">📷</div><div class="photo-thumb">＋</div></div></div>
+        <div class="row"><div style="flex:1;min-width:260px;">
+          <label class="form-label">接种医师签名 <span class="req">*</span></label>
+          <div class="sign-box"><canvas class="signpad"></canvas>
+            <div class="cap"><span>手写签名</span><span style="cursor:pointer;color:var(--cinnabar);" onclick="clearSign(this)">清除重签</span></div></div>
+        </div><div class="right"><button class="btn btn-primary btn-sm">保存免疫记录</button></div></div>
+      </div>
+    </div>
+
+    <!-- 驱虫 -->
+    <div class="op-card">
+      <div class="op-head">
+        <span class="ico">💊</span>
+        <div class="t"><b>驱虫</b><div>体内 + 体外，各自一头份</div></div>
+        <span class="badge badge-success">评估建议执行</span>
+        <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
+      </div>
+      <div class="op-body">
+        <div class="form-group"><label class="form-label">处方 <span class="req">*</span></label>
+          <div class="rx-row rx-head"><span>药品</span><span>给药途径</span><span>剂量</span><span></span></div>
+          <div class="rx-row"><select class="form-select"><option>塞拉菌素滴剂（体外）</option><option>非泼罗尼滴剂</option></select>
+            <select class="form-select"><option>颈背部滴注</option><option>体表喷洒</option></select>
+            <span class="fixed-dose">1 头份</span><button class="btn btn-outline btn-sm" style="padding:4px 8px;">✕</button></div>
+          <div class="rx-row"><select class="form-select"><option>吡喹酮片（体内）</option><option>芬苯达唑片</option></select>
+            <select class="form-select"><option>口服</option><option>拌食</option></select>
+            <span class="fixed-dose">1 头份</span><button class="btn btn-outline btn-sm" style="padding:4px 8px;">✕</button></div>
+          <button class="btn btn-outline btn-sm">＋ 添加药品</button></div>
+        <div class="form-group"><label class="form-label">处置内容记录</label>
+          <textarea class="form-textarea" rows="2">体表滴注塞拉菌素，口服吡喹酮。嘱 2 周后重复体外驱虫一次。</textarea></div>
+        <div class="form-group"><label class="form-label">照片</label>
+          <div class="photo-row"><div class="photo-thumb">📷</div><div class="photo-thumb">＋</div></div></div>
+        <div class="row"><div style="flex:1;min-width:260px;">
+          <label class="form-label">操作医师签名 <span class="req">*</span></label>
+          <div class="sign-box"><canvas class="signpad"></canvas>
+            <div class="cap"><span>手写签名</span><span style="cursor:pointer;color:var(--cinnabar);" onclick="clearSign(this)">清除重签</span></div></div>
+        </div><div class="right"><button class="btn btn-primary btn-sm">保存驱虫记录</button></div></div>
+      </div>
+    </div>
+
+    <!-- 芯片 -->
+    <div class="op-card">
+      <div class="op-head">
+        <span class="ico">📡</span>
+        <div class="t"><b>芯片植入</b><div>绑定宠物档案，芯片永久不可复用</div></div>
+        <span class="badge badge-success">评估建议执行</span>
+        <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
+      </div>
+      <div class="op-body">
+        <div class="row mb-4" style="align-items:flex-start;">
+          <div class="form-group" style="flex:2;min-width:220px;"><label class="form-label">选择芯片 <span class="req">*</span></label>
+            <select class="form-select"><option>1000010231（可用）</option><option>1000010232（可用）</option><option>1000010233（可用）</option></select>
+            <div style="font-size:var(--fs-xs);color:var(--ink-light);margin-top:6px;">也可用扫码枪直接扫入</div></div>
+          <div class="form-group" style="flex:1;min-width:140px;"><label class="form-label">植入日期 <span class="req">*</span></label><input type="date" class="form-input" value="${p.recv}"></div>
+          <div class="form-group" style="flex:1;min-width:140px;"><label class="form-label">植入部位</label><select class="form-select"><option>颈背部皮下</option><option>左肩胛间</option></select></div>
+        </div>
+        <div class="form-group"><label class="form-label">病历记录 <span class="req">*</span></label>
+          <textarea class="form-textarea" rows="3">颈背部皮下植入芯片，扫码核对编号与档案一致。植入部位无出血、无肿胀。</textarea></div>
+        <div class="form-group"><label class="form-label">照片</label>
+          <div class="photo-row"><div class="photo-thumb">📷</div><div class="photo-thumb">＋</div></div></div>
+        <div class="row"><div style="flex:1;min-width:260px;">
+          <label class="form-label">操作医师签名 <span class="req">*</span></label>
+          <div class="sign-box"><canvas class="signpad"></canvas>
+            <div class="cap"><span>手写签名</span><span style="cursor:pointer;color:var(--cinnabar);" onclick="clearSign(this)">清除重签</span></div></div>
+        </div><div class="right"><button class="btn btn-primary btn-sm">保存芯片记录</button></div></div>
+      </div>
+    </div>
+
+    <div class="row right"><button class="btn btn-primary" onclick="advance(4)">全部完成，确定去向 →</button></div>
+  </div></div>`;
+}
+
+/* 步骤 4：确定去向 */
+function stepDisposition(p) {
+  return `<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>④ 确定去向 <span class="tag-chg">收拢</span></div></div>
+  <div class="card-body">
+    <div class="notice"><b>五种去向，选一个并填对应单据</b>
+      目前「安乐死」「领养」散在两个页面，「死亡/无害化」「放回」「领回」在院内根本没有入口 —— 这一屏把它们收齐，并统一留痕。</div>
+
+    <div class="dest-grid mb-5">
+      <div class="dest" onclick="pickDest(this)"><div class="ico">⚰️</div><div class="t">死亡 / 无害化</div><div class="d">院内死亡，转无害化处理</div></div>
+      <div class="dest" onclick="pickDest(this)"><div class="ico">🕯️</div><div class="t">安乐死</div><div class="d">有明确适应症，需医师签名</div></div>
+      <div class="dest" onclick="pickDest(this)"><div class="ico">🏠</div><div class="t">领回</div><div class="d">原主人认领，单据同捕捉端</div></div>
+      <div class="dest" onclick="pickDest(this)"><div class="ico">🌳</div><div class="t">放回</div><div class="d">回到原小区，需接收人签字</div></div>
+      <div class="dest on" onclick="pickDest(this)"><div class="ico">🎗️</div><div class="t">领养</div><div class="d">进入领养大厅待领养</div></div>
+    </div>
+
+    <div id="destForm">
+      <div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">🎗️</div><div class="form-section-title">进入领养大厅</div></div>
+        <div class="form-section-body">
+          <div class="row mb-4" style="align-items:flex-start;">
+            <div class="form-group" style="flex:1;min-width:180px;"><label class="form-label">上架标题 <span class="req">*</span></label><input class="form-input" value="温顺三花猫找家 · ${p.code}"></div>
+            <div class="form-group" style="flex:1;min-width:140px;"><label class="form-label">健康状态</label><select class="form-select"><option>已绝育 / 已免疫 / 已驱虫 / 已植芯片</option><option>部分完成</option></select></div>
+          </div>
+          <div class="form-group"><label class="form-label">性格与介绍 <span class="req">*</span></label>
+            <textarea class="form-textarea" rows="3">性格温顺亲人，可撸可抱，不抓人。已完成绝育、免疫与驱虫，体况恢复良好。适合家庭饲养。</textarea></div>
+          <div class="form-group"><label class="form-label">上架照片 <span class="req">*</span></label>
+            <div class="photo-row"><div class="photo-thumb">📷</div><div class="photo-thumb">📷</div><div class="photo-thumb">＋</div></div></div>
+          <div class="row"><div style="flex:0 0 240px;"><label class="form-label">经办人 <span class="req">*</span></label>
+            <select class="form-select"><option>张明</option><option>李慧</option></select></div>
+          <div class="right" style="flex:1;min-width:260px;">
+            <label class="form-label">经办人签名 <span class="req">*</span></label>
+            <div class="sign-box"><canvas class="signpad"></canvas>
+              <div class="cap"><span>手写签名</span><span style="cursor:pointer;color:var(--cinnabar);" onclick="clearSign(this)">清除重签</span></div></div>
+          </div></div>
+        </div></div>
+    </div>
+
+    <div class="notice warn" style="margin-top:var(--sp-4);">
+      <b>提交后</b> 动物状态自动流转为「待领养」，并出现在领养大厅；同时写入不可修改的处置台账。
+      若选择「死亡/无害化」或「安乐死」，还需政府端确认无害化处理去向。
+    </div>
+
+    <div class="row right"><button class="btn btn-primary" onclick="alert('原型演示：提交后动物状态流转为「待领养」，进入领养大厅，并写入处置台账。')">提交并办结 ✓</button></div>
+  </div></div>`;
+}
+
+function pickDest(el) {
+  el.parentNode.querySelectorAll('.dest').forEach(d => d.classList.remove('on'));
+  el.classList.add('on');
+}
+
+/* ---------- 签名板 ---------- */
+function initSignPads() {
+  document.querySelectorAll('.signpad').forEach(cv => {
+    if (cv.dataset.init) return;
+    cv.dataset.init = '1';
+    const r = cv.getBoundingClientRect();
+    cv.width = r.width || 400; cv.height = 96;
+    const ctx = cv.getContext('2d');
+    ctx.strokeStyle = '#1C1C1C'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    let drawing = false;
+    const pos = e => { const b = cv.getBoundingClientRect(); return [e.clientX - b.left, e.clientY - b.top]; };
+    cv.addEventListener('mousedown', e => { drawing = true; ctx.beginPath(); ctx.moveTo(...pos(e)); });
+    cv.addEventListener('mousemove', e => { if (!drawing) return; ctx.lineTo(...pos(e)); ctx.stroke(); });
+    window.addEventListener('mouseup', () => drawing = false);
+  });
+}
+function clearSign(el) {
+  const cv = el.closest('.sign-box').querySelector('canvas');
+  cv.getContext('2d').clearRect(0, 0, cv.width, cv.height);
+}
+
+function advance(n) { alert('原型演示：保存本步 → 进入「' + STAGES[n - 1] + '」'); STEP = n; renderWork(); }
+function renderList() { document.getElementById('view').innerHTML = viewList(); }
+renderList();
+</script>
+</body>
+</html>
