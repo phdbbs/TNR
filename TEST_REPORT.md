@@ -7422,3 +7422,216 @@ D2「挡回后看不到平台端功能」最初判 FAIL —— 原始 HTML 里�
 
 * 本轮**没有**做生产部署（第四十五轮的需求分析已在同时进行，届时一并评估）。
 * `R45_市级捕捉点_需求分析.md` 是**分析文档，未改任何业务代码**。
+
+---
+
+## 第四十六轮：全局单据化收尾（2026-09-29）
+
+### 一、这一轮接的是什么活
+
+「查看之前的 agent 编码的进度，能否继续完成其他 agent 没有完成的任务？」
+—— 查明**另一个会话的未完成任务 = 全局单据化**（统一单据号 + A4 打印页）。
+仓库 HEAD 从 `7b66775` 前进到 `cd05b57`，中间多了 5 个提交
+（`0ed7d30` 术语「放养」→「放归」、`54e7617` 机构库存拆 `services_stock.py`、
+`2ae4700`/`cd05b57` 安全修复、`e931db5` POST 契约闸门打 slow）。
+**`gui-test-scripts/` 整个目录消失**，根目录改为 `prototypes/`。
+接手时基线 **883 例 1 FAIL**（`test_renders_doc_no_qr_and_related`）。
+
+### 二、修掉的缺陷（全部是「不报错但真的坏了」）
+
+| # | 缺陷 | 症状 | 根因 |
+|---|------|------|------|
+| 1 | 关联单据链**恒为空** | 打印页 200、一条关联单据都没有 | `_capture_related` 把 `Pet` 传进取 `obj.pet` 的函数 → 永远 `None` |
+| 2 | 关系表里有**不存在的** `Pet.transfers` | 只因 #1 提前 return 才没暴露；真跑 AttributeError | `Transfer` 靠 `pet_codes` 逗号串关联，没有 `pet` 外键 |
+| 3 | 打印页日期 | `2026-09-29 08:51:28.922381+00:00`（UTC + 6 位微秒） | 直接 `str(datetime)` |
+| 4 | `qrcode` 未声明依赖 | 本机恰好装了 8.2 所以基线全绿；生产 `pip install -r` 后打印页 **500** | `requirements.txt` 漏写 |
+| 5 | 打印功能**前端零入口** | 后端 8 类单据都有打印视图，按钮不在任何页面上 | 只写了后端 |
+| 6 | `spec['fetcher']` **8 个死 lambda** | 无报错 | 改用 `get_scoped_object()` 后没人读；且它们用的是**不带隔离**的裸 `objects.get()` |
+| 7 | 打印页关联链链接写死旧路径 | 改路由后全变断链 | `templates/print/doc.html:70` 硬编码 |
+
+修法见 `de72291` 的提交说明。第 2 条的精确匹配（避免 `TP001` 误配 `TP0011`）
+是先 `pet_codes__contains` 粗筛、再逗号切分逐条核对。
+
+### 三、打印路由从 `/api/` 移出去（闸门报的是**真问题**）
+
+挂在 `/api/business/print/` 时，并行会话新加的 `AllApiRoutesContractTest`
+枚举每条 `/api/` 路由并断言 `Content-Type: application/json`，报出 **9 例**：
+
+```
+/api/business/print/1/1/ 404 text/html
+```
+
+**该改的是路由，不是闸门。** 打印页返回整页 HTML，而 `/api/` 的契约是 JSON 信封
+（`MEMORY.md` 明写「`/api/` 下必须用 `json_ok`」）。移到根路径
+`/print/<doc>/<pk>/`，注册点在 `tnr_system/urls.py`（**不是** `business/urls.py`，
+那个文件下所有路由都在 `/api/business/` 前缀里）。装饰器从
+`api_login_required`（JSON 401）改为 `login_required` + `role_required`
+（页面语义 = 302 跳登录页）。
+
+### 四、隔离改走真源
+
+`views_print` 原先自己写了一遍角色判断 —— **第二份隔离实现**。改用
+`get_scoped_object()`。项目历史上正因隔离口径写了两遍、对「账号没挂区县」
+解释相反，出现过「列表全空、写接口却全放行」的静默缺陷（见 `core/scope.py` 开头）。
+
+「存在但不属于我」与「不存在」共用**同一个 404 模板 + 同一个状态码**；
+`doc_missing.html` 文案改成笼统的「单据不存在或无权查看」，**不回显 doc** ——
+回显会泄露「类型合法、只是不属于你」，就是存在性预言机。
+
+### 五、判据：新增 + 修掉一个**假红源**
+
+* `business/tests/test_doc_numbers.py` 12 例。新增两条反向对照：
+  `test_cross_district_and_missing_are_indistinguishable`（**成对断言**状态码
+  与响应体完全相同 —— 只测「越权被拒」的话，判据写成「一律 404」也能通过）、
+  `test_wrong_role_rejected`。
+* `core/tests_frontend_consistency.py::PrintEntryPointTest`：从 `DOC_SPECS`
+  **解析**键名，不写死清单。认**三种**挂载写法（字面量 / `PRINT_DOC_KEY`
+  映射表 / 政府端 `business_type` 动态透传）—— 只认第一种会漏掉另外两种。
+* **修 `ApiRouteCoverageTest` 的假红源**：归一化会在**第一个动态段处截断**路径
+  （取出片段用的字符类 `[A-Za-z0-9_/{}\-.]` 不含标记符 `\x00`），原先要求前缀
+  `fullmatch` 某条路由 → 能不能过关取决于「前缀恰好是不是路由」
+  （`/api/business/captures/` 是列表接口，所以一直蒙混过关；
+  `/api/business/print/` 不是 → 10 例假红）。改为「前缀必须是某条路由的前缀」，
+  并补**反向对照**：手工构造路由表做纯谓词单测，**不引用真实 URLconf** ——
+  第一版把 `/api/business/print/` 写进断言，路由一搬走就自己把自己写红了。
+* 顺带发现 `seg.count(self.MARK)` 是**恒为 0 的死条件**（片段由不含 `MARK`
+  的字符类取出）。**不动字符类**：放宽后会让 `` `.../${qs}` ``（带 `?` 查询串）
+  误伤，已写进注释。
+
+### 六、回归结果
+
+**逐提交 worktree 验证**（先 `cp .env` + `cp db.sqlite3` 进 worktree ——
+否则 `settings.py` import 阶段就抛 `ImproperlyConfigured`，
+`check_inline_js.py` 会报 `no such table: accounts_user`，**所有提交看起来都是红的**）：
+
+| 提交 | business | supervision | core | accounts | 内联 JS |
+|------|---------|-------------|------|----------|---------|
+| `de72291` 全局单据化 | 885 OK | 123 OK | 242 OK | 35 OK | 13 段 / 0 失败 |
+| `403b94f` R46 原型 | 同上（差异仅 2 个静态 HTML，无任何代码/测试引用） |
+
+推送三远程：`cd05b57..403b94f`，`git ls-remote` 核对三远程与本地**完全一致**
+（`403b94f5e7d6a9958c32d325cfac72bb33808ea7`）。
+
+### 七、本轮新踩的坑
+
+1. **Django 模板注释 `{# ... #}` 必须同行闭合** —— 跨行写**不报错**，
+   但注释内容会被当正文渲染出来。判据 `TemplateCommentLeakTest` 抓到**两次**
+   （`doc_missing.html` / `doc.html`）。写中文长注释时极易犯。
+2. **改了路由要全库搜旧路径**：`grep api/business/print` 抓到
+   `templates/print/doc.html` 里写死的关联链链接 —— 那是**真断链**。
+   注释里的旧路径无所谓，链接里的必须改。
+3. **「第二份实现」会在改功能时自己冒出来**：`views_print` 手写的隔离逻辑、
+   8 个死 `fetcher` lambda。凡是发现同一件事有两处判断，先合并再改功能。
+
+### 八、诚实记录
+
+* 本轮**没有**做生产部署，也**没有**做 GUI 实测 —— 打印页的浏览器端行为
+  （按钮真的弹新窗口、A4 排版是否合意）**未验证**，只有服务端渲染断言。
+* 打印入口的**界面可达性**由静态判据覆盖（按钮代码在不在），
+  「点下去是否真的打开正确单据」**未做端到端验证**。
+* R46 医院收治流程仍停在**原型评审**阶段，未改任何业务代码。
+
+### 九、R46 原型（等反馈）
+
+* v1 `prototype_hospital_flow.html`：四步向导 + 留痕时间轴 —— **已被否，过于复杂**。
+* v2 `prototype_hospital_form_mobile.html`：照纸质《病例处方签》做的一页手机表单。
+  390×844 真机尺寸、触摸目标全 ≥36px（实测 `small=0`）、12 处自动带出、
+  三个日期默认今天、检查项 chips 点选自动拼文本、处方走底部选择器、
+  签名板支持 touch。无头浏览器实测 **0 JS 错误**，滚动 3703px ≈ 5.1 屏。
+* **两个自选点等确认**：① 检查项用 chips 而非下拉；② 滚动 5 屏是否偏长。
+* A 类待确认（更早）：手术用药没有物料类别（麻醉药/抗生素/止痛药开不出处方）。
+
+---
+
+## 第四十六轮（续）：编号方案漏了 `CON`，以及**平台端「编号规则」页是空壳**（2026-09-29）
+
+### 一、怎么发现的
+
+把打印页用**真实库数据**渲染出来做肉眼核对（不只是跑断言）时，诊疗单那张
+打出来是「**单据号：—**」。顺着查下去发现一整类问题。
+
+### 二、缺陷一：消耗流水一个号都没有
+
+`0023` 重排时 `TYPE_PREFIX` 只列了 purchase / dispatch / adjustment，
+**没有 `consume`**；而消耗流水不是由物料视图直接建的，是 `views_treatment`
+经 `adjust_stock(txn_type='consume')` **间接**写入，三个调用点都没传 `ledger_no`。
+
+本地库实测（补号前）：
+
+```
+Treatment             n=  26 blank=  4
+MaterialTransaction   n= 134 blank= 66    ← 66 条全是 consume（date=2026-09-17 种子数据）
+```
+
+而 `consume_prefix='CON'` **早在平台端「编号规则」页就声明了** ——
+典型的**枚举值存在、写入路径缺失**：消费端（列表 / 打印 / 统计）齐全，
+产生端漏了，**不报任何错**，界面上只是永远空着，看起来像「暂时没有数据」。
+
+改法：`services.DOC_PREFIXES`（12 个类型码的唯一清单）+ `generate_doc_no()`
+校验未知码直接抛错；三处 `adjust_stock(consume)` 补 `generate_doc_no('CON')`；
+迁移 `0024` 给**所有空号**单据补号（**纯增量**，不动任何已有单号）。
+
+补号后：空号全部归零、**无重号**；计数器 `CON last=66`、`TRE last=26`（原 22）。
+
+### 三、判据的坑（值得记）
+
+`DocPrefixRegistryTest` **必须从源码解析产生点**，不能只断言「清单里有 CON」——
+后者在产生端被整段删掉时照样通过。另外扫描**必须排除 `tests/` 与
+`migrations/`**：测试文件自己就在调 `generate_doc_no`，不排除会让
+「产生端存在」这一条**恒真**（假绿）。
+
+同理，`test_vaccine_consumes_hospital_stock` 原来只断言「有 consume 流水」，
+**单号为空也能通过**；补了 `assert_doc_no(txn.ledger_no, 'CON')`。
+
+### 四、缺陷二（**未修，需要决策**）：平台端「编号规则」配置页是空壳
+
+平台端 `/platform/` → 编号规则页可编辑 **9 个前缀**（`capture_prefix` … 
+`consume_prefix`），走 `/api/supervision/config/`。但**没有任何取号路径读它**：
+
+```
+grep 全库：capture_prefix / consume_prefix / …_prefix
+  → supervision/views.py:1473-1483  DEFAULTS（声明）
+  → supervision/tests.py            配置 API 的读写测试
+  → templates/portal/platform/portal.html:800-808   渲染
+  → 业务取号侧：**零引用**（新方案硬编码 generate_doc_no('CAP')）
+```
+
+即：**平台管理员改了前缀，新单据号完全不受影响** —— 页面在说谎。
+本地库 9 个配置值全部等于默认值，所以今天还没造成数据不一致。
+
+顺带：`generate_ledger_no()`（旧「日期+随机」格式）现在**零生产调用点**，
+只剩测试在调；它的 docstring 写着「保留仅为历史兼容」，属**显式决定**，
+但事实上已是死代码。
+
+**为什么没有顺手改**：要让配置真正生效，`business.services` 得去读
+`supervision.models.SystemConfig`，而 `supervision` 本来就依赖 `business`
+—— 会形成**循环导入**（正是 `core/scope.py` 开头描述的那类问题）。
+要么把前缀解析下沉到 `core`，要么注入，属于**设计决策**，不是顺手能改的。
+另外还缺 3 个配置键（领回 `RET` / 接收 `RCV` / 异动 `ADJ`），平台端 UI 也要补。
+
+**两个选项（等磊哥定）**：
+* **(A) 让新方案读配置** —— 前缀解析下沉 `core`，补 3 个配置键 + UI，
+  `generate_doc_no` 按「类型码 → 配置键」取值，缺省用代码默认。
+  风险：生产上若某前缀被改过，改完会**换号段**（新单号前缀变了，与旧号不连续）。
+* **(B) 下架/改造该页** —— 明确「单据号前缀已内置，此页仅展示」，
+  去掉可编辑输入框。风险：撤掉一个已有功能。
+
+### 五、诚实记录
+
+* 打印页**没有做浏览器端实测**（按钮是否真的弹新窗口、A4 排版在真机上是否合意）。
+  本轮做的是「用真实库数据渲染出 HTML 再肉眼核对要素」——比只跑断言强，
+  但**不等于 GUI 实测**。
+* 迁移 `0024` **只在本地 SQLite 上跑过**，未在生产 MySQL 上预演。
+  它是纯增量（只填空号），但生产上执行前应先备份。
+* 未做生产部署。
+
+### 六、回归结果
+
+| 提交 | business | supervision | core | accounts |
+|------|---------|-------------|------|----------|
+| `02a1a2e` fix: 补齐 `CON` + 存量补号 | 889 OK | 123 OK | 242 OK | 35 OK |
+
+推送三远程：`403b94f..02a1a2e`，`git ls-remote` 核对三远程与本地**完全一致**
+（`02a1a2e3800c4103dfa9467c4f35d881cebc05d4`）。
+
+
