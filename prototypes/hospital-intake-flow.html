@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>医院收治原型 V3 · 手机端病例处方签</title>
+<style>
+:root {
+  --cinnabar: #C3272B; --cinnabar-deep: #9D2933; --cinnabar-light: #FBE8E8;
+  --ink: #1C1C1C; --ink-blue: #1A1A2E;
+  --ink-text: #2B2B2B; --ink-muted: #6B5D54; --ink-light: #9C8B7E;
+  --rice-paper: #F5F0E8; --rice-light: #FAF6F0; --rice-warm: #F0EAE0; --white: #FFF;
+  --bamboo: #5B7A4F; --bamboo-light: #E8F0E4;
+  --gold: #C89B3C; --gold-light: #FBF3E0;
+  --azurite: #2B6CB0; --azurite-light: #E0EEF7;
+  --rouge: #9D2933; --rouge-light: #FBE8E8;
+  --border: #D4C5B9; --border-light: #E8DFD4;
+  --shadow: 0 2px 10px rgba(28,28,28,.08);
+}
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+body { font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  background:var(--rice-paper); color:var(--ink-text); font-size:15px; line-height:1.55; }
+
+/* 顶栏（手机高度） */
+.topbar { background:linear-gradient(135deg,var(--ink),var(--ink-blue)); color:#fff; padding:0 14px; height:50px;
+  display:flex; align-items:center; gap:10px; position:sticky; top:0; z-index:50;}
+.topbar .logo { font-size:16px; font-weight:600; letter-spacing:1px; white-space:nowrap;}
+.topbar .logo .dot { display:inline-block; width:9px; height:9px; background:var(--cinnabar); border-radius:2px; margin-right:6px; vertical-align:1px;}
+.topbar .crumb { color:rgba(255,255,255,.6); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.topbar .tag { background:var(--gold); color:var(--ink); font-size:10px; padding:2px 7px; border-radius:9px; font-weight:600; white-space:nowrap;}
+
+/* 手机宽度容器：桌面预览时居中成手机宽度 */
+.phone { max-width:480px; margin:0 auto; min-height:100vh; background:var(--rice-paper);
+  box-shadow:0 0 40px rgba(0,0,0,.10); padding-bottom:80px; position:relative;}
+@media (max-width:520px){ .phone{ box-shadow:none; } }
+
+.wrap { padding:12px 12px 0; }
+
+/* 卡片 */
+.card { background:var(--white); border-radius:12px; box-shadow:var(--shadow); margin-bottom:10px; overflow:hidden;}
+.card-h { padding:10px 14px 8px; display:flex; align-items:center; gap:8px; font-weight:600; font-size:14px;}
+.card-h .bar { width:4px; height:14px; background:var(--cinnabar); border-radius:2px; flex:none;}
+.card-h .hint { color:var(--ink-light); font-size:11px; font-weight:400; margin-left:auto; text-align:right;}
+.card-b { padding:2px 12px 12px; }
+
+/* 徽标 / 按钮 */
+.badge { display:inline-block; padding:2px 9px; border-radius:11px; font-size:11px; font-weight:500;}
+.b-wait { background:var(--gold-light); color:#8a6a1f; }
+.b-slip { background:var(--azurite-light); color:var(--azurite); }
+.b-out { background:var(--bamboo-light); color:var(--bamboo); }
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:5px; border:1px solid var(--border);
+  background:#fff; color:var(--ink-text); padding:9px 16px; border-radius:9px; cursor:pointer; font-size:14px; transition:.15s; user-select:none;}
+.btn:hover { border-color:var(--cinnabar); color:var(--cinnabar); }
+.btn-p { background:var(--cinnabar); border-color:var(--cinnabar); color:#fff; }
+.btn-p:hover { background:var(--cinnabar-deep); color:#fff; }
+.btn-sm { padding:5px 12px; font-size:12.5px; border-radius:7px;}
+.link { color:var(--azurite); cursor:pointer; }
+
+/* 列表行 */
+.pet-item { background:#fff; border-radius:12px; box-shadow:var(--shadow); margin-bottom:9px; padding:11px 13px; display:flex; gap:11px; align-items:center;}
+.pet-item .ico { width:44px; height:44px; border-radius:10px; flex:none; display:flex; align-items:center; justify-content:center; font-size:22px; background:var(--rice-warm);}
+.pet-item .info { flex:1; min-width:0; }
+.pet-item .info .l1 { font-weight:600; font-size:14.5px; display:flex; gap:7px; align-items:center; flex-wrap:wrap;}
+.pet-item .info .l2 { font-size:12px; color:var(--ink-light); margin-top:2px; }
+.pet-item .act { flex:none; }
+
+/* 表单 */
+.row2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.fld { margin-top:10px; }
+.fld label { display:block; font-size:12.5px; color:var(--ink-muted); margin-bottom:4px; }
+.fld label .auto { color:var(--bamboo); font-size:11px; background:var(--bamboo-light); border-radius:8px; padding:0 6px; margin-left:5px;}
+.fld input, .fld select, .fld textarea {
+  width:100%; border:1px solid var(--border); border-radius:9px; padding:10px 12px; font-size:15px; background:#fff;
+  color:var(--ink-text); font-family:inherit; outline:none; min-height:42px; transition:border .15s;}
+.fld input:focus, .fld select:focus, .fld textarea:focus { border-color:var(--cinnabar); }
+.fld input[readonly] { background:var(--rice-light); color:var(--ink-muted); }
+.fld textarea { min-height:72px; resize:vertical; }
+.fld .ph-h { font-size:11.5px; color:var(--ink-light); margin-top:3px; }
+input.code-in { font-family:ui-monospace,Menlo,monospace; font-weight:600; color:var(--cinnabar-deep); letter-spacing:.5px;}
+
+/* 处置开关行（紧凑） */
+.treat { border:1px solid var(--border-light); border-radius:10px; margin-top:9px; overflow:hidden;}
+.treat-h { display:flex; align-items:center; gap:9px; padding:10px 12px; cursor:pointer; background:#fff;}
+.treat-h .ic { font-size:19px; flex:none;}
+.treat-h .nm { font-weight:600; font-size:14px; flex:1;}
+.treat-h .nm small { display:block; font-weight:400; color:var(--ink-light); font-size:11px; margin-top:1px;}
+/* 开关 */
+.sw { width:44px; height:26px; border-radius:13px; background:var(--border); position:relative; flex:none; transition:.2s;}
+.sw::after { content:''; position:absolute; top:2px; left:2px; width:22px; height:22px; border-radius:50%; background:#fff; transition:.2s; box-shadow:0 1px 3px rgba(0,0,0,.25);}
+.treat.on .sw { background:var(--bamboo); }
+.treat.on .sw::after { left:20px; }
+.treat-b { display:none; padding:2px 12px 11px; border-top:1px dashed var(--border-light); background:var(--rice-light);}
+.treat.on .treat-b { display:block; }
+.treat-b .fld { margin-top:8px; }
+
+/* 照片 */
+.ph-grid { display:flex; gap:9px; flex-wrap:wrap; margin-top:8px;}
+.ph-add { width:76px; height:76px; border:1.5px dashed var(--border); border-radius:10px; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; color:var(--ink-light); font-size:11px; cursor:pointer; background:var(--rice-light); gap:3px;}
+.ph-add .big { font-size:22px; line-height:1;}
+.ph-add:active { border-color:var(--cinnabar); color:var(--cinnabar); }
+.ph-th { width:76px; height:76px; border-radius:10px; background:linear-gradient(135deg,#efe6d8,#e0d3bf);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; font-size:10.5px; color:var(--ochre); gap:3px; position:relative;}
+.ph-th .x { position:absolute; top:2px; right:4px; color:#fff; background:rgba(0,0,0,.35); border-radius:50%;
+  width:16px; height:16px; font-size:10px; display:flex; align-items:center; justify-content:center;}
+
+/* 底部固定提交栏 */
+.submit-bar { position:fixed; bottom:0; left:50%; transform:translateX(-50%); width:100%; max-width:480px;
+  background:#fff; border-top:1px solid var(--border-light); padding:10px 14px; display:flex; gap:10px; z-index:60;}
+.submit-bar .btn { flex:1; padding:12px; font-size:15px; border-radius:11px;}
+.submit-bar .btn.ghost { flex:0 0 108px; }
+/* 签名条 */
+.sign-strip { display:flex; align-items:center; gap:8px; background:var(--rice-light); border:1px dashed var(--border);
+  border-radius:9px; padding:8px 11px; font-size:12px; color:var(--ink-muted); margin-top:10px;}
+.sign-strip .stamp { width:34px; height:34px; border:2px solid var(--rouge); border-radius:50%; color:var(--rouge); flex:none;
+  display:flex; align-items:center; justify-content:center; font-size:9px; transform:rotate(-10deg); font-weight:700; text-align:center; line-height:1.15;}
+.sign-strip b { color:var(--ink-text); }
+
+/* 弹窗 */
+.mask { position:fixed; inset:0; background:rgba(20,20,20,.45); z-index:100; display:none; align-items:flex-end; justify-content:center;}
+.mask.show { display:flex; }
+.modal { background:#fff; border-radius:16px 16px 0 0; width:100%; max-width:480px; max-height:86vh; overflow-y:auto; padding-bottom:12px;}
+.modal-h { padding:14px 16px 8px; display:flex; align-items:center; position:sticky; top:0; background:#fff;}
+.modal-h .t { font-weight:600; font-size:15px; }
+.modal-h .x { margin-left:auto; cursor:pointer; color:var(--ink-light); font-size:19px; padding:2px 6px;}
+.modal-b { padding:4px 16px 8px; }
+#toast { position:fixed; top:60px; left:50%; transform:translateX(-50%); z-index:200; display:flex; flex-direction:column; gap:8px; align-items:center; width:max-content; max-width:90vw;}
+.toast-item { background:var(--ink); color:#fff; padding:9px 16px; border-radius:20px; font-size:13px; animation:f .2s; text-align:center;}
+.toast-item.ok { background:var(--bamboo); } .toast-item.err { background:var(--rouge); }
+@keyframes f { from{opacity:0;transform:translateY(-6px);} to{opacity:1;} }
+
+/* 说明页 */
+.qa-item { border-left:3px solid var(--gold); background:var(--gold-light); border-radius:0 8px 8px 0; padding:9px 12px; margin-bottom:9px; font-size:13px;}
+.qa-item b { display:block; margin-bottom:2px; }
+.qa-item .rec em { color:var(--bamboo); font-style:normal; font-weight:600;}
+.flow-line { display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:12.5px;}
+.flow-node { border:1.5px solid var(--cinnabar); color:var(--cinnabar-deep); background:var(--cinnabar-light); border-radius:8px; padding:5px 11px; font-weight:600;}
+.flow-arrow { color:var(--ink-light); }
+.mt8{margin-top:8px}.mt12{margin-top:12px}
+.sec-t { font-weight:600; font-size:14px; margin:14px 0 8px; display:flex; align-items:center; gap:8px;}
+.sec-t .bar { width:3px; height:13px; background:var(--cinnabar); border-radius:2px;}
+.center { text-align:center; }
+</style>
+</head>
+<body>
+<!-- ============================================================
+     ⚠ 本原型已作废（2026-09-30）
+     磊哥判定「医院内诊疗 / 健康评估 / 处方 等原型全部不合格」。
+     仅留作反面参考，**不得作为开发依据**。
+     R46 将重新梳理流程后从零重做全新原型。
+     背景与缺口清单：仓库根 R46_医院收治流程_需求分析.md
+     ============================================================ -->
+<!-- ⚠ 横幅用 position:fixed 是**故意**的：不依赖 body 的 display 模式，
+     任何父布局下都稳定显示为顶部通栏。 -->
+<div style="position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#FCEBEB;color:#501313;border-bottom:2px solid #A32D2D;padding:8px 14px;box-sizing:border-box;font:500 13px/1.6 -apple-system,'PingFang SC','Microsoft YaHei',sans-serif;text-align:center">
+已作废原型 · 2026-09-30 判定「不合格」 · 仅留作反面参考，<b>不得作为开发依据</b> · 背景见仓库根 R46_医院收治流程_需求分析.md
+</div>
+<div class="phone">
+
+  <div class="topbar">
+    <div class="logo"><span class="dot"></span>爱心宠物医院</div>
+    <div class="crumb">收治 · 手机录入原型 <b>V3</b></div>
+    <div class="tag">评审用</div>
+  </div>
+
+  <!-- ======== 列表 ======== -->
+  <div class="wrap" id="view-list">
+    <div class="card" style="padding:11px 13px; display:flex; gap:8px; align-items:center;">
+      <span style="font-size:13px;color:var(--ink-muted);flex:none;">筛选</span>
+      <select style="flex:1;border:1px solid var(--border);border-radius:8px;padding:8px;font-size:13px;min-height:38px;">
+        <option>全部状态</option><option>待接诊</option><option>待出院</option><option>已出院</option></select>
+      <select style="flex:1;border:1px solid var(--border);border-radius:8px;padding:8px;font-size:13px;min-height:38px;">
+        <option>全部物种</option><option>猫</option><option>狗</option></select>
+    </div>
+
+    <div class="sec-t" style="margin-top:4px;"><span class="bar"></span>待接诊（转运到院）</div>
+    <div class="pet-item">
+      <div class="ico">🐈</div>
+      <div class="info"><div class="l1"><span class="code" style="color:var(--cinnabar-deep);font-family:ui-monospace,monospace;">TNR260928003</span><span class="badge b-wait">待接诊</span></div>
+        <div class="l2">猫 · 狸花猫 · 母 ｜ 转运 TRF260928-0142 ｜ 今晨到院</div></div>
+      <button class="btn btn-p btn-sm act" onclick="openSlip()">接诊开单</button>
+    </div>
+
+    <div class="sec-t"><span class="bar"></span>在院（已接诊）</div>
+    <div id="slip-list"></div>
+
+    <div class="sec-t"><span class="bar"></span>已出院（近 7 日）</div>
+    <div class="pet-item">
+      <div class="ico">🐈</div>
+      <div class="info"><div class="l1"><span style="font-family:ui-monospace,monospace;font-weight:600;">TNR260921002</span><span class="badge b-out">放回原小区</span></div>
+        <div class="l2">No 000012 · 2026-09-26 · 张兽医</div></div>
+      <span class="link act" style="font-size:13px;" onclick="toast('原型演示：查看处方签（只读）')">查看</span>
+    </div>
+
+    <div class="center mt12"><button class="btn btn-sm" onclick="showDoc()">📋 原型说明 & 待确认（4 条）</button></div>
+  </div>
+
+  <!-- ======== 处方签（手机录入） ======== -->
+  <div id="view-slip" style="display:none;">
+    <div class="wrap" style="padding-bottom:0;">
+      <div class="card" style="background:linear-gradient(135deg,var(--ink),var(--ink-blue)); color:#fff; border-radius:12px; padding:12px 14px;">
+        <div style="display:flex; align-items:center; gap:9px;">
+          <div style="width:40px;height:40px;border-radius:10px;background:rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;font-size:20px;flex:none;">🐈</div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:700;font-size:15px;font-family:ui-monospace,monospace;">TNR260928003</div>
+            <div style="font-size:12px;color:rgba(255,255,255,.65);">猫 · 狸花猫 · 母 ｜ 转运单 TRF260928-0142</div>
+          </div>
+          <div style="text-align:right;flex:none;">
+            <div style="font-size:10.5px;color:rgba(255,255,255,.6);">处方签号</div>
+            <div style="font-family:ui-monospace,monospace;font-size:13px;color:#F5C86A;" id="slip-no">2026-000013</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 基本信息 -->
+      <div class="card">
+        <div class="card-h"><span class="bar"></span>基本信息<span class="hint">灰底 = 自动带出</span></div>
+        <div class="card-b">
+          <div class="row2">
+            <div class="fld"><label>毛色</label><input type="text" placeholder="如：橘白"></div>
+            <div class="fld"><label>体重（kg）</label><input type="text" inputmode="decimal" placeholder="4.2"></div>
+          </div>
+          <div class="fld"><label>接诊时间<span class="auto">自动</span></label><input type="text" readonly value="" id="f-accept"></div>
+        </div>
+      </div>
+
+      <!-- 健康检查 -->
+      <div class="card">
+        <div class="card-h"><span class="bar"></span>健康检查<span class="hint">逐项填写，无异常可写「未见异常」</span></div>
+        <div class="card-b">
+          <div class="fld"><label>体温检测</label><input type="text" inputmode="decimal" placeholder="38.6 ℃，正常"></div>
+          <div class="fld"><label>常见病检查</label><input type="text" placeholder="未见异常"></div>
+          <div class="fld"><label>传染病检查</label>
+            <input type="text" placeholder="试纸检测阴性，未见异常">
+            <div class="ph-h" style="color:var(--rouge);">※ 填写异常时自动标记隔离并提示</div></div>
+          <div class="fld"><label>皮肤黏膜检查</label><input type="text" placeholder="被毛平顺，皮肤黏膜无异常"></div>
+          <div class="fld"><label>其它</label><input type="text" placeholder="选填"></div>
+          <div class="fld"><label>医嘱</label><textarea placeholder="处置建议与注意事项"></textarea></div>
+        </div>
+      </div>
+
+      <!-- 处置 -->
+      <div class="card">
+        <div class="card-h"><span class="bar"></span>今日处置<span class="hint">开启即录入，时间自动带出</span></div>
+        <div class="card-b" style="padding-top:4px;">
+
+          <div class="treat" id="tr-ster">
+            <div class="treat-h" onclick="toggleTreat('tr-ster')">
+              <span class="ic">✂️</span><span class="nm">绝育手术<small>开启后自动记录手术时间</small></span><span class="sw"></span>
+            </div>
+            <div class="treat-b">
+              <div class="fld"><label>手术时间<span class="auto">自动</span></label><input type="datetime-local" id="t-ster"></div>
+              <div class="fld"><label>手术记录（选填，术后补录亦可）</label><textarea style="min-height:56px;" placeholder="术式、术程简述"></textarea></div>
+            </div>
+          </div>
+
+          <div class="treat" id="tr-dew">
+            <div class="treat-h" onclick="toggleTreat('tr-dew')">
+              <span class="ic">💊</span><span class="nm">驱虫<small>药品下拉 · 固定一头份</small></span><span class="sw"></span>
+            </div>
+            <div class="treat-b">
+              <div class="fld"><label>驱虫药品</label>
+                <select><option value="">请选择…</option><option>超可信（体内外）一头份</option><option>海乐妙（体内外）一头份</option><option>大宠爱（体内外滴剂）一头份</option></select></div>
+              <div class="fld"><label>驱虫时间<span class="auto">自动</span></label><input type="datetime-local" id="t-dew"></div>
+            </div>
+          </div>
+
+          <div class="treat" id="tr-vac">
+            <div class="treat-h" onclick="toggleTreat('tr-vac')">
+              <span class="ic">💉</span><span class="nm">免疫<small>疫苗下拉 · 固定一头份 · 批号自动带出</small></span><span class="sw"></span>
+            </div>
+            <div class="treat-b">
+              <div class="fld"><label>疫苗</label>
+                <select onchange="vacChanged(this)"><option value="">请选择…</option><option>狂犬病灭活疫苗（锐必威）一头份</option><option>犬四联活疫苗（英特威）一头份</option><option>猫三联活疫苗（妙三多）一头份</option></select></div>
+              <div class="fld" id="vac-batch" style="display:none;"><label>批号 / 效期<span class="auto">自动带出</span></label>
+                <input type="text" readonly value=""></div>
+              <div class="fld"><label>免疫时间<span class="auto">自动</span></label><input type="datetime-local" id="t-vac"></div>
+            </div>
+          </div>
+
+          <div class="treat" id="tr-chip">
+            <div class="treat-h" onclick="toggleTreat('tr-chip')">
+              <span class="ic">📟</span><span class="nm">植入芯片<small>本院库存下拉 · 植入后自动绑档案</small></span><span class="sw"></span>
+            </div>
+            <div class="treat-b">
+              <div class="fld"><label>芯片号</label>
+                <select><option value="">请选择…</option><option>900129000345678（库存 12）</option><option>900129000345679（库存 12）</option></select></div>
+              <div class="fld"><label>植入时间<span class="auto">自动</span></label><input type="datetime-local" id="t-chip"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- 处方 -->
+      <div class="card">
+        <div class="card-h"><span class="bar"></span>处方<span class="hint">药品可直接输入名称</span></div>
+        <div class="card-b">
+          <div class="fld" style="margin-top:2px;"><textarea style="min-height:90px;" placeholder="处方内容（药品 / 用法）…&#10;固定一头份，无需记录数量"></textarea></div>
+        </div>
+      </div>
+
+      <!-- 照片 -->
+      <div class="card">
+        <div class="card-h"><span class="bar"></span>拍照留档<span class="hint">选传 · 点格子直接调起相机</span></div>
+        <div class="card-b">
+          <div class="ph-grid" id="ph-grid">
+            <div class="ph-add" onclick="addPhoto()"><span class="big">📷</span><span>拍照 / 相册</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 签名 -->
+      <div class="sign-strip">
+        <div class="stamp">诊疗<br>专用</div>
+        <div style="flex:1;">提交即完成：<b>张兽医</b>（执业兽医师 · 证号 220415001 自动）+ <b>机构电子章</b><br>
+        <span style="color:var(--ink-light);">编号锁定留痕 · 不可改 · 可打印归档</span></div>
+      </div>
+    </div>
+
+    <div class="submit-bar">
+      <button class="btn ghost" onclick="toast('原型演示：暂存草稿')">暂存草稿</button>
+      <button class="btn btn-p" onclick="submitSlip()">提交处方签</button>
+    </div>
+  </div>
+
+  <!-- ======== 说明页 ======== -->
+  <div id="view-doc" style="display:none;">
+    <div class="wrap">
+      <div class="card"><div class="card-b">
+        <div class="sec-t" style="margin-top:0;"><span class="bar"></span>流程（V3 手机版）</div>
+        <div class="flow-line">
+          <span class="flow-node">转运到院</span><span class="flow-arrow">→</span>
+          <span class="flow-node">接诊开单</span><span class="flow-arrow">→</span>
+          <span class="flow-node">手机一页填完（时间自动 · 药品下拉 · 拍照上传）</span><span class="flow-arrow">→</span>
+          <span class="flow-node">提交=签名+盖章+锁定</span><span class="flow-arrow">→</span>
+          <span class="flow-node">出院（下拉选去向）</span>
+        </div>
+        <div class="mt12" style="font-size:13px;">
+          <b>字段沿用纸质处方签</b>：动物种类/品种/体重/毛色/性别/转运单号/接诊时间、健康检查五项、医嘱、绝育手术时间、处方、驱虫/免疫（时间+药品）、兽医签字/证号/盖章。
+          <b>手机化改造</b>：① 纸单表格拆成竖排卡片；② 灰底字段自动带出零输入；③ 处置项做成开关行——开启才展开、时间自动、药品下拉；④ 拍照大按钮直接调起相机；⑤ 底部固定提交栏，单手可操作。
+        </div>
+      </div></div>
+      <div class="card"><div class="card-h"><span class="bar"></span>待确认（4 条）</div><div class="card-b">
+        <div class="qa-item"><b>Q1 · 芯片行是系统扩展（纸质单没有）</b><div class="rec">推荐：<em>保留</em>——政府台账与领养的硬要求。</div></div>
+        <div class="qa-item"><b>Q2 · 照片「选传」不强制</b><div class="rec">推荐：<em>选传</em>，巡检需要强制时可再配置。</div></div>
+        <div class="qa-item"><b>Q3 · 放回原小区需原捕捉点确认？</b><div class="rec">推荐：<em>要确认</em>（复用放归确认）；也可改为医院直接办结。</div></div>
+        <div class="qa-item"><b>Q4 · 处方签编号按机构独立流水、按年重置（2026-000013）</b><div class="rec">请确认。</div></div>
+      </div></div>
+      <div class="center"><button class="btn btn-sm" onclick="showList()">← 返回列表演示</button></div>
+    </div>
+  </div>
+
+  <!-- ======== 出院（底部弹层：下拉选去向） ======== -->
+  <div class="mask" id="m-outcome"><div class="modal">
+    <div class="modal-h"><span class="t">办理出院 · <span id="oc-code" style="font-family:ui-monospace,monospace;"></span></span><span class="x" onclick="closeM('m-outcome')">✕</span></div>
+    <div class="modal-b">
+      <div class="fld" style="margin-top:2px;">
+        <label>出院去向<span style="color:var(--rouge);"> *</span></label>
+        <select id="oc-select" onchange="pickDest(this.value)">
+          <option value="">请选择出院去向…</option>
+          <option>死亡 / 无害化</option>
+          <option>安乐死</option>
+          <option>主人领回</option>
+          <option>放回原小区</option>
+          <option>领养</option>
+        </select>
+      </div>
+      <div id="oc-extra" style="display:none;" class="mt12"></div>
+      <div id="oc-fields" style="display:none;" class="mt8"></div>
+    </div>
+    <div class="modal-b" style="display:flex;gap:10px;">
+      <button class="btn" style="flex:1;" onclick="closeM('m-outcome')">取消</button>
+      <button class="btn btn-p" style="flex:2; display:none;" id="oc-submit" onclick="submitOutcome()">提交出院</button>
+    </div>
+  </div></div>
+
+  <div id="toast"></div>
+</div>
+
+<script>
+const now = () => { const d=new Date(); const p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+const nowLocal = () => { const d=new Date(); const p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
+
+let seq = 13;
+const animals = [
+  { code:'TNR260925001', meta:'猫 · 狸花猫 · 母', trf:'TRF260925-0119', no:'2026-000010', status:'open' },
+  { code:'TNR260924004', meta:'猫 · 橘猫 · 公', trf:'TRF260924-0102', no:'2026-000009', status:'open' },
+];
+
+function renderList(){
+  const el = document.getElementById('slip-list'); el.innerHTML='';
+  animals.forEach(a=>{
+    const st = a.status==='done' ? '<span class="badge b-out">已出院</span>' : '<span class="badge b-slip">已开签 · 待出院</span>';
+    const ops = a.status==='done'
+      ? '<span class="link" style="font-size:13px;" onclick="toast(\'原型演示：查看处方签\')">查看</span>'
+      : '<button class="btn btn-p btn-sm" onclick="openOutcome(\''+a.code+'\')">办理出院</button>';
+    const div = document.createElement('div'); div.className='pet-item';
+    div.innerHTML = `<div class="ico">${a.code.endsWith('004')?'🐈':'🐕'}</div>
+      <div class="info"><div class="l1"><span style="font-family:ui-monospace,monospace;font-weight:600;">${a.code}</span>${st}</div>
+      <div class="l2">${a.meta} ｜ ${a.no}</div></div>
+      <div class="act" style="display:flex;gap:8px;align-items:center;">
+        <span class="link" style="font-size:13px;" onclick="toast('原型演示：查看/补录处方签')">查看</span>${ops}</div>`;
+    el.appendChild(div);
+  });
+}
+
+/* 视图切换 */
+function showList(){ ['view-slip','view-doc'].forEach(i=>document.getElementById(i).style.display='none');
+  document.getElementById('view-list').style.display='block'; renderList(); window.scrollTo(0,0); }
+function showDoc(){ ['view-list','view-slip'].forEach(i=>document.getElementById(i).style.display='none');
+  document.getElementById('view-doc').style.display='block'; window.scrollTo(0,0); }
+
+/* 开单 */
+function openSlip(){
+  document.getElementById('view-list').style.display='none';
+  document.getElementById('view-doc').style.display='none';
+  document.getElementById('view-slip').style.display='block';
+  document.getElementById('f-accept').value = now();
+  document.getElementById('slip-no').textContent = '2026-' + String(seq).padStart(6,'0');
+  window.scrollTo(0,0);
+}
+
+/* 处置开关行 */
+function toggleTreat(id){
+  const el = document.getElementById(id);
+  const turningOn = !el.classList.contains('on');
+  el.classList.toggle('on');
+  if (turningOn) { // 开启即自动带出时间
+    const t = el.querySelector('input[type=datetime-local]');
+    if (t && !t.value) t.value = nowLocal();
+  }
+}
+function vacChanged(sel){
+  const box = document.getElementById('vac-batch');
+  if (sel.value) { box.style.display='block';
+    box.querySelector('input').value = sel.value.includes('狂犬') ? 'R2607A · 有效期至 2027-07'
+      : sel.value.includes('四联') ? 'Q2605C · 有效期至 2027-05' : 'M2608B · 有效期至 2027-08'; }
+  else box.style.display='none';
+}
+
+/* 拍照 */
+let phN = 0;
+function addPhoto(){
+  phN++;
+  const names = ['入院状态','术前','术后','伤口特写','给药','芯片植入'];
+  const th = document.createElement('div'); th.className='ph-th';
+  th.innerHTML = `📷<span>${names[(phN-1)%names.length]}</span><span class="x" onclick="event.stopPropagation();this.parentElement.remove()">✕</span>`;
+  th.onclick = ()=>toast('原型演示：查看原图');
+  document.getElementById('ph-grid').insertBefore(th, document.querySelector('.ph-add'));
+  toast('已添加照片（真实系统：直接调起相机/相册）','ok');
+}
+
+/* 提交 */
+function submitSlip(){
+  toast('处方签已提交：张兽医签名 + 机构电子章 · 编号已锁定留痕','ok');
+  seq++;
+  setTimeout(showList, 500);
+}
+
+/* 出院 */
+let ocCode='';
+function openOutcome(code){
+  ocCode = code;
+  document.getElementById('oc-code').textContent = code;
+  document.getElementById('oc-select').value = '';
+  document.getElementById('oc-extra').style.display='none';
+  document.getElementById('oc-fields').style.display='none';
+  document.getElementById('oc-submit').style.display='none';
+  document.getElementById('m-outcome').classList.add('show');
+}
+function pickDest(d){
+  if (!d) { document.getElementById('oc-extra').style.display='none';
+    document.getElementById('oc-fields').style.display='none';
+    document.getElementById('oc-submit').style.display='none'; return; }
+  const F = {
+    '死亡 / 无害化': ['<div style="font-size:11.5px;color:var(--rouge);">※ 按规定无害化处理，禁止自行掩埋丢弃</div>',
+      ['死因（必填）','无害化方式 / 联单号']],
+    '安乐死': ['<div style="font-size:11.5px;color:var(--rouge);">※ 按规定备案 · 通知记录自动留痕</div>',
+      ['理由（无法救治依据）','药物与方法']],
+    '主人领回': ['<div style="font-size:12px;color:var(--bamboo);">✓ 黑名单自动校验通过（演示）· 与捕捉端领回单一致</div>',
+      ['主人姓名','身份证号','联系电话']],
+    '放回原小区': ['<div style="font-size:12px;color:var(--azurite);">ℹ️ 小区自动带出：樊城区中原路某小区（捕捉单）· 提交后推送原捕捉点确认放归（Q3）</div>', []],
+    '领养': ['<div style="font-size:12px;color:var(--bamboo);">✓ 芯片已植入 · 健康无隔离项 → 推送领养大厅上架</div>', []],
+  }[d];
+  document.getElementById('oc-extra').innerHTML = '<b style="font-size:13.5px;">去向：'+d+'</b>' + F[0];
+  const fields = F[1].map(n=>`<div class="fld"><label>${n}</label><input type="text"></div>`).join('');
+  document.getElementById('oc-fields').innerHTML = fields;
+  document.getElementById('oc-fields').style.display = fields ? 'block' : 'none';
+  document.getElementById('oc-extra').style.display='block';
+  document.getElementById('oc-submit').style.display='inline-flex';
+}
+function submitOutcome(){
+  const d = document.getElementById('oc-select').value;
+  if (!d) return toast('请先选择出院去向','err');
+  closeM('m-outcome');
+  const a = animals.find(x=>x.code===ocCode); if (a) a.status='done';
+  toast('已办理出院：' + d + ' · 状态变更并留痕','ok');
+  showList();
+}
+function closeM(id){ document.getElementById(id).classList.remove('show'); }
+function toast(msg, cls){ const t=document.createElement('div'); t.className='toast-item '+(cls||'');
+  t.textContent=msg; document.getElementById('toast').appendChild(t); setTimeout(()=>t.remove(),2800); }
+
+renderList();
+</script>
+</body>
+</html>

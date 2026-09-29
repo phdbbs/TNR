@@ -2167,6 +2167,19 @@ body {
 </style>
 </head>
 <body>
+<!-- ============================================================
+     ⚠ 本原型已作废（2026-09-30）
+     磊哥判定「医院内诊疗 / 健康评估 / 处方 等原型全部不合格」。
+     仅留作反面参考，**不得作为开发依据**。
+     R46 将重新梳理流程后从零重做全新原型。
+     背景与缺口清单：仓库根 R46_医院收治流程_需求分析.md
+     ============================================================ -->
+<!-- ⚠ 横幅用 position:fixed 是**故意**的：本页 body 在桌面预览下是
+     `display:flex; justify-content:center`，普通块级 div 会变成 flex 子项
+     被挤成一列竖条，横幅就看不见了。fixed 脱离文档流，与父布局无关。 -->
+<div style="position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#FCEBEB;color:#501313;border-bottom:2px solid #A32D2D;padding:8px 14px;box-sizing:border-box;font:500 13px/1.6 -apple-system,'PingFang SC','Microsoft YaHei',sans-serif;text-align:center">
+已作废原型 · 2026-09-30 判定「不合格」 · 仅留作反面参考，<b>不得作为开发依据</b> · 背景见仓库根 R46_医院收治流程_需求分析.md
+</div>
 
 <div class="phone">
   <div class="appbar">
