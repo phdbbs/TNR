@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime, time, timedelta
 
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -549,18 +550,46 @@ def generate_pet_codes(count, year=None):
 
 
 def generate_ledger_no(prefix):
-    """生成台账编号。
+    """生成台账编号（旧格式）。
 
-    格式: prefix + '-' + YYMMDD + '-' + SSS(3位随机)
+    格式: prefix + '-' + YYMMDD + '-' + SSS(4位随机)
     示例: CAP-250101-001
 
-    :param prefix: 前缀，如 CAP/TRF/TRE 等
-    :return: 台账编号字符串
+    ⚠ 新代码请用 `generate_doc_no()`：顺序流水、打印归档可数、不会重号。
+    本函数仅为历史兼容保留。
     """
     # 同 generate_pet_codes：用本地日期，否则凌晨生成的单号会退到前一天
     date_str = timezone.localdate().strftime('%y%m%d')
     rand = f'{random.randint(0, 9999):04d}'
     return f'{prefix}-{date_str}-{rand}'
+
+
+def generate_doc_no(prefix, when=None):
+    """生成单据号：`{类型码}{YY}{5位流水}`，如 CAP2600001。
+
+    - 全市统一按「类型码 + 年份」递增（`DocumentSequence` 计数器，
+      事务 + 行锁取号，并发下不重号）；
+    - 无横线（手机录入/播报友好）、5 位流水（年单量 ≤ 99999 足够）；
+    - `when` 供迁移/补录场景指定业务年份，默认取当前时间。
+    """
+    from business.models import DocumentSequence
+
+    d = when or timezone.now()
+    yy = d.year % 100
+    for attempt in range(3):  # 并发首建撞唯一约束时重试
+        try:
+            with transaction.atomic():
+                seq = (DocumentSequence.objects.select_for_update()
+                       .filter(prefix=prefix, year=yy).first())
+                if seq is None:
+                    seq = DocumentSequence(prefix=prefix, year=yy, last_no=0)
+                seq.last_no += 1
+                seq.save()
+                return f'{prefix}{yy:02d}{seq.last_no:05d}'
+        except IntegrityError:
+            if attempt == 2:
+                raise
+    raise RuntimeError('unreachable')
 
 
 # ============================================

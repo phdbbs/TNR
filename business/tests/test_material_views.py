@@ -6,6 +6,7 @@ from django.utils import timezone
 from business.models import Chip, MaterialTransaction
 from business.services import get_hospital_stock
 from business.tests.base import (
+    assert_doc_no,
     BusinessTestBase, make_chip, make_hospital_txn, make_material,
 )
 
@@ -52,7 +53,7 @@ class PurchaseTest(BusinessTestBase):
         self.assertEqual(material.supplier, '国药')
         txn = MaterialTransaction.objects.get(id=body['data']['id'])
         self.assertEqual(txn.type, 'purchase')
-        self.assertTrue(txn.ledger_no.startswith('PUR-'))
+        assert_doc_no(self, txn.ledger_no, 'PUR')
 
     def test_purchase_new_material(self):
         self.login_as(self.shelter_user_a)
@@ -127,7 +128,7 @@ class DispatchTest(BusinessTestBase):
         txn = MaterialTransaction.objects.get(id=body['data']['id'])
         self.assertEqual(txn.type, 'dispatch')
         self.assertEqual(txn.hospital, self.hospital_a)
-        self.assertTrue(txn.ledger_no.startswith('DIS-'))
+        assert_doc_no(self, txn.ledger_no, 'DIS')
 
     def test_dispatch_insufficient_stock(self):
         material = self._material(stock=5)

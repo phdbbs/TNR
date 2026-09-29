@@ -64,7 +64,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928c"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928d"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -1602,7 +1602,16 @@ const GovPortal = {
 
     TNR_UI.drawer({
       title: '台账详情 · ' + ({ pet: '一宠一档', capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放归', adoption: '领养', material: '物料', euthanasia: '安乐死' }[tab] || tab),
-      body: bodyEl => { bodyEl.innerHTML = TNR_UI.renderDescList(items) + extraHtml; }
+      body: bodyEl => {
+        bodyEl.innerHTML = TNR_UI.renderDescList(items) + extraHtml;
+        /* 「全局台账中心」是政府端**归档打印**的落点：`r.business_type` 与后端
+           `views_print.DOC_SPECS` 的键**同名**（capture / transfer / treatment /
+           release / adoption / material / euthanasia），所以直接透传即可。
+           `pet` 是一宠一档（档案，不是单据），后端没有这个 doc key —— 故意不挂按钮。 */
+        if (tab !== 'pet') {
+          bodyEl.insertAdjacentHTML('beforeend', TNR_UI.printDocBtn(tab, r.id));
+        }
+      }
     });
     // 各阶段照片点击放大（与捕捉端「一宠一档」档案同一套交互）
     setTimeout(() => TNR_UI.bindPhotoZoom(document), 60);

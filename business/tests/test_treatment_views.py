@@ -4,6 +4,7 @@ from django.db.models import Max
 from business.models import Chip, MaterialTransaction, Treatment
 from business.services import get_hospital_stock
 from business.tests.base import (
+    assert_doc_no,
     BusinessTestBase, make_chip, make_hospital_txn, make_material, make_pet,
     make_user,
 )
@@ -29,7 +30,7 @@ class TreatmentCreateTest(BusinessTestBase):
         body = self.ok(self._create(pet, {'items': {}}))
         treatment = Treatment.objects.get(id=body['data']['id'])
         self.assertEqual(treatment.status, 'in_progress')
-        self.assertTrue(treatment.ledger_no.startswith('TRE-'))
+        assert_doc_no(self, treatment.ledger_no, 'TRE')
         self.assertEqual(treatment.hospital, self.hospital_a)
         self.assertEqual(treatment.pet_code, pet.code)
         pet.refresh_from_db()

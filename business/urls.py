@@ -9,6 +9,9 @@ from . import (
     views_release, views_adoption, views_checkin, views_euthanasia,
     views_portal,
 )
+# ⚠ 单据打印视图（`views_print`）**不在这里注册** —— 它返回整页 HTML，
+#   而本文件下所有路由都在 `/api/business/` 前缀里（契约 = JSON 信封）。
+#   注册点在 `tnr_system/urls.py` 的 `/print/<doc>/<pk>/`。
 
 app_name = 'business'
 

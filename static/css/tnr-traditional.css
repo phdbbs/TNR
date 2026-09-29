@@ -1017,6 +1017,16 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
   flex: 1;
 }
 
+/* 单据详情抽屉底部的「打印单据」操作行（第四十六轮：全局单据化）。
+   与正文用虚线隔开，右对齐 —— 抽屉里其它内容都是只读描述，只有这个是动作。 */
+.print-doc-row {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px dashed var(--border-light);
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* === 13. 标签页 === */
 .tabs {
   display: flex;

@@ -299,6 +299,9 @@ class MaterialTransaction(models.Model):
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     date = models.DateField('日期')
     ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    # 关联单据号：接收单指向其签收的下发单号；其他单据留空。
+    # 旧实现「接收单复用下发单号」无法区分两张单，也无法单独打印归档。
+    ref_no = models.CharField('关联单据号', max_length=50, blank=True, default='')
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='material_txns', verbose_name='所属区县')
     note = models.TextField('备注', blank=True, default='')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
@@ -670,3 +673,33 @@ class AdoptionHallListing(models.Model):
 
     def __str__(self):
         return f'上架 - {self.pet.code}'
+
+
+# ============================================
+# 单据号流水计数器
+# ============================================
+class DocumentSequence(models.Model):
+    """单据号计数器：每「类型码 + 年份」一支流水，全市统一递增。
+
+    单据号格式 `{类型码}{YY}{5位流水}`（如 CAP2600001），由
+    `business.services.generate_doc_no()` 在事务内取号 —— 本表只做
+    「发号到几号」的记账，不承载业务含义；单据号本身仍存在各业务单的
+    `ledger_no` 字段上。
+
+    ⚠ 与旧编号（`CAP-260925-0142` 日期+随机）的区别：新号是**顺序流水**，
+    打印归档时人眼可数「第几张单」，且取号在行锁内完成、不可能重号。
+    旧 `generate_ledger_no()` 保留仅为历史兼容，新代码一律用 `generate_doc_no()`。
+    """
+    prefix = models.CharField('单据类型码', max_length=8)
+    year = models.PositiveSmallIntegerField('年份（后两位）')
+    last_no = models.IntegerField('已发流水号', default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['prefix', 'year'], name='uniq_docseq_prefix_year'),
+        ]
+        verbose_name = '单据号计数器'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'{self.prefix}{self.year:02d} → {self.last_no:05d}'

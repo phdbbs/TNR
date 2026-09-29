@@ -18,6 +18,7 @@ from business.views_portal import (
     adopter_portal, adoption_hall_public, hospital_portal, shelter_portal,
     gov_portal, platform_portal,
 )
+from business.views_print import print_doc
 from core.http import is_api_request
 
 urlpatterns = [
@@ -30,6 +31,13 @@ urlpatterns = [
     path('adopter/hall/', adoption_hall_public, name='adoption_hall_public'),
     path('gov/', gov_portal, name='gov_home'),
     path('platform/', platform_portal, name='platform_home'),
+    # 单据打印（第四十六轮：全局单据化）。A4 版式 + 单据号大字 + 溯源二维码
+    # + 关联单据链 + 签字留白栏。
+    # ⚠ **故意不放在 `/api/` 下**：它返回整页 HTML，而 `/api/` 的契约是
+    #   「一律 JSON 信封」（`core/tests.py::AllApiRoutesContractTest` 会枚举
+    #   每条 `/api/` 路由并断言 `Content-Type: application/json`）。
+    #   挂进去会被闸门正确地拦下 —— 该改的是路由，不是闸门。
+    path('print/<str:doc>/<int:pk>/', print_doc, name='print_doc'),
     path('api/business/', include('business.urls')),
     path('api/supervision/', include('supervision.urls')),
 ]

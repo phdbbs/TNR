@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928c"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928d"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -3221,7 +3221,10 @@ const Shelter = {
       { label: '走失原因', value: esc(rec.reason || '—'), full: true },
       { label: '回收时间', value: TNR_UI.formatDateTime(rec.returnTime || rec.createdAt) },
       { label: '操作员', value: esc(rec.operatorName || '—') }
-    ]) + (photos.length ? '<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border-light);"><div style="font-weight:600;margin-bottom:8px;">捕捉时照片</div>' + photoHtml + '</div>' : '') });
+    ]) + (photos.length ? '<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border-light);"><div style="font-weight:600;margin-bottom:8px;">捕捉时照片</div>' + photoHtml + '</div>' : '')
+      /* 回收详情 = 「领回单」的落点。后端 DOC_SPECS 早就有 `owner_return`，
+         但前端一直没挂入口 —— 属于「后端写好了、界面没接」。 */
+      + TNR_UI.printDocBtn('owner_return', rec.id) });
   },
 
   /* 回收登记 - 填写回收单（回收单号、回收人姓名、手机号、住址、签字、走失原因、时间） */
@@ -4121,6 +4124,13 @@ const Shelter = {
     const esc = TNR_UI.escape.bind(TNR_UI);
     const items = [];
     let extra = '';
+    /* 台账页签 → 后端打印单据键（`business/views_print.py::DOC_SPECS`）。
+       ⚠ 两边必须同源：键写错后端回 404 缺页，不是静默失败，但用户只看到
+       「打不开」。`pets` 是动物档案、不是单据，故意不映射（不出打印按钮）。 */
+    const PRINT_DOC_KEY = {
+      captures: 'capture', transfers: 'transfer', treatments: 'treatment',
+      releases: 'release', adoptions: 'adoption', materials: 'material',
+    };
     if (tab === 'captures') {
       const byCode = this._petArchiveByCode();
       const chip = (c) => byCode[c]
@@ -4203,7 +4213,11 @@ const Shelter = {
         { label: '操作员', value: esc(rec.operatorName || '—') }
       );
     }
-    TNR_UI.drawer({ title: '单据详情', body: TNR_UI.renderDescList(items) + extra });
+    TNR_UI.drawer({
+      title: '单据详情',
+      body: TNR_UI.renderDescList(items) + extra
+        + TNR_UI.printDocBtn(PRINT_DOC_KEY[tab], rec.id)
+    });
     setTimeout(() => TNR_UI.bindPhotoZoom(document), 50);
   },
 

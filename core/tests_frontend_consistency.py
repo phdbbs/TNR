@@ -319,10 +319,48 @@ class ApiRouteCoverageTest(SimpleTestCase):
             + '\n  '.join(missing)
         )
 
+    def _route_matchers(self):
+        routes = self._backend_routes()
+        route_res = [self._route_regex(r) for r in routes]
+        # 去掉动态段后的字面量：`/api/business/print/{X}/{X}/` → `/api/business/print//`
+        route_prefixes = [re.sub(r'\{X\}', '', r) for r in routes]
+        return route_res, route_prefixes
+
+    @staticmethod
+    def _is_known(seg, route_res, route_prefixes):
+        """这个前端路径片段是否对应某个已注册路由。
+
+        两级判定：① 整体 `fullmatch`（写死的完整路径）；
+        ② 是某个路由**字面量的前缀**（参数化路径被截断后的形态）。
+        """
+        return (any(rx.fullmatch(seg) for rx in route_res)
+                or any(p.startswith(seg) for p in route_prefixes))
+
     def test_no_frontend_call_to_unknown_route(self):
-        """前端不得调用后端未注册的接口（会 404，表现为按钮「不生效」）。"""
+        """前端不得调用后端未注册的接口（会 404，表现为按钮「不生效」）。
+
+        ⚠ 归一化会**在第一个动态段处把路径截断**：取出片段用的字符类
+        `[A-Za-z0-9_/{}\\-.]` 不含标记符 `MARK`（`\\x00`），所以
+        `` `/api/business/xxx/${id}/yyy/` `` 只能取出 `/api/business/xxx/`
+        这个**前缀**。原先只做 `fullmatch`，于是这个前缀能不能过关
+        **完全取决于它自己恰好是不是一个路由** ——
+        `/api/business/captures/` 恰好是列表接口，所以一直蒙混过关。
+
+        第四十六轮加单据打印时暴露了这个巧合：打印路径是
+        `/api/business/print/<doc>/<pk>/`，而 `/api/business/print/` 本身
+        不是路由 → 10 例**假红**。（顺带说明：那条打印路由本身后来被
+        移出了 `/api/` —— 它返回整页 HTML，违反了 `/api/` 的 JSON 契约，
+        是**真问题**，见 `tnr_system/urls.py`。两件事独立。）
+        这里改为「前缀必须能作为某个已注册路由的前缀」，
+        既保住「拼错路径根」的检出能力，又不再依赖巧合。
+
+        顺带说明 `seg.count(self.MARK)` 是个**恒为 0 的死条件** ——
+        片段由不含 `MARK` 的字符类取出，永远数不到标记符。保留它是因为
+        字符类一旦放宽（让片段跨过标记符）它就会开始生效，但那样会误伤
+        `` `.../${qs}` ``（`qs` 带 `?` 查询串）这类写法，所以**不动字符类**。
+        """
         sources = self._normalized_sources()
-        route_res = [self._route_regex(r) for r in self._backend_routes()]
+        route_res, route_prefixes = self._route_matchers()
 
         called = set()
         for text in sources.values():
@@ -333,12 +371,35 @@ class ApiRouteCoverageTest(SimpleTestCase):
         # 前缀本身（'/api/business/'）是 BASE 常量，不是调用目标
         called = {c for c in called if c.rstrip('/') not in
                   ('/api/business', '/api/supervision')}
-        unknown = sorted(
-            c for c in called if not any(rx.fullmatch(c) for rx in route_res))
+        unknown = sorted(c for c in called
+                         if not self._is_known(c, route_res, route_prefixes))
         self.assertFalse(
             unknown,
             '前端调用了后端未注册的接口，点击后会 404：\n  ' + '\n  '.join(unknown)
         )
+
+    def test_unknown_route_predicate_rejects_both_ways(self):
+        """反向对照：判据既不能假红、也不能宽到「一律通过」。
+
+        上面那条断言放宽成了「前缀匹配」—— 放宽本身有把闸门放松到
+        形同虚设的风险（`一律 return True` 也能让上一条变绿）。
+        所以这里成对地钉住两个方向。
+
+        ⚠ 用**手工构造**的路由表做纯谓词单测，**不引用真实 URLconf**：
+        真实路由会被增删，把某个具体路径写进断言就会变成
+        「改路由就红」的假警报（第四十六轮把打印路由移出 `/api/` 时，
+        第一版反向对照正是这样自己把自己写红了）。
+        """
+        route_res = [self._route_regex('/api/business/reports/{X}/')]
+        route_prefixes = ['/api/business/reports//']   # 动态段被抹掉后的字面量
+        # ① 参数化路径被截断后的**合法前缀** → 必须放行，否则假红
+        self.assertTrue(
+            self._is_known('/api/business/reports/', route_res, route_prefixes),
+            '合法前缀被判成未知路由 —— 会产生假红')
+        # ② 拼错的路径根 → 必须照样被拒，否则闸门失效
+        self.assertFalse(
+            self._is_known('/api/business/reportzzz/', route_res, route_prefixes),
+            '拼错的路径根没被拦住 —— 闸门失效')
 
 
 class CaptureDistrictDefaultTest(SimpleTestCase):
@@ -1473,6 +1534,73 @@ class BusinessFlowEntryPointTest(SimpleTestCase):
             missing,
             '以下业务环节在所有门户模板里都找不到调用入口（流程不可达）：\n  '
             + '\n  '.join(missing))
+
+
+# ============================================================
+# 单据打印入口：DOC_SPECS 里每个单据类型都必须有界面入口
+# ============================================================
+#
+# 第四十六轮「全局单据化」给 8 类单据都做了 A4 打印视图
+# （`business/views_print.py` + `templates/print/doc.html`），
+# 但**打印功能前端零入口**：按钮不在任何页面上，用户根本不知道有这功能。
+#
+# 这与 `FLOW_ENTRY_POINTS` 是同一类缺陷（接口/页面写好了、界面没接），
+# 区别是这次缺的是「读」而不是「写」—— 更难被发现：
+# 一个**不存在**的功能，没人会来报告「打不开」。
+# 而且后端 `DOC_SPECS` 是「枚举值」的典型形态：加一个键只改一行，
+# 忘了挂入口不会有任何报错，只有真的去点才发现没有按钮。
+#
+# 所以这里**不写死单据清单**，直接从 `DOC_SPECS` 解析键名 ——
+# 以后新增单据类型忘了挂入口，这条用例会自己亮。
+#
+# 前端有**三种**挂载写法，都要认（只认第一种会漏掉另外两种）：
+#   1. 字面量：`printDocBtn('treatment', t.id)`（医院端）
+#   2. 映射表：`PRINT_DOC_KEY = { captures: 'capture', ... }`（捕捉端台账页签）
+#   3. 动态透传：`printDocBtn(tab, r.id)`，`tab` 取自 `r.business_type`，
+#      合法取值就在抽屉标题那张表里（政府端全局台账中心）
+PRINT_DOC_BTN = re.compile(r"printDocBtn\(\s*'([a-z_]+)'")
+PRINT_DOC_MAP = re.compile(r"PRINT_DOC_KEY\s*=\s*\{([^}]*)\}", re.S)
+PRINT_DOC_MAP_VAL = re.compile(r":\s*'([a-z_]+)'")
+GOV_LEDGER_TITLE = re.compile(r"台账详情 · ' \+ \((\{[^}]*\})\[tab\]")
+DOC_SPEC_KEY = re.compile(r"^    '([a-z_]+)': \{", re.M)
+
+
+class PrintEntryPointTest(SimpleTestCase):
+    """`views_print.DOC_SPECS` 的每个单据类型都必须能在界面上点到「打印」。"""
+
+    def test_every_doc_spec_has_a_print_entry(self):
+        keys = sorted(set(DOC_SPEC_KEY.findall(read('business/views_print.py'))))
+        self.assertGreaterEqual(
+            len(keys), 8, '没从 DOC_SPECS 解析到单据键 —— 解析逻辑失效了')
+
+        used = set()
+        for rel in PORTALS.values():
+            src = read(rel)
+            used |= set(PRINT_DOC_BTN.findall(src))
+            for body in PRINT_DOC_MAP.findall(src):
+                used |= set(PRINT_DOC_MAP_VAL.findall(body))
+            for body in GOV_LEDGER_TITLE.findall(src):
+                used |= set(re.findall(r"(\w+)\s*:", body))
+
+        missing = [k for k in keys if k not in used]
+        self.assertEqual(
+            missing, [],
+            '以下单据类型后端有打印视图、但**界面上没有任何入口**'
+            '（用户看不到「打印」按钮 = 功能等于不存在）：\n  '
+            + '\n  '.join(missing)
+            + '\n（已挂载：' + ', '.join(sorted(used)) + '）')
+
+    def test_print_button_is_wired_in_both_ends(self):
+        """打印入口不能只挂一个端。
+
+        `printDocBtn` 由 `tnr-common.js` 提供，**所有门户都能用**。
+        捕捉端负责台账归档、政府端负责监管归档 —— 只挂一端时，
+        另一端的工作人员会觉得「这系统没有打印」。
+        """
+        for name in ('shelter', 'gov'):
+            self.assertIn(
+                'printDocBtn', read(PORTALS[name]),
+                f'{name} 门户没有任何打印入口（单据打印在该端不可达）')
 
 
 

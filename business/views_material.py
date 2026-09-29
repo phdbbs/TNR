@@ -17,7 +17,7 @@ from business.models import Material, MaterialTransaction, Chip
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
-    generate_ledger_no, get_district_filtered_queryset,
+    generate_doc_no, get_district_filtered_queryset,
     adjust_stock, get_hospital_stock,
     get_own_institution_object, parse_int_param,
     # 第四十五轮：市级捕捉点 + 机构库存
@@ -252,7 +252,7 @@ def purchase_create(request):
             batch_no=body_str(data, 'batch_no'),
             from_to=body_str(data, 'supplier'),
             note=body_str(data, 'note', '采购入库'),
-            ledger_no=generate_ledger_no('PUR'),
+            ledger_no=generate_doc_no('PUR'),
             district_id=district_id,
         )
 
@@ -407,7 +407,7 @@ def dispatch_create(request):
             operator_name=user.get_full_name() or user.username,
             from_to=target.name,
             note=note,
-            ledger_no=generate_ledger_no('DIS'),
+            ledger_no=generate_doc_no('DIS'),
             district_id=material.district_id,
         )
     except ValueError as e:
@@ -447,12 +447,15 @@ def material_receive(request, pk):
     if txn is None:
         return json_fail('下发记录不存在或无权访问', status=404)
 
-    # 检查是否已签收（避免重复签收）
+    # 检查是否已签收（避免重复签收）。
+    # ⚠ 关联判据用 `ref_no`：接收单自第四十六轮起有**独立**的 RCV 单号，
+    #   与下发单的关联靠 `ref_no` 指向下发单号 —— 旧实现「复用下发单号」
+    #   两张单无法区分，也不能单独打印归档。
     already_received = MaterialTransaction.objects.filter(
         material=txn.material,
         hospital=txn.hospital,
         type='receive',
-        ledger_no=txn.ledger_no,
+        ref_no=txn.ledger_no,
     ).exists()
     if already_received:
         return json_fail('此物料已签收')
@@ -479,7 +482,8 @@ def material_receive(request, pk):
             from_to=txn.from_to or '捕捉点下发',
             batch_no=txn.batch_no,
             supplier=txn.supplier,
-            ledger_no=txn.ledger_no,  # 复用原 dispatch 单号，便于关联
+            ledger_no=generate_doc_no('RCV'),  # 接收单独立单号，打印归档可数
+            ref_no=txn.ledger_no,  # 关联下发单号（单据链：DIS → RCV）
             # 归属区县按**接收机构**推导，不沿用发起方的（第四十五轮起
             # 跨区县下发是允许的）：甲区发到乙区医院，这条签收记录发生在
             # 乙区，沿用甲区会让乙区政府的台账里看不到本院入库。
@@ -573,7 +577,7 @@ def stock_adjustment(request):
             operator_name=user.get_full_name() or user.username,
             from_to=hospital.name if hospital else '捕捉点',
             note=data.get('reason', '库存异动'),
-            ledger_no=generate_ledger_no('ADJ'),
+            ledger_no=generate_doc_no('ADJ'),
             district_id=material.district_id,
         )
     except ValueError as e:

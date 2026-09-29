@@ -13,7 +13,7 @@ from business.models import Transfer, Pet, Capture
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int, body_list,
-    generate_ledger_no, get_district_filtered_queryset,
+    generate_doc_no, get_district_filtered_queryset,
     resolve_district_scope, recalc_capture_status, get_scoped_object,
     busy_transfer_codes, inactive_institution_error,
     get_own_institution_object, is_city_shelter,
@@ -263,7 +263,7 @@ def transfer_create(request):
             note=item.get('note') or body_str(data, 'note') or '',
             operator=user,
             operator_name=user.get_full_name() or user.username,
-            ledger_no=generate_ledger_no('TRF'),
+            ledger_no=generate_doc_no('TRF'),
             district_id=district_id,
         )
 

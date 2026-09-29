@@ -16,7 +16,7 @@ from business.models import Treatment, Pet, Material, Chip
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_int, body_dict,
-    generate_ledger_no, get_district_filtered_queryset,
+    generate_doc_no, get_district_filtered_queryset,
     adjust_stock, use_chip, get_hospital_stock,
     get_active_pet, get_scoped_object, expired_material_error,
     find_hospital_chip_material,
@@ -175,7 +175,7 @@ def treatment_create(request):
             status=status,
             operator=user,
             operator_name=user.get_full_name() or user.username,
-            ledger_no=generate_ledger_no('TRE'),
+            ledger_no=generate_doc_no('TRE'),
             district_id=district_id,
         )
 

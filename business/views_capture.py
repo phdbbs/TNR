@@ -17,7 +17,7 @@ from business.models import Capture, Pet, OwnerReturn
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
-    generate_pet_codes, generate_ledger_no, get_district_scope,
+    generate_pet_codes, generate_doc_no, get_district_scope,
     get_district_filtered_queryset, check_blacklist, amap_regeo,
     amap_ip_location, client_ip, capture_transfer_state, capture_states_bulk,
     recalc_capture_status, get_active_pet, validate_uploaded_images,
@@ -569,7 +569,7 @@ def capture_create(request):
             status='pending',  # 新建捕捉单尚未转运，状态由转运情况自动推导
             operator=request.user,
             operator_name=request.user.get_full_name() or request.user.username,
-            ledger_no=generate_ledger_no('CAP'),
+            ledger_no=generate_doc_no('CAP'),
         )
 
         # 处理合照上传
@@ -960,7 +960,7 @@ def owner_return_create(request, pk=None):
         signature=body_str(data, 'signature'),
         operator=request.user,
         operator_name=request.user.get_full_name() or request.user.username,
-        ledger_no=generate_ledger_no('RET'),
+        ledger_no=generate_doc_no('RET'),
         district=district,
     )
 

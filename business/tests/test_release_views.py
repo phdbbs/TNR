@@ -1,6 +1,7 @@
 """放归闭环视图测试。"""
 from business.models import Release
 from business.tests.base import (
+    assert_doc_no,
     BusinessTestBase, make_capture, make_institution, make_pet,
 )
 
@@ -23,7 +24,7 @@ class ReleaseCreateTest(BusinessTestBase):
         release = Release.objects.get(id=body['data']['id'])
         self.assertEqual(release.status, 'pending')
         self.assertEqual(release.community, self.community_a)
-        self.assertTrue(release.ledger_no.startswith('REL-'))
+        assert_doc_no(self, release.ledger_no, 'REL')
         pet.refresh_from_db()
         self.assertEqual(pet.status, 'in_treatment', '确认放归前状态不变')
 

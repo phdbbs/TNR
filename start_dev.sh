@@ -48,11 +48,13 @@ PY="$VENV/bin/python"
 
 # === 2. 安装依赖 ===
 # 开发环境使用 sqlite3，mysqlclient 仅生产部署需要，这里跳过
-if ! "$PY" -c "import django" 2>/dev/null; then
+# ⚠ 探测要覆盖**全部**必需包：第四十六轮加了 qrcode（单据打印的溯源二维码），
+#   只探 django 的话，老 venv 会走「已就绪，跳过安装」→ 打印页 import 崩。
+if ! "$PY" -c "import django, qrcode" 2>/dev/null; then
     echo "[2/4] 安装依赖..."
     "$VENV/bin/pip" install -q --upgrade pip
     "$VENV/bin/pip" install -q Django==5.0.6 djangorestframework==3.15.1 \
-        Pillow==12.3.0 python-dotenv==1.0.1 django-q2==1.6.2 gunicorn==22.0.0
+        Pillow==12.3.0 qrcode==8.2 python-dotenv==1.0.1 django-q2==1.6.2 gunicorn==22.0.0
 else
     echo "[2/4] 依赖已就绪，跳过安装"
 fi

@@ -20,7 +20,7 @@ from business.models import (
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
-    generate_ledger_no, get_district_filtered_queryset,
+    generate_doc_no, get_district_filtered_queryset,
     check_blacklist, get_active_pet, get_scoped_object,
     pet_has_pending_release, pet_has_active_adoption,
     validate_uploaded_images,
@@ -263,7 +263,7 @@ def adoption_register(request):
         adopted_at=adopted_at,
         operator=user,
         operator_name=user.get_full_name() or user.username,
-        ledger_no=generate_ledger_no('ADP'),
+        ledger_no=generate_doc_no('ADP'),
         district_id=district_id,
     )
 

@@ -1580,5 +1580,48 @@ const TNR_UI = {
     return this.delegateClick(container || document, {
       'data-zoom': (url) => this.photoZoom(url)
     }, 'PhotoZoom');
+  },
+
+  /* ============ 单据打印（第四十六轮：全局单据化） ============
+   *
+   * 「打印单据」按钮 → 新窗口打开该单据的 A4 打印页
+   * （`/print/<doc>/<pk>/`，页面自带「打印 / 另存 PDF」）。
+   *
+   * ⚠ 打印页**不在 `/api/` 下** —— 它返回整页 HTML，而 `/api/` 的契约是
+   * JSON 信封（`core/tests.py::AllApiRoutesContractTest` 会枚举每条 `/api/`
+   * 路由并断言 `Content-Type: application/json`）。见 `tnr_system/urls.py`。
+   *
+   * `doc` 取值必须与后端 `business/views_print.py::DOC_SPECS` 的键一致：
+   * capture / transfer / owner_return / release / adoption /
+   * euthanasia / treatment / material。
+   * 传错键后端会回 404 页面（`print/doc_missing.html`），不会静默失败。
+   */
+  printDocBtn(doc, id, label) {
+    if (!doc || id === null || id === undefined || id === '') return '';
+    this._bindPrintDoc();
+    /* URL 用**模板字符串**写（与 `tnr-api.js` 一致），不要用 `'a' + x + 'b'` 拼接：
+       `core/tests_frontend_consistency.py::ApiRouteCoverageTest` 会把两种写法都归一化成
+       「路径 + 标记符」，但拼接式在归一化后**只在第一个动态段处截断**，前缀是否被判为
+       合法路由全靠巧合。
+       ⚠ 路径**不在 `/api/` 下**：打印页是整页 HTML，而 `/api/` 的契约是 JSON 信封
+       （详见 `tnr_system/urls.py` 里 `print_doc` 那一段的注释）。 */
+    const url = `/print/${doc}/${id}/`;
+    return '<div class="print-doc-row">'
+      + '<button class="btn btn-primary btn-sm" data-print-doc="' + url + '">🖨 '
+      + this.escape(label || '打印单据') + '</button></div>';
+  },
+
+  /* 抽屉是 append 到 `document.body` 的，容器级委托接不到它，
+     所以打印委托必须绑在 **document** 上，且只绑一次（防重复弹窗）。 */
+  _bindPrintDoc() {
+    if (this.__printDocBound) return;
+    this.__printDocBound = true;
+    document.addEventListener('click', (e) => {
+      const btn = (e.target && e.target.closest)
+        ? e.target.closest('[data-print-doc]') : null;
+      if (!btn) return;
+      e.stopPropagation();   // 别让外层委托把同一次点击再当成别的动作
+      window.open(btn.getAttribute('data-print-doc'), '_blank', 'noopener');
+    });
   }
 };

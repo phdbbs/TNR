@@ -5,6 +5,7 @@ from business.models import (
     Blacklist, Release,
 )
 from business.tests.base import (
+    assert_doc_no,
     BusinessTestBase, make_institution, make_pet,
 )
 
@@ -57,7 +58,7 @@ class AdoptionRegisterTest(BusinessTestBase):
         body = self.ok(self.post_json(self.URL, self._payload(pet)))
         adoption = Adoption.objects.get(id=body['data']['id'])
         self.assertEqual(adoption.status, 'pending_claim')
-        self.assertTrue(adoption.ledger_no.startswith('ADP-'))
+        assert_doc_no(self, adoption.ledger_no, 'ADP')
 
         pet.refresh_from_db()
         self.assertEqual(pet.status, 'pending_claim')

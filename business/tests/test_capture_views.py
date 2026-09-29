@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from business.models import Capture, OwnerReturn, Pet, Transfer
 from business.tests.base import (
+    assert_doc_no,
     BusinessTestBase, make_capture, make_district, make_image_file,
     make_institution, make_pet, make_user,
 )
@@ -156,7 +157,7 @@ class CaptureCreateTest(BusinessTestBase):
         capture = Capture.objects.get(id=body['data']['capture']['id'])
         # 新建捕捉单尚未提交转运，状态应为「待转运」而非一律「已完成」
         self.assertEqual(capture.status, 'pending')
-        self.assertTrue(capture.ledger_no.startswith('CAP-'))
+        assert_doc_no(self, capture.ledger_no, 'CAP')
         self.assertEqual(capture.shelter, self.shelter_a)
         self.assertEqual(capture.pet_count, 2)
 
@@ -367,7 +368,7 @@ class OwnerReturnTest(BusinessTestBase):
     def test_success(self):
         pet = make_pet(district=self.district_a)
         body = self.ok(self._register(pet))
-        self.assertTrue(body['data']['ledger_no'].startswith('RET-'))
+        assert_doc_no(self, body['data']['ledger_no'], 'RET')
         pet.refresh_from_db()
         self.assertEqual(pet.status, 'owner_returned')
         record = OwnerReturn.objects.get(id=body['data']['id'])

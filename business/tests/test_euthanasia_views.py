@@ -1,6 +1,6 @@
 """安乐死处置视图测试。"""
 from business.models import Euthanasia
-from business.tests.base import BusinessTestBase, make_pet
+from business.tests.base import BusinessTestBase, assert_doc_no, make_pet
 
 URL = '/api/business/euthanasia/'
 
@@ -20,7 +20,7 @@ class EuthanasiaCreateTest(BusinessTestBase):
         record = Euthanasia.objects.get(id=body['data']['id'])
         self.assertEqual(record.hospital, self.hospital_a)
         self.assertFalse(record.body_received)
-        self.assertTrue(record.ledger_no.startswith('EUT-'))
+        assert_doc_no(self, record.ledger_no, 'EUT')
         pet.refresh_from_db()
         self.assertEqual(pet.status, 'euthanized')
 

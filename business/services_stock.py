@@ -342,6 +342,7 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
         operator_name=extra.get('operator_name', ''),
         date=today,
         ledger_no=extra.get('ledger_no', ''),
+        ref_no=extra.get('ref_no', ''),  # 接收单关联下发单号（第四十六轮单据链）
         district=district,
         note=extra.get('note', ''),
     )

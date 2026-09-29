@@ -1,7 +1,8 @@
 """转运拆分下发/签收/驳回/撤回视图测试。"""
 from business.models import Pet, Transfer
 from business.services import busy_transfer_codes, capture_transfer_state
-from business.tests.base import (BusinessTestBase, make_capture, make_institution,
+from business.tests.base import (
+    assert_doc_no,BusinessTestBase, make_capture, make_institution,
                                  make_pet)
 
 TRANSFER_URL = '/api/business/transfers/'
@@ -25,7 +26,7 @@ class TransferCreateTest(BusinessTestBase):
         transfer = Transfer.objects.get(id=body['data'][0]['id'])
         self.assertEqual(transfer.status, 'pending')
         self.assertEqual(transfer.pet_count, 2)
-        self.assertTrue(transfer.ledger_no.startswith('TRF-'))
+        assert_doc_no(self, transfer.ledger_no, 'TRF')
 
         pet = pets[0]
         pet.refresh_from_db()

@@ -14,7 +14,7 @@ from business.models import Euthanasia, Pet
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
-    generate_ledger_no, get_district_filtered_queryset,
+    generate_doc_no, get_district_filtered_queryset,
     get_active_pet, get_scoped_object,
 )
 
@@ -99,7 +99,7 @@ def euthanasia_create(request):
         body_received=False,
         operator=user,
         operator_name=user.get_full_name() or user.username,
-        ledger_no=generate_ledger_no('EUT'),
+        ledger_no=generate_doc_no('EUT'),
         district_id=district_id,
     )
 

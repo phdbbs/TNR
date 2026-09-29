@@ -17,6 +17,19 @@ SEQ = {"district": 0, "institution": 0, "inst_code": 0, "user": 0, "pet": 0,
        "material": 0, "chip": 0, "capture": 0}
 
 
+def assert_doc_no(testcase, no, prefix):
+    """断言单据号符合新规则 `{前缀}{YY}{5位流水}`（如 CAP2600001）。
+
+    第四十六轮全局单据化：单据号 = 类型码 + 两位年 + 5 位顺序流水，
+    无横线（手机录入友好）；旧格式（日期+随机）已在 0023 迁移重排。
+    """
+    import re as _re
+
+    testcase.assertTrue(
+        _re.fullmatch(rf'{prefix}\d{{2}}\d{{5}}', no or ''),
+        f'单据号 {no!r} 不符合 {prefix}+YY+5位流水 规则')
+
+
 def make_image_file(name='photo.png', w=8, h=8, color=(200, 120, 80)):
     """返回一个**内容真实**的图片上传文件。
 

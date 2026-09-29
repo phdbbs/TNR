@@ -67,7 +67,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928c"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20260928d"></script>
 <script>
 /* ====================================================
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
@@ -981,7 +981,8 @@ const Hospital = {
         {label: '状态', value: this.treatmentStatusBadge(t.status)}
       ]) + '</div>';
 
-      TNR_UI.drawer({title: '诊疗记录详情 · ' + this.escape(t.pet_code), body: html});
+      TNR_UI.drawer({title: '诊疗记录详情 · ' + this.escape(t.pet_code),
+        body: html + TNR_UI.printDocBtn('treatment', t.id)});
     } catch (e) {
       TNR_UI.toast(e.message || '加载失败', 'danger');
     }
@@ -1627,7 +1628,8 @@ const Hospital = {
       {label: '操作人', value: this.escape(e.operator_name || '')},
       {label: '单据编号', value: this.escape(e.ledger_no || '')}
     ]) + '</div>';
-    TNR_UI.drawer({title: '安乐死处置详情 · ' + this.escape(e.pet_code), body: html});
+    TNR_UI.drawer({title: '安乐死处置详情 · ' + this.escape(e.pet_code),
+      body: html + TNR_UI.printDocBtn('euthanasia', e.id)});
   },
 
   /* ========== 7. 单据台账 ========== */
