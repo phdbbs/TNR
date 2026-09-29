@@ -3,9 +3,10 @@
 单据号规则：`{类型码}{YY}{5位流水}`（如 CAP2600001），全市统一按
 「类型码 + 年份」递增；打印页 = A4 版式 + 单据号 + 溯源二维码 + 关联单据链。
 """
+import os
 import re
 
-from django.test import Client
+from django.test import Client, SimpleTestCase
 from django.utils import timezone
 from datetime import datetime
 
@@ -15,6 +16,8 @@ from business.tests.base import (
     BusinessTestBase, assert_doc_no, make_capture, make_district, make_institution,
     make_material, make_pet, make_user,
 )
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class DocNumberRuleTest(BusinessTestBase):
@@ -44,6 +47,72 @@ class DocNumberRuleTest(BusinessTestBase):
         generate_doc_no('EUT')
         row = DocumentSequence.objects.get(prefix='EUT', year=timezone.now().year % 100)
         self.assertEqual(row.last_no, 1)
+
+    def test_unknown_prefix_rejected(self):
+        """未知类型码直接抛错 —— 不生成怪号。
+
+        单号是要印在纸上、写进档案的东西；错了比崩了更难查。
+        """
+        with self.assertRaises(ValueError):
+            generate_doc_no('ZZZ')
+
+
+class DocPrefixRegistryTest(SimpleTestCase):
+    """类型码清单：每个码都必须有**产生端**，且代码里不得出现表外的码。
+
+    针对的是一整类缺陷（见 `services.DOC_PREFIXES` 的注释）：
+    **枚举值存在、写入路径缺失** —— 消费端（列表 / 打印 / 统计）齐全、
+    产生端漏了，功能就是**空壳**：界面上永远空着，看起来像「暂时没有数据」，
+    不报任何错。`CON`（物料消耗）就是这么漏的：68 条消耗流水 66 条空号，
+    打印出来是「单据号：—」。
+
+    ⚠ 判据必须**从源码解析调用点**，不能只断言「清单里有 CON」——
+    后者在产生端被整段删掉时照样通过（典型假绿）。
+    ⚠ 扫描时**排除 `tests/` 与 `migrations/`**：测试里的调用点会让
+    「产生端存在」这一条恒真（测试文件自己就在调）。
+    """
+
+    @staticmethod
+    def _producer_corpus():
+        out = []
+        root = os.path.join(ROOT, 'business')
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in ('migrations', 'tests')]
+            for fn in filenames:
+                if fn.endswith('.py'):
+                    with open(os.path.join(dirpath, fn), encoding='utf-8') as f:
+                        out.append(f.read())
+        return '\n'.join(out)
+
+    def test_every_declared_code_has_a_producer(self):
+        from business.services import DOC_PREFIXES
+        produced = set(re.findall(r"generate_doc_no\(\s*'([A-Z]+)'",
+                                  self._producer_corpus()))
+        missing = sorted(set(DOC_PREFIXES) - produced)
+        self.assertEqual(
+            missing, [],
+            '以下类型码**声明了却没有产生端**（消费端有、写入路径缺失 = 空壳）：\n  '
+            + '\n  '.join('%s（%s）' % (k, DOC_PREFIXES[k]) for k in missing))
+
+    def test_no_code_outside_the_registry(self):
+        from business.services import DOC_PREFIXES
+        used = set(re.findall(r"generate_doc_no\(\s*'([A-Z]+)'",
+                              self._producer_corpus()))
+        unknown = sorted(used - set(DOC_PREFIXES))
+        self.assertEqual(
+            unknown, [],
+            '以下类型码在代码里取号、却不在 `DOC_PREFIXES` 里（清单漏了）：\n  '
+            + '\n  '.join(unknown))
+
+    def test_migration_prefix_map_is_a_subset(self):
+        """迁移里的类型码映射不得出现清单外的码。"""
+        from business.services import DOC_PREFIXES
+        with open(os.path.join(ROOT, 'business/migrations/0024_backfill_blank_doc_nos.py'),
+                  encoding='utf-8') as f:
+            src = f.read()
+        used = set(re.findall(r"'([A-Z]{3})'", src))
+        self.assertTrue(used, '没解析到迁移里的类型码 —— 解析逻辑失效了')
+        self.assertEqual(sorted(used - set(DOC_PREFIXES)), [])
 
 
 class ReceiveDocChainTest(BusinessTestBase):

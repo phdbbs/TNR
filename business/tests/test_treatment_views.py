@@ -62,8 +62,14 @@ class TreatmentCreateTest(BusinessTestBase):
         self.assertTrue(treatment.items_vaccine)
         self.assertEqual(treatment.vaccine_quantity, 2)
         self.assertEqual(get_hospital_stock(material, self.hospital_a), 8)
-        self.assertTrue(MaterialTransaction.objects.filter(
-            material=material, hospital=self.hospital_a, type='consume').exists())
+        txn = MaterialTransaction.objects.filter(
+            material=material, hospital=self.hospital_a, type='consume').first()
+        self.assertIsNotNone(txn)
+        # 消耗流水也必须有单号（`CON…`）。原实现三个 `adjust_stock` 调用点
+        # 都没传 `ledger_no` —— 于是消耗流水**一个号都没有**，打印出来是
+        # 「单据号：—」，归档时无法编号。而 `consume_prefix='CON'` 早在
+        # 平台端「编号规则」页就声明了（枚举值存在、写入路径缺失）。
+        assert_doc_no(self, txn.ledger_no, 'CON')
 
     def test_vaccine_out_of_stock_rejected(self):
         pet = self._pet()

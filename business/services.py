@@ -564,6 +564,34 @@ def generate_ledger_no(prefix):
     return f'{prefix}-{date_str}-{rand}'
 
 
+# 单据类型码的**唯一清单**。新增单据类型时必须同时做三件事：
+#   ① 加进这里；② 在**产生点**调用 `generate_doc_no('<码>')`；
+#   ③ 在 `business/views_print.py::DOC_SPECS` 里有对应的打印规格（或明确不打印）。
+#
+# ⚠ 这张表是「**枚举值存在、写入路径缺失**」那类缺陷的判据基础：
+#   只有消费端（列表 / 打印 / 统计）而没有产生端，功能就是**空壳** ——
+#   界面上永远空着，看起来像「暂时没有数据」，不会报任何错。
+#
+#   `CON`（物料消耗）就曾漏在表外：消耗流水由 `views_treatment` 经
+#   `adjust_stock(txn_type='consume')` **间接**写入，没人传 `ledger_no`，
+#   于是**一个号都没有** —— 打印出来是「单据号：—」，归档时无法编号。
+#   而 `consume_prefix='CON'` 早在平台端「编号规则」页就声明了。
+DOC_PREFIXES = {
+    'CAP': '捕捉单',
+    'TRF': '转运单',
+    'RET': '领回单',
+    'REL': '放归单',
+    'ADP': '领养单',
+    'EUT': '安乐死单',
+    'TRE': '诊疗单',
+    'PUR': '物料采购入库单',
+    'DIS': '物料下发单',
+    'RCV': '物料接收单',
+    'ADJ': '物料异动单',
+    'CON': '物料消耗记录',
+}
+
+
 def generate_doc_no(prefix, when=None):
     """生成单据号：`{类型码}{YY}{5位流水}`，如 CAP2600001。
 
@@ -571,8 +599,16 @@ def generate_doc_no(prefix, when=None):
       事务 + 行锁取号，并发下不重号）；
     - 无横线（手机录入/播报友好）、5 位流水（年单量 ≤ 99999 足够）；
     - `when` 供迁移/补录场景指定业务年份，默认取当前时间。
+
+    ⚠ 类型码必须在 `DOC_PREFIXES` 里。未知码**直接抛错**，不生成怪号 ——
+    单号是要印在纸上、写在档案上的东西，错了比崩了更难查。
     """
     from business.models import DocumentSequence
+
+    if prefix not in DOC_PREFIXES:
+        raise ValueError(
+            '未知单据类型码 %r；合法值：%s'
+            % (prefix, '/'.join(sorted(DOC_PREFIXES))))
 
     d = when or timezone.now()
     yy = d.year % 100

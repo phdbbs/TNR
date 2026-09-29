@@ -207,6 +207,7 @@ def treatment_create(request):
                     operator_name=user.get_full_name() or user.username,
                     from_to='诊疗消耗',
                     note=f'{pet.code} 疫苗接种',
+                    ledger_no=generate_doc_no('CON'),
                 )
 
         # 驱虫 - 消耗库存
@@ -227,6 +228,7 @@ def treatment_create(request):
                     operator_name=user.get_full_name() or user.username,
                     from_to='诊疗消耗',
                     note=f'{pet.code} 驱虫',
+                    ledger_no=generate_doc_no('CON'),
                 )
 
         # 芯片 - 绑定芯片并消耗芯片物料库存
@@ -248,6 +250,7 @@ def treatment_create(request):
                         operator_name=user.get_full_name() or user.username,
                         from_to='诊疗消耗',
                         note=f'{pet.code} 芯片植入 {chip_no}',
+                        ledger_no=generate_doc_no('CON'),
                     )
 
         treatment.save()
