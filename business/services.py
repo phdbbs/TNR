@@ -591,6 +591,47 @@ DOC_PREFIXES = {
     'CON': '物料消耗记录',
 }
 
+# 类型码 → 平台端「编号规则」配置键（`supervision.SYSTEM_CONFIG_DEFAULTS` 同源）。
+# 缺口的键在配置页补齐（owner_return / receive / adjustment），两侧必须一一对上。
+DOC_CONFIG_KEY = {
+    'CAP': 'capture_prefix',
+    'TRF': 'transfer_prefix',
+    'RET': 'owner_return_prefix',
+    'REL': 'release_prefix',
+    'ADP': 'adoption_prefix',
+    'EUT': 'euthanasia_prefix',
+    'TRE': 'treatment_prefix',
+    'PUR': 'purchase_prefix',
+    'DIS': 'dispatch_prefix',
+    'RCV': 'receive_prefix',
+    'ADJ': 'adjustment_prefix',
+    'CON': 'consume_prefix',
+}
+
+
+def _configured_prefix(code):
+    """解析平台端「编号规则」页对某类型码的**前缀覆盖**。
+
+    - 配置键见 `DOC_CONFIG_KEY`；没配置 / 值为空 / 不是 2~8 个大写字母
+      → 回退内置类型码；
+    - 任何读取异常都回退内置码：取号永远不能因配置表的问题而失败。
+
+    在此之前平台端「编号规则」页是**空壳**（能编辑、没有任何取号路径
+    读它，第四十六轮报告「缺陷二·需决策」）；本函数把它接进取号链路。
+    """
+    try:
+        from supervision.models import SystemConfig
+        key = DOC_CONFIG_KEY.get(code)
+        if not key:
+            return code
+        val = (SystemConfig.objects.filter(key=key)
+               .values_list('value', flat=True).first() or '').strip().upper()
+        if re.fullmatch(r'[A-Z]{2,8}', val):
+            return val
+    except Exception:
+        pass
+    return code
+
 
 def generate_doc_no(prefix, when=None):
     """生成单据号：`{类型码}{YY}{5位流水}`，如 CAP2600001。
@@ -602,6 +643,10 @@ def generate_doc_no(prefix, when=None):
 
     ⚠ 类型码必须在 `DOC_PREFIXES` 里。未知码**直接抛错**，不生成怪号 ——
     单号是要印在纸上、写在档案上的东西，错了比崩了更难查。
+
+    ⚠ 前缀可被平台端「编号规则」页覆盖（`_configured_prefix()`），
+    计数器按**实际使用的前缀**记账 —— 改前缀后新号从 00001 重新起排，
+    旧前缀的号不受影响。
     """
     from business.models import DocumentSequence
 
@@ -609,6 +654,7 @@ def generate_doc_no(prefix, when=None):
         raise ValueError(
             '未知单据类型码 %r；合法值：%s'
             % (prefix, '/'.join(sorted(DOC_PREFIXES))))
+    prefix = _configured_prefix(prefix)
 
     d = when or timezone.now()
     yy = d.year % 100

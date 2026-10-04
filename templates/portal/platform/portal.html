@@ -797,15 +797,18 @@ const PlatformPortal = {
         return;
       }
       const prefixes = [
-        { type: '捕捉记录', key: 'capture_prefix', example: 'CAP-2025-0110-001' },
-        { type: '转运记录', key: 'transfer_prefix', example: 'TRF-2025-0111-001' },
-        { type: '诊疗记录', key: 'treatment_prefix', example: 'TRE-2025-0115-001' },
-        { type: '放归记录', key: 'release_prefix', example: 'REL-2025-0124-001' },
-        { type: '领养记录', key: 'adoption_prefix', example: 'ADP-2025-0128-001' },
-        { type: '安乐死记录', key: 'euthanasia_prefix', example: 'EUT-2025-0120-001' },
-        { type: '物料采购', key: 'purchase_prefix', example: 'PUR-2025-0105-001' },
-        { type: '物料下发', key: 'dispatch_prefix', example: 'DIS-2025-0108-001' },
-        { type: '物料消耗', key: 'consume_prefix', example: 'CON-2025-0113-001' }
+        { type: '捕捉单', key: 'capture_prefix', example: 'CAP260001' },
+        { type: '转运单', key: 'transfer_prefix', example: 'TRF260001' },
+        { type: '领回单', key: 'owner_return_prefix', example: 'RET260001' },
+        { type: '放归单', key: 'release_prefix', example: 'REL260001' },
+        { type: '领养单', key: 'adoption_prefix', example: 'ADP260001' },
+        { type: '安乐死单', key: 'euthanasia_prefix', example: 'EUT260001' },
+        { type: '诊疗单', key: 'treatment_prefix', example: 'TRE260001' },
+        { type: '物料采购入库单', key: 'purchase_prefix', example: 'PUR260001' },
+        { type: '物料下发单', key: 'dispatch_prefix', example: 'DIS260001' },
+        { type: '物料接收单', key: 'receive_prefix', example: 'RCV260001' },
+        { type: '物料异动单', key: 'adjustment_prefix', example: 'ADJ260001' },
+        { type: '物料消耗记录', key: 'consume_prefix', example: 'CON260001' }
       ];
       el.innerHTML = `
         <div class="card">

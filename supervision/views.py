@@ -1471,15 +1471,22 @@ def operation_logs(request):
 #: 「读得到、写不进去」，用户点了保存界面还提示成功。
 SYSTEM_CONFIG_DEFAULTS = {
     'pet_code_prefix': 'TNR',
-    'ledger_no_format': 'PREFIX-YYMMDD-SSS',
+    # 第四十六轮：单据号格式改为 `{前缀}{YY}{5位流水}`（CAP2600001 式），
+    # 顺序流水、无横线；这里的值只是**格式说明文案**，供编号规则页展示。
+    'ledger_no_format': 'PREFIX-YY-SSSSS',
+    # 类型码 → 配置键的映射在 `business.services.DOC_CONFIG_KEY`，
+    # 取号侧经 `_configured_prefix()` 读这里的值 —— 编号规则页不再是空壳。
     'capture_prefix': 'CAP',
     'transfer_prefix': 'TRF',
-    'treatment_prefix': 'TRE',
+    'owner_return_prefix': 'RET',
     'release_prefix': 'REL',
     'adoption_prefix': 'ADP',
     'euthanasia_prefix': 'EUT',
+    'treatment_prefix': 'TRE',
     'purchase_prefix': 'PUR',
     'dispatch_prefix': 'DIS',
+    'receive_prefix': 'RCV',
+    'adjustment_prefix': 'ADJ',
     'consume_prefix': 'CON',
 }
 

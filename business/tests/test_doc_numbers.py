@@ -57,6 +57,36 @@ class DocNumberRuleTest(BusinessTestBase):
             generate_doc_no('ZZZ')
 
 
+class ConfiguredPrefixTest(BusinessTestBase):
+    """平台端「编号规则」页的前缀覆盖必须**真的**接到取号链路。
+
+    第四十六轮报告「缺陷二·需决策」：配置页可编辑前缀，但取号侧
+    零引用 —— 空壳。`_configured_prefix()` 是接点：改配置后新号必须
+    用新前缀、计数器按实际前缀记账；非法配置回退内置码。
+    """
+
+    def test_config_override_drives_prefix(self):
+        from supervision.models import SystemConfig
+        SystemConfig.objects.update_or_create(
+            key='capture_prefix', defaults={'value': 'XY'})
+        no = generate_doc_no('CAP')
+        self.assertTrue(no.startswith('XY26'), f'配置覆盖后应为 XY 前缀，实际 {no}')
+        # 计数器按实际前缀记账
+        self.assertTrue(
+            DocumentSequence.objects.filter(prefix='XY', year=26).exists())
+        # 恢复默认后回到 CAP 流水
+        SystemConfig.objects.filter(key='capture_prefix').delete()
+        assert_doc_no(self, generate_doc_no('CAP'), 'CAP')
+
+    def test_invalid_config_falls_back_to_builtin(self):
+        from supervision.models import SystemConfig
+        for bad in ['', 'x', 'TOOLONGPREFIX8', 'CAP-1']:
+            SystemConfig.objects.update_or_create(
+                key='capture_prefix', defaults={'value': bad})
+            assert_doc_no(self, generate_doc_no('CAP'), 'CAP')
+        SystemConfig.objects.filter(key='capture_prefix').delete()
+
+
 class DocPrefixRegistryTest(SimpleTestCase):
     """类型码清单：每个码都必须有**产生端**，且代码里不得出现表外的码。
 
