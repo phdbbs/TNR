@@ -7,7 +7,8 @@ from business.models import (
     Treatment,
 )
 from business.tests.base import (
-    BusinessTestBase, make_capture, make_institution, make_pet, make_user,
+    BusinessTestBase, make_capture, make_district, make_institution, make_pet,
+    make_user,
 )
 
 
@@ -100,6 +101,64 @@ class PortalApiTest(BusinessTestBase):
         self.login_as(self.hospital_user_a)
         data = self.ok(self.get_json('/api/business/pets/?status=released'))['data']
         self.assertEqual([p['id'] for p in data], [released.id])
+
+
+class CityShelterPetsScopeTest(BusinessTestBase):
+    """市级捕捉点的「待转运」可见范围（R46 收尾修复的回归钉）。
+
+    市级捕捉点挂在「全市（市级）」区县下，而它的捕捉单按**实际捕捉区县**
+    落区县（R45 Q2 口径）。`/api/business/pets/` 的 shelter 分支原先按
+    机构区县过滤 —— 市级操作员刚捕捉的外区动物从「待转运」里凭空消失
+    （2026-10-05 生产实测：bzd / CAP2600023 / TNR261005001，列表恒空）。
+    修后：市级捕捉点可见 = 本机构名下动物（∪ 机构区县兜底）；
+    区县级捕捉点口径不变。
+    """
+
+    def _city_fixtures(self):
+        city_district = make_district(name='全市样例', code='CS9', is_city=True)
+        city_shelter = make_institution(type='shelter', district=city_district)
+        user = make_user('cs_op', role='shelter',
+                         district=city_district, institution=city_shelter)
+        return city_district, city_shelter, user
+
+    def test_city_shelter_sees_own_cross_district_capture(self):
+        city_district, city_shelter, user = self._city_fixtures()
+        other_district = make_district(name='襄城样例', code='XC9')
+        # 市级捕捉点在别的小区捕捉：动物归属实际捕捉区县，shelter 是本机构
+        pet = make_pet(district=other_district, shelter=city_shelter,
+                       status='in_transit')
+        self.login_as(user)
+        data = self.ok(self.get_json('/api/business/pets/?status=in_transit'))['data']
+        self.assertIn(pet.id, [p['id'] for p in data],
+                      '市级捕捉点自己刚捕捉的外区动物必须出现在待转运')
+
+    def test_city_shelter_does_not_see_other_shelters_pets(self):
+        city_district, city_shelter, user = self._city_fixtures()
+        other_district = make_district(name='樊城样例', code='FC9')
+        other_shelter = make_institution(type='shelter', district=other_district)
+        make_pet(district=other_district, shelter=other_shelter,
+                 status='in_transit')
+        self.login_as(user)
+        data = self.ok(self.get_json('/api/business/pets/?status=in_transit'))['data']
+        self.assertEqual(data, [], '其他捕捉点的动物不得混进市级操作员的待转运备选')
+
+    def test_district_shelter_scope_unchanged(self):
+        city_district, city_shelter, _ = self._city_fixtures()
+        other_district = make_district(name='东津样例', code='DJ9')
+        third_district = make_district(name='南漳样例', code='NZ9')
+        district_shelter = make_institution(type='shelter', district=other_district)
+        district_user = make_user('ds_op', role='shelter',
+                                  district=other_district, institution=district_shelter)
+        # 区县捕捉点自己的动物（同区县、别家机构的动物按原口径也可见）
+        own = make_pet(district=other_district, shelter=district_shelter,
+                       status='in_transit')
+        # 市级捕捉点跨区县捕捉的动物（落在第三区县）：不进入区县捕捉点的待转运
+        make_pet(district=third_district, shelter=city_shelter,
+                 status='in_transit')
+        self.login_as(district_user)
+        data = self.ok(self.get_json('/api/business/pets/?status=in_transit'))['data']
+        self.assertIn(own.id, [p['id'] for p in data], '本区县动物照常可见')
+        self.assertEqual(len(data), 1, '区县口径不应变化')
 
     def test_hall_listings_adopter_sees_active_only(self):
         pet1 = make_pet(district=self.district_a, status='pending_adopt')

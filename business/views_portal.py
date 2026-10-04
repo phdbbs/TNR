@@ -18,7 +18,7 @@ from business.models import (
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     get_district_filtered_queryset, get_scoped_object, hospital_pet_scope,
-    pet_archive_records, pet_brief, pet_photo_list,
+    pet_archive_records, pet_brief, pet_photo_list, is_city_shelter,
 )
 
 
@@ -126,11 +126,22 @@ def hospital_pets(request):
         # 那样会返回**全市**宠物，备选框里混进其他区县的动物，用户点了「下发」必然
         # 被后端的跨区县校验拦下（"以下动物不属于本区县，无法转运"）——
         # 备选框里出现永远选不中的选项，比空列表更糟。
+        #
+        # ⚠ 市级捕捉点（第四十五轮）例外：它的捕捉单按**实际捕捉区县**归属
+        #   （R45 Q2 口径），机构自身挂在「全市（市级）」下 —— 若仍按机构区县
+        #   过滤，刚捕捉的外区动物会从「待转运」里凭空消失（2026-10-05 生产实测：
+        #   bzd 建单 CAP2600023 落襄城区，列表恒空）。可见范围 = 本机构名下的
+        #   动物（自己捕捉的，无论落在哪个区县）∪ 机构区县兜底；
+        #   ``transfer_create`` 侧的锚点解析（按动物所在区县）本就能接住这类单。
         inst = user.institution
-        if inst is not None and inst.district_id:
-            qs = Pet.objects.filter(district_id=inst.district_id, is_deleted=False)
-        else:
+        if inst is None or not inst.district_id:
             qs = Pet.objects.none()
+        elif is_city_shelter(inst):
+            qs = Pet.objects.filter(
+                Q(district_id=inst.district_id) | Q(shelter_id=inst.id),
+                is_deleted=False)
+        else:
+            qs = Pet.objects.filter(district_id=inst.district_id, is_deleted=False)
     else:
         qs = get_district_filtered_queryset(Pet, user).filter(is_deleted=False)
 
