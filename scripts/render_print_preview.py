@@ -1,7 +1,11 @@
 """把单据打印页的**真实渲染结果**落盘成 HTML，用于肉眼核对 A4 版式。
 
 用法：
-    .venv/bin/python scripts/render_print_preview.py [输出目录]
+    .venv/bin/python scripts/render_print_preview.py
+
+结果固定写到仓库内 `gui-test-screenshots/print_preview/`（已在 .gitignore，
+本地产物不入库）。不接受命令行指定输出目录 —— 单据内容来自真实库数据，
+落盘路径必须是脚本可控的固定位置，避免「参数拼路径」这类穿越面。
 
 为什么要有这个脚本
 ------------------
@@ -34,6 +38,25 @@ from django.test import Client                      # noqa: E402
 from accounts.models import User                    # noqa: E402
 from business.models import Capture, MaterialTransaction, Treatment, Transfer  # noqa: E402
 
+OUTDIR = os.path.join(ROOT, 'gui-test-screenshots', 'print_preview')
+
+
+def _write(filename, content):
+    """把渲染结果写入固定输出目录内的白名单文件名。
+
+    路径穿越守卫：无论 filename 将来怎么扩展，落盘目标 resolve 后
+    必须**仍在本脚本固定的 OUTDIR 内**，否则直接拒绝 —— 输出位置
+    永远不出这个目录。
+    """
+    import pathlib
+    base = pathlib.Path(OUTDIR).resolve()
+    target = (base / filename).resolve()
+    if base != target and base not in target.parents:
+        raise ValueError(f'非法输出路径：{filename}')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    return str(target)
+
 
 def _best_capture():
     """挑关联单据最多的捕捉单 —— 这样关联链区块也会被渲染出来。"""
@@ -49,7 +72,7 @@ def _best_capture():
 
 
 def main():
-    outdir = sys.argv[1] if len(sys.argv) > 1 else '/tmp'
+    os.makedirs(OUTDIR, exist_ok=True)
     user = (User.objects.filter(role='gov_city', is_active=True).first()
             or User.objects.filter(is_superuser=True).first())
     if user is None:
@@ -75,9 +98,7 @@ def main():
     written = []
     for doc, pk, name in jobs:
         resp = client.get('/print/%s/%s/' % (doc, pk))
-        path = os.path.join(outdir, 'print_preview_%s.html' % name)
-        with open(path, 'wb') as f:
-            f.write(resp.content)
+        path = _write('print_preview_%s.html' % name, resp.content)
         # 「单据号：—」= 这条单据没有号（归档时无法编号）—— 这是本脚本最该盯的一行
         blank_no = b'<td class="lbl">\xe5\x8d\x95\xe6\x8d\xae\xe5\x8f\xb7\xef\xbc\x9a</td><td>\xe2\x80\x94</td>' in resp.content
         print('  %-20s /print/%s/%s/  %s  %s  %s'
@@ -87,9 +108,7 @@ def main():
         written.append(path)
 
     resp = client.get('/print/nothing/1/')
-    path = os.path.join(outdir, 'print_preview_404.html')
-    with open(path, 'wb') as f:
-        f.write(resp.content)
+    path = _write('print_preview_404.html', resp.content)
     print('  %-20s /print/nothing/1/  %s（未知单据类型）' % ('404', resp.status_code))
     written.append(path)
 
