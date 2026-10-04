@@ -32,6 +32,7 @@ from business.models import (
     Adoption, Capture, CheckIn, Chip, Material, MaterialTransaction, Message,
     Pet, Release, Treatment,
 )
+from business.tests.base import assert_doc_no
 from core.models import District, Institution
 
 SEED_USERNAMES = [
@@ -562,26 +563,28 @@ class SeedMessageIdempotencyKeyTest(SeedDataTestBase):
 
 
 class SeedMaterialTxnIdempotencyKeyTest(SeedDataTestBase):
-    """种子物资流水的幂等键必须带**类型**。
+    """种子物资流水的幂等键必须是**业务身份**，不能是单据号。
 
-    `ledger_no` 本身就不唯一，这是业务设计而非缺陷：「下发」与「签收」是
-    同一张单的两条台账，运行时两边**共用同一个** `DIS-` 单号（签收行的
-    note 里写着「原单号：DIS-…」）。本地库实测：按 `ledger_no` 分组有
-    **21 组**重复，加上 `type` 之后只剩 **1 组**（`''` × 66，`consume`
-    消耗记录本来就没有台账编号）—— 21 组里绝大多数正是这种下发/签收配对。
+    第四十六轮全局单据化之前，种子的幂等键是硬编码的 `ledger_no`（加 type）；
+    单据号重排成新规则（PUR2600019 式）后旧号永远查不到 —— 用单号取键的
+    每次 `seed_data` 都会**重复建单**（2026-10-04 实测：重启一次就多出
+    16 条重复种子单）。现在的键 = (type, material, batch_no, date)。
 
-    只按 `ledger_no` 取键，种子里真配一对同号的下发/签收就会**静默少建一条**
-    （第二条被当成"已存在"跳过），而且不报错。
+    本用例钉住两条不变量：
+      ① 同物料同批次同日、但**类型不同**的既有行，不得吞掉种子该建的那条；
+      ② 被删掉的种子行重跑种子必须**补回来**，且拿的是新规则单号
+        （创建时现取，不是清单里硬编码的旧号）。
     """
 
-    def test_pre_existing_row_with_same_ledger_no_but_other_type(self):
+    def test_pre_existing_row_with_same_business_key_but_other_type(self):
         self.seed()
         seeded = MaterialTransaction.objects.get(
-            ledger_no='PUR-2025-0105-001', type='purchase')
+            type='purchase', material__name='狂犬疫苗',
+            batch_no='B20250101', date='2025-01-05')
 
-        # 模拟「同一单号、另一侧台账」的真实行
+        # 模拟「同物料同批次同日、但另一侧台账」的真实行（不同 type ≠ 同一条）
         MaterialTransaction.objects.create(
-            ledger_no=seeded.ledger_no, type='consume',
+            ledger_no='DIS26TEST01', type='dispatch',
             material=seeded.material, material_name=seeded.material_name,
             quantity=1, unit=seeded.unit, date=seeded.date,
             district=seeded.district)
@@ -589,7 +592,11 @@ class SeedMaterialTxnIdempotencyKeyTest(SeedDataTestBase):
 
         self.seed()
 
-        self.assertTrue(
-            MaterialTransaction.objects.filter(
-                ledger_no='PUR-2025-0105-001', type='purchase').exists(),
-            '同号不同侧的真实台账不应让种子流水被跳过')
+        rebuilt = MaterialTransaction.objects.get(
+            type='purchase', material=seeded.material,
+            batch_no='B20250101', date=seeded.date)
+        assert_doc_no(self, rebuilt.ledger_no, 'PUR')
+        # 另一侧的真实行不受影响
+        self.assertTrue(MaterialTransaction.objects.filter(
+            ledger_no='DIS26TEST01', type='dispatch').exists(),
+            '业务键不同侧的真实台账不应被种子改动')

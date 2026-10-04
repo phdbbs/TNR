@@ -20,6 +20,7 @@ from business.models import (
     Euthanasia, Message,
 )
 from business.stock_init import initialize as init_material_stock
+from business.services import generate_doc_no
 from core.models import District, Institution
 
 # ============================================
@@ -404,8 +405,13 @@ class Command(BaseCommand):
              2, 'TNR2502004,TNR2502005', 'CAP-2025-0115-001', 'hd_shelter'),
         ]
         for cap_id, dist_code, shelter_id, shelter_name, comm_id, comm_name, address, prop, contact, phone, pet_count, pet_codes, ledger_no, operator in data:
-            cap, _ = Capture.objects.get_or_create(
-                ledger_no=ledger_no,
+            # 幂等键 = `pet_codes`（动物编号串，种子里唯一且稳定）。
+            # ⚠ 不能用 `ledger_no` 取键：第四十六轮全局单据化把存量单号重排成了
+            #   新规则（CAP2600001 式），硬编码的旧号（CAP-2025-…）从此查不到 ——
+            #   每次 `seed_data` 都会**重复建单**（2026-10-04 实测复现）。
+            #   单据号是「结果」，不是业务身份；键用稳定业务字段，号在创建时现取。
+            cap, created = Capture.objects.get_or_create(
+                pet_codes=pet_codes,
                 defaults={
                     'district': districts[dist_code],
                     'shelter': institutions[shelter_id],
@@ -423,6 +429,9 @@ class Command(BaseCommand):
                     'operator_name': users[operator].get_full_name() or users[operator].username,
                 }
             )
+            if created:
+                cap.ledger_no = generate_doc_no('CAP')
+                cap.save(update_fields=['ledger_no'])
             # shelter_name / community_name 是机构名的冗余副本。get_or_create 只在
             # 新建时应用 defaults，机构后来改名后副本会一直停在旧值（现场 CAP001、
             # CAP002 的 shelter_name 至今仍是北京时期的「朝阳区/海淀区流浪动物捕捉点」）。
@@ -519,8 +528,11 @@ class Command(BaseCommand):
              '', 'TRF-2025-0118-001', 'D002', 'hd_shelter'),
         ]
         for trf_id, cap_id, from_id, from_name, to_id, to_name, pet_codes, count, status, received_at, reject, ledger_no, dist, operator in data:
-            Transfer.objects.get_or_create(
-                ledger_no=ledger_no,
+            # 幂等键 = (pet_codes, 接收医院)：与捕捉单同理，不能用旧单号取键
+            # （存量单号已重排，旧号永远查不到 → 每次种子运行都重复建单）。
+            trf, created = Transfer.objects.get_or_create(
+                pet_codes=pet_codes,
+                to_hospital=institutions[to_id],
                 defaults={
                     'capture': captures[cap_id],
                     'from_shelter': institutions[from_id],
@@ -537,6 +549,9 @@ class Command(BaseCommand):
                     'district': districts[dist],
                 }
             )
+            if created:
+                trf.ledger_no = generate_doc_no('TRF')
+                trf.save(update_fields=['ledger_no'])
 
     # ============================================
     # 10. 诊疗记录
@@ -576,7 +591,7 @@ class Command(BaseCommand):
              vac_type, vac_batch, vac_date, vac_qty,
              dew_type, dew_batch, dew_date, dew_qty,
              chip_no, chip_date, status, dist, operator) = row
-            Treatment.objects.get_or_create(
+            tre, created = Treatment.objects.get_or_create(
                 pet=pets[pet_id],
                 defaults={
                     'pet_code': pet_code,
@@ -608,6 +623,11 @@ class Command(BaseCommand):
                     'district': districts[dist],
                 }
             )
+            if created:
+                # 诊疗单号：全新库上种子直接建行会漏号（`0024` 只补升级库的存量），
+                # 创建时现取号，保证任何库上种子诊疗单都有 CON/TRE 规则号。
+                tre.ledger_no = generate_doc_no('TRE')
+                tre.save(update_fields=['ledger_no'])
 
     # ============================================
     # 11. 物资流水
@@ -652,30 +672,26 @@ class Command(BaseCommand):
              '', '芭比堂动物医院', 'I005', 'DIS-2026-0212-001', date(2026, 2, 12),
              'D002', 'hd_shelter', '下发至医院（待签收）'),
         ]
-        for row in data:
-            (mtx_id, txn_type, mat_id, mat_name, qty, unit, batch_no,
-             supplier, from_to, hosp_id, ledger_no, txn_date, dist, operator, note) = row
-            # ⚠ 幂等键是 **(ledger_no, type)**，不能只用 `ledger_no`。
-            #
-            # `ledger_no` **本身就不唯一** —— 这是业务设计，不是缺陷：
-            # 「下发」与「签收」是同一张单的两条台账，运行时两边共用同一个
-            # `DIS-` 单号（签收行的 note 里写着「原单号：DIS-…」）。
-            # 本地库实测：按 `ledger_no` 分组有 **21 组**重复，加上 `type`
-            # 之后只剩 **1 组**（`''` × 66，那是 `consume` 消耗记录本来
-            # 就没有台账编号）—— 21 组里绝大多数正是这种下发/签收配对。
-            #
-            # 只按 `ledger_no` 取键，将来种子里真的配一对同号的下发/签收，
-            # 就会**静默少建一条**（第二条被当成"已存在"跳过），而且不报错。
-            # 加上 `type` 之后，键与业务身份一致：同号不同侧是两条。
-            MaterialTransaction.objects.get_or_create(
-                ledger_no=ledger_no,
-                type=txn_type,
-                defaults={
-                    'material': materials[mat_id],
+        # 元组第 11 列（如 'PUR-2025-0105-001'）是**旧硬编码单号**，仅作历史
+        # 注释保留 —— 第四十六轮起单号一律创建时经 `generate_doc_no()` 现取。
+        PREFIX_BY_TYPE = {'purchase': 'PUR', 'dispatch': 'DIS',
+                          'receive': 'RCV', 'consume': 'CON', 'adjustment': 'ADJ'}
+        RECEIVE_REF = {'MTX003R': 'MTX002', 'MTX006R': 'MTX005'}
+        created_objs = {}
+
+        def _key_fields(r):
+            """幂等键 = (type, material, batch_no, date)：种子清单内唯一。"""
+            (_, t, _, _, _, _, batch, _, _, _, _, d, _, _, _) = r
+            return {'type': t, 'material': materials[r[2]],
+                    'batch_no': batch, 'date': d}
+
+        def _defaults(r):
+            (_, txn_type, mat_id, mat_name, qty, unit, batch_no,
+             supplier, from_to, hosp_id, _legacy, txn_date, dist, operator, note) = r
+            return {
                     'material_name': mat_name,
                     'quantity': qty,
                     'unit': unit,
-                    'batch_no': batch_no,
                     'supplier': supplier,
                     'from_to': from_to,
                     'hospital': institutions[hosp_id] if hosp_id else None,
@@ -688,11 +704,35 @@ class Command(BaseCommand):
                                     else getattr(users[operator], 'institution', None)),
                     'operator': users[operator],
                     'operator_name': users[operator].get_full_name() or users[operator].username,
-                    'date': txn_date,
                     'district': districts[dist],
                     'note': note,
-                }
+            }
+
+        # 第一遍：非接收类（采购/下发/消耗/异动）
+        for row in (r for r in data if r[1] != 'receive'):
+            mtx_id, txn_type = row[0], row[1]
+            txn, created = MaterialTransaction.objects.get_or_create(
+                **_key_fields(row),
+                defaults=_defaults(row),
             )
+            if created:
+                txn.ledger_no = generate_doc_no(PREFIX_BY_TYPE[txn_type])
+                txn.save(update_fields=['ledger_no'])
+            created_objs[mtx_id] = txn
+
+        # 第二遍：接收单（独立 RCV 号 + ref_no 指向下发单，单据链 DIS → RCV）
+        for row in (r for r in data if r[1] == 'receive'):
+            mtx_id = row[0]
+            txn, created = MaterialTransaction.objects.get_or_create(
+                **_key_fields(row),
+                defaults=_defaults(row),
+            )
+            if created:
+                txn.ledger_no = generate_doc_no('RCV')
+                ref = created_objs.get(RECEIVE_REF.get(mtx_id, ''))
+                txn.ref_no = ref.ledger_no if ref else ''
+                txn.save(update_fields=['ledger_no', 'ref_no'])
+            created_objs[mtx_id] = txn
 
     # ============================================
     # 11b. 机构库存（第四十五轮）
@@ -726,10 +766,10 @@ class Command(BaseCommand):
         for row in data:
             (rel_id, pet_id, pet_code, comm_id, comm_name,
              receiver, phone, status, released_at, ledger_no, dist, operator) = row
-            Release.objects.get_or_create(
-                ledger_no=ledger_no,
+            # 幂等键 = pet（一只宠物最多一条放归），旧单号已重排不能作键
+            rel, created = Release.objects.get_or_create(
+                pet=pets[pet_id],
                 defaults={
-                    'pet': pets[pet_id],
                     'pet_code': pet_code,
                     'community': institutions[comm_id],
                     'community_name': comm_name,
@@ -742,6 +782,9 @@ class Command(BaseCommand):
                     'district': districts[dist],
                 }
             )
+            if created:
+                rel.ledger_no = generate_doc_no('REL')
+                rel.save(update_fields=['ledger_no'])
 
     # ============================================
     # 13. 领养记录
@@ -759,10 +802,10 @@ class Command(BaseCommand):
             (adp_id, pet_id, pet_code, adopter_name, adopter_phone, adopter_id, adopter_addr,
              qual, commit, agreement, hosp_id, hosp_name, status, adopted_at,
              ledger_no, dist, operator) = row
-            Adoption.objects.get_or_create(
-                ledger_no=ledger_no,
+            # 幂等键 = pet（一只宠物最多一条领养），旧单号已重排不能作键
+            adp, created = Adoption.objects.get_or_create(
+                pet=pets[pet_id],
                 defaults={
-                    'pet': pets[pet_id],
                     'pet_code': pet_code,
                     'adopter': users['adopter1'],
                     'adopter_name': adopter_name,
@@ -781,6 +824,9 @@ class Command(BaseCommand):
                     'district': districts[dist],
                 }
             )
+            if created:
+                adp.ledger_no = generate_doc_no('ADP')
+                adp.save(update_fields=['ledger_no'])
 
     # ============================================
     # 13.1 领养大厅上架信息
@@ -867,10 +913,10 @@ class Command(BaseCommand):
             (eut_id, pet_id, pet_code, hosp_id, hosp_name, reason, condition,
              euthanized_at, body_received, body_received_at,
              body_received_by, body_received_name, ledger_no, dist, operator) = row
-            Euthanasia.objects.get_or_create(
-                ledger_no=ledger_no,
+            # 幂等键 = pet（一只宠物最多一条安乐死），旧单号已重排不能作键
+            eut, created = Euthanasia.objects.get_or_create(
+                pet=pets[pet_id],
                 defaults={
-                    'pet': pets[pet_id],
                     'pet_code': pet_code,
                     'hospital': institutions[hosp_id],
                     'hospital_name': hosp_name,
@@ -886,6 +932,9 @@ class Command(BaseCommand):
                     'district': districts[dist],
                 }
             )
+            if created:
+                eut.ledger_no = generate_doc_no('EUT')
+                eut.save(update_fields=['ledger_no'])
 
     # ============================================
     # 17. 消息通知
