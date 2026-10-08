@@ -7695,3 +7695,76 @@ grep 全库：capture_prefix / consume_prefix / …_prefix
 | 完整全量（含 slow，seed 修复前 HEAD） | 1289 例 OK |
 | seed 修复后专项（seed/库存/迁移 + doc_numbers + supervision） | 58 + 167 例 OK |
 | 数据一致性巡检 `check_data_integrity` | 16 项全部 ✓ |
+
+---
+
+## 三方一致性核查：本地 / 代码库 / 生产（2026-10-08）
+
+> 本次**未改任何代码**，只做核查。目的是确认生产跑的就是最新代码。
+
+### 一、结论：代码层面三方一致
+
+| 层 | 判据 | 结果 |
+|---|---|---|
+| 本地 | `git status` | 干净，HEAD `4198d0a7b490ee7cad7d647f6bca17afd5fa328d` |
+| 代码库 | `git ls-remote` ×3 | origin / gitee / github **全部 = `4198d0a7`** |
+| 生产 | 逐文件 sha256 | 198 个跟踪文件中 **193 个内容完全相同** |
+| 生产 | `showmigrations` | **68 条全部已应用**，无待应用项 |
+| 生产 | `static/` vs `staticfiles/` | 逐文件一致；且**服务实际下发**的 JS 哈希与本地一致 |
+| 生产 | 关键包 `import` | `django / qrcode / MySQLdb / PIL / django_q / rest_framework` 全 OK |
+| 生产 | 运行态 | `DEBUG=False`；gunicorn + qworker RUNNING；首页 200 + `?v=20260928d` |
+| 生产 | 第 46 轮新路由 | `/print/capture/1/` → **302**（跳登录页 = 路由在线） |
+
+### 二、⚠⚠ 关键发现：**生产 git 元数据是失真的，不能用来判断新旧**
+
+生产 `/opt/tnr`：
+* HEAD = `9c46669`（**2026-09-27**），**detached HEAD**（`HEAD detached from cfd46d6`）；
+* `git status` 报 **73 项改动/未跟踪** —— 看上去像「生产落后一大截」；
+* 最新提交 `4198d0a` 在生产对象库里**不存在**（`Not a valid object name`）；
+* `refs/remotes/origin/main` 同样停在旧提交；reflog 显示**最后一次 git 操作是 9-27 17:02**。
+
+→ 那些 `M` 是**相对于过时基线 `9c46669`** 的，**不是**相对于最新代码。
+**只看 `git status` 会得出完全相反的结论。** 正确判据是**逐文件比 sha256**。
+
+### 三、三方差异（3 处，**全在非功能层面**）
+
+| # | 差异 | 生产 | 本地 | 影响 |
+|---|---|---|---|---|
+| 1 | 生产 git 元数据 | `9c46669` + detached + 73 dirty | `4198d0a` 干净 | **无功能影响**；但 `git pull` 不可直接用 |
+| 2 | `.trae/specs/build-tnr-system/*.md` ×3 | `9c46669` 版本（mtime 8-15） | 9-28 版本 | **零** —— AI 助手会话计划文件，运行时不读 |
+| 3 | `prototypes/` | **目录不存在** | README + V3 原型 | **零** —— 已作废原型，生产本就不该有 |
+
+判断依据：同步**保留 mtime**（`R46_*.md` 两侧均 `09-30 00:49`；
+`business/views_portal.py` 两侧均 `10-05 02:20`）→ 同步发生在 **10-05 02:20 之后**；
+而 `prototypes/` 9-30 即入库却不在生产 → **被同步有意跳过**，不是同步太旧。
+
+### 四、⚠ 生产上有「不该有的东西」
+
+同步是**整工作区拷贝**（不尊重 `.gitignore`，且**无 `--delete`**，属历史残留）：
+
+* **`.workbuddy-ai/`** —— **项目记忆目录**（含内部缺陷记录与部署细节）。
+  `.gitignore` 第 13 行忽略、`deploy.sh:81` 也显式 `rm -rf`，**但它躺在生产上**；
+* **`db.sqlite3.bak-*` ×5** —— 本地 SQLite 快照（0.8~1.9MB，含本地测试数据）。
+  生产用 MySQL，纯噪音；
+* `__pycache__` ×16、`.DS_Store`、`.trae-html-share-packages/`。
+
+**生产独有文件 = 0** —— 没有任何手工补丁或临时脚本，这点是干净的。
+
+### 五、待决策（均涉及**写生产**，未擅自执行）
+
+1. **生产 git 元数据是否对齐**：`sudo git fetch origin && sudo git checkout -f main`。
+   工作区已是最新内容，`checkout -f` **不会丢代码**，只会清掉那 73 项 dirty 标记。
+2. **生产噪音是否清理**：`.workbuddy-ai/` + 5 个 SQLite 备份 + `__pycache__` + `.DS_Store`。
+   建议**先备份再删**。
+3. **同步机制是否固定为 git**：当前「拷文件 + 无删除」会导致
+   （a）git 元数据持续漂移、（b）被删文件永远留在生产。
+   生产已配 `origin`，建议改 `git fetch && git reset --hard origin/main`。
+
+### 六、环境备忘
+
+* 生产 SSH `ubuntu@100.99.98.71`，项目 `/opt/tnr`，venv 在 `venv/`（**不是** `.venv/`）。
+* **生产 `.git` 属主是 `root:root`**（工作区是 `ubuntu:ubuntu`）→ 所有 git 命令报
+  `dubious ownership`。用 `git -c safe.directory=/opt/tnr ...` **命令行内临时覆盖**，
+  **不要**去改服务器配置；`status` 加 `--no-optional-locks` 保证只读。
+* 验证 Django 模块要带 `django.setup()`，否则报 `apps aren't loaded yet`（**假红**）。
+* 抓生产实际下发内容：在服务器上跑 `curl -sL http://127.0.0.1/`（绕开本地代理问题）。
