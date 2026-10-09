@@ -1,0 +1,1086 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<title>医院收治处置流程 · 移动端原型 v4（2026-10-09）</title>
+<style>
+/* ============================================================
+   一、设计令牌 —— 取自 static/css/tnr-traditional.css 快照
+   （原型自包含，保证与线上系统同色同字）
+   ============================================================ */
+:root{
+  --cinnabar:#C3272B; --cinnabar-deep:#9D2933; --cinnabar-light:#FBE8E8; --cinnabar-dark:#A02222;
+  --ink:#1C1C1C; --ink-deep:#141414; --ink-blue:#1A1A2E; --ink-soft:#2B2B2B;
+  --ink-text:#2B2B2B; --ink-muted:#6B5D54; --ink-light:#9C8B7E;
+  --rice-paper:#F5F0E8; --rice-light:#FAF6F0; --rice-warm:#F0EAE0; --white:#FFFFFF;
+  --bamboo-green:#5B7A4F; --bamboo-light:#E8F0E4;
+  --autumn-gold:#C89B3C; --autumn-light:#FBF3E0;
+  --azurite:#2B6CB0; --azurite-light:#E0EEF7;
+  --rouge:#9D2933; --rouge-light:#FBE8E8;
+  --ochre:#864E36; --ochre-light:#F0E0D4;
+  --border-ink:#D4C5B9; --border-light:#E8DFD4; --border-faint:#F0EAE0;
+  --grad-sidebar:linear-gradient(180deg,#1A1A2E 0%,#16213E 50%,#1C1C1C 100%);
+  --grad-cinnabar:linear-gradient(135deg,#C3272B 0%,#9D2933 100%);
+  --grad-bamboo:linear-gradient(135deg,#5B7A4F 0%,#426666 100%);
+  --grad-gold:linear-gradient(135deg,#C89B3C 0%,#B8860B 100%);
+  --font-display:'Noto Serif SC','Songti SC','STSong',serif;
+  --font-body:'Noto Sans SC','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+  --font-mono:'SF Mono','Consolas',monospace;
+  --r-sm:4px; --r-md:6px; --r-lg:8px; --r-xl:12px; --r-2xl:16px; --r-full:9999px;
+  --shadow-xs:0 1px 2px rgba(28,28,28,.04);
+  --shadow-sm:0 2px 8px rgba(28,28,28,.06);
+  --shadow-md:0 4px 16px rgba(28,28,28,.08);
+  --shadow-lg:0 8px 32px rgba(28,28,28,.12);
+  --shadow-cinnabar:0 4px 12px rgba(195,39,43,.25);
+  --t-fast:120ms ease; --t-base:200ms ease;
+}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html{-webkit-font-smoothing:antialiased;}
+body{font-family:var(--font-body);font-size:14px;line-height:1.6;color:var(--ink-text);
+  background:#E7E1D7;overflow-x:hidden;}
+img{max-width:100%;display:block;}
+button,input,select,textarea{font-family:inherit;font-size:inherit;}
+a{text-decoration:none;color:inherit;}
+ul,ol{list-style:none;}
+
+/* ============================================================
+   二、手机外壳（桌面预览时居中成 430px 真机宽度）
+   ============================================================ */
+.phone{
+  max-width:430px;margin:0 auto;min-height:100vh;background:var(--rice-paper);
+  position:relative;box-shadow:0 0 48px rgba(28,28,28,.14);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+@media(max-width:520px){.phone{box-shadow:none;}}
+
+/* 顶栏 */
+.appbar{
+  background:var(--grad-sidebar);color:#fff;padding:0 12px;height:52px;flex:none;
+  display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:60;
+}
+.appbar-back{
+  width:32px;height:32px;border:none;background:rgba(255,255,255,.12);color:#fff;
+  border-radius:var(--r-md);font-size:17px;cursor:pointer;display:flex;align-items:center;
+  justify-content:center;flex:none;
+}
+.appbar-back:active{background:rgba(255,255,255,.24);}
+.appbar-titles{flex:1;min-width:0;}
+.appbar-title{font-family:var(--font-display);font-size:16px;font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.appbar-sub{font-size:11px;color:rgba(255,255,255,.55);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;}
+.appbar-tag{background:var(--autumn-gold);color:var(--ink);font-size:10px;font-weight:700;
+  padding:2px 8px;border-radius:var(--r-full);flex:none;white-space:nowrap;}
+
+/* 视图容器 */
+.views{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;position:relative;}
+.view{display:none;padding:12px 12px 24px;animation:fadeUp .22s ease;}
+.view.active{display:block;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+
+/* 原型说明条 */
+.proto-note{
+  background:var(--ink-blue);color:#fff;font-size:11.5px;padding:9px 12px;border-radius:var(--r-lg);
+  display:flex;gap:8px;align-items:flex-start;margin-bottom:10px;line-height:1.55;
+}
+.proto-note b{color:#F0C674;}
+.proto-note .k{background:rgba(255,255,255,.14);padding:1px 5px;border-radius:3px;
+  font-family:var(--font-mono);font-size:10.5px;}
+
+/* ============================================================
+   三、通用组件（与线上同款）
+   ============================================================ */
+.card{background:var(--white);border-radius:var(--r-xl);border:1px solid var(--border-light);
+  box-shadow:var(--shadow-sm);margin-bottom:10px;overflow:hidden;}
+.card-h{display:flex;align-items:center;gap:8px;padding:11px 13px 8px;
+  font-family:var(--font-display);font-size:15px;font-weight:600;color:var(--ink);}
+.card-h .bar{width:3px;height:15px;background:var(--grad-cinnabar);border-radius:2px;flex:none;}
+.card-h .hint{margin-left:auto;font-family:var(--font-body);font-size:11px;font-weight:400;
+  color:var(--ink-light);}
+.card-b{padding:2px 13px 13px;}
+
+.badge{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:var(--r-sm);
+  font-size:11px;font-weight:600;line-height:1.7;white-space:nowrap;}
+.b-cin{background:var(--cinnabar-light);color:var(--cinnabar);}
+.b-suc{background:var(--bamboo-light);color:var(--bamboo-green);}
+.b-wrn{background:var(--autumn-light);color:#8a6a1f;}
+.b-inf{background:var(--azurite-light);color:var(--azurite);}
+.b-dan{background:var(--rouge-light);color:var(--rouge);}
+.b-def{background:var(--rice-warm);color:var(--ink-muted);}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid var(--border-ink);
+  background:var(--white);color:var(--ink-text);padding:9px 14px;border-radius:var(--r-lg);
+  font-size:14px;font-weight:500;cursor:pointer;transition:all var(--t-fast);user-select:none;line-height:1.4;}
+.btn:active{transform:scale(.98);}
+.btn:disabled{opacity:.45;cursor:not-allowed;}
+.btn-p{background:var(--grad-cinnabar);border-color:transparent;color:#fff;box-shadow:var(--shadow-cinnabar);}
+.btn-s{background:var(--grad-bamboo);border-color:transparent;color:#fff;}
+.btn-o{background:transparent;color:var(--cinnabar);border-color:var(--cinnabar);}
+.btn-g{background:transparent;color:var(--ink-muted);border-color:transparent;}
+.btn-sm{padding:6px 11px;font-size:12.5px;border-radius:var(--r-md);}
+.btn-block{width:100%;}
+
+/* 表单 */
+.fld{margin-bottom:11px;}
+.fld:last-child{margin-bottom:0;}
+.fld>label{display:block;font-size:12.5px;color:var(--ink-muted);margin-bottom:5px;font-weight:500;}
+.fld>label .req{color:var(--cinnabar);margin-left:2px;}
+.fld>label .auto{font-size:10.5px;color:var(--bamboo-green);background:var(--bamboo-light);
+  border-radius:var(--r-full);padding:0 6px;margin-left:5px;font-weight:600;}
+.inp,.sel,.tar{width:100%;padding:9px 11px;border:1px solid var(--border-ink);border-radius:var(--r-md);
+  background:var(--white);color:var(--ink-text);font-size:15px;min-height:40px;outline:none;
+  transition:border var(--t-fast);}
+.inp:focus,.sel:focus,.tar:focus{border-color:var(--cinnabar);box-shadow:0 0 0 3px rgba(195,39,43,.1);}
+.inp[readonly]{background:var(--rice-light);color:var(--ink-muted);}
+.tar{min-height:70px;resize:vertical;line-height:1.6;padding:9px 11px;}
+.inp::placeholder,.tar::placeholder{color:var(--ink-light);}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
+.unit-inp{position:relative;}
+.unit-inp .u{position:absolute;right:11px;top:50%;transform:translateY(-50%);
+  font-size:12px;color:var(--ink-light);pointer-events:none;}
+.unit-inp .inp{padding-right:38px;}
+
+/* chips */
+.chips{display:flex;flex-wrap:wrap;gap:7px;}
+.chip{border:1px solid var(--border-ink);background:var(--white);color:var(--ink-text);
+  border-radius:var(--r-full);padding:6px 12px;font-size:12.5px;cursor:pointer;
+  transition:all var(--t-fast);user-select:none;min-height:32px;display:inline-flex;align-items:center;}
+.chip:active{transform:scale(.97);}
+.chip.on{background:var(--cinnabar-light);border-color:var(--cinnabar);color:var(--cinnabar);font-weight:600;}
+.chip.on.ok{background:var(--bamboo-light);border-color:var(--bamboo-green);color:var(--bamboo-green);}
+.chip.on.warn{background:var(--autumn-light);border-color:var(--autumn-gold);color:#8a6a1f;}
+
+/* 三态分段控件（未检 / 阴性 / 阳性） */
+.seg{display:inline-flex;border:1px solid var(--border-ink);border-radius:var(--r-md);overflow:hidden;flex:none;}
+.seg button{border:none;background:var(--white);color:var(--ink-muted);font-size:12px;padding:5px 10px;
+  cursor:pointer;transition:all var(--t-fast);border-left:1px solid var(--border-light);}
+.seg button:first-child{border-left:none;}
+.seg button.on-neg{background:var(--bamboo-green);color:#fff;font-weight:600;}
+.seg button.on-pos{background:var(--rouge);color:#fff;font-weight:600;}
+.seg button.on-none{background:var(--rice-warm);color:var(--ink-muted);font-weight:600;}
+
+/* 只读信息行 */
+.kv{display:grid;grid-template-columns:1fr 1fr;gap:9px 12px;}
+.kv .k{font-size:11px;color:var(--ink-light);}
+.kv .v{font-size:13.5px;color:var(--ink-text);font-weight:500;margin-top:1px;}
+.kv .full{grid-column:1/-1;}
+
+/* 动物卡 */
+.pet-item{display:flex;gap:11px;align-items:center;background:var(--white);border:1px solid var(--border-light);
+  border-radius:var(--r-xl);box-shadow:var(--shadow-sm);padding:11px 13px;margin-bottom:9px;cursor:pointer;
+  transition:all var(--t-fast);}
+.pet-item:active{transform:scale(.99);border-color:var(--cinnabar);}
+.pet-item .ico{width:46px;height:46px;border-radius:var(--r-lg);background:var(--rice-warm);flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:23px;}
+.pet-item .info{flex:1;min-width:0;}
+.pet-item .l1{font-weight:600;font-size:14.5px;display:flex;gap:7px;align-items:center;flex-wrap:wrap;}
+.pet-item .l2{font-size:11.5px;color:var(--ink-light);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.pet-item .go{flex:none;color:var(--ink-light);font-size:16px;}
+
+/* 统计条 */
+.stat-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:11px;}
+.stat{background:var(--white);border:1px solid var(--border-light);border-radius:var(--r-lg);
+  padding:9px 6px;text-align:center;position:relative;overflow:hidden;}
+.stat::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--cinnabar);}
+.stat.g::before{background:var(--bamboo-green);}
+.stat.gold::before{background:var(--autumn-gold);}
+.stat .n{font-family:var(--font-display);font-size:22px;font-weight:700;color:var(--ink);line-height:1.2;}
+.stat .t{font-size:11px;color:var(--ink-muted);}
+
+/* ============================================================
+   四、流程步骤条
+   ============================================================ */
+.steps{display:flex;align-items:flex-start;background:var(--white);border:1px solid var(--border-light);
+  border-radius:var(--r-xl);padding:12px 8px 10px;margin-bottom:11px;box-shadow:var(--shadow-sm);
+  position:sticky;top:0;z-index:50;}
+.step{flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;position:relative;cursor:pointer;}
+.step .dot{width:26px;height:26px;border-radius:var(--r-full);background:var(--rice-warm);
+  color:var(--ink-light);display:flex;align-items:center;justify-content:center;font-size:12.5px;
+  font-weight:700;flex:none;transition:all var(--t-base);}
+.step .lb{font-size:10.5px;color:var(--ink-light);text-align:center;line-height:1.3;}
+.step::after{content:'';position:absolute;top:13px;left:calc(50% + 16px);right:calc(-50% + 16px);
+  height:2px;background:var(--border-light);}
+.step:last-child::after{display:none;}
+.step.done .dot{background:var(--bamboo-green);color:#fff;}
+.step.done .lb{color:var(--bamboo-green);}
+.step.done::after{background:var(--bamboo-green);}
+.step.cur .dot{background:var(--grad-cinnabar);color:#fff;box-shadow:var(--shadow-cinnabar);}
+.step.cur .lb{color:var(--cinnabar);font-weight:700;}
+
+/* 底部固定操作栏 */
+.bottom-bar{flex:none;background:var(--white);border-top:1px solid var(--border-light);
+  padding:10px 12px calc(10px + env(safe-area-inset-bottom));display:flex;gap:9px;
+  box-shadow:0 -2px 12px rgba(28,28,28,.05);}
+.bottom-bar .btn{flex:1;padding:12px;font-size:15px;border-radius:var(--r-xl);}
+.bottom-bar .btn.ghost{flex:0 0 96px;}
+
+/* ============================================================
+   五、处方
+   ============================================================ */
+.rx-scope{border:1px solid var(--border-light);border-radius:var(--r-lg);margin-bottom:10px;
+  overflow:hidden;background:var(--white);}
+.rx-scope-h{display:flex;align-items:center;gap:9px;padding:10px 12px;background:var(--rice-light);
+  border-bottom:1px solid var(--border-light);cursor:pointer;}
+.rx-scope-h .cb{width:19px;height:19px;accent-color:var(--cinnabar);flex:none;cursor:pointer;}
+.rx-scope-h .ic{font-size:18px;flex:none;}
+.rx-scope-h .nm{flex:1;font-weight:600;font-size:14px;}
+.rx-scope-h .nm small{display:block;font-weight:400;color:var(--ink-light);font-size:11px;margin-top:1px;}
+.rx-scope-h .arr{color:var(--ink-light);font-size:12px;transition:transform var(--t-base);}
+.rx-scope.open .rx-scope-h .arr{transform:rotate(90deg);}
+.rx-scope-b{display:none;padding:11px 12px 12px;}
+.rx-scope.open .rx-scope-b{display:block;}
+
+.rx-list{display:flex;flex-direction:column;gap:7px;margin-top:9px;}
+.rx-row{display:flex;align-items:center;gap:9px;background:var(--rice-light);border:1px solid var(--border-light);
+  border-radius:var(--r-md);padding:8px 10px;}
+.rx-row .nm{flex:1;min-width:0;font-size:13px;font-weight:500;}
+.rx-row .nm small{display:block;font-weight:400;color:var(--ink-light);font-size:11px;}
+.rx-row .qty{flex:none;font-size:12px;color:var(--cinnabar);font-weight:700;
+  background:var(--cinnabar-light);border-radius:var(--r-full);padding:2px 9px;}
+.rx-row .del{flex:none;width:26px;height:26px;border:none;background:var(--rouge-light);color:var(--rouge);
+  border-radius:var(--r-md);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;}
+.rx-empty{font-size:12px;color:var(--ink-light);padding:8px 0;text-align:center;}
+
+.order-tpl{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;}
+.order-tpl .t{font-size:11px;border:1px dashed var(--border-ink);border-radius:var(--r-full);
+  padding:3px 9px;color:var(--ink-muted);cursor:pointer;background:var(--rice-light);}
+.order-tpl .t:active{border-color:var(--cinnabar);color:var(--cinnabar);}
+
+/* 底部药品选择弹层 */
+.sheet-mask{position:fixed;inset:0;background:rgba(20,20,20,.5);z-index:200;display:none;
+  align-items:flex-end;justify-content:center;}
+.sheet-mask.show{display:flex;animation:fadeIn .16s ease;}
+@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
+.sheet{background:var(--white);width:100%;max-width:430px;border-radius:var(--r-2xl) var(--r-2xl) 0 0;
+  max-height:86vh;display:flex;flex-direction:column;animation:slideUp .24s cubic-bezier(.4,0,.2,1);}
+@keyframes slideUp{from{transform:translateY(40px);opacity:.4;}to{transform:none;opacity:1;}}
+.sheet-h{padding:13px 14px 10px;border-bottom:1px solid var(--border-faint);display:flex;
+  align-items:center;gap:9px;flex:none;}
+.sheet-h .tt{font-family:var(--font-display);font-size:16px;font-weight:600;color:var(--ink);}
+.sheet-h .sub{font-size:11px;color:var(--ink-light);}
+.sheet-h .x{margin-left:auto;width:30px;height:30px;border:none;background:var(--rice-paper);
+  border-radius:var(--r-md);font-size:16px;color:var(--ink-muted);cursor:pointer;}
+.sheet-tabs{display:flex;gap:6px;padding:10px 14px 4px;overflow-x:auto;flex:none;}
+.sheet-tabs .tb{white-space:nowrap;font-size:12.5px;padding:5px 12px;border-radius:var(--r-full);
+  border:1px solid var(--border-ink);background:var(--white);color:var(--ink-muted);cursor:pointer;}
+.sheet-tabs .tb.on{background:var(--cinnabar);border-color:var(--cinnabar);color:#fff;font-weight:600;}
+.sheet-b{overflow-y:auto;padding:10px 14px 16px;flex:1;}
+.med-row{display:flex;align-items:center;gap:10px;padding:10px 11px;border:1px solid var(--border-light);
+  border-radius:var(--r-lg);margin-bottom:8px;background:var(--white);}
+.med-row.picked{border-color:var(--bamboo-green);background:var(--bamboo-light);}
+.med-row .m-info{flex:1;min-width:0;}
+.med-row .m-nm{font-size:13.5px;font-weight:600;color:var(--ink-text);}
+.med-row .m-sp{font-size:11px;color:var(--ink-light);margin-top:1px;}
+.med-row .m-add{flex:none;}
+.med-row .m-stk{font-size:11px;color:var(--ink-muted);text-align:right;margin-bottom:3px;}
+.stock-low{color:var(--rouge);font-weight:600;}
+.sheet-foot{padding:10px 14px calc(12px + env(safe-area-inset-bottom));border-top:1px solid var(--border-faint);
+  display:flex;gap:9px;flex:none;}
+.sheet-foot .btn{flex:1;}
+
+/* toast */
+.toast-wrap{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:900;
+  display:flex;flex-direction:column;gap:7px;align-items:center;pointer-events:none;width:100%;max-width:420px;padding:0 14px;}
+.toast{background:var(--ink-soft);color:#fff;font-size:13px;padding:9px 15px;border-radius:var(--r-lg);
+  box-shadow:var(--shadow-lg);display:flex;align-items:center;gap:8px;animation:tin .25s ease;max-width:100%;}
+.toast.ok{background:var(--bamboo-green);}
+.toast.warn{background:var(--autumn-gold);color:var(--ink);}
+.toast.err{background:var(--rouge);}
+@keyframes tin{from{transform:translateY(-14px);opacity:0;}to{transform:none;opacity:1;}}
+
+/* 兽医签名条 */
+.sign-strip{display:flex;align-items:center;gap:10px;background:var(--rice-light);
+  border:1px dashed var(--border-ink);border-radius:var(--r-lg);padding:10px 11px;}
+.sign-strip .stamp{width:44px;height:44px;border:2px solid var(--rouge);border-radius:50%;color:var(--rouge);
+  flex:none;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;
+  text-align:center;line-height:1.1;transform:rotate(-9deg);font-family:var(--font-display);}
+.sign-strip .sd{flex:1;min-width:0;}
+.sign-strip .sd .n{font-size:13.5px;font-weight:600;}
+.sign-strip .sd .d{font-size:11px;color:var(--ink-light);font-family:var(--font-mono);margin-top:1px;}
+
+/* 提示条 */
+.tip{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;line-height:1.55;
+  padding:8px 11px;border-radius:var(--r-md);margin-top:9px;}
+.tip.inf{background:var(--azurite-light);color:#1c4f80;}
+.tip.wrn{background:var(--autumn-light);color:#8a6a1f;}
+.tip.suc{background:var(--bamboo-light);color:#3f5c37;}
+
+/* 时间轴（归档预览） */
+.tl{position:relative;padding-left:20px;}
+.tl::before{content:'';position:absolute;left:5px;top:4px;bottom:4px;width:2px;background:var(--border-light);}
+.tl-i{position:relative;padding-bottom:12px;}
+.tl-i:last-child{padding-bottom:0;}
+.tl-i::before{content:'';position:absolute;left:-19px;top:4px;width:9px;height:9px;border-radius:var(--r-full);
+  background:var(--cinnabar);border:2px solid var(--white);box-shadow:0 0 0 2px var(--cinnabar-light);}
+.tl-i.ok::before{background:var(--bamboo-green);box-shadow:0 0 0 2px var(--bamboo-light);}
+.tl-i .tm{font-size:10.5px;color:var(--ink-light);}
+.tl-i .tt{font-size:13px;font-weight:600;color:var(--ink-text);}
+.tl-i .td{font-size:11.5px;color:var(--ink-muted);margin-top:1px;}
+.hidden{display:none !important;}
+</style>
+</head>
+<body>
+
+<div class="phone">
+
+  <!-- 顶栏 -->
+  <header class="appbar">
+    <button class="appbar-back" id="btnBack" title="返回">‹</button>
+    <div class="appbar-titles">
+      <div class="appbar-title" id="abTitle">动物交接管理 · 待接诊</div>
+      <div class="appbar-sub" id="abSub">爱心宠物医院 · 樊城区</div>
+    </div>
+    <span class="appbar-tag" id="abTag">原型 v4</span>
+  </header>
+
+  <!-- 视图容器 -->
+  <div class="views" id="views">
+
+    <!-- ========== 视图 1：入院列表 ========== -->
+    <section class="view active" id="view-list">
+      <div class="proto-note">
+        <span>🧭</span>
+        <div>
+          <b>流程：</b>入院签收 → 诊疗前检查 → 下医嘱 + 开处方 → 执行与办结。<br>
+          处方药品一律从<span class="k">统一下发的库存药品</span>中选取，每项固定 <b>1 头份</b>，<b>选药即用药</b>（自动扣本院库存）。
+        </div>
+      </div>
+
+      <div class="stat-strip">
+        <div class="stat"><div class="n">3</div><div class="t">待接诊</div></div>
+        <div class="stat g"><div class="n">1</div><div class="t">诊疗中</div></div>
+        <div class="stat gold"><div class="n">2</div><div class="t">今日已办结</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span class="bar"></span>入院动物列表<span class="hint">点击开始处置</span></div>
+        <div class="card-b" style="padding-top:6px;">
+          <div id="petList"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 视图 2：处置流程 ========== -->
+    <section class="view" id="view-flow">
+      <div class="steps" id="stepBar"></div>
+      <div id="stepBody"></div>
+    </section>
+
+  </div>
+
+  <!-- 底部操作栏 -->
+  <div class="bottom-bar hidden" id="bottomBar"></div>
+</div>
+
+<!-- 药品选择弹层 -->
+<div class="sheet-mask" id="sheetMask">
+  <div class="sheet">
+    <div class="sheet-h">
+      <div>
+        <div class="tt">选择处方药品</div>
+        <div class="sub" id="sheetSub">统一发放库存 · 每项固定 1 头份</div>
+      </div>
+      <button class="x" id="sheetClose">✕</button>
+    </div>
+    <div class="sheet-tabs" id="sheetTabs"></div>
+    <div class="sheet-b" id="sheetBody"></div>
+    <div class="sheet-foot">
+      <button class="btn btn-p btn-block" id="sheetDone">完成（<span id="sheetCount">0</span>）</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script>
+/* ============================================================
+   数据层（原型假数据 —— 结构对齐线上 Material / Treatment）
+   ============================================================ */
+const HOSPITAL = { name: '爱心宠物医院', district: '樊城区' };
+const VET = { name: '赵医生', license: '鄂兽医执字第 20210356 号', seal: '爱心宠物医院' };
+
+/* 入院动物：status = pending(待接诊) / treating(诊疗中) / closed(已办结) */
+const PETS = [
+  { id: 1, code: 'TNR2510001', name: '小橘', species: '猫', gender: '母', breed: '中华田园猫', color: '橘白', weight: '2.8', age: '约1岁',
+    shelter: '阳光小区捕捉点', district: '樊城区', transferNo: 'ZY-2025-1008-001', receiveDate: '2025-10-09', status: 'pending',
+    catchNote: '小区投喂点诱捕，体表较干净，未见明显外伤' },
+  { id: 2, code: 'TNR2510002', name: '煤球', species: '猫', gender: '公', breed: '中华田园猫', color: '纯黑', weight: '3.6', age: '约2岁',
+    shelter: '春园路社区捕捉点', district: '樊城区', transferNo: 'ZY-2025-1008-001', receiveDate: '2025-10-09', status: 'pending',
+    catchNote: '社区车库诱捕，右耳有陈旧缺口' },
+  { id: 3, code: 'TNR2510003', name: '三花', species: '猫', gender: '母', breed: '中华田园猫', color: '三花', weight: '2.4', age: '约8月',
+    shelter: '阳光小区捕捉点', district: '樊城区', transferNo: 'ZY-2025-1008-002', receiveDate: '2025-10-09', status: 'pending',
+    catchNote: '同窝幼猫，偏瘦' },
+  { id: 4, code: 'TNR2510004', name: '大黄', species: '狗', gender: '公', breed: '中华田园犬', color: '黄', weight: '12.5', age: '约3岁',
+    shelter: '长虹路巡查收容', district: '樊城区', transferNo: 'ZY-2025-1008-003', receiveDate: '2025-10-08', status: 'treating',
+    catchNote: '巡查收容，已绝育（左耳缺口），待疫苗' },
+];
+
+/* 统一发放药品库（Material 的「药品」类别 + 疫苗/驱虫/芯片） */
+const MEDS = [
+  { id: 'M01', name: '舒泰50',            spec: '5ml/瓶',      batch: 'A250901', stock: 12, group: '麻醉镇痛', use: '诱导麻醉' },
+  { id: 'M02', name: '异氟烷',            spec: '100ml/瓶',    batch: 'B250812', stock: 6,  group: '麻醉镇痛', use: '吸入维持麻醉' },
+  { id: 'M03', name: '丙泊酚注射液',       spec: '20ml/支',     batch: 'C250903', stock: 9,  group: '麻醉镇痛', use: '短效麻醉' },
+  { id: 'M04', name: '美洛昔康注射液',     spec: '10ml/瓶',     batch: 'D250825', stock: 14, group: '麻醉镇痛', use: '术后镇痛' },
+  { id: 'M05', name: '布托啡诺注射液',     spec: '10ml/支',     batch: 'D250901', stock: 7,  group: '麻醉镇痛', use: '术前镇痛' },
+  { id: 'M06', name: '头孢曲松钠',        spec: '1g/支',       batch: 'E250819', stock: 22, group: '抗菌消炎', use: '广谱抗菌' },
+  { id: 'M07', name: '阿莫西林克拉维酸钾', spec: '0.5g/片',     batch: 'E250906', stock: 30, group: '抗菌消炎', use: '术后抗感染' },
+  { id: 'M08', name: '恩诺沙星注射液',     spec: '10ml/支',     batch: 'E250828', stock: 11, group: '抗菌消炎', use: '泌尿/消化道感染' },
+  { id: 'M09', name: '酚磺乙胺（止血敏）',  spec: '2ml/支',      batch: 'F250910', stock: 18, group: '止血补液', use: '术中止血' },
+  { id: 'M10', name: '乳酸林格氏液',       spec: '500ml/袋',    batch: 'F250902', stock: 16, group: '止血补液', use: '术中补液' },
+  { id: 'M11', name: '大宠爱（塞拉菌素滴剂）', spec: '0.5ml/支', batch: 'G250815', stock: 25, group: '驱虫', use: '体外驱虫' },
+  { id: 'M12', name: '海乐妙（米尔贝肟）',  spec: '2.5mg/片',    batch: 'G250821', stock: 20, group: '驱虫', use: '体内驱虫' },
+  { id: 'M13', name: '猫三联疫苗（妙三多）', spec: '1ml/头份',   batch: 'H250908', stock: 15, group: '疫苗', use: 'FPV/FCV/FHV 免疫' },
+  { id: 'M14', name: '狂犬疫苗',           spec: '1ml/头份',    batch: 'H250905', stock: 13, group: '疫苗', use: '狂犬病免疫' },
+  { id: 'M15', name: '生理盐水（冲洗）',    spec: '500ml/瓶',    batch: 'F250830', stock: 24, group: '止血补液', use: '创口冲洗' },
+  { id: 'M16', name: '阿托品注射液',        spec: '1ml/支',      batch: 'C250826', stock: 3,  group: '麻醉镇痛', use: '麻醉前给药' },
+];
+const MED_GROUPS = ['全部', '麻醉镇痛', '抗菌消炎', '止血补液', '驱虫', '疫苗'];
+
+/* 传染病快检项（3 态：未检 / 阴性 / 阳性） */
+const TESTS = [
+  { key: 'fpv',  label: '猫瘟 FPV' },
+  { key: 'fcv',  label: '猫杯状 FCV' },
+  { key: 'fhv',  label: '猫疱疹 FHV' },
+  { key: 'felv', label: '猫白血病 FeLV' },
+  { key: 'fiv',  label: '猫艾滋 FIV' },
+];
+
+/* 诊疗项目定义 */
+const ITEMS = [
+  { key: 'sterilization', icon: '✂️', name: '绝育手术', desc: '母猫卵巢子宫摘除 / 公猫去势',
+    tpl: ['术前禁食 12h、禁水 4h', '舒泰50 诱导麻醉，异氟烷维持', '术中乳酸林格氏液补液，酚磺乙胺止血', '术后美洛昔康镇痛 3 日，头孢曲松抗感染 3 日', '术后 7 日复查拆线'] },
+  { key: 'vaccine', icon: '💉', name: '疫苗接种', desc: '猫三联 / 狂犬，免疫接种',
+    tpl: ['猫三联首免 1 头份，21 日后加强', '狂犬疫苗 1 头份，与三联间隔 7 日', '接种后留观 30 分钟'] },
+  { key: 'deworming', icon: '💊', name: '驱虫处置', desc: '体内外驱虫',
+    tpl: ['体外滴剂 1 头份，颈背部皮肤点涂', '体内驱虫 1 头份，空腹口服', '驱虫后 7 日内避免洗澡'] },
+  { key: 'chip', icon: '📡', name: '芯片植入', desc: '颈部皮下植入，绑定档案',
+    tpl: ['颈部肩胛间皮下植入', '植入后扫码核对芯片号', '录入档案并同步至管理平台'] },
+];
+
+/* 办结去向（映射 Pet.STATUS_CHOICES） */
+const DISPOSALS = [
+  { key: 'pending_adopt',  icon: '🎗️', label: '待领养',     note: '状态 → 待领养' },
+  { key: 'released',       icon: '🌳', label: '放回原小区',   note: '状态 → 已放归' },
+  { key: 'owner_returned', icon: '🏠', label: '主人领回',     note: '状态 → 主人领回' },
+  { key: 'euthanized',     icon: '🕯️', label: '安乐死',       note: '状态 → 已死亡（需另开单据）' },
+  { key: 'dead',           icon: '⚰️', label: '死亡 / 无害化', note: '⚠ 现有 8 态中无对应状态' },
+];
+
+/* ============================================================
+   状态
+   ============================================================ */
+const STEPS = ['入院签收', '诊疗前检查', '医嘱与处方', '执行与办结'];
+let S = {};
+
+function resetState(petId) {
+  S = {
+    view: 'flow', petId, step: 1, maxStep: 1,
+    /* 1 入院签收 */
+    sign: { received: true, receiver: '赵医生', note: '' },
+    /* 2 诊疗前检查 */
+    check: { temp: '', weight: '', hr: '', rr: '', bcs: '', mental: '', mucosa: '', skin: '', dehydr: '',
+             tests: {}, conclusion: '', note: '' },
+    /* 3 医嘱与处方 */
+    items: {}, orders: {}, openScope: 'sterilization',
+    rx: [],   /* {medId, name, spec, batch, scope} */
+    /* 4 执行与办结 */
+    exec: { sterilization: false, vaccine: false, deworming: false, chip: false },
+    disposal: '', disposalNote: '',
+  };
+  PETS.forEach(p => { if (p.id === petId) { S.pet = p; } });
+}
+const pet = () => S.pet;
+const med = id => MEDS.find(m => m.id === id);
+const rxOf = scope => S.rx.filter(r => r.scope === scope);
+
+/* ============================================================
+   工具
+   ============================================================ */
+const $  = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function todayStr(){ const d = new Date(); const p = n => String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
+function toast(msg, type){
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type || '');
+  el.textContent = msg;
+  $('#toastWrap').appendChild(el);
+  setTimeout(() => { el.style.transition='opacity .25s'; el.style.opacity='0'; setTimeout(()=>el.remove(),260); }, 2000);
+}
+function testVal(k){ return (S.check.tests && S.check.tests[k]) || 'none'; }
+
+/* ============================================================
+   视图 1：入院列表
+   ============================================================ */
+function renderList(){
+  S.view = 'list';
+  $('#view-list').classList.add('active');
+  $('#view-flow').classList.remove('active');
+  $('#bottomBar').classList.add('hidden');
+  $('#abTitle').textContent = '动物交接管理 · 待接诊';
+  $('#abSub').textContent = HOSPITAL.name + ' · ' + HOSPITAL.district;
+  $('#abTag').textContent = '原型 v4';
+
+  const statusMap = { pending: ['b-wrn','待接诊'], treating: ['b-inf','诊疗中'], closed: ['b-suc','已办结'] };
+  $('#petList').innerHTML = PETS.map(p => {
+    const [cls, txt] = statusMap[p.status];
+    return `<div class="pet-item" data-open="${p.id}">
+      <div class="ico">${p.species === '狗' ? '🐕' : '🐈'}</div>
+      <div class="info">
+        <div class="l1">${esc(p.code)} · ${esc(p.name)} <span class="badge ${cls}">${txt}</span></div>
+        <div class="l2">${esc(p.species)} · ${esc(p.gender)} · ${esc(p.breed)} · ${esc(p.weight)}kg · ${esc(p.shelter)}</div>
+        <div class="l2">接收日期 ${esc(p.receiveDate)} · 转运单 ${esc(p.transferNo)}</div>
+      </div>
+      <div class="go">›</div>
+    </div>`;
+  }).join('');
+}
+
+/* ============================================================
+   视图 2：处置流程
+   ============================================================ */
+function renderFlow(){
+  S.view = 'flow';
+  $('#view-list').classList.remove('active');
+  $('#view-flow').classList.add('active');
+  $('#bottomBar').classList.remove('hidden');
+
+  const p = pet();
+  $('#abTitle').textContent = p.code + ' · ' + p.name;
+  $('#abSub').textContent = p.species + ' · ' + p.gender + ' · ' + p.breed + ' · ' + p.weight + 'kg';
+  $('#abTag').textContent = '第 ' + S.step + ' / 4 步';
+
+  renderStepBar();
+  renderStepBody();
+  renderBottomBar();
+  $('#views').scrollTop = 0;
+}
+
+function renderStepBar(){
+  $('#stepBar').innerHTML = STEPS.map((lb, i) => {
+    const n = i + 1;
+    const cls = n < S.step ? 'done' : (n === S.step ? 'cur' : '');
+    return `<div class="step ${cls}" data-step="${n}">
+      <div class="dot">${n < S.step ? '✓' : n}</div>
+      <div class="lb">${lb}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderStepBody(){
+  const b = $('#stepBody');
+  if (S.step === 1) b.innerHTML = step1HTML();
+  else if (S.step === 2) b.innerHTML = step2HTML();
+  else if (S.step === 3) b.innerHTML = step3HTML();
+  else b.innerHTML = step4HTML();
+}
+
+function renderBottomBar(){
+  const bar = $('#bottomBar');
+  const isLast = S.step === 4;
+  const prev = S.step > 1 ? '<button class="btn btn-g ghost" data-nav="prev">上一步</button>' : '<button class="btn btn-g ghost" data-nav="list">返回列表</button>';
+  const next = isLast
+    ? '<button class="btn btn-s" data-nav="submit">✓ 提交归档</button>'
+    : '<button class="btn btn-p" data-nav="next">下一步 ›</button>';
+  bar.innerHTML = prev + next;
+}
+
+/* ---------- 步骤 1：入院签收 ---------- */
+function step1HTML(){
+  const p = pet();
+  return `
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>转运单信息<span class="hint">系统自动带出</span></div>
+    <div class="card-b">
+      <div class="kv">
+        <div><div class="k">转运单号</div><div class="v">${esc(p.transferNo)}</div></div>
+        <div><div class="k">来源捕捉点</div><div class="v">${esc(p.shelter)}</div></div>
+        <div><div class="k">所属区县</div><div class="v">${esc(p.district)}</div></div>
+        <div><div class="k">接收日期</div><div class="v">${esc(p.receiveDate)}</div></div>
+        <div class="full"><div class="k">捕捉备注</div><div class="v" style="font-weight:400;">${esc(p.catchNote)}</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>动物档案核对<span class="hint">自动带出</span></div>
+    <div class="card-b">
+      <div class="kv">
+        <div><div class="k">档案编号</div><div class="v">${esc(p.code)}</div></div>
+        <div><div class="k">昵称</div><div class="v">${esc(p.name)}</div></div>
+        <div><div class="k">物种 / 品种</div><div class="v">${esc(p.species)} / ${esc(p.breed)}</div></div>
+        <div><div class="k">性别 / 毛色</div><div class="v">${esc(p.gender)} / ${esc(p.color)}</div></div>
+        <div><div class="k">体重</div><div class="v">${esc(p.weight)} kg</div></div>
+        <div><div class="k">芯片号</div><div class="v" style="color:var(--ink-light);">未植入</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>入院签收</div>
+    <div class="card-b">
+      <div class="fld">
+        <label>签收人<span class="auto">账号带出</span></label>
+        <input class="inp" value="${esc(S.sign.receiver)}" readonly />
+      </div>
+      <div class="fld">
+        <label>签收日期<span class="auto">默认今天</span></label>
+        <input class="inp" type="date" value="${todayStr()}" readonly />
+      </div>
+      <div class="fld">
+        <label>入院备注</label>
+        <textarea class="tar" id="signNote" placeholder="如：动物精神状态、运输途中有无异常…">${esc(S.sign.note)}</textarea>
+      </div>
+      <div class="tip inf"><span>ℹ️</span><div>确认签收后，动物状态由「在途」变更为 <b>待诊疗</b>，进入下一步检查环节。</div></div>
+    </div>
+  </div>`;
+}
+
+/* ---------- 步骤 2：诊疗前检查 ---------- */
+function step2HTML(){
+  const c = S.check;
+  const chip = (group, val, label, extra) => `<span class="chip ${c[group] === val ? 'on ' + (extra || '') : ''}" data-check="${group}" data-val="${val}">${label}</span>`;
+  const segHTML = (k) => {
+    const v = testVal(k);
+    return `<div class="seg" data-test="${k}">
+      <button data-tv="none" class="${v === 'none' ? 'on-none' : ''}">未检</button>
+      <button data-tv="neg"  class="${v === 'neg'  ? 'on-neg'  : ''}">阴性</button>
+      <button data-tv="pos"  class="${v === 'pos'  ? 'on-pos'  : ''}">阳性</button>
+    </div>`;
+  };
+  const posCount = TESTS.filter(t => testVal(t.key) === 'pos').length;
+
+  return `
+  <div class="proto-note">
+    <span>🩺</span>
+    <div><b>诊疗前先检查</b> —— 未完成体格检查与传染病快检，不能进入下医嘱/开处方环节。</div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>基础体征</div>
+    <div class="card-b">
+      <div class="row3">
+        <div class="fld"><label>体温</label><div class="unit-inp"><input class="inp" type="number" step="0.1" id="ck_temp" value="${esc(c.temp)}" placeholder="38.5"><span class="u">℃</span></div></div>
+        <div class="fld"><label>体重</label><div class="unit-inp"><input class="inp" type="number" step="0.1" id="ck_weight" value="${esc(c.weight)}" placeholder="${esc(pet().weight)}"><span class="u">kg</span></div></div>
+        <div class="fld"><label>心率</label><div class="unit-inp"><input class="inp" type="number" id="ck_hr" value="${esc(c.hr)}" placeholder="160"><span class="u">次</span></div></div>
+      </div>
+      <div class="row2">
+        <div class="fld"><label>呼吸频率</label><div class="unit-inp"><input class="inp" type="number" id="ck_rr" value="${esc(c.rr)}" placeholder="30"><span class="u">次</span></div></div>
+        <div class="fld"><label>体况评分 BCS</label>
+          <select class="sel" id="ck_bcs">
+            <option value="">请选择</option>
+            ${[1,2,3,4,5,6,7,8,9].map(n => `<option value="${n}" ${String(c.bcs)===String(n)?'selected':''}>${n} 分${n<4?'（偏瘦）':n>5?'（偏胖）':'（理想）'}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>临床检查<span class="hint">点选即录入</span></div>
+    <div class="card-b">
+      <div class="fld"><label>精神状态</label><div class="chips">
+        ${chip('mental','正常','正常','ok')}${chip('mental','沉郁','沉郁','warn')}${chip('mental','兴奋','兴奋','warn')}${chip('mental','昏迷','昏迷','warn')}
+      </div></div>
+      <div class="fld"><label>可视黏膜</label><div class="chips">
+        ${chip('mucosa','粉红','粉红正常','ok')}${chip('mucosa','苍白','苍白','warn')}${chip('mucosa','发绀','发绀','warn')}${chip('mucosa','黄染','黄染','warn')}
+      </div></div>
+      <div class="fld"><label>皮肤 / 被毛</label><div class="chips">
+        ${chip('skin','正常','正常','ok')}${chip('skin','体外寄生虫','体外寄生虫','warn')}${chip('skin','皮肤病','皮肤病','warn')}${chip('skin','外伤','外伤','warn')}
+      </div></div>
+      <div class="fld"><label>脱水程度</label><div class="chips">
+        ${chip('dehydr','无','无','ok')}${chip('dehydr','轻度','轻度','warn')}${chip('dehydr','中度','中度','warn')}${chip('dehydr','重度','重度','warn')}
+      </div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>传染病快检
+      <span class="hint">${posCount > 0 ? '<span style="color:var(--rouge);font-weight:700;">⚠ 有 ' + posCount + ' 项阳性</span>' : '三项以上建议全检'}</span></div>
+    <div class="card-b">
+      ${TESTS.map(t => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border-faint);">
+        <div style="flex:1;font-size:13.5px;">${t.label}</div>${segHTML(t.key)}
+      </div>`).join('')}
+      <div class="tip wrn" style="margin-top:10px;"><span>⚠️</span><div>任一快检 <b>阳性</b> 时，建议先治疗、暂缓绝育手术（系统会在下一步提示）。</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>检查结论</div>
+    <div class="card-b">
+      <div class="fld"><label>是否适合诊疗<span class="req">*</span></label><div class="chips">
+        ${chip('conclusion','适合诊疗','适合诊疗','ok')}
+        ${chip('conclusion','需先治疗','需先治疗','warn')}
+        ${chip('conclusion','暂缓手术','暂缓手术','warn')}
+        ${chip('conclusion','不宜处置','不宜处置','warn')}
+      </div></div>
+      <div class="fld"><label>检查备注</label>
+        <textarea class="tar" id="ck_note" placeholder="异常项说明、既往病史…">${esc(c.note)}</textarea></div>
+      <div class="sign-strip">
+        <div class="stamp">${esc(VET.seal)}</div>
+        <div class="sd">
+          <div class="n">检查兽医：${esc(VET.name)}</div>
+          <div class="d">${esc(VET.license)}</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ---------- 步骤 3：医嘱与处方 ---------- */
+function step3HTML(){
+  const scopeHTML = ITEMS.map(it => {
+    const on = !!S.items[it.key];
+    const rx = rxOf(it.key);
+    const open = S.openScope === it.key;
+    return `
+    <div class="rx-scope ${open ? 'open' : ''}">
+      <div class="rx-scope-h" data-scope-toggle="${it.key}">
+        <input type="checkbox" class="cb" data-item="${it.key}" ${on ? 'checked' : ''} />
+        <span class="ic">${it.icon}</span>
+        <span class="nm">${it.name}<small>${it.desc}</small></span>
+        ${rx.length ? `<span class="badge b-cin">处方 ${rx.length}</span>` : ''}
+        <span class="arr">›</span>
+      </div>
+      <div class="rx-scope-b">
+        <div class="fld">
+          <label>医嘱<span class="req">*</span></label>
+          <textarea class="tar" id="ord_${it.key}" placeholder="填写本项诊疗的医嘱内容…">${esc(S.orders[it.key] || '')}</textarea>
+          <div class="order-tpl">
+            ${it.tpl.map(t => `<span class="t" data-tpl="${it.key}" data-txt="${esc(t)}">＋ ${esc(t)}</span>`).join('')}
+          </div>
+        </div>
+        <div class="fld" style="margin-top:12px;">
+          <label>处方用药<span class="hint" style="font-weight:400;color:var(--ink-light);font-size:11px;"> · 统一发放药品 · 固定 1 头份</span></label>
+          <div class="rx-list">
+            ${rx.length ? rx.map((r, i) => `
+              <div class="rx-row">
+                <div class="nm">${esc(r.name)}<small>${esc(r.spec)} · 批号 ${esc(r.batch)}</small></div>
+                <div class="qty">1 头份</div>
+                <button class="del" data-rx-del="${it.key}:${r.medId}">✕</button>
+              </div>`).join('') : '<div class="rx-empty">尚未开药</div>'}
+          </div>
+          <button class="btn btn-o btn-sm" style="margin-top:8px;width:100%;" data-open-med="${it.key}">＋ 从库存药品中选择</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  const totalRx = S.rx.length;
+  const posTest = TESTS.filter(t => testVal(t.key) === 'pos');
+  const needSterWarn = (S.items.sterilization || S.openScope === 'sterilization') && posTest.length > 0;
+
+  return `
+  <div class="proto-note">
+    <span>📝</span>
+    <div>勾选本次要做的诊疗项目 → 逐项<b>下医嘱</b>、<b>开处方</b>。<br>
+    处方药品来自<span class="k">统一发放库存</span>，每项固定 <b>1 头份</b>，<b>选药即用药</b>。</div>
+  </div>
+
+  ${needSterWarn ? `<div class="tip wrn"><span>⚠️</span><div>传染病快检存在阳性项（${posTest.map(t=>t.label).join('、')}），建议暂缓绝育手术。</div></div>` : ''}
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>本次诊疗项目与处方<span class="hint">已开药 ${totalRx} 项</span></div>
+    <div class="card-b" style="padding-top:6px;">${scopeHTML}</div>
+  </div>`;
+}
+
+/* ---------- 步骤 4：执行与办结 ---------- */
+function step4HTML(){
+  const execItems = ITEMS.filter(it => S.items[it.key]);
+  const totalRx = S.rx.length;
+
+  return `
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>诊疗执行确认</div>
+    <div class="card-b">
+      ${execItems.length ? execItems.map(it => `
+        <div class="rx-row" data-exec="${it.key}" style="cursor:pointer;">
+          <input type="checkbox" ${S.exec[it.key] ? 'checked' : ''}
+                 style="width:19px;height:19px;accent-color:var(--bamboo-green);flex:none;pointer-events:none;" />
+          <div class="nm">${it.icon} ${it.name}<small>处方 ${rxOf(it.key).length} 项</small></div>
+          <span class="badge ${S.exec[it.key] ? 'b-suc' : 'b-def'}">${S.exec[it.key] ? '已执行' : '待执行'}</span>
+        </div>`).join('') : '<div class="rx-empty">未选择任何诊疗项目</div>'}
+      <div class="tip inf"><span>📦</span><div>提交后将自动生成 <b>诊疗台账</b> 与 <b>消耗流水（CON 单）</b>，按处方逐项扣减本院库存，共 <b>${totalRx}</b> 头份。</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>办结去向<span class="hint">必选</span></div>
+    <div class="card-b">
+      <div class="chips" style="flex-direction:column;align-items:stretch;gap:7px;">
+        ${DISPOSALS.map(d => `
+          <span class="chip ${S.disposal === d.key ? 'on' : ''}" data-disposal="${d.key}"
+                style="justify-content:flex-start;border-radius:var(--r-lg);padding:9px 12px;">
+            <span style="font-size:17px;margin-right:7px;">${d.icon}</span>
+            <span style="flex:1;">${d.label}</span>
+            <span style="font-size:10.5px;color:var(--ink-light);">${d.note}</span>
+          </span>`).join('')}
+      </div>
+      <div class="fld" style="margin-top:11px;"><label>办结备注</label>
+        <textarea class="tar" id="dispNote" placeholder="如：术后状态良好，转待领养；或安乐死原因…">${esc(S.disposalNote)}</textarea></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>兽医签名与盖章<span class="hint">账号带出</span></div>
+    <div class="card-b">
+      <div class="sign-strip">
+        <div class="stamp">${esc(VET.seal)}</div>
+        <div class="sd">
+          <div class="n">主诊兽医：${esc(VET.name)}</div>
+          <div class="d">${esc(VET.license)}</div>
+          <div class="d">${HOSPITAL.name} · 电子章</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><span class="bar"></span>处置留痕</div>
+    <div class="card-b">
+      <div class="tl">
+        <div class="tl-i ok"><div class="tm">${esc(pet().receiveDate)} 09:12</div><div class="tt">入院签收</div><div class="td">${esc(pet().shelter)} 转运交接，接收人 ${esc(S.sign.receiver)}</div></div>
+        <div class="tl-i ok"><div class="tm">${esc(pet().receiveDate)} 09:30</div><div class="tt">诊疗前检查</div><div class="td">结论：${esc(S.check.conclusion || '—')} · 体温 ${esc(S.check.temp || '—')}℃ · 体重 ${esc(S.check.weight || pet().weight)}kg</div></div>
+        <div class="tl-i ok"><div class="tm">${esc(pet().receiveDate)} 10:05</div><div class="tt">医嘱与处方</div><div class="td">${ITEMS.filter(i=>S.items[i.key]).map(i=>i.name).join('、') || '—'} · 处方 ${S.rx.length} 项</div></div>
+        <div class="tl-i"><div class="tm">待提交</div><div class="tt">执行与办结</div><div class="td">${S.disposal ? '去向：' + (DISPOSALS.find(d=>d.key===S.disposal)||{}).label : '尚未选择去向'}</div></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ============================================================
+   药品选择弹层
+   ============================================================ */
+let sheet = { scope: null, group: '全部' };
+
+function openMedSheet(scope){
+  sheet.scope = scope;
+  sheet.group = '全部';
+  $('#sheetSub').textContent = '为「' + (ITEMS.find(i => i.key === scope) || {}).name + '」选择 · 统一发放库存 · 每项固定 1 头份';
+  renderSheet();
+  $('#sheetMask').classList.add('show');
+}
+function closeMedSheet(){ $('#sheetMask').classList.remove('show'); }
+
+function renderSheet(){
+  $('#sheetTabs').innerHTML = MED_GROUPS.map(g =>
+    `<span class="tb ${sheet.group === g ? 'on' : ''}" data-mgroup="${g}">${g}</span>`).join('');
+
+  const list = MEDS.filter(m => sheet.group === '全部' || m.group === sheet.group);
+  const pickedIds = rxOf(sheet.scope).map(r => r.medId);
+
+  $('#sheetBody').innerHTML = list.map(m => {
+    const picked = pickedIds.includes(m.id);
+    const low = m.stock <= 5;
+    return `<div class="med-row ${picked ? 'picked' : ''}">
+      <div class="m-info">
+        <div class="m-nm">${esc(m.name)}</div>
+        <div class="m-sp">${esc(m.spec)} · ${esc(m.group)} · ${esc(m.use)}</div>
+        <div class="m-sp">批号 ${esc(m.batch)}</div>
+      </div>
+      <div style="flex:none;text-align:right;">
+        <div class="m-stk ${low ? 'stock-low' : ''}">库存 ${m.stock}</div>
+        <button class="btn btn-sm ${picked ? 'btn-s' : 'btn-o'}" data-med-pick="${m.id}" ${(!picked && m.stock <= 0) ? 'disabled' : ''}>
+          ${picked ? '✓ 已选' : '＋ 1 头份'}
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+
+  $('#sheetCount').textContent = rxOf(sheet.scope).length;
+}
+
+/* ============================================================
+   校验与流转
+   ============================================================ */
+function collectInputs(){
+  /* 把当前步的输入回写到 S（因为每次渲染都重建 DOM） */
+  if (S.step === 1){
+    const n = $('#signNote'); if (n) S.sign.note = n.value;
+  }
+  if (S.step === 2){
+    ['temp','weight','hr','rr','bcs','note'].forEach(k => {
+      const el = $('#ck_' + k); if (el) S.check[k] = el.value;
+    });
+  }
+  if (S.step === 3){
+    ITEMS.forEach(it => {
+      const el = $('#ord_' + it.key); if (el) S.orders[it.key] = el.value;
+    });
+  }
+  if (S.step === 4){
+    const el = $('#dispNote'); if (el) S.disposalNote = el.value;
+  }
+}
+
+function validateStep(n){
+  if (n === 1){
+    if (!S.sign.received){ toast('请先确认签收', 'warn'); return false; }
+    return true;
+  }
+  if (n === 2){
+    const c = S.check;
+    if (!c.conclusion){ toast('请选择检查结论', 'warn'); return false; }
+    const miss = [];
+    if (!c.temp) miss.push('体温');
+    if (!c.hr) miss.push('心率');
+    if (miss.length){ toast('请填写基础体征：' + miss.join('、'), 'warn'); return false; }
+    return true;
+  }
+  if (n === 3){
+    const on = ITEMS.filter(it => S.items[it.key]);
+    if (!on.length){ toast('请至少勾选一项诊疗项目', 'warn'); return false; }
+    for (const it of on){
+      if (!(S.orders[it.key] || '').trim()){ toast('请填写「' + it.name + '」的医嘱', 'warn'); return false; }
+    }
+    return true;
+  }
+  if (n === 4){
+    const on = ITEMS.filter(it => S.items[it.key]);
+    const unexec = on.filter(it => !S.exec[it.key]);
+    if (unexec.length){ toast('还有 ' + unexec.length + ' 项诊疗未确认执行', 'warn'); return false; }
+    if (!S.disposal){ toast('请选择办结去向', 'warn'); return false; }
+    return true;
+  }
+  return true;
+}
+
+/* ============================================================
+   事件绑定
+   ============================================================ */
+document.addEventListener('click', e => {
+  const t = e.target;
+
+  /* 返回 */
+  if (t.closest('#btnBack')){
+    if (S.view === 'flow'){ renderList(); } else { /* 已在列表 */ }
+    return;
+  }
+
+  /* 打开动物 */
+  const open = t.closest('[data-open]');
+  if (open){ resetState(Number(open.dataset.open)); S.view='flow'; renderFlow(); return; }
+
+  /* 步骤条跳转 */
+  const st = t.closest('[data-step]');
+  if (st){
+    const n = Number(st.dataset.step);
+    if (n <= S.maxStep){ S.step = n; renderFlow(); }
+    else toast('请按顺序完成前面的步骤', 'warn');
+    return;
+  }
+
+  /* 底部操作 */
+  const nav = t.closest('[data-nav]');
+  if (nav){
+    const act = nav.dataset.nav;
+    if (act === 'list'){ renderList(); return; }
+    if (act === 'prev'){ collectInputs(); S.step--; renderFlow(); return; }
+    if (act === 'next'){
+      collectInputs();
+      if (!validateStep(S.step)) return;
+      S.step++; S.maxStep = Math.max(S.maxStep, S.step); renderFlow(); return;
+    }
+    if (act === 'submit'){
+      collectInputs();
+      if (!validateStep(4)) return;
+      const p = pet(); p.status = 'closed';
+      toast('✓ 已提交归档，生成诊疗台账与消耗流水', 'ok');
+      setTimeout(renderList, 700);
+      return;
+    }
+  }
+
+  /* ---- 步骤 2：chips ---- */
+  const ck = t.closest('[data-check]');
+  if (ck){
+    const g = ck.dataset.check, v = ck.dataset.val;
+    S.check[g] = (S.check[g] === v) ? '' : v;
+    renderStepBody(); return;
+  }
+  /* 步骤 2：三态快检 */
+  const tv = t.closest('[data-tv]');
+  if (tv){
+    const k = tv.closest('[data-test]').dataset.test;
+    S.check.tests[k] = tv.dataset.tv;
+    renderStepBody(); return;
+  }
+
+  /* ---- 步骤 3：勾选诊疗项目 ---- */
+  const it = t.closest('[data-item]');
+  if (it){
+    const k = it.dataset.item;
+    S.items[k] = !S.items[k];
+    if (S.items[k]) S.openScope = k;
+    if (!S.items[k]) S.rx = S.rx.filter(r => r.scope !== k);  /* 取消项目 → 撤掉其处方 */
+    renderStepBody(); return;
+  }
+  /* 展开/收起区块（点标题栏，非复选框） */
+  const stg = t.closest('[data-scope-toggle]');
+  if (stg){
+    const k = stg.dataset.scopeToggle;
+    S.openScope = (S.openScope === k) ? '' : k;
+    renderStepBody(); return;
+  }
+  /* 医嘱模板 */
+  const tp = t.closest('[data-tpl]');
+  if (tp){
+    const k = tp.dataset.tpl, txt = tp.dataset.txt;
+    const el = $('#ord_' + k);
+    if (el){ el.value = (el.value ? el.value.replace(/\s*$/, '') + '\n' : '') + txt; S.orders[k] = el.value; }
+    return;
+  }
+  /* 打开药品选择 */
+  const om = t.closest('[data-open-med]');
+  if (om){ openMedSheet(om.dataset.openMed); return; }
+  /* 删除处方项 */
+  const del = t.closest('[data-rx-del]');
+  if (del){
+    const [scope, medId] = del.dataset.rxDel.split(':');
+    S.rx = S.rx.filter(r => !(r.scope === scope && r.medId === medId));
+    renderStepBody(); return;
+  }
+
+  /* ---- 步骤 4 ---- */
+  const ex = t.closest('[data-exec]');
+  if (ex){ S.exec[ex.dataset.exec] = !S.exec[ex.dataset.exec]; renderStepBody(); return; }
+  const dp = t.closest('[data-disposal]');
+  if (dp){ collectInputs(); S.disposal = (S.disposal === dp.dataset.disposal) ? '' : dp.dataset.disposal; renderStepBody(); return; }
+
+  /* ---- 弹层 ---- */
+  const mg = t.closest('[data-mgroup]');
+  if (mg){ sheet.group = mg.dataset.mgroup; renderSheet(); return; }
+  const mp = t.closest('[data-med-pick]');
+  if (mp){
+    const m = med(mp.dataset.medPick);
+    const picked = rxOf(sheet.scope).some(r => r.medId === m.id);
+    if (picked){ S.rx = S.rx.filter(r => !(r.scope === sheet.scope && r.medId === m.id)); }
+    else {
+      if (m.stock <= 0){ toast('该药品库存不足', 'err'); return; }
+      S.rx.push({ medId: m.id, name: m.name, spec: m.spec, batch: m.batch, scope: sheet.scope });
+      toast('已加入处方：' + m.name + '（1 头份）', 'ok');
+    }
+    renderSheet(); renderStepBody(); return;
+  }
+  if (t.closest('#sheetClose') || t.closest('#sheetDone') || t.id === 'sheetMask'){ closeMedSheet(); return; }
+});
+
+/* 输入回写（失焦即存，切步不丢） */
+document.addEventListener('input', e => {
+  const el = e.target;
+  if (el.id === 'signNote') S.sign.note = el.value;
+  if (el.id === 'ck_note') S.check.note = el.value;
+  if (el.id === 'dispNote') S.disposalNote = el.value;
+  if (el.id && el.id.startsWith('ck_')) S.check[el.id.slice(3)] = el.value;
+  if (el.id && el.id.startsWith('ord_')) S.orders[el.id.slice(4)] = el.value;
+});
+
+/* 启动 */
+renderList();
+</script>
+</body>
+</html>
