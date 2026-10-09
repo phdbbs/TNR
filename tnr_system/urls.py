@@ -43,7 +43,17 @@ urlpatterns = [
 ]
 
 if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    # ⚠ `/media/` 只在**本地磁盘存储**下才挂。
+    #
+    # 切到对象存储后，图片由对象存储域名（或 CDN）直接提供，Django 不再参与
+    # 文件分发。此时若仍挂着 `/media/`，本地残留的旧文件照样能访问 ——
+    # 于是「迁移没搬干净」这件事会被完全掩盖：页面看起来一切正常，
+    # 实际一部分图走对象存储、另一部分走本地残留，等到清理本地目录时才集中爆发。
+    # 让它在对象存储模式下**直接 404**，是把问题暴露在最早的时刻。
+    from core.storage import is_local_media
+
+    if is_local_media():
+        urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
 
 
