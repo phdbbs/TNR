@@ -21,6 +21,7 @@ from business.models import (
 )
 from business.stock_init import initialize as init_material_stock
 from business.services import generate_doc_no
+from business.services_chip import parse_chip_numbers
 from core.models import District, Institution
 
 # ============================================
@@ -50,7 +51,20 @@ SEED_DISTRICT_CODE_BY_INTERNAL = {
 # 演示物料清单（**单一来源**）
 # ============================================
 # 字段：(mat_id, 名称, 类别, 单位, 规格, 供应商, 批号, 捕捉点库存, 安全库存,
-#        有效期距今天数, 芯片起始号, 芯片结束号, 区县代号)
+#        有效期距今天数, 区县代号)
+#
+# ⚠ 第四十六轮删掉了原来的「芯片起始号 / 芯片结束号」两列：
+#   芯片已改为**逐号**管理（`Chip` 表），号段由 `_seed_chips()` 按
+#   `SEED_CHIP_ASSIGNMENT` 连续分配，不再需要一份手写号段清单
+#   —— 那份清单正是「双真源」的一半（清单说 100 个、实际建了 30 行，
+#   界面照样按清单显示 100 且不报错）。
+#
+# ⚠ MAT004（宠物芯片）的「捕捉点库存」是 **290**，不是采购量 500：
+#   500 个里有 210 个已下发给爱心宠物医院（见 `SEED_CHIP_ASSIGNMENT`），
+#   余额 290。这个数字与「`Chip` 表里挂在襄城捕捉点名下的芯片数」
+#   **必须相等**（「芯片按号码单独管理」的强绑定），有判据盯着；
+#   第四十六轮之前它写的是 500，于是界面上「库存 500」而实际只有 500 颗里
+#   的 290 颗在捕捉点 —— 两页数字不同，且没有任何提示。
 #
 # ⚠ 有效期用**距今天数**，不要写绝对日期。
 # 本命令里其它日期（入库 2025-01-05、诊疗 2025-01-14 等）都是**历史事件**，
@@ -65,13 +79,13 @@ SEED_DISTRICT_CODE_BY_INTERNAL = {
 SEED_MATERIALS = [
     # --- 襄城区（演示区县之一，内部代号 D001） ---
     ('MAT001', '狂犬疫苗', 'vaccine', '支', '1ml/支', '国药集团', 'B20250101',
-     120, 50, 270, '', '', 'D001'),
+     120, 50, 270, 'D001'),
     ('MAT002', '猫三联疫苗', 'vaccine', '支', '1ml/支', '英特威', 'B20250102',
-     80, 40, 180, '', '', 'D001'),
+     80, 40, 180, 'D001'),
     ('MAT003', '体内外驱虫药', 'dewormer', '盒', '6片/盒', '拜耳', 'Q20250101',
-     60, 30, 90, '', '', 'D001'),
+     60, 30, 90, 'D001'),
     ('MAT004', '宠物芯片', 'chip', '个', '134.2kHz', '信码科技', 'C20250101',
-     500, 200, None, '1000010001', '1000010500', 'D001'),
+     290, 200, None, 'D001'),
     # --- 樊城区（演示区县之二，内部代号 D002） ---
     #
     # ⚠ 为什么樊城区也必须有：生产实测时 4 条物料**全挂在襄城区**，
@@ -81,14 +95,74 @@ SEED_MATERIALS = [
     # 名称与襄城区**刻意重名**：同一件耗材在多个区县各有一条库存是正常
     # 业务状态，也正好让 `(name, district)` 这个幂等键始终被真实覆盖。
     ('MAT101', '狂犬疫苗', 'vaccine', '支', '1ml/支', '国药集团', 'B20250201',
-     90, 40, 300, '', '', 'D002'),
+     90, 40, 300, 'D002'),
     ('MAT102', '猫三联疫苗', 'vaccine', '支', '1ml/支', '英特威', 'B20250202',
-     60, 30, 200, '', '', 'D002'),
+     60, 30, 200, 'D002'),
     ('MAT103', '体内外驱虫药', 'dewormer', '盒', '6片/盒', '拜耳', 'Q20250201',
-     45, 20, 120, '', '', 'D002'),
+     45, 20, 120, 'D002'),
     ('MAT104', '宠物芯片', 'chip', '个', '134.2kHz', '信码科技', 'C20250201',
-     300, 150, None, '1000010501', '1000011000', 'D002'),
+     300, 150, None, 'D002'),
 ]
+
+# 种子芯片的起始号（第四十六轮）。
+#
+# ⚠ 宽度必须是 **10 位**：`parse_chip_numbers()` 按首号位数补零，
+# 首号写 11 位会得到 `10000100001`，与宠物档案里的 `chip_no`
+# （`1000010001`）对不上 —— 医院登记「芯片植入」时会报「芯片不存在」。
+# （这个坑第四十六轮之前就踩过一次，注释留在 `_seed_chips` 里。）
+SEED_CHIP_FIRST_NUMBER = '1000010001'
+
+# 种子芯片的**分配**：物料 → [(机构 code, 个数), ...]（第四十六轮）。
+#
+# ⚠ 机构 code 与 `_seed_institutions()` 的清单同源（那里是权威定义）：
+#   I001 = 襄城流浪动物捕捉点、I002 = 樊城流浪动物捕捉点、I003 = 爱心宠物医院。
+#
+# 口径与 `_seed_material_txns()` 里的芯片流水对齐：
+#   MTX004 襄城捕捉点**采购** 500 个；
+#   MTX005 襄城捕捉点**下发** 210 个至爱心宠物医院（MTX006R 已签收）；
+#   MTX006 爱心宠物医院**消耗** 3 个（PET001/002/003 芯片植入）。
+# 于是：爱心宠物医院 210 个（其中 3 个随后被标 `used`）、襄城捕捉点 290 个。
+#
+# ⚠ **医院必须排在前面**：`_link_chips_to_pets()` 与 `_seed_pets()` /
+#   `_seed_treatments()` 都硬编码引用 `1000010001` / `1000010006` /
+#   `1000010011` / `1000010016` 这几个号 —— 它们是**爱心宠物医院**植出去的，
+#   所以号段必须从医院开始排（医院拿 `1000010001~1000010210`）。
+#   排反了的话，这 15 颗「已使用」的芯片会挂在捕捉点名下的宠物身上，
+#   而宠物是在医院做的诊疗 —— 追溯链当场错位，且不会报错。
+#
+# ⚠ 捕捉点的芯片个数必须与 `SEED_MATERIALS` 里该物料的 `stock` **相等**
+#   （`stock` 的语义就是「该区县捕捉点的当前库存」）：
+#   MAT004 → 290、MAT104 → 300，与 `SEED_MATERIALS` 里的 290 / 300 一致，
+#   有判据盯着（`SeedChipNumberConsistencyTest`）。改了一边忘了另一边，
+#   界面就会「库存一个数、芯片列表另一个数」，且不报错。
+SEED_CHIP_ASSIGNMENT = {
+    'MAT004': [('I003', 210), ('I001', 290)],
+    'MAT104': [('I002', 300)],
+}
+
+# 每个芯片物料的**芯片总数**（从 `SEED_CHIP_ASSIGNMENT` 派生，不手抄）。
+#
+# ⚠ 它是**采购总量**，不等于 `SEED_MATERIALS` 里该物料的 `stock`
+#   （后者是**该区县捕捉点的当前余额**）：MAT004 采购 500、下发给医院 210，
+#   于是捕捉点余额 290 —— `500 == 210 + 290`，两个数字都不手抄、都能对上。
+SEED_CHIP_COUNT = {
+    mat_id: sum(n for _code, n in rows)
+    for mat_id, rows in SEED_CHIP_ASSIGNMENT.items()
+}
+
+# 种子数据里「已植入芯片」的那几颗 —— 芯片的**全局序号**（见 `_seed_chips` 的
+# 分配顺序），与 `_seed_pets()` 里 4 个带 `chip_no` 的宠物一一对应：
+#
+#     序号 1  → 1000010001 → PET001 / TNR2501001
+#     序号 6  → 1000010006 → PET002 / TNR2501002
+#     序号 11 → 1000010011 → PET003 / TNR2501003
+#     序号 16 → 1000010016 → PET006 / TNR2501006（安乐死，芯片仍算已植入）
+#
+# ⚠ 必须与 `_link_chips_to_pets()` 用**同一个常量**。原实现两处各写一份
+#   （那里关联 1-15 共 15 颗、`_seed_pets` 只有 4 个 chip_no），于是
+#   「15 颗被标 `used`、流水侧只记了 3 个消耗」—— 爱心宠物医院的
+#   「可用芯片数」（195）与「库存数」（207）差 12，**且不报错**。
+SEED_USED_CHIP_INDEXES = (1, 6, 11, 16)
 
 # 演示物料所属区县的**实际 code**。
 #
@@ -126,7 +200,7 @@ class Command(BaseCommand):
             institutions = self._seed_institutions(districts)
             users = self._seed_users(districts, institutions)
             materials = self._seed_materials(districts)
-            chips = self._seed_chips()
+            chips = self._seed_chips(materials)
             captures = self._seed_captures(districts, institutions, users)
             pets = self._seed_pets(districts, institutions, captures, chips)
             self._link_chips_to_pets(pets, chips)
@@ -322,7 +396,7 @@ class Command(BaseCommand):
         self.stdout.write('创建物资...')
         today = timezone.localdate()
         materials = {}
-        for mat_id, name, category, unit, spec, supplier, batch_no, stock, safety, expiry_offset, chip_start, chip_end, district_code in SEED_MATERIALS:
+        for mat_id, name, category, unit, spec, supplier, batch_no, stock, safety, expiry_offset, district_code in SEED_MATERIALS:
             # 有效期由**距今天数**换算（见 SEED_MATERIALS 的说明）；
             # `None` 表示该物料没有有效期（芯片）。
             expiry = None if expiry_offset is None else today + timedelta(days=expiry_offset)
@@ -350,8 +424,6 @@ class Command(BaseCommand):
                     'shelter_stock': stock,
                     'safety_stock': safety,
                     'expiry_date': expiry,
-                    'chip_range_start': chip_start,
-                    'chip_range_end': chip_end,
                 }
             )
             materials[mat_id] = m
@@ -360,34 +432,89 @@ class Command(BaseCommand):
     # ============================================
     # 5. 芯片
     # ============================================
-    def _seed_chips(self):
-        self.stdout.write('创建芯片（500个）...')
-        chips = {}
-        # 号段 1000010001-1000010500，共 10 位。
-        # 注意补零宽度是 3 位（{i:03d}）：写成 {i:04d} 会得到 11 位的
-        # 10000100001，与宠物档案里的 chip_no（1000010001）对不上，
-        # 医院登记「芯片植入」时会报「芯片不存在」。
-        existing = set(Chip.objects.values_list('number', flat=True))
-        to_create = []
-        for i in range(1, 501):
-            number = f'1000010{i:03d}'
-            if number not in existing:
-                to_create.append(Chip(number=number))
-        if to_create:
-            Chip.objects.bulk_create(to_create, batch_size=200)
+    def _seed_chips(self, materials):
+        """按 `SEED_CHIP_ASSIGNMENT` 建出**逐号**芯片行（第四十六轮）。
 
-        # 标记前15个为已使用
-        for i in range(1, 16):
-            number = f'1000010{i:03d}'
-            chip = Chip.objects.get(number=number)
+        重构前这里建的是一池**没有归属**的裸号码：查不出「这批在谁手上」，
+        医院端也无从「从本院库存里挑芯片」—— 而演示数据里明明写着有 500 颗。
+        现在每一颗都带持有机构与所属物料。
+
+        号码按**物料顺序、机构顺序连续分配**，起点是
+        `SEED_CHIP_FIRST_NUMBER`。于是「芯片数 == 分配表里的个数」天然成立，
+        不需要另写一份号段清单 —— 那种清单正是重构前双真源的另一半。
+
+        ⚠ 号码宽度由 `SEED_CHIP_FIRST_NUMBER` 的位数决定（10 位）。写成 11 位
+        会与宠物档案里的 `chip_no`（`1000010001`）对不上，医院登记
+        「芯片植入」时会报「芯片不存在」。
+
+        ⚠ 已知缺口：把前 15 颗标成 `used` 时**没有补对应的 consume 流水**
+        （`_seed_material_txns()` 里那 3 笔只记了数量 3，不是 15）。
+        所以爱心宠物医院的 `MaterialStock.quantity`（207）与「名下芯片总数」
+        （210）差 3。这是种子数据的既有简化，**不是缺陷** ——
+        但意味着「芯片数 == 库存数」的对账判据必须按 **`available`** 计数
+        （207 = 210 − 3 才对得上），不能按总数。
+        """
+        self.stdout.write('创建芯片...')
+        chips = {}
+        next_number = SEED_CHIP_FIRST_NUMBER
+        seq = 0
+        for mat_id in sorted(SEED_CHIP_ASSIGNMENT):
+            material = materials.get(mat_id)
+            if material is None:
+                continue
+            for inst_code, count in SEED_CHIP_ASSIGNMENT[mat_id]:
+                if count <= 0:
+                    continue
+                institution = Institution.objects.filter(code=inst_code).first()
+                if institution is None:
+                    self.stdout.write(self.style.WARNING(
+                        f'  机构 {inst_code} 不存在，{material.name} 的 {count} 颗跳过'))
+                    continue
+
+                numbers = parse_chip_numbers(next_number, count)
+                existed = set(Chip.objects.filter(
+                    number__in=numbers).values_list('number', flat=True))
+                to_create = [
+                    Chip(number=n, status='available', institution=institution,
+                         material=material, batch_no='SEED')
+                    for n in numbers if n not in existed
+                ]
+                if to_create:
+                    Chip.objects.bulk_create(to_create, batch_size=200)
+
+                # 幂等修复：重构前的行没有机构/物料归属，按分配表补上。
+                # 这里**不是「猜」**（与迁移里「存量行不回填」的取舍不同）——
+                # 种子明确知道这批货属于哪个机构、哪条物料。
+                Chip.objects.filter(
+                    number__in=numbers, institution__isnull=True).update(
+                    institution=institution)
+                Chip.objects.filter(
+                    number__in=numbers, material__isnull=True).update(
+                    material=material)
+
+                rows = {c.number: c for c in Chip.objects.filter(number__in=numbers)}
+                for n in numbers:
+                    seq += 1
+                    chips[seq] = rows[n]
+                # 下一段接着排。多取 1 个再取末位，避免与下一段的首号重叠。
+                next_number = parse_chip_numbers(next_number, count + 1)[-1]
+                self.stdout.write(f'  {material.name}（{institution.name}）'
+                                  f'{count} 颗：{numbers[0]} ~ {numbers[-1]}')
+
+        # 标为已使用 —— 只标 `SEED_USED_CHIP_INDEXES` 那几颗（与 `_seed_pets`
+        # 里 4 个 `chip_no` 一一对应）。
+        # ⚠ 不要多标：多标的芯片会让「可用芯片数」小于 `MaterialStock.quantity`，
+        #   而流水侧没有对应消耗，两边永远对不上且不报错（原实现标 15 颗、
+        #   流水只记 3 个，差值 12）。
+        for i in SEED_USED_CHIP_INDEXES:
+            chip = chips.get(i)
+            if chip is None:
+                continue
             chip.status = 'used'
             chip.used_at = date(2025, 1, 20)
             chip.save(update_fields=['status', 'used_at'])
-            chips[i] = chip
-        # 其余芯片
-        for i in range(16, 501):
-            number = f'1000010{i:03d}'
-            chips[i] = Chip.objects.get(number=number)
+
+        self.stdout.write(f'  共 {len(chips)} 颗芯片')
         return chips
 
     # ============================================
@@ -498,18 +625,25 @@ class Command(BaseCommand):
     # ============================================
     def _link_chips_to_pets(self, pets, chips):
         self.stdout.write('关联芯片到宠物...')
-        # 芯片1-5 -> PET001, 6-10 -> PET002, 11-15 -> PET003
+        # 每只宠物**一颗**芯片 —— 与 `Pet.chip_no` 一一对应，序号取自
+        # `SEED_USED_CHIP_INDEXES`（`_seed_chips` 也用它标 `used`，**同一常量**）。
+        #
+        # ⚠ 原实现给每只宠物关联 5 颗（1-5 / 6-10 / 11-15），但宠物档案里
+        #   只存得下一个 `chip_no`，于是「关联了 5 颗、档案里只记 1 颗」，
+        #   另外 4 颗成了「挂在宠物名下、却答不出是给谁用的」。
+        #   更要紧的是它与流水口径对不上（15 颗 `used` vs 3 个消耗），
+        #   让「可用芯片数」与「库存数」静默错开。
         mapping = {
-            'PET001': list(range(1, 6)),
-            'PET002': list(range(6, 11)),
-            'PET003': list(range(11, 16)),
+            'PET001': 1,
+            'PET002': 6,
+            'PET003': 11,
+            'PET006': 16,
         }
-        for pet_id, chip_indices in mapping.items():
+        for pet_id, idx in mapping.items():
             pet = pets[pet_id]
-            for idx in chip_indices:
-                chip = chips[idx]
-                chip.pet = pet
-                chip.save(update_fields=['pet'])
+            chip = chips[idx]
+            chip.pet = pet
+            chip.save(update_fields=['pet'])
 
     # ============================================
     # 9. 转运记录
@@ -653,9 +787,13 @@ class Command(BaseCommand):
             ('MTX005', 'dispatch', 'MAT004', '宠物芯片', 210, '个', 'C20250101',
              '', '多家医院', None, 'DIS-2025-0107-001', date(2025, 1, 7),
              'D001', 'cy_shelter', '下发至各医院'),
-            ('MTX006', 'consume', 'MAT004', '宠物芯片', 3, '个', 'C20250101',
+            # ⚠ 数量 4 与 `SEED_USED_CHIP_INDEXES` 的**个数**必须一致：
+            #   标了 4 颗 `used`，流水侧就必须有 4 个消耗 —— 否则
+            #   爱心宠物医院的「可用芯片数」与 `MaterialStock.quantity` 会
+            #   静默错开（原实现标 15 颗、这里只记 3 个，差 12）。
+            ('MTX006', 'consume', 'MAT004', '宠物芯片', 4, '个', 'C20250101',
              '', '诊疗消耗', 'I003', 'CON-2025-0115-001', date(2025, 1, 15),
-             'D001', 'aixin_hosp', 'PET001,PET002,PET003芯片植入'),
+             'D001', 'aixin_hosp', 'PET001,PET002,PET003,PET006芯片植入'),
             ('MTX006R', 'receive', 'MAT004', '宠物芯片', 210, '个', 'C20250101',
              '', '襄城流浪动物捕捉点', 'I003', 'RVC-2025-0107-001', date(2025, 1, 7),
              'D001', 'aixin_hosp', '签收下发物料（原单号：DIS-2025-0107-001）'),

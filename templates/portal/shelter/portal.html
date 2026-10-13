@@ -2195,7 +2195,7 @@ const Shelter = {
       html += '<div class="form-group"><label class="form-label">采购日期</label><input type="date" class="form-input" id="pu_date"></div>';
       html += '</div><div class="form-row-3">';
       html += '<div class="form-group"><label class="form-label">批号</label><input class="form-input" id="pu_batchNo" placeholder="批号"></div>';
-      html += '<div class="form-group" id="pu_chipRangeGroup" style="display:none;"><label class="form-label">芯片起止号段</label><div class="flex gap-2 items-center"><input class="form-input" id="pu_chipStart" placeholder="起始号"><span>~</span><input class="form-input" id="pu_chipEnd" placeholder="结束号"></div></div>';
+      html += '<div class="form-group" id="pu_chipRangeGroup" style="display:none;"><label class="form-label">芯片起始号</label><input class="form-input" id="pu_chipStart" placeholder="如 042060107000177"></div>';
       html += '<div class="form-group"><label class="form-label">备注</label><input class="form-input" id="pu_note" placeholder="备注"></div>';
       html += '</div>';
       html += '<button class="btn btn-primary" id="btnPurchase">提交采购入库</button>';
@@ -2246,6 +2246,12 @@ const Shelter = {
         const name = document.getElementById('pu_name').value.trim();
         const qty = parseInt(document.getElementById('pu_qty').value) || 0;
         if (!name || qty < 1) { TNR_UI.toast('请填写完整信息', 'warning'); return; }
+        // 第四十六轮：芯片只填「起始号」，这批号码由服务端按「首号 + 数量」
+        // 递增推算（数量就是上面的 quantity）。原来的「起止号段」两个输入
+        // 已删除 —— 服务端只认首号，留着结束号输入框等于让用户以为填了有用
+        // （**静默做不到**，比撞 400 更难发现）。
+        const chipStart = cat === 'chip' ? document.getElementById('pu_chipStart').value.trim() : '';
+        if (cat === 'chip' && !chipStart) { TNR_UI.toast('请填写芯片起始号', 'warning'); return; }
         const res = await TNR_API.purchaseMaterial({
           category: cat,
           name: name,
@@ -2255,8 +2261,7 @@ const Shelter = {
           supplier: document.getElementById('pu_supplier').value.trim(),
           date: document.getElementById('pu_date').value || TNR_UI.formatDate(new Date()),
           note: document.getElementById('pu_note').value.trim(),
-          chip_start: cat === 'chip' ? document.getElementById('pu_chipStart').value : '',
-          chip_end: cat === 'chip' ? document.getElementById('pu_chipEnd').value : ''
+          chip_start: chipStart
         });
         if (res && res.success !== false) {
           TNR_UI.toast('采购入库成功：' + (res.data?.ledger_no || ''), 'success');
@@ -2292,7 +2297,7 @@ const Shelter = {
       html += '<div class="form-group"><label class="form-label">批号</label><input class="form-input" id="ob_batchNo" placeholder="批号"></div>';
       html += '<div class="form-group"><label class="form-label">备注</label><input class="form-input" id="ob_note" placeholder="备注"></div>';
       html += '</div><div class="form-row-3">';
-      html += '<div class="form-group" id="ob_chipRangeGroup" style="display:none;"><label class="form-label">芯片号段</label><input class="form-input" id="ob_chipRange" placeholder="如：1000010001-1000010010"></div>';
+      html += '<div class="form-group" id="ob_chipRangeGroup" style="display:none;"><label class="form-label">芯片起始号</label><input class="form-input" id="ob_chipStart" placeholder="如：042060107000177"></div>';
       html += '</div>';
       html += '<button class="btn btn-primary" id="btnOutbound">提交下发</button>';
       html += '</div></div>';
@@ -2414,6 +2419,17 @@ const Shelter = {
           TNR_UI.toast('库存不足，当前库存：' + stockOf(mat) + (mat.unit || ''), 'danger');
           return;
         }
+        // 第四十六轮：芯片按「首号 + 数量」下发。服务端会**逐颗**校验
+        // 「属于本机构、属于该物料、状态可用」，通过后把它们标为在途
+        // （签收时靠下发单反查这批号码，再转到接收方名下）。
+        // ⚠ 原来的 `chip_range`（"1001-1010" 号段字符串）只是往备注里拼一句话，
+        //   芯片归属压根没动 —— 同一批可以无限次重复下发。
+        const chipStart = mat.category === 'chip'
+          ? document.getElementById('ob_chipStart').value.trim() : '';
+        if (mat.category === 'chip' && !chipStart) {
+          TNR_UI.toast('请填写芯片起始号', 'warning');
+          return;
+        }
         const payload = {
           material_id: mat.id,
           material_name: mat.name,
@@ -2421,7 +2437,7 @@ const Shelter = {
           unit: mat.unit,
           batch_no: document.getElementById('ob_batchNo').value.trim(),
           note: document.getElementById('ob_note').value.trim(),
-          chip_range: mat.category === 'chip' ? document.getElementById('ob_chipRange').value : ''
+          chip_start: chipStart
         };
         /* 接收方按类型走**两个不同的字段名**（`hospital_id` / `to_shelter_id`）——
          * 服务端 `dispatch_create` 靠它区分接收方类型，两个都传直接 400。

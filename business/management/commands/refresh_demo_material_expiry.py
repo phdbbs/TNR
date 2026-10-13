@@ -47,7 +47,7 @@ from core.models import District
 DEMO_MATERIAL_OFFSETS = {
     (SEED_DISTRICT_CODE_BY_INTERNAL[district_code], name): offset
     for (_id, name, _cat, _unit, _spec, _sup, _batch,
-         _stock, _safety, offset, _cs, _ce, district_code) in SEED_MATERIALS
+         _stock, _safety, offset, district_code) in SEED_MATERIALS
     if offset is not None
 }
 

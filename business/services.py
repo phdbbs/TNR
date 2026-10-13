@@ -677,21 +677,36 @@ def generate_doc_no(prefix, when=None):
 # ============================================
 # 芯片管理
 # ============================================
-def use_chip(chip_no, pet):
+def use_chip(chip_no, pet, institution=None):
     """标记芯片为已使用。
 
     :param chip_no: 芯片号
     :param pet: 关联的宠物对象
+    :param institution: 使用这颗芯片的机构（医院）。**传了才做归属校验**。
     :return: True 表示成功
-    :raises ValueError: 芯片不存在或已使用
+    :raises ValueError: 芯片不存在 / 不可用 / 不属于本机构
+
+    ⚠ 归属校验**只拦新引用、不拦存量**（第四十六轮）：
+    重构前的 `Chip` 行没有机构归属（`institution` 为 NULL），
+    它们的归属信息在数据里已经丢了，一律放行 —— 否则历史芯片一颗都用不出去。
+    新入库的芯片一定带机构，所以「甲院的芯片被乙院用掉」会被拦住。
     """
     try:
         chip = Chip.objects.get(number=chip_no)
     except Chip.DoesNotExist:
         raise ValueError(f'芯片 {chip_no} 不存在')
 
+    # 三态都要拦：`used` 是重复使用；`in_transit` 是「货还在路上、
+    # 对方没签收」—— 此时库存已经从发起方扣掉了，谁都不该能用它。
+    # 重构前只有两态，所以只判了 `used`，`in_transit` 是新增的漏洞面。
     if chip.status == 'used':
         raise ValueError(f'芯片 {chip_no} 已被使用')
+    if chip.status == 'in_transit':
+        raise ValueError(f'芯片 {chip_no} 在途（尚未签收），不能使用')
+
+    if (institution is not None and chip.institution_id is not None
+            and chip.institution_id != institution.id):
+        raise ValueError(f'芯片 {chip_no} 不属于 {institution.name}，不能使用')
 
     chip.status = 'used'
     chip.pet = pet

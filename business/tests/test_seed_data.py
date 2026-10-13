@@ -21,17 +21,20 @@ from datetime import timedelta
 from io import StringIO
 
 from django.core.management import call_command
+from django.db.models import Sum
 from django.test import TestCase
 from django.utils import timezone
 
 from accounts.models import User
 from business.management.commands.seed_data import (
-    SEED_DISTRICT_CODE_BY_INTERNAL, SEED_MATERIAL_DISTRICT_CODES, SEED_MATERIALS,
+    SEED_CHIP_COUNT, SEED_DISTRICT_CODE_BY_INTERNAL, SEED_MATERIAL_DISTRICT_CODES,
+    SEED_MATERIALS, SEED_USED_CHIP_INDEXES,
 )
 from business.models import (
-    Adoption, Capture, CheckIn, Chip, Material, MaterialTransaction, Message,
-    Pet, Release, Treatment,
+    Adoption, Capture, CheckIn, Chip, Material, MaterialStock,
+    MaterialTransaction, Message, Pet, Release, Treatment,
 )
+from business.services_chip import count_available_chips
 from business.tests.base import assert_doc_no
 from core.models import District, Institution
 
@@ -228,11 +231,81 @@ class SeedChipNumberConsistencyTest(SeedDataTestBase):
     def test_seed_chip_range_is_ten_digits(self):
         self.seed()
         nums = list(Chip.objects.values_list('number', flat=True))
-        self.assertEqual(len(nums), 500)
+        # ⚠ 数量从清单**派生**，不硬编码。第四十五轮加了樊城区的芯片物料
+        #   （MAT104，300 个）之后，这里仍写着 500、种子也只建了 500 颗 ——
+        #   樊城那 300 个芯片**一颗都没建**，判据却一直是绿的。
+        #   第四十六轮补齐后它立刻变红，才把这个缺口暴露出来。
+        self.assertEqual(len(nums), sum(SEED_CHIP_COUNT.values()))
         self.assertEqual(sorted({len(n) for n in nums}), [10],
                          f'芯片号应为 10 位，实际长度集合 {sorted({len(n) for n in nums})}')
         self.assertIn('1000010001', nums)
         self.assertIn('1000010500', nums)
+
+    def test_every_chip_has_institution_and_material(self):
+        """每颗芯片都必须带**持有机构**与**所属物料**（第四十六轮）。
+
+        重构前的芯片是一池无归属的裸号码：查不出「这批在谁手上」，
+        医院端「从本院库存里挑芯片」挑不出任何东西 ——
+        而演示数据里明明写着有 500 颗。
+        """
+        self.seed()
+        self.assertFalse(
+            Chip.objects.filter(institution__isnull=True).exists(),
+            '存在没有持有机构的芯片（医院端将挑不出可用芯片）')
+        self.assertFalse(
+            Chip.objects.filter(material__isnull=True).exists(),
+            '存在没有所属物料的芯片（消耗时扣不到正确的物料库存）')
+
+    def test_chip_count_matches_stock_for_every_institution(self):
+        """**每个机构**（捕捉点与医院）的可用芯片数必须等于其库存数。
+
+        这是「芯片按号码单独管理 + 强绑定」的**业务结果**判据（不是状态码）：
+        入库 N 颗 → 库存 +N；下发/消耗 M 颗 → 库存 −M、且芯片状态同步变。
+        两边一旦错开，界面上「库存 500」与「芯片 290」会**同时显示**且不报错
+        （第四十六轮之前就是这个状态）。
+        """
+        self.seed()
+        checked = 0
+        for stock in MaterialStock.objects.filter(material__category='chip'):
+            self.assertEqual(
+                count_available_chips(stock.material, stock.institution),
+                stock.quantity,
+                f'{stock.institution.name} 的「{stock.material.name}」'
+                f'可用芯片数与库存数不一致')
+            checked += 1
+        # 判据不能空跑：种子数据必须有 2 个捕捉点 + 1 家医院持有芯片。
+        self.assertEqual(checked, 3, '应覆盖 2 个捕捉点 + 1 家医院')
+
+    def test_used_chip_count_matches_consume_txn(self):
+        """「已使用芯片数」必须等于芯片的 consume 流水合计。
+
+        与上一条互为**正反两面**：上一条盯「可用的」，这一条盯「用掉的」。
+        只盯一边的话，把两边同时改错（都 +12）仍会通过。
+        """
+        self.seed()
+        material = Material.objects.get(name='宠物芯片', district__code='CY')
+        used = Chip.objects.filter(material=material, status='used').count()
+        consumed = (MaterialTransaction.objects
+                    .filter(material=material, type='consume')
+                    .aggregate(t=Sum('quantity'))['t'] or 0)
+        self.assertEqual(used, consumed, '已使用芯片数与消耗流水对不上')
+
+    def test_used_chip_indexes_and_linked_pets_agree(self):
+        """被标 `used` 的芯片，必须正好是 `_link_chips_to_pets` 关联的那几只。
+
+        ⚠ 这两处原来各写一份清单（一个标 1-15、一个关联 1-15，而
+        `_seed_pets` 里只有 4 个 `chip_no`），所以「标了多少」与
+        「关联了多少」没人校验 —— 现在两处共用 `SEED_USED_CHIP_INDEXES`，
+        这条判据盯住「共享常量确实被两边用上」。
+        """
+        self.seed()
+        used = Chip.objects.filter(status='used')
+        self.assertEqual(used.count(), len(SEED_USED_CHIP_INDEXES))
+        self.assertEqual(used.filter(pet__isnull=True).count(), 0,
+                         '有已使用的芯片没有关联宠物（追溯链断了）')
+        self.assertEqual(
+            sorted(used.values_list('pet__code', flat=True)),
+            ['TNR2501001', 'TNR2501002', 'TNR2501003', 'TNR2501006'])
 
 
 class SeedMaterialExpiryTest(SeedDataTestBase):

@@ -148,6 +148,18 @@ def treatment_create(request):
                 return json_fail(f'芯片 {chip_no} 不存在')
             if chip.status == 'used':
                 return json_fail(f'芯片 {chip_no} 已被使用')
+            # 在途芯片不能植（第四十六轮）：库存已从发起方扣掉、对方还没签收，
+            # 此时它不属于任何一方 —— 谁都不该能用。重构前只有两态，漏了这一态。
+            if chip.status == 'in_transit':
+                return json_fail(f'芯片 {chip_no} 在途（尚未签收），不能使用')
+            # 归属校验（第四十六轮）：**只拦新引用、不拦存量** ——
+            # 重构前的 `Chip` 行没有机构归属（`institution` 为 NULL），
+            # 归属信息在数据里已经丢了，一律放行，否则历史芯片一颗都植不出去。
+            # 新入库的芯片一定带机构，所以「甲院的芯片被乙院植掉」会被拦住。
+            if (chip.institution_id is not None
+                    and hospital is not None
+                    and chip.institution_id != hospital.id):
+                return json_fail(f'芯片 {chip_no} 不属于 {hospital.name}，不能使用')
             # 芯片物料在这里**一并取好并校验**，保持「先全校验 → 再落库」的两段式。
             # 原先它在下面的事务块内才查询 —— 一次可能失败的 DB 查询落在落库之后，
             # 且过期判据会漏掉这条路径。
@@ -236,7 +248,14 @@ def treatment_create(request):
             if chip_data.get('date'):
                 treatment.chip_date = _parse_date(chip_data['date'])
             if chip_no:
-                use_chip(chip_no, pet)
+                # 归属校验（第四十六轮）：传 `institution=hospital` 让
+                # `use_chip()` 复核一次「这颗芯片是不是本院的」。
+                # 上面第一步已做过同一判据，这里是**落库前的最后一道闸** ——
+                # 万一中间有人改了芯片归属，也不会把别人的芯片植掉。
+                # ⚠ 故意**不包 try**：异常传播出 `atomic()` 会整块回滚，
+                #   不会留下「Treatment 建了、芯片没植」的半截行；
+                #   在事务内 `return json_fail()` 反而会**提交**半截数据。
+                use_chip(chip_no, pet, institution=hospital)
                 treatment.chip_no = chip_no
                 # chip_material 已在第一步取好并校验过（见上），这里不再查询
                 if chip_material:

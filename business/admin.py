@@ -50,7 +50,7 @@ class TreatmentAdmin(admin.ModelAdmin):
 class MaterialAdmin(admin.ModelAdmin):
     list_display = ('id', 'name', 'category', 'unit', 'batch_no', 'shelter_stock', 'safety_stock', 'expiry_date', 'district')
     list_filter = ('category', 'district')
-    search_fields = ('name', 'batch_no', 'supplier', 'specification', 'chip_range_start', 'chip_range_end')
+    search_fields = ('name', 'batch_no', 'supplier', 'specification')
 
 
 @admin.register(MaterialTransaction)
@@ -70,8 +70,13 @@ class MaterialStockAdmin(admin.ModelAdmin):
 
 @admin.register(Chip)
 class ChipAdmin(admin.ModelAdmin):
-    list_display = ('number', 'status', 'pet', 'used_at', 'created_at')
-    list_filter = ('status',)
+    # 第四十六轮重构后芯片带机构/物料/批次 —— 后台要能按这些维度查，
+    # 否则运维问「这批 042060107000177 现在在谁手上」时只能翻库。
+    list_display = ('number', 'status', 'institution', 'material', 'batch_no',
+                    'pet', 'used_at', 'created_at')
+    list_filter = ('status', 'institution__type', 'institution__district')
+    search_fields = ('number', 'batch_no', 'pet__code', 'pet__chip_no')
+    raw_id_fields = ('pet', 'institution', 'material', 'dispatch_txn')
     search_fields = ('number',)
     date_hierarchy = 'created_at'
 

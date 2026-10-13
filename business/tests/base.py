@@ -137,13 +137,23 @@ def make_material(category="vaccine", name=None, district=None, shelter_stock=10
     )
 
 
-def make_chip(number=None, status="available", pet=None):
+def make_chip(number=None, status="available", pet=None, institution=None,
+              material=None):
+    """造一颗芯片。
+
+    `institution` / `material` 默认 None = **重构前的存量行形态**
+    （第四十六轮之前 `Chip` 没有这两列，历史行就是 NULL）。
+    要测「新形态」（带归属）就显式传，见
+    `business/tests/test_material_views.py` 里的芯片下发用例。
+    """
     from business.models import Chip
     SEQ["chip"] += 1
     return Chip.objects.create(
         number=number or f"CHIP{SEQ['chip']:010d}",
         status=status,
         pet=pet,
+        institution=institution,
+        material=material,
     )
 
 

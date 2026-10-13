@@ -248,8 +248,10 @@ class Material(models.Model):
     shelter_stock = models.IntegerField('捕捉点库存', default=0)
     safety_stock = models.IntegerField('安全库存', default=0)
     expiry_date = models.DateField('过期日期', null=True, blank=True)
-    chip_range_start = models.CharField('芯片起始号', max_length=30, blank=True, default='')
-    chip_range_end = models.CharField('芯片结束号', max_length=30, blank=True, default='')
+    # ⚠ 第四十六轮删除了 `chip_range_start` / `chip_range_end`：
+    #   那两个字段只记号段字符串、与实际建出的 `Chip` 行**数量不校验**，
+    #   是「双真源」（号段说 100 个、实际 30 行，界面照样显示 100 且不报错）。
+    #   现在芯片一律以 `Chip` 表逐号为准，入库时按「首号 + 数量」生成号码。
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='materials', verbose_name='所属区县')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
@@ -387,15 +389,86 @@ class MaterialStock(models.Model):
 # 芯片
 # ============================================
 class Chip(models.Model):
+    """芯片 —— 「一行 = 一个号码」，按**每一个号码单独管理**（第四十六轮重构）。
+
+    为什么必须逐号建行
+    ------------------
+    芯片与疫苗/驱虫药不同：**每一颗芯片的号码都要能单独追溯到动物**。
+    「号段」这种表示法能算出数量，但答不出「042060107000177 这颗现在在谁手上、
+    植给了哪只猫」—— 而这恰恰是芯片存在的意义。
+
+    重构前的双轨（第四十六轮之前）
+    ------------------------------
+    老实现同时维护两套、且**互不校验**：
+
+    - `Chip` 表逐号一行，但**没有机构归属** —— 号码是全局的，
+      查不出「这批货在谁手上」，医院端也无从「从本院库存里挑芯片」；
+    - `Material.chip_range_start/end` 只记两个字符串，与实际建出来的
+      `Chip` 行**数量不校验** —— 号段写着 100 个、实际只建了 30 行，
+      界面照样按号段显示 100，全程没有任何报错。
+
+    重构后：**`Chip` 表是唯一真源**，`Material` 上的号段字段已删除。
+    持有机构、所属物料、入库批次都记在这一行上。
+
+    归属怎么表达
+    ------------
+    `institution` 走 `DISTRICT_LOOKUP` 派生区县，**故意不加冗余
+    `district` 外键** —— 与 `MaterialStock` 同一条理由：区县恒等于
+    `institution.district`，加一列只是把同一个事实存两遍、凭空多一个漂移面。
+
+    状态机（四态）
+    --------------
+    - `available`  可用：在本机构手上，没植出去；
+    - `in_transit` 在途：随下发单出去了、对方**还没签收**。
+      为什么要有这一态：物资流转的口径是「建单时发起方就出库、签收时接收方
+      才入库，中间两边都不算」。芯片必须跟着同一条口径走，否则
+      「芯片数」与「库存数」在在途期间必然对不上（发起方库存已经 -N，
+      芯片却还挂在他名下）。
+    - `used`       已使用：植进动物体内了。**仍留在原机构名下**（追溯用），
+      但不再计入库存 —— 消耗那一步已经让 `MaterialStock` 减过了。
+    - `void`       已作废：损坏 / 丢失，随「库存异动」一起报废。
+      为什么必须有这一态：库存异动会让 `MaterialStock` 减掉 N，
+      若芯片行不动，`available` 计数就比库存多出 N 且**不报错**。
+      作废的号码**保留在表里**（不删行）—— 「这颗哪去了」本身就是要能答的问题。
+
+    ⚠ 存量行（重构前 seed 出来的）`institution` / `material` 一律为 NULL，
+    **不回填**：号段与捕捉点的对应关系在数据里已经丢了，同一区县可能有两个
+    捕捉点，猜错就是把芯片记到别的机构名下（与 `MaterialTransaction.institution`
+    历史行同一条处理）。读取侧把 NULL 当作「未归属」；写入侧
+    **只拦新引用、不拦存量** —— 否则历史芯片会一颗都用不出去。
+    """
+
     STATUS_CHOICES = [
         ('available', '可用'),
+        ('in_transit', '在途'),
         ('used', '已使用'),
+        ('void', '已作废'),
     ]
     number = models.CharField('芯片号', max_length=30, unique=True)
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='available')
     pet = models.ForeignKey('business.Pet', on_delete=models.SET_NULL, null=True, blank=True, related_name='chips', verbose_name='关联宠物')
     used_at = models.DateField('使用日期', null=True, blank=True)
+    # 「持有机构」—— 这颗芯片现在在谁手上。NULL = 重构前的存量行（未归属）。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='chips', verbose_name='持有机构')
+    # 这颗芯片是从哪条物料进来的（chip 类别的 Material）。NULL = 存量行。
+    material = models.ForeignKey(
+        'business.Material', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='chips', verbose_name='所属物料')
+    # 入库批次号 = 采购单号（如 PUR202610130001）。用于回答「这颗是哪一批进来的」。
+    batch_no = models.CharField('入库批次号', max_length=50, blank=True, default='')
+    # 「在途下发单」—— 仅 `status='in_transit'` 时有值，指向把它发出去的那张
+    # 下发流水。签收时靠它反查「这批要收的是哪些号码」，清空后置 NULL。
+    dispatch_txn = models.ForeignKey(
+        'business.MaterialTransaction', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='transit_chips', verbose_name='在途下发单')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    # 本模型没有 `district` 外键，区县隔离沿机构派生 —— 不声明的话
+    # 区县角色一访问就 `FieldError` 500（市级账号走 `return all()` 绕过该分支，
+    # 只测市级账号**永远发现不了**，同 `CheckIn` / `AdoptionHallListing`）。
+    DISTRICT_LOOKUP = 'institution__district'
 
     class Meta:
         ordering = ['-id']

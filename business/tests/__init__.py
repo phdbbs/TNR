@@ -8,6 +8,8 @@
 - test_transfer_views.py   转运拆分下发 / 签收 / 驳回 / 重发
 - test_treatment_views.py  诊疗与库存联动
 - test_material_views.py   物料供应链双台账
+- test_chip_services.py    芯片号码推算（纯函数：首号 + 数量 → 号码列表）
+- test_chip_views.py       芯片列表 / 本院可用芯片（第四十六轮）
 - test_release_views.py    放归闭环
 - test_adoption_views.py   领养登记 / 在线申请 / 领养大厅
 - test_checkin_views.py    回访打卡审核

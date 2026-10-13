@@ -2,7 +2,7 @@
 Task 7: 物料供应链与双台账
 - 物料列表/采购/下发/签收/异动
 - 捕捉点台账 / 医院台账
-- 芯片号段管理
+- 芯片：按「首号 + 数量」逐号入库 / 下发（第四十六轮重构）
 """
 from datetime import datetime
 
@@ -13,7 +13,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
-from business.models import Material, MaterialTransaction, Chip
+from business.models import Material, MaterialTransaction
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
@@ -23,6 +23,10 @@ from business.services import (
     # 第四十五轮：市级捕捉点 + 机构库存
     can_dispatch_across_districts, get_institution_stock, get_shelter_stock,
     inactive_institution_error, is_city_shelter,
+)
+from business.services_chip import (
+    chip_batch_create, chip_batch_dispatch, chip_batch_precheck,
+    chip_batch_receive, chip_batch_void, parse_chip_numbers,
 )
 from core.models import Institution
 
@@ -176,10 +180,20 @@ def purchase_create(request):
         "quantity": 100,
         "supplier": "国药集团",
         "batch_no": "B20250101",
-        "expiry_date": "2025-12-31",
-        "chip_range_start": "1000010001",  // 芯片才需要
-        "chip_range_end": "1000010100"
+        "expiry_date": "2025-12-31"
     }
+
+    **芯片**（`category='chip'`）另需「首号」——数量就是 `quantity`，
+    号码按数值 +1 递增、保持位数补零，逐个建 `Chip` 行：
+
+    {
+        "material_id": 4,
+        "quantity": 500,
+        "chip_start": "042060107000177"   // 这批的第一个号码
+    }
+
+    强绑定：号码个数必须等于 `quantity`（`parse_chip_numbers` 直接报错，
+    不存在「号码 30 个、数量填 100」这种各记各的情况）。
     """
     data = parse_json_body(request)
     user = request.user
@@ -235,8 +249,29 @@ def purchase_create(request):
     # 库存记到哪个机构（第四十五轮）：捕捉点账号 = 自己的机构。
     institution = _receiving_institution(user, material)
 
+    # 芯片采购：号码**必须在写库之前全部校验完**（项目约定「多表写入两段式：
+    # 先全校验 → 再事务落库」）。
+    #
+    # ⚠ 这一步原来藏在下面的事务里、且是**静默失败**的：`_create_chip_range()`
+    #   遇到非数字号段直接 `return`，调用方照样回「采购入库成功，增加库存 100」
+    #   —— 库存加了 100，芯片一颗都没建，全程没有任何提示。
+    #   现在非数字号段是 400 + 具体文案，且校验前置。
+    #
+    # 兼容期：`chip_range_start` 是重构前（第四十六轮）的参数名，字段已删除，
+    # 但前端在阶段 8 之前仍可能传它，故一并读入。阶段 8 之后可只留 `chip_start`。
+    chip_first_number = ''
+    if material.category == 'chip':
+        chip_first_number = (body_str(data, 'chip_start')
+                             or body_str(data, 'chip_range_start'))
+        try:
+            # 数量就是这批芯片的个数 —— 「强绑定」：不存在号码 30 个、
+            # 数量填 100 这种各记各的情况（`parse_chip_numbers` 直接报错）。
+            parse_chip_numbers(chip_first_number, quantity)
+        except ValueError as e:
+            return json_fail(str(e))
+
     # 校验全部通过，从这里开始才写库。整体包一个事务：
-    # 采购要同时写「物料行 / 采购流水 / 机构库存 / 芯片号段」，
+    # 采购要同时写「物料行 / 采购流水 / 机构库存 / 芯片逐号行」，
     # 中途任何异常都不该留下半截数据。
     with transaction.atomic():
         # 创建采购流水（捕捉点侧，hospital=None）
@@ -273,17 +308,20 @@ def purchase_create(request):
         if update_fields:
             material.save(update_fields=update_fields)
 
-        # 芯片采购：创建芯片号段（兼容前端 chip_start/chip_end 与后端 chip_range_* 两种命名）
+        # 芯片采购：按「首号 + 数量」逐号建行，归属本机构与本物料。
+        # `batch_no` 记采购单号 —— 用于回答「这颗芯片是哪一批进来的」。
         if material.category == 'chip':
-            range_start = body_str(data, 'chip_range_start') or body_str(data, 'chip_start')
-            range_end = body_str(data, 'chip_range_end') or body_str(data, 'chip_end')
-            if range_start and range_end:
-                _create_chip_range(range_start, range_end, material)
-                material.chip_range_start = range_start
-                material.chip_range_end = range_end
-                material.save(update_fields=['chip_range_start', 'chip_range_end'])
+            chip_batch_create(
+                material=material,
+                institution=institution,
+                first_number=chip_first_number,
+                count=quantity,
+                batch_no=txn.ledger_no,
+            )
 
-    return json_ok(serialize_instance(txn), message=f'采购入库成功，增加库存 {quantity}')
+    chip_note = f'，芯片 {quantity} 颗（{chip_first_number} 起）' if material.category == 'chip' else ''
+    return json_ok(serialize_instance(txn),
+                   message=f'采购入库成功，增加库存 {quantity}{chip_note}')
 
 
 @csrf_exempt
@@ -297,8 +335,17 @@ def dispatch_create(request):
         "material_id": 1,
         "hospital_id": 3,          // 接收方 = 医院（旧名，保留）
         "to_shelter_id": 5,        // 接收方 = 捕捉点（二选一，不可同时传）
+        "quantity": 50
+    }
+
+    **芯片**（`category='chip'`）另需「首号」——数量就是 `quantity`。
+    这批号码必须**属于本机构、属于该物料、且状态为可用**，否则整个下发被拒：
+
+    {
+        "material_id": 4,
+        "to_hospital_id": 3,
         "quantity": 50,
-        "chip_numbers": ["1000010001", "1000010002"]  // 芯片可选指定号
+        "chip_start": "042060107000177"
     }
 
     可下发范围由**发起方层级**决定（`dispatch_scope_district`）：
@@ -365,56 +412,62 @@ def dispatch_create(request):
             return json_fail(f'{sender.name}库存不足（当前 {current}，需 {quantity}）')
         return json_fail(f'捕捉点库存不足（当前库存 {current}）')
 
-    # 检查芯片号是否可用
-    # ⚠ 必须挡非字符串 / 非列表（第三十五轮）：`{"chip_numbers": 123}` 会让
-    # `Chip.objects.filter(number__in=123)` 抛 `TypeError: 'int' object is not
-    # iterable` → 500；`{"chip_numbers": {"a": 1}}` 更隐蔽 —— dict 可迭代，
-    # Django 会拿**字典的键**去查，不报错但语义完全错。
-    chip_numbers = data.get('chip_numbers', [])
-    if isinstance(chip_numbers, str):
-        # 兼容逗号分隔字符串，避免被当成字符串逐字符迭代
-        chip_numbers = [c.strip() for c in chip_numbers.split(',') if c.strip()]
-    elif not isinstance(chip_numbers, list):
-        chip_numbers = []
-    if material.category == 'chip' and chip_numbers:
-        unavailable = Chip.objects.filter(
-            number__in=chip_numbers, status='used'
-        ).count()
-        if unavailable > 0:
-            return json_fail(f'{unavailable} 个芯片号已被使用')
+    # 芯片下发：号码必须在**扣库存之前**校验完（只读预检）。
+    #
+    # ⚠ 重构前这里是「可选指定号」的 `chip_numbers` 列表 + `chip_range` 号段
+    #   字符串两条路，两条路**都只是往备注里拼一句话**（`note += f'，芯片号段 …'`），
+    #   芯片的归属压根没动 —— 下发了 100 颗，发起方库存扣了 100，
+    #   而这 100 颗芯片在系统里仍然挂在发起方名下、状态还是「可用」，
+    #   于是同一个人可以把它再下发一次。现在号码是真的逐颗转移了。
+    chip_first_number = ''
+    if material.category == 'chip':
+        # 兼容期：`chip_range_start` 是重构前的参数名（字段已删除），
+        # 前端在阶段 8 之前仍可能传它。
+        chip_first_number = (body_str(data, 'chip_start')
+                             or body_str(data, 'chip_range_start'))
+        try:
+            chip_batch_precheck(material, sender, chip_first_number, quantity)
+        except ValueError as e:
+            return json_fail(str(e))
 
-    # 兼容前端 chip_range（如 "1000010001-1000010010"）号段输入
     # ⚠ 文案里保留「待医院签收」这个措辞（医院端界面/历史用例都在匹配它），
     #   接收方是捕捉点时才改用「待捕捉点签收」。
     target_label = '医院' if target.type == 'hospital' else '捕捉点'
     note = f'下发至 {target.name}（待{target_label}签收）'
-    chip_range = body_str(data, 'chip_range').strip()
-    if material.category == 'chip' and chip_range:
-        note += f'，芯片号段 {chip_range}'
+    if material.category == 'chip':
+        note += f'，芯片 {quantity} 颗（{chip_first_number} 起）'
 
     # 创建下发流水：**发起机构出库**（`institution` = 发起捕捉点），
     # `hospital` 记**接收方**（第四十五轮起也可能是捕捉点）用于对方的待签收列表。
     # ⚠ 接收方签收之前**不增加**任何一方的库存 —— 否则这批货会同时算在
     #   发起方和接收方两边（「一进一出」的口径见 R45 §五第 12 条）。
+    #
+    # ⚠ 第四十六轮把这三步（建流水 / 记接收方 / 芯片标在途）包进同一个事务：
+    #   芯片标在途失败时，扣掉的库存必须一起回滚，否则「库存少了、芯片还在」
+    #   两个真源当场错开且不报错。
     try:
-        txn = adjust_stock(
-            material=material,
-            hospital=None,
-            quantity=quantity,
-            txn_type='dispatch',
-            institution=sender,
-            operator=user,
-            operator_name=user.get_full_name() or user.username,
-            from_to=target.name,
-            note=note,
-            ledger_no=generate_doc_no('DIS'),
-            district_id=material.district_id,
-        )
+        with transaction.atomic():
+            txn = adjust_stock(
+                material=material,
+                hospital=None,
+                quantity=quantity,
+                txn_type='dispatch',
+                institution=sender,
+                operator=user,
+                operator_name=user.get_full_name() or user.username,
+                from_to=target.name,
+                note=note,
+                ledger_no=generate_doc_no('DIS'),
+                district_id=material.district_id,
+            )
+            # 关联接收方到流水（用于对方查看待签收列表），但不影响对方库存
+            txn.hospital = target
+            txn.save(update_fields=['hospital'])
+
+            if material.category == 'chip':
+                chip_batch_dispatch(material, sender, chip_first_number, quantity, txn)
     except ValueError as e:
         return json_fail(str(e))
-    # 关联接收方到流水（用于对方查看待签收列表），但不影响对方库存
-    txn.hospital = target
-    txn.save(update_fields=['hospital'])
 
     return json_ok(serialize_instance(txn),
                    message=f'下发成功，数量 {quantity}（待{target_label}签收后增加库存）')
@@ -467,29 +520,44 @@ def material_receive(request, pk):
     #   `MaterialStock` 那一行承载，绕过 `adjust_stock` 就等于
     #   **流水写了、库存没加**，两个真源当场对不上，而且没有任何报错
     #   （`check_data_integrity` 的「机构库存与流水合计不一致」会报出来）。
-    with transaction.atomic():
-        txn.note = (txn.note + ' [已签收]' if txn.note else '[已签收]').strip()
-        txn.save(update_fields=['note'])
+    # ⚠ 整块包 try：`chip_batch_receive()` 在「在途芯片数与下发数量不一致」时
+    #   会抛 `ValueError`（见那里的注释）。不接住的话它会打成 500，
+    #   用户只看到「服务器错误」，而真正的原因（这批芯片被人为改过）
+    #   完全说不出口。接住后 400 + 具体文案，且事务照旧回滚。
+    try:
+        with transaction.atomic():
+            txn.note = (txn.note + ' [已签收]' if txn.note else '[已签收]').strip()
+            txn.save(update_fields=['note'])
 
-        receive_txn = adjust_stock(
-            material=txn.material,
-            hospital=txn.hospital,
-            quantity=txn.quantity,
-            txn_type='receive',
-            institution=user.institution,
-            operator=user,
-            operator_name=user.get_full_name() or user.username,
-            from_to=txn.from_to or '捕捉点下发',
-            batch_no=txn.batch_no,
-            supplier=txn.supplier,
-            ledger_no=generate_doc_no('RCV'),  # 接收单独立单号，打印归档可数
-            ref_no=txn.ledger_no,  # 关联下发单号（单据链：DIS → RCV）
-            # 归属区县按**接收机构**推导，不沿用发起方的（第四十五轮起
-            # 跨区县下发是允许的）：甲区发到乙区医院，这条签收记录发生在
-            # 乙区，沿用甲区会让乙区政府的台账里看不到本院入库。
-            district=user.institution.district,
-            note=f'签收下发物料（原单号：{txn.ledger_no}）',
-        )
+            receive_txn = adjust_stock(
+                material=txn.material,
+                hospital=txn.hospital,
+                quantity=txn.quantity,
+                txn_type='receive',
+                institution=user.institution,
+                operator=user,
+                operator_name=user.get_full_name() or user.username,
+                from_to=txn.from_to or '捕捉点下发',
+                batch_no=txn.batch_no,
+                supplier=txn.supplier,
+                ledger_no=generate_doc_no('RCV'),  # 接收单独立单号，打印归档可数
+                ref_no=txn.ledger_no,  # 关联下发单号（单据链：DIS → RCV）
+                # 归属区县按**接收机构**推导，不沿用发起方的（第四十五轮起
+                # 跨区县下发是允许的）：甲区发到乙区医院，这条签收记录发生在
+                # 乙区，沿用甲区会让乙区政府的台账里看不到本院入库。
+                district=user.institution.district,
+                note=f'签收下发物料（原单号：{txn.ledger_no}）',
+            )
+
+            # 芯片签收：把这批**在途**芯片转到本机构名下、状态回到「可用」。
+            # ⚠ 必须与库存写入同一个事务 —— 库存加了、芯片没转（或反过来），
+            #   「芯片数」与「库存数」当场错开，且没有任何报错。
+            # ⚠ 数量与下发单不一致时 `chip_batch_receive()` 会抛错拒绝签收：
+            #   照单全收会让错开被「合法化」，事后无从追。
+            if txn.material.category == 'chip':
+                chip_batch_receive(txn, user.institution)
+    except ValueError as e:
+        return json_fail(str(e))
 
     return json_ok(serialize_instance(receive_txn),
                    message=f'签收成功，{user.institution.name}库存已增加')
@@ -506,6 +574,17 @@ def stock_adjustment(request):
         "material_id": 1,
         "quantity": 5,
         "reason": "过期报废"
+    }
+
+    **芯片**另需「首号」（与入库 / 下发同一口径）—— 数量就是 `quantity`，
+    这批号码必须**属于本机构且为可用状态**，作废后状态变 `void`
+    （号码保留在表里，「这颗哪去了」要能答）：
+
+    {
+        "material_id": 4,
+        "quantity": 2,
+        "reason": "芯片损坏报废",
+        "chip_start": "042060107000177"
     }
 
     ⚠⚠ **`shelter` 是本轮（第三十七轮）补上的，不是笔误**。
@@ -565,25 +644,47 @@ def stock_adjustment(request):
         if current < quantity:
             return json_fail(f'医院库存不足（当前 {current}，需 {quantity}）')
 
+    # 芯片异动：号码必须在**扣库存的同一步**里作废。
+    #
+    # ⚠ 第四十六轮补上的洞：库存异动会让 `MaterialStock` 减掉 N，而芯片行
+    #   原来**不动** —— 「可用芯片数」于是比库存多出 N，且**没有任何报错**。
+    #   芯片「按号码单独管理」的前提就是：每一次数量变化都有对应的号码变化。
+    #   兼容期读入旧参数名 `chip_range_start`（阶段 8 之后可去掉）。
+    chip_first_number = ''
+    if material.category == 'chip':
+        chip_first_number = (body_str(data, 'chip_start')
+                             or body_str(data, 'chip_range_start'))
+
     txn = None
+    # 整块包事务 + try：`chip_batch_void()` 在号码不属于本机构 / 状态不对时
+    # 会抛 `ValueError`，异常传播出去整块回滚（不会留下「库存扣了、芯片没动」
+    # 的半截状态），再在外层转成 400 + 具体文案。
+    # ⚠ 不要写成「在事务里 `return json_fail()`」—— 那是**正常返回**，
+    #   事务会**提交**，半截状态就留在库里了。
     try:
-        txn = adjust_stock(
-            material=material,
-            hospital=hospital,
-            quantity=quantity,
-            institution=institution,
-            txn_type='adjustment',
-            operator=user,
-            operator_name=user.get_full_name() or user.username,
-            from_to=hospital.name if hospital else '捕捉点',
-            note=data.get('reason', '库存异动'),
-            ledger_no=generate_doc_no('ADJ'),
-            district_id=material.district_id,
-        )
+        with transaction.atomic():
+            txn = adjust_stock(
+                material=material,
+                hospital=hospital,
+                quantity=quantity,
+                institution=institution,
+                txn_type='adjustment',
+                operator=user,
+                operator_name=user.get_full_name() or user.username,
+                from_to=hospital.name if hospital else '捕捉点',
+                note=data.get('reason', '库存异动'),
+                ledger_no=generate_doc_no('ADJ'),
+                district_id=material.district_id,
+            )
+            if material.category == 'chip':
+                chip_batch_void(material, institution, chip_first_number, quantity)
     except ValueError as e:
         return json_fail(str(e))
 
-    return json_ok(serialize_instance(txn), message=f'异动登记成功，扣减 {quantity}')
+    chip_note = (f'，芯片 {quantity} 颗（{chip_first_number} 起）已作废'
+                 if material.category == 'chip' else '')
+    return json_ok(serialize_instance(txn),
+                   message=f'异动登记成功，扣减 {quantity}{chip_note}')
 
 
 def _scoped_txn_queryset(user):
@@ -744,31 +845,8 @@ def dispatch_target_options(request):
 # ============================================
 # 辅助函数
 # ============================================
-def _create_chip_range(range_start, range_end, material):
-    """根据芯片号段创建 Chip 记录
-
-    支持纯数字号段（如 1000010001 ~ 1000010100）
-    """
-    try:
-        start_num = int(range_start)
-        end_num = int(range_end)
-    except (ValueError, TypeError):
-        return
-
-    if end_num < start_num:
-        return
-
-    # 批量创建（跳过已存在的）
-    existing = set(Chip.objects.filter(
-        number__gte=range_start,
-        number__lte=range_end
-    ).values_list('number', flat=True))
-
-    chips_to_create = []
-    for n in range(start_num, end_num + 1):
-        num_str = str(n)
-        if num_str not in existing:
-            chips_to_create.append(Chip(number=num_str))
-
-    if chips_to_create:
-        Chip.objects.bulk_create(chips_to_create, batch_size=200)
+# ⚠ 第四十六轮删除了 `_create_chip_range()` —— 它是芯片双轨的源头：
+#   - 号段解析失败时**静默 `return`**，调用方照样回「采购入库成功」，
+#     库存加了、芯片一颗没建，全程无提示；
+#   - 建出的 `Chip` 行**没有机构归属**，查不出「这批在谁手上」。
+#   现在芯片一律走 `services_chip.chip_batch_create()`（「首号 + 数量」）。

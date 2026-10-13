@@ -160,6 +160,34 @@ class TreatmentCreateTest(BusinessTestBase):
             'chip': {'chip_no': 'GHOST-CHIP'},
         }), message='不存在')
 
+    def test_in_transit_chip_rejected(self):
+        """**在途**芯片不能植入（第四十六轮新增的第三态）。
+
+        在途 = 库存已从发起方扣掉、接收方还没签收 —— 此时它不属于任何一方，
+        谁都不该能用。重构前只有「可用 / 已使用」两态，漏了这一态：
+        货还在路上就能被植进动物，而两边的库存账都对不上。
+        """
+        pet = self._pet()
+        chip = make_chip(status='in_transit')
+        self.expect_fail(self._create(pet, {
+            'items': {'chip': True},
+            'chip': {'chip_no': chip.number},
+        }), message='在途')
+
+    def test_chip_of_other_hospital_rejected(self):
+        """**别院持有的**芯片不能植入（第四十六轮归属校验）。
+
+        **反向对照**：上面 `test_chip_binds_pet_and_consumes` 用的是
+        无归属的存量芯片（放行），这一条用的是带归属且不属于本院的（拦下）——
+        只测一边的话，把判据写成「一律放行」或「一律拒绝」都能通过。
+        """
+        pet = self._pet()
+        chip = make_chip(institution=self.hospital_b)
+        self.expect_fail(self._create(pet, {
+            'items': {'chip': True},
+            'chip': {'chip_no': chip.number},
+        }), message='不属于')
+
     def test_pending_adopt_pet_can_be_treated(self):
         pet = self._pet(status='pending_adopt')
         self.ok(self._create(pet, {'items': {}}))

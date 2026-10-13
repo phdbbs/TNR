@@ -79,6 +79,41 @@ class UseChipTest(TestCase):
             use_chip(chip.number, pet)
         self.assertIn('已被使用', str(ctx.exception))
 
+    def test_in_transit_chip_raises(self):
+        """**在途**芯片不能用（第四十六轮新增的第三态）。
+
+        ⚠ 必须**直接测服务层**：接口层（`treatment_create`）另有一道同样的闸，
+        走接口的用例在服务层被变异后**照样通过**（第一道闸拦住了）——
+        实测变异 M「use_chip 不再拦在途」走接口就是抓不到的。
+        两道闸都在是对的（`use_chip` 是公共 API，别处调用时也得拦），
+        所以判据要各自盯住自己那道。
+        """
+        chip = make_chip(status='in_transit')
+        with self.assertRaises(ValueError) as ctx:
+            use_chip(chip.number, make_pet())
+        self.assertIn('在途', str(ctx.exception))
+
+    def test_chip_of_other_institution_raises(self):
+        """带归属、且不属于指定机构的芯片不能用。"""
+        mine = make_institution(type='hospital', name='本院')
+        other = make_institution(type='hospital', name='他院')
+        chip = make_chip(institution=mine)
+        with self.assertRaises(ValueError) as ctx:
+            use_chip(chip.number, make_pet(), institution=other)
+        self.assertIn('不属于', str(ctx.exception))
+
+    def test_chip_without_institution_still_usable(self):
+        """**存量行**（`institution` 为 NULL）仍可用 —— 「只拦新引用、不拦存量」。
+
+        这条是上面那条的**反向对照**：少了它，把归属判据写成「一律拒绝」
+        也能让 `test_chip_of_other_institution_raises` 通过，
+        而后果是历史芯片一颗都植不出去。
+        """
+        chip = make_chip(institution=None)
+        hospital = make_institution(type='hospital', name='本院')
+        pet = make_pet()
+        self.assertTrue(use_chip(chip.number, pet, institution=hospital))
+
 
 class AdjustStockTest(TestCase):
     def test_purchase_increases_shelter_stock(self):

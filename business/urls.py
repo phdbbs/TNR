@@ -7,7 +7,7 @@ from django.urls import path
 from . import (
     views_capture, views_transfer, views_treatment, views_material,
     views_release, views_adoption, views_checkin, views_euthanasia,
-    views_portal,
+    views_portal, views_chip,
 )
 # ⚠ 单据打印视图（`views_print`）**不在这里注册** —— 它返回整页 HTML，
 #   而本文件下所有路由都在 `/api/business/` 前缀里（契约 = JSON 信封）。
@@ -62,6 +62,11 @@ urlpatterns = [
          name='dispatch_target_options'),
     path('materials/shelter-ledger/', views_material.shelter_stock_ledger, name='shelter_stock_ledger'),
     path('materials/hospital-ledger/', views_material.hospital_stock_ledger, name='hospital_stock_ledger'),
+    # 芯片（第四十六轮）：只读接口。写路径（入库/下发/签收）留在
+    # `materials/purchase|dispatch|<pk>/receive` —— 它们本来就是
+    # 「一笔物料业务」的两半，拆开会让「库存扣了、芯片没动」重新出现。
+    path('chips/', views_chip.chip_list, name='chip_list'),
+    path('chips/available/', views_chip.chip_available, name='chip_available'),
 
     # ============================================
     # Task 8: 放归闭环
