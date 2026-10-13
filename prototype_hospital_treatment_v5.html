@@ -257,18 +257,40 @@ ul,ol{list-style:none;}
    六、处置项目卡 / 处方
    ============================================================ */
 .item-card{border:1px solid var(--border-light);border-radius:var(--r-xl);background:var(--white);
-  margin-bottom:12px;overflow:hidden;box-shadow:var(--shadow-xs);}
-.item-card.on{border-color:var(--cinnabar);box-shadow:var(--shadow-sm);}
+  margin-bottom:9px;overflow:hidden;box-shadow:var(--shadow-xs);}
+.item-card.collapsed .item-b{display:none;}
+/* 已填写 → 竹青；待补全 → 胭脂；未填写 → 默认灰（与未填写一眼可分） */
+.item-card.filled{border-color:var(--bamboo-green);}
+.item-card.filled .item-h{background:var(--bamboo-light);}
+.item-card.filled .item-h .nm{color:#3f5c37;}
+.item-card.half{border-color:var(--rouge);}
+.item-card.half .item-h{background:var(--rouge-light);}
 .item-h{display:flex;align-items:center;gap:9px;padding:11px 13px;background:var(--rice-light);
-  border-bottom:1px solid var(--border-light);}
+  border-bottom:1px solid var(--border-light);cursor:pointer;user-select:none;}
+.item-card.collapsed .item-h{border-bottom:none;}
 .item-h .ic{font-size:18px;flex:none;}
 .item-h .nm{flex:1;min-width:0;font-weight:600;font-size:14px;}
 .item-h .nm small{display:block;font-weight:400;color:var(--ink-light);font-size:11px;margin-top:1px;}
+.item-h .arr{flex:none;color:var(--ink-light);font-size:15px;transition:transform var(--t-base);}
+.item-card.open .item-h .arr{transform:rotate(90deg);}
 .item-b{padding:12px 13px;}
+
+/* 紧凑：日期一行 + 快捷标签 */
+.date-row{display:flex;gap:7px;align-items:center;flex-wrap:wrap;}
+.date-row .inp{flex:0 0 165px;min-width:0;}
+.chip.qk{min-height:30px;padding:4px 11px;font-size:12px;}
+.chips.tight{gap:6px;}
+.chips.tight .chip{min-height:29px;padding:4px 10px;font-size:12px;}
+
+/* 长页面里的区块小标题 */
+.sec-head{display:flex;align-items:center;gap:8px;padding:2px 2px 10px;
+  font-family:var(--font-display);font-size:15px;font-weight:600;color:var(--ink);}
+.sec-head .bar{width:3px;height:15px;background:var(--grad-cinnabar);border-radius:2px;flex:none;}
+.sec-head .hint{margin-left:auto;font-family:var(--font-body);font-size:11.5px;font-weight:400;color:var(--ink-light);}
 
 .rx-list{display:flex;flex-direction:column;gap:7px;margin-top:9px;}
 .rx-row{display:flex;align-items:center;gap:9px;background:var(--rice-light);border:1px solid var(--border-light);
-  border-radius:var(--r-md);padding:8px 10px;}
+  border-radius:var(--r-md);padding:6px 9px;}
 .rx-row .nm{flex:1;min-width:0;font-size:13px;font-weight:500;}
 .rx-row .nm small{display:block;font-weight:400;color:var(--ink-light);font-size:11px;}
 .rx-row .qty{flex:none;font-size:12px;color:var(--cinnabar);font-weight:700;
@@ -554,12 +576,16 @@ const PETS = [
    ============================================================ */
 const STEPS = ['诊疗前检查', '医嘱与处方', '执行与办结'];
 let ui = { view:'list', filter:'pending', petId:null, step:1, maxStep:1,
-           tab2:'advice', tab3:'exec', medKey:null, medGroup:'全部' };
+           openItems:{}, medKey:null, medGroup:'全部' };
 let S = null;   /* 当前动物的诊疗草稿（引用 PETS[i]._* ，改动即持久） */
 
 function pad(n){ return String(n).padStart(2,'0'); }
 function nowStr(){ const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; }
 function todayStr(){ const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
+function addDays(n){
+  const d = new Date(); d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
 
 function blankCheck(){
   return { tempFlag:'', temp:'', common:[], commonOther:'', commonOtherOn:false,
@@ -568,7 +594,8 @@ function blankCheck(){
 }
 function blankPlan(){
   const o = {};
-  ITEMS.forEach(it => { o[it.key] = { date:'', rx:[], rxOther:'', notes:'', vet:0, done:false, doneAt:'', chipNo:'' }; });
+  /* 预计执行时间默认当天，省去每次手选 */
+  ITEMS.forEach(it => { o[it.key] = { date: todayStr(), rx:[], rxOther:'', notes:'', vet:0, done:false, doneAt:'', chipNo:'' }; });
   return o;
 }
 function initFlow(p){
@@ -590,10 +617,16 @@ function initFlow(p){
      「完成办结」按钮永远出不来（v5 首轮实测踩到）。 */
   S = { pet:p, check:p._check, advice:p._advice, plan:p._plan,
         diagnosed:p._diagnosed, done_treat:p._doneTreat, disposal:p._disposal, disposed:p._disposed };
-  if (p.stage === 'pending') { ui.step = 1; ui.tab2 = 'advice'; }
-  else if (p.stage === 'treating') { ui.step = 2; ui.tab2 = 'advice'; }
-  else { ui.step = 3; ui.tab3 = 'disposal'; }
+  if (p.stage === 'pending') ui.step = 1;
+  else if (p.stage === 'treating') ui.step = 2;
+  else ui.step = 3;
   ui.maxStep = ui.step;
+  /* 折叠态：默认全折叠；已填过内容的项目自动展开，便于回看 */
+  ui.openItems = {};
+  ITEMS.forEach(it => {
+    const pl = S.plan[it.key];
+    if (pl.rx.length || String(pl.rxOther).trim() || String(pl.chipNo).trim()) ui.openItems[it.key] = true;
+  });
 }
 /* 草稿写回动物对象（字符串/布尔需要显式回写；check/plan 是同一引用） */
 function syncBack(){
@@ -624,14 +657,18 @@ function itemTags(it, species){
   return it.tags.map(a => MEDS.find(m => m.alias === a))
                 .filter(m => m && (m.species === '通用' || m.species === species));
 }
-/* 必执行判定：时间与处方互为必填 → 两者都齐才算「必执行」 */
+/* 必执行判定 —— 日期已默认当天，故以「处方」为准：
+   选了处方 = 该项目要做（必执行）；没选处方 = 跳过。
+   处方有、日期被清空 → half（报错提示补日期）。
+   ⚠ `!!it.chip` 不能写成 `it.chip` —— 没有 chip 属性的项目会返回 undefined，
+     使 hasRx 变成 undefined、half 恒为 true，把「诊断完成」永久拦死。 */
 function planState(it){
   const p = S.plan[it.key];
   const hasDate = !!p.date;
-  /* ⚠ `!!it.chip` 不能写成 `it.chip` —— 没有 chip 属性的项目会返回 undefined，
-     使 hasRx 变成 undefined、half 恒为 true，把「诊断完成」永久拦死。 */
   const hasRx = p.rx.length > 0 || !!String(p.rxOther).trim() || (!!it.chip && !!String(p.chipNo).trim());
-  return { hasDate, hasRx, must: hasDate && hasRx, half: hasDate !== hasRx };
+  /* 三态互斥：blank 未填写 / filled 已填写 / half 待补全（有处方但缺日期） */
+  const state = hasRx ? (hasDate ? 'filled' : 'half') : 'blank';
+  return { hasDate, hasRx, must: hasRx, half: state === 'half', state };
 }
 const mustItems = () => ITEMS.filter(it => planState(it).must);
 const vetOf = id => VETS.find(v => v.id === id) || VETS[0];
@@ -838,34 +875,33 @@ function step1HTML(){
   return h;
 }
 
-/* ---------- 步骤 2：医嘱与处方 ---------- */
+/* ---------- 步骤 2：医嘱与处方（上下长页面，不用页签） ---------- */
 function step2HTML(){
   const diagnosed = !!S.diagnosed;
-  let h = `<div class="tabs">
-    <div class="tb ${ui.tab2==='advice'?'on':''}" data-act="tab2" data-k="advice">医嘱</div>
-    <div class="tb ${ui.tab2==='items'?'on':''}" data-act="tab2" data-k="items">处置项目<span class="n">${mustItems().length}</span></div>
-  </div>`;
+  let h = '';
 
   if (diagnosed){
     h += `<div class="tip suc"><span>✓</span><div>诊断已完成，本单已进入执行阶段。如需修改医嘱 / 处方，请先点底部「撤回诊断」。</div></div>`;
   }
 
-  if (ui.tab2 === 'advice'){
-    h += `<div class="card">
-      <div class="card-h"><span class="bar"></span>医嘱<span class="hint">文字记录</span></div>
-      <div class="card-b">
-        <textarea class="tar" data-inp="advice" style="min-height:130px;"
-          placeholder="填写医嘱，如：术前禁食禁水 12 小时；术后观察精神食欲……" ${diagnosed?'disabled':''}>${esc(S.advice)}</textarea>
-        ${diagnosed ? '' : '<div class="tpl-row">' + ADVICE_TPL.map((t,i) => `<span class="t" data-act="advice-tpl" data-i="${i}">＋ ${esc(t)}</span>`).join('') + '</div>'}
-        <div class="tip inf"><span>ℹ</span><div>医嘱为整单记录；下面「处置项目」里每项的处方，才是实际用药与扣库存的依据。</div></div>
-      </div>
-    </div>`;
-  } else {
-    ITEMS.forEach(it => { h += itemCardHTML(it, diagnosed); });
-    h += `<div class="tip wrn"><span>⚠</span><div>
-      <b>填写规则：</b>某项的「预计执行时间」与「处方」<b>互为必填</b> —— 只填其一，暂存或诊断完成时会报错；
-      两项都填即视为<b>必须执行</b>，执行阶段不完成则无法诊疗完成。两项都不填 = 该项目跳过。</div></div>`;
-  }
+  /* 上：医嘱 */
+  h += `<div class="card">
+    <div class="card-h"><span class="bar"></span>医嘱<span class="hint">文字记录 · 整单</span></div>
+    <div class="card-b">
+      <textarea class="tar" data-inp="advice" style="min-height:104px;"
+        placeholder="填写医嘱，如：术前禁食禁水 12 小时；术后观察精神食欲……" ${diagnosed?'disabled':''}>${esc(S.advice)}</textarea>
+      ${diagnosed ? '' : '<div class="tpl-row">' + ADVICE_TPL.map((t,i) => `<span class="t" data-act="advice-tpl" data-i="${i}">＋ ${esc(t)}</span>`).join('') + '</div>'}
+    </div>
+  </div>`;
+
+  /* 下：处置项目（折叠，点标题展开填写） */
+  h += `<div class="sec-head"><span class="bar"></span>处置项目
+    <span class="hint">已填写 <b style="color:var(--bamboo-green);" id="itemCount">${mustItems().length}</b> / ${ITEMS.length} 项 · 点击展开</span></div>`;
+  ITEMS.forEach(it => { h += itemCardHTML(it, diagnosed); });
+
+  h += `<div class="tip wrn"><span>⚠</span><div>
+    <b>填写规则：</b>展开要做的项目、选好<b>处方</b>即视为<b>必须执行</b>（执行阶段不完成则无法诊疗完成）；
+    不选处方 = 该项目跳过。预计执行时间默认当天，可用「3天后 / 5天后」快捷改。</div></div>`;
   return h;
 }
 
@@ -873,17 +909,29 @@ function itemCardHTML(it, locked){
   const p = S.pet, pl = S.plan[it.key], st = planState(it);
   const tags = itemTags(it, p.species);
   const vet = vetOf(pl.vet);
+  const open = !!ui.openItems[it.key];
+  const stateCls = st.state;
+  const badge = st.state === 'filled' ? '<span class="badge b-suc">已填写</span>'
+              : (st.state === 'half' ? '<span class="badge b-dan">待补全</span>' : '<span class="badge b-def">未填写</span>');
 
-  let h = `<div class="item-card ${st.must?'on':''}" data-item="${it.key}">
-    <div class="item-h">
+  let h = `<div class="item-card ${stateCls} ${open ? 'open' : 'collapsed'}" data-item="${it.key}">
+    <div class="item-h" data-act="item-toggle" data-k="${it.key}">
       <span class="ic">${it.icon}</span>
       <div class="nm">${it.name}<small>${it.hint}</small></div>
-      ${st.must ? '<span class="badge b-cin">必执行</span>' : (st.half ? '<span class="badge b-dan">待补全</span>' : '<span class="badge b-def">跳过</span>')}
+      ${badge}
+      <span class="arr">›</span>
     </div>
     <div class="item-b">`;
 
+  /* 预计执行时间：一行紧凑 + 快捷标签 */
   h += `<div class="fld"><label>预计执行时间</label>
-    <input type="date" class="inp" data-plan="${it.key}" data-f="date" value="${esc(pl.date)}" ${locked?'disabled':''}></div>`;
+    <div class="date-row">
+      <input type="date" class="inp" data-plan="${it.key}" data-f="date" value="${esc(pl.date)}" ${locked?'disabled':''}>
+      ${locked ? '' : `<span class="chip qk" data-act="date-quick" data-k="${it.key}" data-d="0">今天</span>
+      <span class="chip qk" data-act="date-quick" data-k="${it.key}" data-d="3">3天后</span>
+      <span class="chip qk" data-act="date-quick" data-k="${it.key}" data-d="5">5天后</span>
+      <span class="chip qk" data-act="date-quick" data-k="${it.key}" data-d="7">7天后</span>`}
+    </div></div>`;
 
   if (it.chip){
     h += `<div class="fld"><label>芯片号</label>
@@ -892,7 +940,7 @@ function itemCardHTML(it, locked){
 
   h += `<div class="fld"><label>处方 <span class="auto">库存用药 · 固定 1 头份</span></label>`;
   if (tags.length && !locked){
-    h += '<div class="chips">';
+    h += '<div class="chips tight">';
     tags.forEach(m => {
       const picked = pl.rx.some(r => r.medId === m.id);
       const out = m.stock <= 0;
@@ -944,6 +992,24 @@ function rxListHTML(key){
   }).join('');
 }
 
+/* 轻量刷新卡片状态（只改 class 与徽章，不重建 DOM → 不打断正在输入的日期/芯片号） */
+function refreshItemState(key){
+  const it = ITEMS.find(x => x.key === key);
+  const wrap = document.querySelector(`.item-card[data-item="${key}"]`);
+  if (!it || !wrap) return;
+  const st = planState(it);
+  wrap.classList.toggle('filled', st.state === 'filled');
+  wrap.classList.toggle('half', st.state === 'half');
+  wrap.classList.toggle('blank', st.state === 'blank');
+  const badge = wrap.querySelector('.item-h .badge');
+  if (badge){
+    badge.className = 'badge ' + (st.state === 'filled' ? 'b-suc' : (st.state === 'half' ? 'b-dan' : 'b-def'));
+    badge.textContent = st.state === 'filled' ? '已填写' : (st.state === 'half' ? '待补全' : '未填写');
+  }
+  const cnt = document.getElementById('itemCount');
+  if (cnt) cnt.textContent = mustItems().length;
+}
+
 /* 局部刷新单张处置项目卡（避免整页重渲染打断正在输入的字段） */
 function refreshItemCard(key){
   const it = ITEMS.find(x => x.key === key);
@@ -955,70 +1021,65 @@ function refreshItemCard(key){
   wrap.className = fresh.className;
   wrap.querySelector('.item-h').innerHTML = fresh.querySelector('.item-h').innerHTML;
   wrap.replaceChild(fresh.querySelector('.item-b'), wrap.querySelector('.item-b'));
-  /* 同步页签上的「必执行项」计数 —— 只刷新卡片会让这个数字停在旧值（实测踩到） */
-  const cnt = document.querySelector('.tabs .tb[data-act="tab2"][data-k="items"] .n');
+  /* 同步「已填写 N 项」计数 —— 只刷新卡片会让这个数字停在旧值（实测踩到） */
+  const cnt = document.getElementById('itemCount');
   if (cnt) cnt.textContent = mustItems().length;
 }
 
-/* ---------- 步骤 3：执行与办结 ---------- */
+/* ---------- 步骤 3：执行与办结（上下两个区块，不用页签） ---------- */
 function step3HTML(){
   const must = mustItems();
   const finished = S.pet.stage === 'done';
+  const doneN = must.filter(it => S.plan[it.key].done).length;
 
-  let h = `<div class="tabs">
-    <div class="tb ${ui.tab3==='exec'?'on':''}" data-act="tab3" data-k="exec">处置执行</div>
-    <div class="tb ${ui.tab3==='disposal'?'on':''}" data-act="tab3" data-k="disposal">办结去向</div>
-  </div>`;
-
-  if (ui.tab3 === 'exec'){
-    if (!must.length){
-      h += `<div class="card"><div class="card-b"><div class="empty">
-        本单未填写任何「预计执行时间 + 处方」，没有需要执行的处置项目。<br>
-        可直接点击下方「诊疗完成」进入办结。</div></div></div>`;
-    } else {
-      h += '<div class="card"><div class="card-h"><span class="bar"></span>处置执行清单'
-        + `<span class="hint">${must.filter(it => S.plan[it.key].done).length} / ${must.length} 已完成</span></div><div class="card-b">`;
-      must.forEach(it => {
-        const pl = S.plan[it.key];
-        const vet = vetOf(pl.vet);
-        const rxTxt = pl.rx.map(r => (med(r.medId) || {}).name || '').filter(Boolean).join('、');
-        h += `<div class="exec-row ${pl.done?'done':''}">
-          <span class="ic">${it.icon}</span>
-          <div class="info">
-            <div class="nm">${it.name} ${pl.done ? '<span class="badge b-suc">已完成</span>' : '<span class="badge b-wrn">待执行</span>'}</div>
-            <div class="sub">处方：<b>${esc(rxTxt || pl.rxOther || '—')}</b>${(pl.rxOther && rxTxt) ? '，手写：' + esc(pl.rxOther) : ''}</div>
-            <div class="sub">预计 ${esc(pl.date)}${pl.done ? ' · 实际 ' + esc(pl.doneAt) : ''} · ${esc(vet.name)}</div>
-          </div>
-          <div class="act">${pl.done
-            ? `<button class="btn btn-sm" data-act="exec-undo" data-k="${it.key}" ${finished?'disabled':''}>撤销</button>`
-            : `<button class="btn btn-sm btn-s" data-act="exec-done" data-k="${it.key}" ${finished?'disabled':''}>治疗完成</button>`}</div>
-        </div>`;
-      });
-      h += '</div></div>';
-    }
-    h += `<div class="tip inf"><span>💊</span><div>点「治疗完成」时<b>扣减该项处方药品的本院库存</b>并生成消耗流水；手写药品仅记录、不扣库存。</div></div>`;
+  /* 上：处置执行 */
+  let h = '<div class="card"><div class="card-h"><span class="bar"></span>处置执行清单'
+    + `<span class="hint">${doneN} / ${must.length} 已完成</span></div><div class="card-b">`;
+  if (!must.length){
+    h += `<div class="empty">本单未选择任何处置项目（未填写处方）。<br>可直接点击下方「诊疗完成」进入办结。</div>`;
   } else {
-    if (!S.diagnosed){
-      h += `<div class="card"><div class="card-b"><div class="empty">请先完成「医嘱与处方」并点击「诊断完成」，再选择办结去向。</div></div></div>`;
-    } else {
-      h += `<div class="card">
-        <div class="card-h"><span class="bar"></span>建议办结去向<span class="hint">单选</span></div>
-        <div class="card-b"><div class="disposal-grid">`;
-      DISPOSALS.forEach(d => {
-        h += `<div class="dsp ${S.disposal===d.key?'on':''}" data-act="disposal" data-k="${d.key}">
-          <span class="ic">${d.icon}</span>
-          <div class="tx"><div class="n">${d.label}</div><div class="d">${d.desc}</div></div>
-        </div>`;
-      });
-      h += '</div>';
-      if (S.disposal){
-        const d = DISPOSALS.find(x => x.key === S.disposal);
-        h += `<div class="tip suc" style="margin-top:12px;"><span>✓</span><div>
-          已选去向：<b>${d.label}</b>。本步只变更动物状态并记录去向，具体单据（领养 / 放归 / 领回 / 安乐死 / 无害化）由对应模块后续开具。</div></div>`;
-      }
-      h += '</div></div>';
+    must.forEach(it => {
+      const pl = S.plan[it.key];
+      const vet = vetOf(pl.vet);
+      const rxTxt = pl.rx.map(r => (med(r.medId) || {}).name || '').filter(Boolean).join('、');
+      h += `<div class="exec-row ${pl.done?'done':''}">
+        <span class="ic">${it.icon}</span>
+        <div class="info">
+          <div class="nm">${it.name} ${pl.done ? '<span class="badge b-suc">已完成</span>' : '<span class="badge b-wrn">待执行</span>'}</div>
+          <div class="sub">处方：<b>${esc(rxTxt || pl.rxOther || '—')}</b>${(pl.rxOther && rxTxt) ? '，手写：' + esc(pl.rxOther) : ''}</div>
+          <div class="sub">预计 ${esc(pl.date)}${pl.done ? ' · 实际 ' + esc(pl.doneAt) : ''} · ${esc(vet.name)}</div>
+        </div>
+        <div class="act">${pl.done
+          ? `<button class="btn btn-sm" data-act="exec-undo" data-k="${it.key}" ${finished?'disabled':''}>撤销</button>`
+          : `<button class="btn btn-sm btn-s" data-act="exec-done" data-k="${it.key}" ${finished?'disabled':''}>治疗完成</button>`}</div>
+      </div>`;
+    });
+  }
+  h += '</div></div>';
+  h += `<div class="tip inf"><span>💊</span><div>点「治疗完成」时<b>扣减该项处方药品的本院库存</b>并生成消耗流水；手写药品仅记录、不扣库存。</div></div>`;
+
+  /* 下：办结去向 */
+  h += `<div class="card" style="margin-top:14px;">
+    <div class="card-h"><span class="bar"></span>办结去向<span class="hint">单选 · 诊疗完成后可选</span></div>
+    <div class="card-b">`;
+  if (!S.diagnosed){
+    h += `<div class="empty">请先完成「医嘱与处方」并点击「诊断完成」。</div>`;
+  } else {
+    h += '<div class="disposal-grid">';
+    DISPOSALS.forEach(d => {
+      h += `<div class="dsp ${S.disposal===d.key?'on':''}" data-act="disposal" data-k="${d.key}">
+        <span class="ic">${d.icon}</span>
+        <div class="tx"><div class="n">${d.label}</div><div class="d">${d.desc}</div></div>
+      </div>`;
+    });
+    h += '</div>';
+    if (S.disposal){
+      const d = DISPOSALS.find(x => x.key === S.disposal);
+      h += `<div class="tip suc" style="margin-top:12px;"><span>✓</span><div>
+        已选去向：<b>${d.label}</b>。本步只变更动物状态并记录去向，具体单据（领养 / 放归 / 领回 / 安乐死 / 无害化）由对应模块后续开具。</div></div>`;
     }
   }
+  h += '</div></div>';
   return h;
 }
 
@@ -1070,8 +1131,17 @@ document.addEventListener('click', e => {
     if (n <= ui.maxStep){ ui.step = n; renderFlow(); }
     return;
   }
-  if (act === 'tab2'){ ui.tab2 = el.dataset.k; renderFlow(); return; }
-  if (act === 'tab3'){ ui.tab3 = el.dataset.k; renderFlow(); return; }
+  if (act === 'item-toggle'){
+    const k = el.dataset.k;
+    ui.openItems[k] = !ui.openItems[k];
+    refreshItemCard(k);
+    return;
+  }
+  if (act === 'date-quick'){
+    S.plan[el.dataset.k].date = addDays(+el.dataset.d);
+    refreshItemCard(el.dataset.k);
+    return;
+  }
 
   /* 检查项 */
   if (act === 'temp'){
@@ -1164,8 +1234,8 @@ document.addEventListener('click', e => {
   if (act === 'treat-done'){
     S.done_treat = true; S.disposed = false;
     S.pet.stage = 'done'; S.pet._doneAt = nowStr();
-    ui.tab3 = 'disposal'; syncBack(); renderFlow();
-    toast('诊疗完成，动物状态转为「待出院」', 'ok'); return;
+    syncBack(); renderFlow();
+    toast('诊疗完成，状态转为「待出院」，请在下方选择办结去向', 'ok'); return;
   }
   if (act === 'finish'){ finishCase(); return; }
 });
@@ -1182,6 +1252,7 @@ document.addEventListener('input', e => {
   if (t.dataset.plan){
     const k = t.dataset.plan, f = t.dataset.f;
     S.plan[k][f] = (f === 'vet') ? +t.value : t.value;
+    refreshItemState(k);   /* 实时更新卡片配色与徽章，但不重建 DOM */
   }
 });
 
@@ -1211,7 +1282,7 @@ function saveCheck(isDraft){
   } else {
     c.submitted = true;
     if (p.stage === 'pending') p.stage = 'treating';
-    ui.step = 2; ui.maxStep = Math.max(ui.maxStep, 2); ui.tab2 = 'advice';
+    ui.step = 2; ui.maxStep = Math.max(ui.maxStep, 2);
     syncBack(); renderFlow();
     toast('检查单已提交，进入医嘱与处方', 'ok');
   }
@@ -1222,8 +1293,9 @@ function validatePlan(){
   for (const it of ITEMS){
     const st = planState(it);
     if (st.half){
-      ui.tab2 = 'items'; renderFlow();
-      toast(`${it.name}：${st.hasDate ? '已填「预计执行时间」，请同时填写「处方」' : '已填「处方」，请同时填写「预计执行时间」'}`, 'err');
+      ui.openItems[it.key] = true;   /* 自动展开出问题的项目 */
+      renderFlow();
+      toast(`${it.name}：已选处方但日期为空，请补上预计执行时间`, 'err');
       return false;
     }
   }
@@ -1243,7 +1315,7 @@ function diagnoseDone(){
   }
   S.diagnosed = true;
   if (S.pet.stage === 'pending') S.pet.stage = 'treating';
-  ui.step = 3; ui.maxStep = Math.max(ui.maxStep, 3); ui.tab3 = 'exec';
+  ui.step = 3; ui.maxStep = Math.max(ui.maxStep, 3);
   syncBack(); renderFlow();
   toast('诊断完成，进入执行阶段', 'ok');
 }
