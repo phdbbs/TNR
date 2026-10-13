@@ -319,11 +319,25 @@ class StorageSwitchBehaviourTest(TestCase):
 #:   - urls.py 在 DEBUG 下把它挂成静态路由
 #:   - core/storage.py 是存储抽象的落点
 #:   - media_migrate.py 用它做「本地源目录」的默认值
+#: 允许直接用本地路径的文件。
+#: 只有**本地文件运维命令**才有这个资格 —— 它们的职责就是在磁盘上搬动、核对、
+#: 清理文件，这种语义经 Storage API 反而表达不了（对象存储没有 "parent 目录"）。
+#: 配置与存储抽象自身也要读 MEDIA_ROOT，同列于此。
+#: ⚠ 业务代码（视图 / 服务 / 序列化）**绝不**在此列 —— 「把问题文件加进白名单」
+#:   是静默放水，由 ``test_allowlist_stays_local_ops_only`` 守着。
 _MEDIA_ROOT_ALLOWED = {
     'tnr_system/settings.py',
     'tnr_system/urls.py',
     'core/storage.py',
     'core/management/commands/media_migrate.py',
+    'core/management/commands/media_clean_orphans.py',
+}
+
+#: 白名单里非「本地文件运维」的其余成员（配置与存储抽象本身）。
+_MEDIA_ROOT_NON_COMMAND = {
+    'tnr_system/settings.py',
+    'tnr_system/urls.py',
+    'core/storage.py',
 }
 
 _SCAN_DIRS = ('accounts', 'business', 'core', 'supervision', 'tnr_system')
@@ -414,6 +428,35 @@ class NoHardcodedMediaPathTest(TestCase):
         found = [v for v in _scan_media_root_violations(root)
                  if v[0] == 'business/bad_views.py']
         self.assertTrue(found, '扫描器漏掉了真实违规 —— 判据是假的')
+
+    def test_allowlist_stays_local_ops_only(self):
+        """白名单只允许「本地文件运维命令」，且成员必须真实存在。
+
+        ## 这条守的是白名单本身
+
+        ``_MEDIA_ROOT_ALLOWED`` 表面看是放水口：谁被加进去，静态扫描就不再看他。
+        所以判据必须同时钉两件事：
+
+        1. 每个成员**真实存在** —— 否则删了文件、白名单还在，扫描范围被悄悄缩小，
+           而这条测试会是唯一能发现「白名单里躺着已删除文件」的地方；
+        2. 除配置与存储抽象外，成员**必须是管理命令** —— 发现谁把
+           ``business/views.py`` 塞进来，这里立刻红，而不是等线上出事。
+        """
+        root = Path(__file__).resolve().parent.parent
+
+        for rel in sorted(_MEDIA_ROOT_ALLOWED):
+            self.assertTrue(
+                (root / rel).is_file(),
+                '白名单成员不存在：%s（删文件时请同步删白名单条目）' % rel)
+
+        offenders = sorted(_MEDIA_ROOT_ALLOWED - _MEDIA_ROOT_NON_COMMAND
+                           - {'core/management/commands/media_migrate.py',
+                              'core/management/commands/media_clean_orphans.py'})
+        self.assertEqual(
+            offenders, [],
+            '白名单里出现了非「本地文件运维命令」的成员：%s\n'
+            '业务代码不得直接使用本地路径，请改用 Storage API。'
+            % '、'.join(offenders))
 
     def test_comment_only_mention_is_not_a_violation(self):
         """只在**注释**里提到 MEDIA_ROOT 不算违规（剥注释这一步的对照）。

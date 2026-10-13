@@ -139,30 +139,91 @@ python manage.py check && sudo systemctl restart tnr
 
 ---
 
-## 6. ⚠ 迁移前必须处理的一件事：孤儿文件
+## 6. 孤儿文件：已处理（2026-10-13）
 
-**本地现状**（2026-10-09 实测）：
+**本地现状**（2026-10-13 实测，清理前）：
 
 ```
-数据库引用的图片：    54 个
-media/ 目录里的文件： 20522 个
+数据库引用的图片：     54 个     （全部是 photos/phone_photo_*.jpg，共 6.65 MB）
+media/ 目录里的文件： 20523 个
+孤儿文件：           20469 个    （合计 113.5 MB）
 ```
 
-也就是说有 **两万多个孤儿文件** —— 磁盘上有，但没有任何数据库记录引用它们。
-主要来源是**跑测试时上传的图片**（`test-pet-0_*.png` / `test-group_*.png` 等），
-改造前测试没有隔离 `MEDIA_ROOT`，每跑一次就往真实目录里丢十几个。
+孤儿按来源分三类，前两类是噪声，第三类才是空间大头：
 
-**这直接影响迁移决策**：
+| 来源 | 数量 | 占用 | 说明 |
+|---|---|---|---|
+| `photos/TNR*.png` | 13981 | 1.0 MB | 历史登记 / seed 图，单个约 75 B |
+| `photos/pet*_*.png` | ~350 | 90.2 MB | seed 宠物图，**单个 264 KB，同一张反复复制** |
+| `photos/test-*` | 5444 | 0.4 MB | 改造前测试没隔离 `MEDIA_ROOT` 时留下的残留 |
+| 其他 | ~690 | 21.9 MB | 同上两类之外的早期残留 |
 
-- 不加 `--include-orphans` → 只搬 54 个，对象存储干净，但那两万个文件留在本地
-- 加 `--include-orphans` → 全部搬走，**白付两万多个文件的存储与流量费**
+> 空间的 98.7% 集中在 435 个 >5 KB 的文件里，全是 `pet_*` / `pet2_*` 的 seed 图。
+> 「文件多」和「占空间」在这里是两件事，别被 20469 这个数字误导。
 
-**建议顺序**：先做孤儿文件审计（比对数据库引用 + 按名称特征识别测试残留），
-确认后再决定搬哪些。清理脚本应当**默认 dry-run**、**先备份**。
+### 清理命令
+
+```bash
+# ① 干跑：只出报告，零改动（默认）
+python manage.py media_clean_orphans
+
+# ② 真清：先移送到 media/ 同级的 media_orphans_<时间戳>/（可恢复）
+python manage.py media_clean_orphans --apply
+
+# ③ 备份确认无价值后彻底删除（危险，双闸门）
+python manage.py media_clean_orphans --purge --backup-dir <备份目录> --yes
+```
+
+### 为什么是「移到备份」而不是「删」
+
+直接 `os.remove` 的一次误判就是永久丢失，而判断依据（「数据库里没有引用」）
+本身依赖几个不牢靠的假设：历史数据可能是手工导入的、逻辑删除记录的 `name`
+可能被误清过、**本地库不是生产库**。所以默认走移动，并写 `MANIFEST.txt`
+记录「原 key → 备份位置」；真要把文件找回来，搬回 `MEDIA_ROOT` 下同相对路径即可，
+**数据库一行都不用改**。
+
+### 三条硬规则
+
+1. **备份目录必须在 `MEDIA_ROOT` 之外**（默认就在它同级）。
+   落在 `media/` 内会同时踩三个坑：被下次扫描当成新的孤儿、
+   被 `media_migrate` 一起搬上对象存储、让 `/media/` 路由下「看起来干净」变成假象。
+   代码里是**硬校验**，落在里面直接报错。
+2. **逻辑删除记录的引用照样算有效。** 照片仍是审计凭证，仍可能被恢复；
+   Django 默认 manager 不过滤软删，所以天然满足（`SoftDeleteReferenceKeptTest` 守着）。
+3. **引用集合动态扫描全部 `FileField`/`ImageField`**，没有硬编码字段清单 ——
+   硬编码清单会在新增图片字段时静默漏扫，表现为「新功能的图被当孤儿删掉」
+   且没有任何报错（`NewFileFieldTest` 守着）。
+
+### 被中断了怎么办
+
+中断（Ctrl-C / OOM / `SIGTERM`）后**重跑同一条命令即可**，它是幂等的。
+但有一个坑要知道：默认备份目录名带时间戳，所以**续跑会新建一个目录**，
+文件于是分到两处，而第一个目录的 MANIFEST 还没写（它在末尾统一落盘）。
+
+补救办法（2026-10-14 真实踩到过：20469 个文件被分成 17669 + 2800 两份）：
+
+```bash
+# ① 合并（--ignore-existing 保证不覆盖已有文件，先核对无重叠）
+rsync -a --ignore-existing media_orphans_<新的>/ media_orphans_<旧的>/
+
+# ② 删除已合并完的目录（先核对里面每个文件都在旧目录里）
+
+# ③ 按备份目录里的现有文件重写清单 —— 条数必须等于文件数
+python manage.py media_clean_orphans --rebuild-manifest \
+    --backup-dir media_orphans_<旧的>
+```
+
+`--rebuild-manifest` 不移动任何文件，只重建清单。
+合并后若不重建，**多出来的那些文件就永久失去溯源记录，而且没有任何报错**。
+
+### 对迁移的影响
+
+清完之后本地只剩 54 个被引用的文件，`media_migrate` 不带 `--include-orphans`
+搬走的就是干净的一份，**不会再白付两万多个文件的存储与流量费**。
 
 > ⚠ 本地 `db.sqlite3` 是**开发库**，引用数（54）不代表生产。
-> 生产（MySQL）的真实引用数要在生产环境跑 `media_migrate` 才知道。
-> 本次改造**没有动生产环境**。
+> 生产（MySQL）的孤儿情况要在生产环境跑 `media_clean_orphans` 才知道，
+> 同样先干跑、看清楚、再 `--apply`。**本次清理只动了本地开发库的 media/ 目录。**
 
 ---
 
@@ -172,7 +233,9 @@ media/ 目录里的文件： 20522 个
 |---|---|
 | `core/storage.py` | **新增** —— 存储抽象、后端工厂、环境变量契约 |
 | `core/management/commands/media_migrate.py` | **新增** —— 迁移命令 |
+| `core/management/commands/media_clean_orphans.py` | **新增** —— 孤儿文件清理命令（2026-10-13） |
 | `core/tests_media_storage.py` | **新增** —— 26 条判据 |
+| `core/tests_media_clean_orphans.py` | **新增** —— 18 条判据（2026-10-13） |
 | `tnr_system/test_runner.py` | **新增** —— 测试隔离 `MEDIA_ROOT` |
 | `tnr_system/settings.py` | 显式 `STORAGES` + `TEST_RUNNER` |
 | `tnr_system/urls.py` | `/media/` 挂载改为仅本地存储模式 |

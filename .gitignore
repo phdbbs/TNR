@@ -7,6 +7,9 @@ db.sqlite3-journal
 db.sqlite3.bak-*
 .env
 media/
+# 孤儿媒体文件的清理备份（media_clean_orphans --apply 产出，可含上万个文件）。
+# 不忽略的话 git status 会被它拖垮，且有被误提交进仓库的风险。
+media_orphans_*/
 staticfiles/
 
 # 本地项目记忆/会话数据（deploy.sh 也会显式排除）
