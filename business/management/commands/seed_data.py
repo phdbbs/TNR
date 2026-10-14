@@ -86,6 +86,25 @@ SEED_MATERIALS = [
      60, 30, 90, 'D001'),
     ('MAT004', '宠物芯片', 'chip', '个', '134.2kHz', '信码科技', 'C20250101',
      290, 200, None, 'D001'),
+    # --- 药品（第四十六轮，R46 口径 1）---
+    #
+    # 口径原文：「处方药品从**已下发的药品**中选择，并扣减该药品在医院侧的库存
+    # —— 即走现有物料体系（`Material` 加「药品」类别），**不新建独立药品字典**」。
+    # 所以这里只是**加了几条物料**，采购 / 下发 / 签收 / 台账 / 库存对账
+    # 全部自动复用，没有任何新表、新流程。
+    #
+    # ⚠ 光有物料不够：医院端「从本院库存挑药开处方」挑的是**医院侧**库存，
+    #   而医院库存来自「捕捉点下发 + 医院签收」。下面 `_seed_material_txns()`
+    #   里配了采购 → 下发 → 签收三条，缺了它们医院侧药品库存恒为 0，
+    #   界面上就是「一条药都开不出来」。
+    ('MAT005', '头孢曲松钠', 'medicine', '支', '1g/支', '国药集团', 'M20250101',
+     60, 20, 365, 'D001'),
+    ('MAT006', '美洛昔康注射液', 'medicine', '瓶', '10ml/瓶', '瑞派宠物', 'M20250102',
+     30, 10, 180, 'D001'),
+    ('MAT007', '乳酸林格氏液', 'medicine', '袋', '500ml/袋', '科伦药业', 'M20250103',
+     40, 15, 300, 'D001'),
+    ('MAT008', '舒泰50', 'medicine', '瓶', '5ml/瓶', '维克', 'M20250104',
+     20, 8, 400, 'D001'),
     # --- 樊城区（演示区县之二，内部代号 D002） ---
     #
     # ⚠ 为什么樊城区也必须有：生产实测时 4 条物料**全挂在襄城区**，
@@ -102,6 +121,15 @@ SEED_MATERIALS = [
      45, 20, 120, 'D002'),
     ('MAT104', '宠物芯片', 'chip', '个', '134.2kHz', '信码科技', 'C20250201',
      300, 150, None, 'D002'),
+    # --- 药品（樊城区，第四十六轮）---
+    ('MAT105', '头孢曲松钠', 'medicine', '支', '1g/支', '国药集团', 'M20250201',
+     50, 20, 365, 'D002'),
+    ('MAT106', '美洛昔康注射液', 'medicine', '瓶', '10ml/瓶', '瑞派宠物', 'M20250202',
+     25, 10, 180, 'D002'),
+    ('MAT107', '乳酸林格氏液', 'medicine', '袋', '500ml/袋', '科伦药业', 'M20250203',
+     35, 15, 300, 'D002'),
+    ('MAT108', '舒泰50', 'medicine', '瓶', '5ml/瓶', '维克', 'M20250204',
+     18, 8, 400, 'D002'),
 ]
 
 # 种子芯片的起始号（第四十六轮）。
@@ -163,6 +191,19 @@ SEED_CHIP_COUNT = {
 #   「15 颗被标 `used`、流水侧只记了 3 个消耗」—— 爱心宠物医院的
 #   「可用芯片数」（195）与「库存数」（207）差 12，**且不报错**。
 SEED_USED_CHIP_INDEXES = (1, 6, 11, 16)
+
+# 种子诊疗单的**办结去向**（第四十六轮 v5.1 三步流程）。
+#
+# ⚠ 必须与 `_seed_pets()` 里那几只动物的状态**语义一致**，否则种子数据自己
+#   就是矛盾的：`dispose()` 是把去向 key **直接赋值**给 `Pet.status` 的，
+#   所以「诊疗单说已领养、动物状态说已放归」在生产里不可能出现，
+#   拿它当演示数据只会让人怀疑系统算错了。
+#   TRE004 不在表里 = 还没办结（`in_progress`，停在「待出院」）。
+SEED_TREATMENT_DISPOSAL = {
+    'TRE001': 'pending_adopt',   # PET001 → adopted（走完领养流程）
+    'TRE002': 'released',        # PET002 → released
+    'TRE003': 'pending_adopt',   # PET003 → pending_adopt
+}
 
 # 演示物料所属区县的**实际 code**。
 #
@@ -725,6 +766,22 @@ class Command(BaseCommand):
              vac_type, vac_batch, vac_date, vac_qty,
              dew_type, dew_batch, dew_date, dew_qty,
              chip_no, chip_date, status, dist, operator) = row
+            # v5.1 三步流程的时间戳（第四十六轮）：由 `status` 推导，
+            # 让 `Treatment.stage` 派生出正确阶段。
+            # ⚠ 不补的话所有种子单的 `checked_at` 都是空 → 阶段全是「待接诊」，
+            #   看板上几张单子全挤在「待接诊」里，演示时看不出流程走到哪一步。
+            stamp = timezone.now()
+            disposal = SEED_TREATMENT_DISPOSAL.get(tre_id, '')
+            flow_defaults = {
+                'checked_at': stamp,
+                'diagnosed_at': stamp,
+                # 「诊疗完成」与「已办结」是**两步**（原型 `_doneTreat` 与
+                # `_disposed` 分开）：有去向才算办结，`disposed_at` 不能跟着
+                # `done_at` 一起无条件写 —— 那样「待出院」这个状态就永远看不到。
+                'done_at': stamp if status == 'completed' else None,
+                'disposal': disposal,
+                'disposed_at': stamp if disposal else None,
+            }
             tre, created = Treatment.objects.get_or_create(
                 pet=pets[pet_id],
                 defaults={
@@ -755,6 +812,7 @@ class Command(BaseCommand):
                     'operator': users[operator],
                     'operator_name': users[operator].get_full_name() or users[operator].username,
                     'district': districts[dist],
+                    **flow_defaults,
                 }
             )
             if created:
@@ -797,6 +855,20 @@ class Command(BaseCommand):
             ('MTX006R', 'receive', 'MAT004', '宠物芯片', 210, '个', 'C20250101',
              '', '襄城流浪动物捕捉点', 'I003', 'RVC-2025-0107-001', date(2025, 1, 7),
              'D001', 'aixin_hosp', '签收下发物料（原单号：DIS-2025-0107-001）'),
+            # --- 药品（第四十六轮，R46 口径 1）：让医院侧**有药可开处方** ---
+            #
+            # 三条一套：采购（形成捕捉点库存）→ 下发 → 签收（形成医院库存）。
+            # ⚠ 少了「签收」那一条，医院侧药品库存恒为 0 —— 处方一条都开不出来，
+            #   而界面上只会显示「库存为 0」，看不出是流程没走完。
+            ('MTX007', 'purchase', 'MAT005', '头孢曲松钠', 60, '支', 'M20250101',
+             '国药集团', '国药集团', None, 'PUR-2025-0110-001', date(2025, 1, 10),
+             'D001', 'cy_shelter', '药品采购入库'),
+            ('MTX008', 'dispatch', 'MAT005', '头孢曲松钠', 40, '支', 'M20250101',
+             '', '爱心宠物医院', 'I003', 'DIS-2025-0112-001', date(2025, 1, 12),
+             'D001', 'cy_shelter', '下发至爱心宠物医院'),
+            ('MTX008R', 'receive', 'MAT005', '头孢曲松钠', 40, '支', 'M20250101',
+             '', '襄城流浪动物捕捉点', 'I003', 'RCV-2025-0113-001', date(2025, 1, 13),
+             'D001', 'aixin_hosp', '签收下发物料（原单号：DIS-2025-0112-001）'),
             # --- 樊城区（D002）---
             #
             # 只补物料不补流水，`hd_gov` 的「库存流水」页仍是空的 ——
@@ -809,12 +881,25 @@ class Command(BaseCommand):
             ('MTX102', 'dispatch', 'MAT101', '狂犬疫苗', 30, '支', 'B20250201',
              '', '芭比堂动物医院', 'I005', 'DIS-2026-0212-001', date(2026, 2, 12),
              'D002', 'hd_shelter', '下发至医院（待签收）'),
+            # --- 药品（樊城区）：同样三条一套，但**签收已完成** ---
+            # 与襄城那条 MTX102 正好形成对照：一条停在「待签收」，
+            # 一条走完「已签收」—— 演示时两种中间态都看得到。
+            ('MTX107', 'purchase', 'MAT105', '头孢曲松钠', 50, '支', 'M20250201',
+             '国药集团', '国药集团', None, 'PUR-2026-0210-002', date(2026, 2, 10),
+             'D002', 'hd_shelter', '药品采购入库'),
+            ('MTX108', 'dispatch', 'MAT105', '头孢曲松钠', 30, '支', 'M20250201',
+             '', '芭比堂动物医院', 'I005', 'DIS-2026-0212-002', date(2026, 2, 12),
+             'D002', 'hd_shelter', '下发至芭比堂动物医院'),
+            ('MTX108R', 'receive', 'MAT105', '头孢曲松钠', 30, '支', 'M20250201',
+             '', '樊城流浪动物捕捉点', 'I005', 'RCV-2026-0214-001', date(2026, 2, 14),
+             'D002', 'babitang_hosp', '签收下发物料（原单号：DIS-2026-0212-002）'),
         ]
         # 元组第 11 列（如 'PUR-2025-0105-001'）是**旧硬编码单号**，仅作历史
         # 注释保留 —— 第四十六轮起单号一律创建时经 `generate_doc_no()` 现取。
         PREFIX_BY_TYPE = {'purchase': 'PUR', 'dispatch': 'DIS',
                           'receive': 'RCV', 'consume': 'CON', 'adjustment': 'ADJ'}
-        RECEIVE_REF = {'MTX003R': 'MTX002', 'MTX006R': 'MTX005'}
+        RECEIVE_REF = {'MTX003R': 'MTX002', 'MTX006R': 'MTX005',
+                       'MTX008R': 'MTX008', 'MTX108R': 'MTX108'}
         created_objs = {}
 
         def _key_fields(r):

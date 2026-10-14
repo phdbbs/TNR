@@ -20,6 +20,7 @@
 import qrcode
 import base64
 import io
+import json
 from datetime import date, datetime
 
 from django.contrib.auth.decorators import login_required
@@ -31,6 +32,7 @@ from business.models import (
     Treatment, MaterialTransaction,
 )
 from business.services import get_scoped_object
+from business import services_treatment as st
 from accounts.decorators import role_required
 
 # 纸张来源提示：统一 A4 竖版
@@ -139,6 +141,90 @@ TREATMENT_FIELDS = [
     ('芯片号', _v('chip_no')), ('植入日期', _v('chip_date', 'date')),
     ('状态', _choice('status')), ('操作员', _v('operator_name')),
 ]
+
+def _infectious_text(obj):
+    """传染病检查的 JSON 快照 → 一行可读文本（如「猫瘟 FPV:阴性　猫鼻支 FHV:未检」）。
+
+    ⚠ 标签表从 `services_treatment.INFECTIOUS_TESTS` 取，**不在这里再写一份** ——
+      打印页与前端各写一份的话，加了新病种就会出现「界面有、打印没有」，
+      而两边都不会报错。
+    """
+    raw = (getattr(obj, 'infectious_tests', '') or '').strip()
+    if not raw:
+        return '—'
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return '—'
+    if not isinstance(data, dict):
+        return '—'
+    species = getattr(getattr(obj, 'pet', None), 'species', '') or ''
+    label_of = dict(st.INFECTIOUS_TESTS.get(species, []))
+    result_of = dict(st.TEST_RESULTS)
+    parts = [f'{label_of.get(k, k)}:{result_of.get(v, v)}' for k, v in data.items()]
+    return '　'.join(parts) or '—'
+
+
+def _items_text(obj):
+    """处置项目 + 处方 → 多行文本（每项一行，处方缩进跟在下面）。
+
+    返回的字符串里带 `\\n`，由模板的 `|linebreaksbr` 转成换行 ——
+    直接塞进 `{{ value }}` 的话换行会被 HTML 折叠成空格，几项处方挤成一行。
+    """
+    lines = []
+    for item in obj.items.all():
+        name = item.item_name or item.get_item_key_display()
+        head = name
+        if item.planned_date:
+            head += f'（{item.planned_date:%Y-%m-%d}）'
+        if item.chip_no:
+            head += f' 芯片 {item.chip_no}'
+        head += '【已执行】' if item.is_done else '【未执行】'
+        lines.append(head)
+
+        rx = list(item.rx_rows.all())
+        if rx:
+            lines.append('　处方：' + '、'.join(
+                f'{r.material_name} ×{r.quantity}{r.unit or ""}' for r in rx))
+        if item.rx_other:
+            lines.append('　手写：' + item.rx_other)
+        if item.notes:
+            lines.append('　注意：' + item.notes)
+        if item.vet_name or item.vet_license:
+            lines.append(f'　操作人：{item.vet_name} {item.vet_license}'.rstrip())
+    return '\n'.join(lines) or '—'
+
+
+def _treatment_fields(obj):
+    """诊疗单打印字段 —— **两代字段都打**。
+
+    旧代（Task 6 口径）是 `TREATMENT_FIELDS` 里那批明细列；
+    新代（第四十六轮 v5.1 三步流程）是体检 / 医嘱 / 签名 / 办结 + 子表。
+
+    ⚠ 为什么两代都要：历史单子是旧口径建的（新列全空），新单子走三步流程
+      （旧明细列不写）。只打一代的话，另一半单子打出来是**一片空白**，
+      而打印页不会报任何错 —— 归档时才发现纸面上什么都没印。
+    """
+    rows = [(label, getter(obj)) for label, getter in TREATMENT_FIELDS]
+    rows.extend([
+        ('体温(℃)', lambda o: '—' if o.temperature is None else f'{o.temperature}'),
+        ('体温判定', _choice('temperature_flag')),
+        ('常见病检查', _v('common_findings')),
+        ('常见病其他', _v('common_other')),
+        ('传染病检查', _infectious_text),
+        ('皮肤黏膜', _v('skin_mucosa')),
+        ('皮肤黏膜其他', _v('skin_other')),
+        ('其它检查', _v('check_note')),
+        ('医嘱', _v('advice')),
+        ('兽医', _v('vet_name')), ('执业证号', _v('vet_license')),
+        ('电子章', _v('hospital_seal')),
+        ('办结去向', _choice('disposal')),
+        ('检查提交', _v('checked_at')), ('诊断完成', _v('diagnosed_at')),
+        ('诊疗完成', _v('done_at')), ('办结时间', _v('disposed_at')),
+        ('处置项目', _items_text),
+    ])
+    return rows
+
 
 MT_TYPE_TITLE = {
     'purchase': '物料采购入库单', 'dispatch': '物料下发单',
@@ -280,9 +366,14 @@ DOC_SPECS = {
                  'related': _get_pet_related},
     'euthanasia': {'model': Euthanasia, 'title': '安乐死单', 'fields': EUTH_FIELDS,
                    'related': _get_pet_related},
-    'treatment': {'model': Treatment, 'title': '诊疗单', 'fields': TREATMENT_FIELDS,
+    # ⚠ `fields_fn` 是**按单据对象动态**算字段清单的钩子（诊疗单要读子表，
+    #   物料单要按 `type` 决定是否加「关联下发单号」）。静态 `fields` 留给
+    #   字段固定的那几类；两者只能有一个非空，`fields_fn` 优先。
+    'treatment': {'model': Treatment, 'title': '诊疗单', 'fields': None,
+                  'fields_fn': _treatment_fields,
                   'related': _get_pet_related},
     'material': {'model': MaterialTransaction, 'title': None, 'fields': None,
+                 'fields_fn': _mt_fields,
                  'related': _mt_related},
 }
 
@@ -314,7 +405,8 @@ def print_doc(request, doc, pk):
         return render(request, 'print/doc_missing.html', {'doc': doc}, status=404)
 
     title = spec['title'] or _mt_title(obj)
-    fields = spec['fields'] or _mt_fields(obj)
+    fields_fn = spec.get('fields_fn')
+    fields = fields_fn(obj) if fields_fn else spec['fields']
     rows = [(label, getter(obj)) for label, getter in fields]
     related = spec['related'](obj)
     print_url = request.build_absolute_uri()

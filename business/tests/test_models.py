@@ -29,8 +29,12 @@ class PetModelTest(TestCase):
         self.assertEqual(dict(Pet._meta.get_field('species').choices), {'猫': '猫', '狗': '狗'})
 
     def test_status_choices_complete(self):
+        # `dead`（死亡/无害化）是第四十六轮从 `euthanized` 里拆出来的**独立状态**：
+        # 原 `euthanized` 的 label 是「已死亡」，而 v5.1 原型的「办结去向」是
+        # 两个选项（安乐死 / 死亡无害化），后续单据也不同（安乐死单 / 无害化单）。
+        # 产生点：`services_treatment.dispose()` 按去向 key 直接赋给 `Pet.status`。
         expected = {'in_transit', 'in_treatment', 'pending_adopt', 'pending_claim',
-                    'adopted', 'released', 'euthanized', 'owner_returned'}
+                    'adopted', 'released', 'euthanized', 'dead', 'owner_returned'}
         self.assertEqual({c for c, _ in Pet.STATUS_CHOICES}, expected)
 
     def test_district_protect(self):
@@ -62,8 +66,13 @@ class MaterialModelTest(TestCase):
         self.assertEqual(material.shelter_stock, 0)
 
     def test_category_choices(self):
+        # `medicine`（药品）是第四十六轮加的：R46 口径 1 —— 处方药品走
+        # **现有物料体系**（从已下发的药品里选、扣医院侧库存），
+        # 不新建独立药品字典。
+        # 产生点：采购入库 `views_material.purchase_create()` 的 `category` 参数；
+        # 消费点：`services_treatment` 的 `RX_CATEGORIES`（可开处方的类别）。
         self.assertEqual({c for c, _ in Material.CATEGORY_CHOICES},
-                         {'vaccine', 'dewormer', 'chip'})
+                         {'vaccine', 'dewormer', 'chip', 'medicine'})
 
 
 class TransactionModelTest(TestCase):

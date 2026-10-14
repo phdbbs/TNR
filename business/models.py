@@ -12,7 +12,15 @@ class Pet(models.Model):
         ('pending_claim', '待领出'),
         ('adopted', '已领养'),
         ('released', '已放归'),
-        ('euthanized', '已死亡'),
+        # ⚠ 第四十六轮把这两态拆开（R46 §四「办结去向」缺口）：
+        #   原 `euthanized` 的 label 是「已死亡」，而原型「办结去向」是**两个**
+        #   选项 —— 🕯️ 安乐死（需另开安乐死单）与 ⚰️ 死亡 / 无害化（需另开
+        #   无害化单）。用同一个状态表达两件事的后果是：**统计口径永久合并**
+        #   （「本区安乐死了几只」与「本区收尸了几只」是两张要分开报的表），
+        #   且事后无法从数据里拆开 —— 旧行一律落在 `euthanized`，
+        #   回填只能靠猜。label 改名本身不动数据，`dead` 是纯新增。
+        ('euthanized', '已安乐死'),
+        ('dead', '已死亡/无害化'),
         ('owner_returned', '主人领回'),
     ]
     SPECIES_CHOICES = [
@@ -186,10 +194,59 @@ class Transfer(models.Model):
 # 诊疗记录
 # ============================================
 class Treatment(models.Model):
+    """诊疗单 —— 一次收治后在该医院的完整诊疗过程（v5.1 原型三步流程）。
+
+    ⚠ 本模型有**两代字段**并存，这不是历史遗留没清干净，而是刻意保留：
+
+    * **旧代**：`items_sterilization` / `items_vaccine` / `items_deworming` /
+      `items_chip` 四个布尔，以及 `sterilization_*` / `vaccine_*` /
+      `deworming_*` / `chip_*` 明细列。它们是第四十六轮之前的口径，
+      现在仍被 **打印页**（`views_print.TREATMENT_FIELDS`）、**监管端统计**
+      （`supervision/views.py`）、**宠物档案时间轴**（`views_portal.py`）、
+      **政府端 / 医院端列表**读取。删掉它们 = 这几处一起断。
+    * **新代**：体检 / 医嘱 / 签名 / 办结字段 + `TreatmentItem` / `TreatmentRx`
+      两张子表，承载 v5.1 原型的三步流程。
+
+    写入侧的分工（**只有一处写**，避免双真源漂移）：
+    新流程一律写子表；`items_*` 四个布尔作为「本单做了哪些项目」的**派生索引**
+    由 `services_treatment.sync_legacy_item_flags()` 在同一事务内回写，
+    供上面那几处既有页面继续工作。旧的明细列（`sterilization_surgeon` 等）
+    **新流程不再写** —— 新流程的明细在子表里，打印页按「有子表读子表」兜底。
+    """
+
     STATUS_CHOICES = [
         ('in_progress', '进行中'),
         ('completed', '已完成'),
     ]
+    # 办结去向 —— key 与 `Pet.STATUS_CHOICES` 一一对齐（v5.1 原型 DISPOSALS）。
+    # 「安乐死」与「死亡/无害化」是两个选项，对应 Pet 的两个状态（见 Pet 的注释）。
+    DISPOSAL_CHOICES = [
+        ('pending_adopt', '领养'),
+        ('released', '放回原小区'),
+        ('owner_returned', '主人领回'),
+        ('euthanized', '安乐死'),
+        ('dead', '死亡 / 无害化'),
+    ]
+    TEMP_FLAG_CHOICES = [
+        ('normal', '正常'),
+        ('fever', '发烧'),
+    ]
+    # 三步流程的阶段 —— 由三个时间戳**派生**，不单独存列。
+    # 存列的话就会出现「stage 说已办结、disposed_at 是空的」这种自相矛盾的行，
+    # 而且必然有一处写入路径忘了同步（本项目已栽过多次「双真源」）。
+    STAGE_CHECKING = 'checking'
+    STAGE_TREATING = 'treating'
+    STAGE_DONE = 'done'
+    STAGE_CHOICES = [
+        (STAGE_CHECKING, '待接诊'),
+        (STAGE_TREATING, '诊疗中'),
+        (STAGE_DONE, '诊疗完毕'),
+    ]
+    # 办结去向是**单选**，且只在「诊疗完成」之后才可选（原型：未诊断完成时
+    # 办结去向整块显示「请先完成医嘱与处方」）。
+    DISPOSED_STATUSES = ('pending_adopt', 'released', 'owner_returned',
+                         'euthanized', 'dead')
+
     pet = models.ForeignKey('business.Pet', on_delete=models.CASCADE, related_name='treatments', verbose_name='宠物')
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='treatments', verbose_name='医院')
@@ -214,6 +271,44 @@ class Treatment(models.Model):
     deworming_quantity = models.IntegerField('驱虫数量', default=0)
     chip_no = models.CharField('芯片号', max_length=30, blank=True, default='')
     chip_date = models.DateField('植入日期', null=True, blank=True)
+
+    # ---------- 第一步：诊疗前检查 ----------
+    # 体温存**数值**（R46 §五.1 建议）：只有数值才能做异常预警与趋势，
+    # 存「38.5℃」这种字符串的话，将来想画个体温曲线就得把历史数据全部正则解析。
+    temperature = models.FloatField('体温(℃)', null=True, blank=True)
+    temperature_flag = models.CharField('体温判定', max_length=10, choices=TEMP_FLAG_CHOICES,
+                                        blank=True, default='')
+    # 检查项一律存**文本快照**（同 R46 §五.1）：原型上的 chips 选项以后会变，
+    # 存 key 的话「历史单据」会跟着今天的选项一起变，那就不是留痕了。
+    common_findings = models.TextField('常见病检查', blank=True, default='',
+                                       help_text='多选，顿号分隔')
+    common_other = models.CharField('常见病其他', max_length=200, blank=True, default='')
+    # 传染病检查三态（未检 / 阴性 / 阳性），按物种给不同的三项。
+    # 存 JSON 文本而不是三列布尔：物种不同则项不同（猫 FPV/FHV/FCV、
+    # 狗 CDV/CPV/CCV），加一个病种就要加一列，且「未检」与「阴性」
+    # 必须能区分 —— 用 BooleanField 的话两者都是 False，分不开。
+    infectious_tests = models.TextField('传染病检查', blank=True, default='',
+                                        help_text='JSON: {"fpv": "neg", ...}')
+    skin_mucosa = models.CharField('皮肤黏膜检查', max_length=50, blank=True, default='')
+    skin_other = models.CharField('皮肤黏膜其他', max_length=200, blank=True, default='')
+    check_note = models.TextField('其它检查情况', blank=True, default='')
+    checked_at = models.DateTimeField('检查单提交时间', null=True, blank=True)
+
+    # ---------- 第二步：医嘱与处方 ----------
+    advice = models.TextField('医嘱', blank=True, default='')
+    diagnosed_at = models.DateTimeField('诊断完成时间', null=True, blank=True)
+
+    # ---------- 签名与电子章（R46 口径 2：挂账号，落库时快照）----------
+    vet_name = models.CharField('兽医姓名', max_length=50, blank=True, default='')
+    vet_license = models.CharField('兽医执业证号', max_length=100, blank=True, default='')
+    hospital_seal = models.CharField('机构电子章', max_length=100, blank=True, default='')
+
+    # ---------- 第三步：执行与办结 ----------
+    done_at = models.DateTimeField('诊疗完成时间', null=True, blank=True)
+    disposal = models.CharField('办结去向', max_length=20, choices=DISPOSAL_CHOICES,
+                                blank=True, default='')
+    disposed_at = models.DateTimeField('办结时间', null=True, blank=True)
+
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='in_progress')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='treatments', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
@@ -229,6 +324,114 @@ class Treatment(models.Model):
     def __str__(self):
         return f'{self.pet_code} - {self.hospital_name}'
 
+    @property
+    def stage(self):
+        """三步流程的阶段 —— **派生值**，见 `STAGE_CHOICES` 上方的注释。"""
+        if self.done_at:
+            return self.STAGE_DONE
+        if self.checked_at:
+            return self.STAGE_TREATING
+        return self.STAGE_CHECKING
+
+    @property
+    def is_disposed(self):
+        """是否已选办结去向（「待出院」与「已办结」的分界，原型 `_disposed`）。"""
+        return bool(self.disposed_at)
+
+
+# ============================================
+# 诊疗单 · 处置项目明细（v5.1 原型第二步的每个项目）
+# ============================================
+class TreatmentItem(models.Model):
+    """一张诊疗单里的**处置项目**：绝育 / 驱虫 / 免疫 / 芯片 / 其他。
+
+    ⚠ 「展开、选了处方」= 该项目**必须执行**（原型口径：`must = hasRx`）。
+    执行阶段不把它做完，就不允许「诊疗完成」。所以 `is_done` 是办结的前置闸门，
+    判据见 `services_treatment.must_items_not_done()`。
+    """
+
+    ITEM_CHOICES = [
+        ('sterilization', '绝育'),
+        ('deworming', '驱虫'),
+        ('vaccine', '免疫'),
+        ('chip', '芯片'),
+        ('other', '其他'),
+    ]
+
+    # 本模型没有 `district` 外键（区县随诊疗单走），必须声明派生路径：
+    # 缺了它，区县账号一旦对这张表调用 `get_district_filtered_queryset()`
+    # 就会抛 `FieldError` → 接口 500，而市级账号走 `return all()` 绕过 ——
+    # 只测市级账号永远发现不了（`Chip` 就是这么栽的，见 business/models.py 上方）。
+    DISTRICT_LOOKUP = 'treatment__district'
+
+    treatment = models.ForeignKey('business.Treatment', on_delete=models.CASCADE,
+                                  related_name='items', verbose_name='诊疗单')
+    item_key = models.CharField('项目', max_length=20, choices=ITEM_CHOICES)
+    item_name = models.CharField('项目名称', max_length=50, blank=True, default='')
+    planned_date = models.DateField('预计执行时间', null=True, blank=True)
+    # 芯片号只对 `item_key='chip'` 有意义，但对其他项目留空即可 ——
+    # 拆成另一张表会让「一张单的项目列表」要 join 三张表才拼得出来。
+    chip_no = models.CharField('芯片号', max_length=30, blank=True, default='')
+    notes = models.CharField('注意事项', max_length=500, blank=True, default='')
+    # 手写处方：原型明确「仅记录、不统计库存」（`rxOther`），与下面从库存选的
+    # `TreatmentRx` 是两回事，**不能合并** —— 合并会让手写药名也去扣库存。
+    rx_other = models.CharField('手写处方', max_length=500, blank=True, default='')
+    # 操作人快照（原型每个项目可单独指定兽医，默认当前账号）
+    vet_name = models.CharField('操作人', max_length=50, blank=True, default='')
+    vet_license = models.CharField('操作人执业证号', max_length=100, blank=True, default='')
+    is_done = models.BooleanField('已执行', default=False)
+    done_at = models.DateTimeField('执行时间', null=True, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+        # 一张单里每个项目只应有一行 —— 原型是「每个 key 一份草稿」，
+        # 没有约束的话重复提交会静默多出几行，而界面上只显示一行，
+        # 「已执行 3/5 项」这类计数从此永远对不上。
+        constraints = [
+            models.UniqueConstraint(fields=['treatment', 'item_key'],
+                                    name='uniq_treatment_item_key'),
+        ]
+        verbose_name = '诊疗处置项目'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'{self.treatment_id} - {self.get_item_key_display()}'
+
+
+# ============================================
+# 诊疗单 · 处方明细（从本院库存药品里选，R46 口径 1）
+# ============================================
+class TreatmentRx(models.Model):
+    """处置项目下的一条处方 —— **必须指向真实物料**。
+
+    R46 口径 1：药品从**已下发的药品**里选、扣**医院侧库存**，
+    不新建独立药品字典。所以这里存的是 `Material` 外键，而不是药名字符串 ——
+    存字符串的话「扣了哪条物料的库存」就无从谈起，只能整单瞎扣。
+    """
+
+    # 与 `TreatmentItem` 同理：没有 `district` 外键，区县随诊疗单走。
+    DISTRICT_LOOKUP = 'item__treatment__district'
+
+    item = models.ForeignKey('business.TreatmentItem', on_delete=models.CASCADE,
+                             related_name='rx_rows', verbose_name='处置项目')
+    # PROTECT：被处方引用过的物料不允许删 —— 与 `MaterialTransaction.material`
+    # 同一约定。否则历史处方会指向一个不存在的药品，打印出来是个空名字。
+    material = models.ForeignKey('business.Material', on_delete=models.PROTECT,
+                                 related_name='treatment_rx', verbose_name='药品')
+    material_name = models.CharField('药品名称快照', max_length=100, blank=True, default='')
+    quantity = models.IntegerField('数量', default=1)
+    unit = models.CharField('单位', max_length=20, blank=True, default='')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+        verbose_name = '诊疗处方'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'{self.material_name} x{self.quantity}'
+
 
 # ============================================
 # 物资
@@ -238,6 +441,14 @@ class Material(models.Model):
         ('vaccine', '疫苗'),
         ('dewormer', '驱虫药'),
         ('chip', '芯片'),
+        # R46 口径 1（**机制性口径**）：处方药品**走现有物料体系** ——
+        # 从已下发的药品里选、扣医院侧库存（`adjust_stock(txn_type='consume')`），
+        # **不新建独立药品字典**。所以这里只加一个类别，其余全链路自动复用：
+        # 采购 / 下发 / 签收 / 台账 / 库存对账 / CON 消耗流水都不用改。
+        #
+        # ⚠ 加类别必须**同时**把前端物料类别下拉补上（捕捉点 / 医院 / 平台端），
+        #   否则就是本项目反复栽过的「服务端放行、前端藏选项 = 静默做不到」。
+        ('medicine', '药品'),
     ]
     name = models.CharField('物资名称', max_length=100)
     category = models.CharField('类别', max_length=20, choices=CATEGORY_CHOICES)

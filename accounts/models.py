@@ -20,6 +20,13 @@ class User(AbstractUser):
     institution = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='所属机构')
     phone = models.CharField('电话', max_length=20, blank=True, default='')
     status = models.CharField('状态', max_length=10, default='active')  # active/inactive
+    # R46 口径 2（**机制性口径，不随原型作废而失效**）：兽医签名 / 执业证号
+    # **挂账号**，一次维护、每次自动带出。
+    #
+    # ⚠ 诊疗单落库时把它**快照**进 `Treatment.vet_license`，而不是每次实时读账号：
+    #   证号是会变的（续期、换号），历史单据上的证号必须保持当时那一串 ——
+    #   与 `Capture.operator_name` / `AuditLog.district_name` 是同一条约定。
+    vet_license = models.CharField('兽医执业证号', max_length=100, blank=True, default='')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     def __str__(self):

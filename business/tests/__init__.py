@@ -6,7 +6,8 @@
 - test_models.py           模型约束与默认值
 - test_capture_views.py    捕捉登记 / 主人领回
 - test_transfer_views.py   转运拆分下发 / 签收 / 驳回 / 重发
-- test_treatment_views.py  诊疗与库存联动
+- test_treatment_views.py  诊疗与库存联动（Task 6 旧口径：一次请求提交整张单）
+- test_treatment_flow.py   诊疗三步流程（第四十六轮 v5.1：检查/医嘱/执行办结）
 - test_material_views.py   物料供应链双台账
 - test_chip_services.py    芯片号码推算（纯函数：首号 + 数量 → 号码列表）
 - test_chip_views.py       芯片列表 / 本院可用芯片（第四十六轮）

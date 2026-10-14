@@ -45,6 +45,22 @@ urlpatterns = [
     # ============================================
     path('treatments/', views_treatment.treatment_list, name='treatment_list'),
     path('treatments/create/', views_treatment.treatment_create, name='treatment_create'),
+    # v5.1 三步流程（第四十六轮）：库存在「执行」那一刻才扣。
+    # 具体路径放在 `<int:pk>` 之前 —— 虽然 `board` / `open` 不会被
+    # `<int:pk>` 匹配，但把通配放最后是这条路由表一直以来的约定，
+    # 免得将来加一条匹配任意字符串的规则时被它悄悄吃掉。
+    path('treatments/board/', views_treatment.treatment_board, name='treatment_board'),
+    path('treatments/open/', views_treatment.treatment_open, name='treatment_open'),
+    path('treatments/<int:pk>/check/', views_treatment.treatment_check, name='treatment_check'),
+    path('treatments/<int:pk>/plan/', views_treatment.treatment_plan, name='treatment_plan'),
+    path('treatments/<int:pk>/diagnose/', views_treatment.treatment_diagnose, name='treatment_diagnose'),
+    path('treatments/<int:pk>/undiagnose/', views_treatment.treatment_undiagnose, name='treatment_undiagnose'),
+    path('treatments/<int:pk>/items/<int:item_id>/execute/',
+         views_treatment.treatment_item_execute, name='treatment_item_execute'),
+    path('treatments/<int:pk>/items/<int:item_id>/undo/',
+         views_treatment.treatment_item_undo, name='treatment_item_undo'),
+    path('treatments/<int:pk>/done/', views_treatment.treatment_done, name='treatment_done'),
+    path('treatments/<int:pk>/dispose/', views_treatment.treatment_dispose, name='treatment_dispose'),
     path('treatments/<int:pk>/', views_treatment.treatment_detail, name='treatment_detail'),
 
     # ============================================

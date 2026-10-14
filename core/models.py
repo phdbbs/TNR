@@ -35,6 +35,10 @@ class Institution(models.Model):
     address = models.CharField('地址', max_length=200, blank=True, default='')
     contact = models.CharField('联系人', max_length=50, blank=True, default='')
     phone = models.CharField('联系电话', max_length=20, blank=True, default='')
+    # R46 口径 2：机构**电子章**。原型上画成「爱心宠物医院 / 电子章」两行文字章。
+    # 留空时前端按机构名兜底生成（`seal_text or name`），不强制每家机构都维护一遍
+    # —— 强制维护的结果一定是「没人填、章是空白」，不如给一个合理的默认。
+    seal_text = models.CharField('电子章文字', max_length=100, blank=True, default='')
     status = models.CharField('状态', max_length=10, default='active')
     # 建档时间。写法与 `District.created_at` 保持一致（DateField + auto_now_add）。
     #
