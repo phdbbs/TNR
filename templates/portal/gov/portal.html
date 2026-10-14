@@ -64,7 +64,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928d"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20261013a"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -1293,7 +1293,8 @@ const GovPortal = {
         in_transit: ['在途', 'badge-info'], in_treatment: ['待诊疗', 'badge-warning'],
         pending_adopt: ['待领养', 'badge-info'], pending_claim: ['待领出', 'badge-warning'],
         adopted: ['已领养', 'badge-success'], released: ['已放归', 'badge-success'],
-        euthanized: ['已死亡', 'badge-danger'], owner_returned: ['主人领回', 'badge-default'],
+        euthanized: ['已安乐死', 'badge-danger'], dead: ['已死亡/无害化', 'badge-danger'],
+        owner_returned: ['主人领回', 'badge-default'],
       };
       columns = [
         { key: 'ledger_no', title: '档案编号', render: r => `<strong>${esc(r.ledger_no)}</strong>` },

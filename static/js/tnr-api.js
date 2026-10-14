@@ -178,6 +178,34 @@ const TNR_API = {
   // 由操作员重新勾选后下发新单；旧的「重新下发」可对同一单反复下发，已废弃。
   async getTreatments() { return this._get('/api/business/treatments/'); },
   async createTreatment(data) { return this._post('/api/business/treatments/create/', data); },
+  /* ---- 诊疗三步流程（第四十六轮 v5.1）----
+     ⚠ 读接口走 `getData`（**严格读**：失败抛错），不走 `_get`（静默读会把
+       400/500 变成一张空列表 —— 「加载失败」在界面上看起来就是「暂时没有数据」）。
+     写接口走 `_post`（有信封），调用方用 `TNR_UI.assertOk` 感知失败。 */
+  async getTreatmentBoard() { return this.getData('/api/business/treatments/board/'); },
+  async openTreatment(petId) { return this._post('/api/business/treatments/open/', { pet_id: petId }); },
+  async treatmentCheck(id, data) { return this._post('/api/business/treatments/' + id + '/check/', data); },
+  async treatmentPlan(id, data) { return this._post('/api/business/treatments/' + id + '/plan/', data); },
+  async treatmentDiagnose(id) { return this._post('/api/business/treatments/' + id + '/diagnose/', {}); },
+  async treatmentUndiagnose(id) { return this._post('/api/business/treatments/' + id + '/undiagnose/', {}); },
+  async treatmentExecuteItem(id, itemId) { return this._post('/api/business/treatments/' + id + '/items/' + itemId + '/execute/', {}); },
+  async treatmentUndoItem(id, itemId) { return this._post('/api/business/treatments/' + id + '/items/' + itemId + '/undo/', {}); },
+  async treatmentDone(id) { return this._post('/api/business/treatments/' + id + '/done/', {}); },
+  async treatmentDispose(id, disposal) { return this._post('/api/business/treatments/' + id + '/dispose/', { disposal: disposal }); },
+  /* ---- 芯片（第四十六轮：按号码逐颗管理）---- */
+  async getChips(params) {
+    const qs = [];
+    const p = params || {};
+    if (p.status) qs.push('status=' + encodeURIComponent(p.status));
+    if (p.materialId) qs.push('material_id=' + encodeURIComponent(p.materialId));
+    if (p.keyword) qs.push('keyword=' + encodeURIComponent(p.keyword));
+    return this.getData('/api/business/chips/' + (qs.length ? '?' + qs.join('&') : ''));
+  },
+  async getAvailableChips(materialId) {
+    const url = '/api/business/chips/available/'
+      + (materialId ? '?material_id=' + encodeURIComponent(materialId) : '');
+    return this.getData(url);
+  },
   async getMaterials() { return this._get('/api/business/materials/'); },
   async purchaseMaterial(data) { return this._post('/api/business/materials/purchase/', data); },
   async dispatchMaterial(data) { return this._post('/api/business/materials/dispatch/', data); },
@@ -395,7 +423,11 @@ const TNR_API = {
     return this.getData(url);
   },
   getPetStatusText(status) {
-    const map = {'in_transit':'在途','in_treatment':'待诊疗/诊疗中','pending_adopt':'待领养','pending_claim':'待领出','adopted':'已领养','released':'已放归','euthanized':'已死亡','owner_returned':'主人领回'};
+    // ⚠ `euthanized` 与 `dead` 是**两个**状态，不能合并（第四十六轮拆开）：
+    //   前者=安乐死（另开安乐死单）、后者=死亡/无害化（另开无害化单），
+    //   是两张要分开报的表。历史上 `euthanized` 的文案曾是「已死亡」，
+    //   若这里不同步改，界面上会同时出现两个「已死亡」，看不出区别。
+    const map = {'in_transit':'在途','in_treatment':'待诊疗/诊疗中','pending_adopt':'待领养','pending_claim':'待领出','adopted':'已领养','released':'已放归','euthanized':'已安乐死','dead':'已死亡/无害化','owner_returned':'主人领回'};
     return map[status] || status;
   },
   // 一宠一档：把动物的物种/品种/性别拼成一行可读文案（如「猫 · 中华田园犬 · 公」）。
@@ -407,11 +439,14 @@ const TNR_API = {
     return parts.length ? parts.join(sep || ' · ') : '—';
   },
   getPetStatusBadge(status) {
-    const map = {'in_transit':'badge-warning','in_treatment':'badge-info','pending_adopt':'badge-cinnabar','pending_claim':'badge-cinnabar','adopted':'badge-success','released':'badge-success','euthanized':'badge-danger','owner_returned':'badge-default'};
+    const map = {'in_transit':'badge-warning','in_treatment':'badge-info','pending_adopt':'badge-cinnabar','pending_claim':'badge-cinnabar','adopted':'badge-success','released':'badge-success','euthanized':'badge-danger','dead':'badge-danger','owner_returned':'badge-default'};
     return map[status] || 'badge-default';
   },
   getMaterialCategoryText(cat) {
-    const map = {'vaccine':'疫苗','dewormer':'驱虫药','chip':'芯片'};
+    // 与后端 `Material.CATEGORY_CHOICES` 逐项对齐。`medicine`（药品）是
+    // 第四十六轮为「处方药品走现有物料体系」加的（R46 口径 1）——
+    // 这里漏一项，界面上就会把类别直接显示成英文枚举码 `medicine`。
+    const map = {'vaccine':'疫苗','dewormer':'驱虫药','chip':'芯片','medicine':'药品'};
     return map[cat] || cat;
   }
 };

@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928d"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20261013a"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -266,7 +266,11 @@ const Shelter = {
       in_treatment: ['诊疗中', 'info'],
       /* Treatment.status：进行中 */
       in_progress: ['进行中', 'info'],
-      euthanized: ['已死亡', 'danger'],
+      /* ⚠ `euthanized`（安乐死）与 `dead`（死亡/无害化）是两个状态，
+         第四十六轮拆开 —— 两者的后续单据不同（安乐死单 / 无害化单），
+         合并显示会让「这个动物是怎么没的」在界面上看不出来。 */
+      euthanized: ['已安乐死', 'danger'],
+      dead: ['已死亡/无害化', 'danger'],
       owner_returned: ['已领回', 'default'],
       active: ['启用', 'success'],
       inactive: ['停用', 'default']
@@ -2125,7 +2129,11 @@ const Shelter = {
             { key: 'category', label: '分类', type: 'select', options: [
               { value: 'vaccine', label: '疫苗' },
               { value: 'dewormer', label: '驱虫药' },
-              { value: 'chip', label: '芯片' }
+              { value: 'chip', label: '芯片' },
+              /* 「药品」是第四十六轮为处方加上的类别（R46 口径 1）。
+                 下拉里缺这一项 = 医院开处方时选不到药，而服务端是放行的
+                 —— 属于「服务端放行、前端藏选项」的静默做不到。 */
+              { value: 'medicine', label: '药品' }
             ]},
             { key: 'stock_state', label: '库存状态', type: 'select', options: [
               { value: 'out', label: '耗尽' },
@@ -2186,7 +2194,7 @@ const Shelter = {
     } else if (tab === 'purchase') {
       let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>采购入库登记</div></div><div class="card-body">';
       html += '<div class="form-row-3">';
-      html += '<div class="form-group"><label class="form-label">物料类型<span class="req">*</span></label><select class="form-select" id="pu_category"><option value="vaccine">疫苗</option><option value="dewormer">驱虫药</option><option value="chip">芯片</option></select></div>';
+      html += '<div class="form-group"><label class="form-label">物料类型<span class="req">*</span></label><select class="form-select" id="pu_category"><option value="vaccine">疫苗</option><option value="dewormer">驱虫药</option><option value="medicine">药品</option><option value="chip">芯片</option></select></div>';
       html += '<div class="form-group"><label class="form-label">物料名称<span class="req">*</span></label><input class="form-input" id="pu_name" placeholder="如：狂犬疫苗"></div>';
       html += '<div class="form-group"><label class="form-label">采购数量<span class="req">*</span></label><input type="number" class="form-input" id="pu_qty" min="1" value="1"></div>';
       html += '</div><div class="form-row-3">';
@@ -3095,8 +3103,13 @@ const Shelter = {
       /* 死亡：已登记死亡的动物 + **遗体移交**。
          `/api/business/euthanasia/<id>/body-receive/` 原先界面上没有任何入口 ——
          捕捉点既看不到自己该去领哪具遗体，也没有「领取」按钮，
-         死亡流程的最后一步在界面上不可达（与放归流程同一类问题）。 */
-      const deadPets = pets.filter(p => p.status === 'euthanized');
+         死亡流程的最后一步在界面上不可达（与放归流程同一类问题）。
+
+         ⚠ 第四十六轮起 `dead`（死亡/无害化）也要列进来：它是独立状态，
+           此前只认 `euthanized` 会让这类动物在这一页**整个消失**。
+           这类动物通常没有安乐死单，下面各列对 `euthOf()` 返回 undefined
+           已有兜底（显示 `—`、不渲染按钮），所以列进来是安全的。 */
+      const deadPets = pets.filter(p => ['euthanized', 'dead'].includes(p.status));
       const euths = await TNR_API.getEuthanasia();
       this._euthanasia = euths || [];
       const euthOf = (pet) => this._euthanasia.find(

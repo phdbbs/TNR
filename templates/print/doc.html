@@ -58,7 +58,7 @@
 
     <table>
       {% for label, value in rows %}
-      <tr><td class="lbl">{{ label }}：</td><td>{{ value }}</td></tr>
+      <tr><td class="lbl">{{ label }}：</td><td>{{ value|linebreaksbr }}</td></tr>
       {% endfor %}
     </table>
 

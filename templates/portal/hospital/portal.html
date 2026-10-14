@@ -47,6 +47,148 @@
   .sub-tab:hover{color:var(--ink)}
   .sub-tab.active{color:var(--cinnabar);border-bottom-color:var(--cinnabar);font-weight:600}
   .loading-state{text-align:center;padding:var(--sp-8);color:var(--ink-light)}
+
+  /* ============================================================
+     第四十六轮 v5.1：诊疗三步流程（原型 prototype_hospital_treatment_v5.1）
+     ------------------------------------------------------------
+     ⚠ 全部选择器都挂在 `#page-treatment` 下。这些类名（`.chip` / `.empty` /
+       `.kv` / `.tip` / `.pet-item` …）在原型里是全局的，直接搬进来会**泄漏到
+       本门户其它页面**（改一处样式、别处一起变，且不会报错）。加一层页面作用域
+       就把影响面钉死在诊疗页内。
+     ⚠ 颜色/圆角/间距一律用 `tnr-traditional.css` 的既有令牌，不新造颜色 ——
+       否则「同一个端两种风格」，与本轮「样式与原来一致」的要求相反。
+     ============================================================ */
+  #page-treatment .tx-filter-tabs{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-4);overflow-x:auto;padding-bottom:2px}
+  #page-treatment .tx-ft{border:1px solid var(--border-ink);background:var(--white);color:var(--ink-muted);border-radius:var(--r-full);padding:6px 14px;font-size:var(--fs-base);cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;transition:all var(--t-fast)}
+  #page-treatment .tx-ft .cnt{background:var(--rice-warm);color:var(--ink-muted);border-radius:var(--r-full);font-size:var(--fs-xs);font-weight:700;padding:0 7px;line-height:1.6}
+  #page-treatment .tx-ft.active{background:var(--grad-cinnabar);border-color:transparent;color:#fff;font-weight:600;box-shadow:var(--shadow-cinnabar)}
+  #page-treatment .tx-ft.active .cnt{background:rgba(255,255,255,.25);color:#fff}
+
+  #page-treatment .tx-pet-item{display:flex;gap:var(--sp-3);align-items:center;background:var(--white);border:1px solid var(--border-light);border-radius:var(--r-xl);box-shadow:var(--shadow-sm);padding:var(--sp-3) var(--sp-4);margin-bottom:var(--sp-2);cursor:pointer;transition:all var(--t-fast)}
+  #page-treatment .tx-pet-item:hover{border-color:var(--cinnabar);box-shadow:var(--shadow-md)}
+  #page-treatment .tx-pet-item .ico{width:46px;height:46px;border-radius:var(--r-lg);background:var(--rice-warm);flex:none;display:flex;align-items:center;justify-content:center;font-size:22px}
+  #page-treatment .tx-pet-item .info{flex:1;min-width:0}
+  #page-treatment .tx-pet-item .l1{font-weight:600;font-size:var(--fs-md);display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap}
+  #page-treatment .tx-pet-item .l2{font-size:var(--fs-sm);color:var(--ink-light);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #page-treatment .tx-pet-item .go{flex:none;color:var(--ink-light);font-size:var(--fs-lg)}
+  #page-treatment .tx-empty{text-align:center;color:var(--ink-light);font-size:var(--fs-base);padding:var(--sp-8) 0;line-height:1.9}
+
+  #page-treatment .tx-flow-head{display:flex;align-items:center;gap:var(--sp-3);margin-bottom:var(--sp-3);flex-wrap:wrap}
+  #page-treatment .tx-flow-head .who{font-family:var(--font-display);font-size:var(--fs-lg);font-weight:600;color:var(--ink)}
+  #page-treatment .tx-flow-head .meta{font-size:var(--fs-sm);color:var(--ink-light)}
+  #page-treatment .tx-steps{display:flex;align-items:flex-start;background:var(--white);border:1px solid var(--border-light);border-radius:var(--r-xl);padding:var(--sp-3) var(--sp-2) 10px;margin-bottom:var(--sp-4);box-shadow:var(--shadow-sm)}
+  #page-treatment .tx-step{flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;position:relative;cursor:pointer}
+  #page-treatment .tx-step .dot{width:27px;height:27px;border-radius:var(--r-full);background:var(--rice-warm);color:var(--ink-light);display:flex;align-items:center;justify-content:center;font-size:var(--fs-sm);font-weight:700;flex:none;transition:all var(--t-base)}
+  #page-treatment .tx-step .lb{font-size:var(--fs-xs);color:var(--ink-light);text-align:center;line-height:1.3}
+  #page-treatment .tx-step::after{content:'';position:absolute;top:13px;left:calc(50% + 17px);right:calc(-50% + 17px);height:2px;background:var(--border-light)}
+  #page-treatment .tx-step:last-child::after{display:none}
+  #page-treatment .tx-step.done .dot{background:var(--bamboo-green);color:#fff}
+  #page-treatment .tx-step.done .lb{color:var(--bamboo-green)}
+  #page-treatment .tx-step.done::after{background:var(--bamboo-green)}
+  #page-treatment .tx-step.cur .dot{background:var(--grad-cinnabar);color:#fff;box-shadow:var(--shadow-cinnabar)}
+  #page-treatment .tx-step.cur .lb{color:var(--cinnabar);font-weight:700}
+  #page-treatment .tx-step.lock{cursor:not-allowed;opacity:.55}
+
+  #page-treatment .tx-fld{margin-bottom:var(--sp-3)}
+  #page-treatment .tx-fld:last-child{margin-bottom:0}
+  #page-treatment .tx-fld>label{display:block;font-size:var(--fs-sm);color:var(--ink-muted);margin-bottom:5px;font-weight:500}
+  #page-treatment .tx-fld>label .req{color:var(--cinnabar);margin-left:2px}
+  #page-treatment .tx-fld>label .auto{font-size:var(--fs-xs);color:var(--bamboo-green);background:var(--bamboo-light);border-radius:var(--r-full);padding:0 6px;margin-left:5px;font-weight:600}
+  #page-treatment .tx-inp,#page-treatment .tx-sel,#page-treatment .tx-tar{width:100%;padding:8px 11px;border:1px solid var(--border-ink);border-radius:var(--r-md);background:var(--white);color:var(--ink-text);font-size:var(--fs-md);min-height:38px;outline:none;transition:border var(--t-fast)}
+  #page-treatment .tx-inp:focus,#page-treatment .tx-sel:focus,#page-treatment .tx-tar:focus{border-color:var(--cinnabar);box-shadow:0 0 0 3px rgba(195,39,43,.1)}
+  #page-treatment .tx-inp[readonly],#page-treatment .tx-inp:disabled,#page-treatment .tx-sel:disabled,#page-treatment .tx-tar:disabled{background:var(--rice-light);color:var(--ink-muted)}
+  #page-treatment .tx-tar{min-height:74px;resize:vertical;line-height:1.6}
+  #page-treatment .tx-row2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3)}
+  #page-treatment .tx-row3{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-3)}
+  #page-treatment .tx-unit{position:relative}
+  #page-treatment .tx-unit .u{position:absolute;right:11px;top:50%;transform:translateY(-50%);font-size:var(--fs-sm);color:var(--ink-light);pointer-events:none}
+  #page-treatment .tx-unit .tx-inp{padding-right:38px}
+  @media(max-width:560px){
+    #page-treatment .tx-row3{grid-template-columns:1fr 1fr}
+    #page-treatment .tx-row3>.tx-fld:nth-child(3){grid-column:1/-1}
+  }
+
+  #page-treatment .tx-chips{display:flex;flex-wrap:wrap;gap:7px}
+  #page-treatment .tx-chip{border:1px solid var(--border-ink);background:var(--white);color:var(--ink-text);border-radius:var(--r-full);padding:5px 12px;font-size:var(--fs-sm);cursor:pointer;transition:all var(--t-fast);min-height:32px;display:inline-flex;align-items:center;user-select:none}
+  #page-treatment .tx-chip.active{background:var(--cinnabar-light);border-color:var(--cinnabar);color:var(--cinnabar);font-weight:600}
+  #page-treatment .tx-chip.active.ok{background:var(--bamboo-light);border-color:var(--bamboo-green);color:var(--bamboo-green)}
+  #page-treatment .tx-chip.active.warn{background:var(--autumn-light);border-color:var(--autumn-gold);color:#8a6a1f}
+  #page-treatment .tx-chip.disabled{opacity:.45;cursor:not-allowed;text-decoration:line-through}
+  #page-treatment .tx-chip.qk{min-height:30px;padding:3px 11px;font-size:var(--fs-sm)}
+  #page-treatment .tx-seg{display:inline-flex;border:1px solid var(--border-ink);border-radius:var(--r-md);overflow:hidden;flex:none}
+  #page-treatment .tx-seg button{border:none;background:var(--white);color:var(--ink-muted);font-size:var(--fs-sm);padding:5px 10px;cursor:pointer;transition:all var(--t-fast);border-left:1px solid var(--border-light)}
+  #page-treatment .tx-seg button:first-child{border-left:none}
+  #page-treatment .tx-seg button.on-neg{background:var(--bamboo-green);color:#fff;font-weight:600}
+  #page-treatment .tx-seg button.on-pos{background:var(--rouge);color:#fff;font-weight:600}
+  #page-treatment .tx-seg button.on-none{background:var(--rice-warm);color:var(--ink-muted);font-weight:600}
+
+  #page-treatment .tx-kv{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
+  #page-treatment .tx-kv .k{font-size:var(--fs-xs);color:var(--ink-light)}
+  #page-treatment .tx-kv .v{font-size:var(--fs-base);color:var(--ink-text);font-weight:500;margin-top:1px}
+  #page-treatment .tx-kv .full{grid-column:1/-1}
+  @media(max-width:560px){ #page-treatment .tx-kv{grid-template-columns:1fr} }
+
+  #page-treatment .tx-tip{display:flex;gap:var(--sp-2);align-items:flex-start;font-size:var(--fs-sm);line-height:1.55;padding:8px 11px;border-radius:var(--r-md);margin:9px 0}
+  #page-treatment .tx-tip.inf{background:var(--azurite-light);color:#1c4f80}
+  #page-treatment .tx-tip.wrn{background:var(--autumn-light);color:#8a6a1f}
+  #page-treatment .tx-tip.suc{background:var(--bamboo-light);color:#3f5c37}
+
+  #page-treatment .tx-item-card{border:1px solid var(--border-light);border-radius:var(--r-xl);background:var(--white);margin-bottom:9px;overflow:hidden;box-shadow:var(--shadow-xs)}
+  #page-treatment .tx-item-card.collapsed .tx-item-b{display:none}
+  #page-treatment .tx-item-card.filled{border-color:var(--bamboo-green)}
+  #page-treatment .tx-item-card.filled .tx-item-h{background:var(--bamboo-light)}
+  #page-treatment .tx-item-card.half{border-color:var(--rouge)}
+  #page-treatment .tx-item-card.half .tx-item-h{background:var(--rouge-light)}
+  #page-treatment .tx-item-h{display:flex;align-items:center;gap:9px;padding:11px 13px;background:var(--rice-light);border-bottom:1px solid var(--border-light);cursor:pointer;user-select:none}
+  #page-treatment .tx-item-card.collapsed .tx-item-h{border-bottom:none}
+  #page-treatment .tx-item-h .ic{font-size:18px;flex:none}
+  #page-treatment .tx-item-h .nm{flex:1;min-width:0;font-weight:600;font-size:var(--fs-md)}
+  #page-treatment .tx-item-h .nm small{display:block;font-weight:400;color:var(--ink-light);font-size:var(--fs-xs);margin-top:1px}
+  #page-treatment .tx-item-h .arr{flex:none;color:var(--ink-light);font-size:var(--fs-lg);transition:transform var(--t-base)}
+  #page-treatment .tx-item-card.open .tx-item-h .arr{transform:rotate(90deg)}
+  #page-treatment .tx-item-b{padding:var(--sp-3)}
+  #page-treatment .tx-date-row{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+  #page-treatment .tx-date-row .tx-inp{flex:0 0 165px;min-width:0}
+  #page-treatment .tx-sec-head{display:flex;align-items:center;gap:var(--sp-2);padding:2px 2px 10px;font-family:var(--font-display);font-size:var(--fs-lg);font-weight:600;color:var(--ink)}
+  #page-treatment .tx-sec-head .bar{width:3px;height:15px;background:var(--grad-cinnabar);border-radius:2px;flex:none}
+  #page-treatment .tx-sec-head .hint{margin-left:auto;font-family:var(--font-body);font-size:var(--fs-sm);font-weight:400;color:var(--ink-light)}
+  #page-treatment .tx-rx-list{display:flex;flex-direction:column;gap:7px;margin-top:9px}
+  #page-treatment .tx-rx-row{display:flex;align-items:center;gap:9px;background:var(--rice-light);border:1px solid var(--border-light);border-radius:var(--r-md);padding:6px 9px}
+  #page-treatment .tx-rx-row .nm{flex:1;min-width:0;font-size:var(--fs-base);font-weight:500}
+  #page-treatment .tx-rx-row .nm small{display:block;font-weight:400;color:var(--ink-light);font-size:var(--fs-xs)}
+  #page-treatment .tx-rx-row .qty{flex:none;font-size:var(--fs-sm);color:var(--cinnabar);font-weight:700;background:var(--cinnabar-light);border-radius:var(--r-full);padding:2px 9px}
+  #page-treatment .tx-rx-row .del{flex:none;width:26px;height:26px;border:none;background:var(--rouge-light);color:var(--rouge);border-radius:var(--r-md);cursor:pointer;font-size:var(--fs-md);display:flex;align-items:center;justify-content:center}
+  #page-treatment .tx-rx-empty{font-size:var(--fs-sm);color:var(--ink-light);padding:8px 0;text-align:center}
+  #page-treatment .tx-tpl-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+  #page-treatment .tx-tpl-row .t{font-size:var(--fs-xs);border:1px dashed var(--border-ink);border-radius:var(--r-full);padding:3px 9px;color:var(--ink-muted);cursor:pointer;background:var(--rice-light)}
+  #page-treatment .tx-sign-strip{display:flex;align-items:center;gap:10px;background:var(--rice-light);border:1px dashed var(--border-ink);border-radius:var(--r-lg);padding:9px 11px;margin-top:9px}
+  #page-treatment .tx-sign-strip .stamp{width:44px;height:44px;border:2px solid var(--rouge);border-radius:50%;color:var(--rouge);flex:none;display:flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:700;text-align:center;line-height:1.1;transform:rotate(-9deg);font-family:var(--font-display);padding:2px}
+  #page-treatment .tx-sign-strip .sd{flex:1;min-width:0}
+  #page-treatment .tx-sign-strip .sd .n{font-size:var(--fs-base);font-weight:600}
+  #page-treatment .tx-sign-strip .sd .d{font-size:var(--fs-xs);color:var(--ink-light);font-family:var(--font-mono);margin-top:1px}
+
+  #page-treatment .tx-exec-row{display:flex;align-items:center;gap:11px;border:1px solid var(--border-light);border-radius:var(--r-lg);padding:11px 12px;margin-bottom:9px;background:var(--white)}
+  #page-treatment .tx-exec-row.done{border-color:var(--bamboo-green);background:var(--bamboo-light)}
+  #page-treatment .tx-exec-row .ic{font-size:19px;flex:none}
+  #page-treatment .tx-exec-row .info{flex:1;min-width:0}
+  #page-treatment .tx-exec-row .info .nm{font-size:var(--fs-md);font-weight:600}
+  #page-treatment .tx-exec-row .info .sub{font-size:var(--fs-sm);color:var(--ink-light);margin-top:2px}
+  #page-treatment .tx-exec-row .info .sub b{color:var(--cinnabar);font-weight:600}
+  #page-treatment .tx-exec-row .act{flex:none}
+
+  #page-treatment .tx-disposal-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3)}
+  @media(max-width:560px){ #page-treatment .tx-disposal-grid{grid-template-columns:1fr} }
+  #page-treatment .tx-dsp{border:1px solid var(--border-ink);border-radius:var(--r-lg);padding:var(--sp-3);cursor:pointer;background:var(--white);transition:all var(--t-fast);display:flex;gap:10px;align-items:flex-start}
+  #page-treatment .tx-dsp.active{border-color:var(--cinnabar);background:var(--cinnabar-light);box-shadow:var(--shadow-sm)}
+  #page-treatment .tx-dsp .ic{font-size:20px;flex:none}
+  #page-treatment .tx-dsp .tx{flex:1;min-width:0}
+  #page-treatment .tx-dsp .tx .n{font-size:var(--fs-md);font-weight:600;color:var(--ink-text)}
+  #page-treatment .tx-dsp .tx .d{font-size:var(--fs-xs);color:var(--ink-light);margin-top:2px}
+  #page-treatment .tx-dsp.active .tx .n{color:var(--cinnabar)}
+
+  #page-treatment .tx-bottom-bar{position:sticky;bottom:0;background:rgba(245,240,232,.94);backdrop-filter:blur(8px);border-top:1px solid var(--border-light);padding:var(--sp-3) 0 var(--sp-1);display:flex;gap:10px;margin-top:var(--sp-4);z-index:40}
+  #page-treatment .tx-bottom-bar .btn{flex:1}
+  #page-treatment .tx-bottom-bar .btn-ghost{flex:0 0 110px}
 </style>
 {% endblock %}
 
@@ -67,11 +209,26 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20260928d"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20261013a"></script>
 <script>
 /* ====================================================
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
    ==================================================== */
+
+/* 办结去向的图标与说明（第四十六轮 v5.1）。
+   ⚠ 只放**展示**信息：去向的**合法取值**由后端
+     `Treatment.DISPOSAL_CHOICES` 通过 `options.disposals` 下发，
+     前端不另写一份清单 —— 两边各写一份必然漂移（后端加了去向、
+     前端下拉里没有，界面上就是「这个去向选不了」且不报错）。 */
+const TX_DISPOSAL_ICON = {
+  pending_adopt: '🎗️', released: '🌳', owner_returned: '🏠',
+  euthanized: '🕯️', dead: '⚰️'
+};
+const TX_DISPOSAL_DESC = {
+  pending_adopt: '信息进入领养大厅', released: '待转运可选',
+  owner_returned: '联系主人领回', euthanized: '需另开安乐死单',
+  dead: '需另开无害化单'
+};
 
 const Hospital = {
   titles: {
@@ -88,9 +245,17 @@ const Hospital = {
   state: {
     currentPage: 'dashboard',
     receiveTab: 'pending',
-    treatmentTab: 'operate',
+    // 诊疗页三个子页签：flow（v5.1 三步流程）/ list（诊疗记录）/ quick（旧口径快速登记）
+    treatmentTab: 'flow',
     materialTab: 'pending',
     ledgerTab: 'transfer',
+    // 诊疗看板的筛选标签：pending（待接诊）/ treating（诊疗中）/ done（诊疗完毕）
+    treatmentFilter: 'pending',
+    // 诊疗看板数据（`/api/business/treatments/board/` 的响应体）
+    treatmentBoard: null,
+    // 当前诊疗流程会话：{ detail, draft, step, maxStep, open }
+    // 非空 = 正在看某只动物的流程；null = 停在看板
+    treatmentFlow: null,
     treatmentPetId: null,
     treatmentData: { items: {}, sterilization: null, vaccine: null, deworming: null, chip: null },
     // 首页看板「数据概览」的统计区间（任意起止）。空串 = 不限。
@@ -534,36 +699,1201 @@ const Hospital = {
     });
   },
 
-  /* ========== 3. 诊疗业务管理 ========== */
+  /* ========== 3. 诊疗业务管理（第四十六轮 v5.1 三步流程） ==========
+   *
+   * 三个子页签：
+   *   flow   —— v5.1 原型口径：看板（待接诊 / 诊疗中 / 诊疗完毕）→ 点动物进三步流程
+   *   list   —— 诊疗记录（原有列表，保留）
+   *   quick  —— 旧口径「快速登记」（一次提交整单并当场扣库存）
+   *
+   * ⚠ `quick` 不是历史包袱，**不能删**：
+   *   1. 旧接口 `treatment_create` 还在（`TNR_API.createTreatment`），去掉唯一
+   *      调用点就成了「接口存在、界面没接」——流程在界面上不可达；
+   *   2. 旧口径的「绝育手术病历档案」（手术日期 / 主刀 / 麻醉 / 诊断 / 手术过程 /
+   *      恢复）在三步流程里**没有对应字段**，而打印页
+   *      （`views_print.TREATMENT_FIELDS`）与政府端详情**在读它们** ——
+   *      去掉入口会让这些列永远空白，且不报错。
+   *
+   * 事件一律走 `TNR_UI.delegateClick`（绑在 `#page-treatment` 这个**稳定容器**上）：
+   * 视图每次都是整体重渲染 `innerHTML`，直接绑在子节点上的监听器会随旧节点一起
+   * 被丢弃，表现为「点按钮没反应，且控制台干干净净」。
+   */
   async render_treatment() {
     const page = document.getElementById('page-treatment');
-    let html = '<div class="sub-tabs">' +
-      '<div class="sub-tab ' + (this.state.treatmentTab === 'operate' ? 'active' : '') + '" data-ttab="operate">诊疗操作</div>' +
-      '<div class="sub-tab ' + (this.state.treatmentTab === 'list' ? 'active' : '') + '" data-ttab="list">诊疗记录</div>' +
+    const TABS = [['flow', '诊疗流程'], ['list', '诊疗记录'], ['quick', '快速登记']];
+    page.innerHTML = '<div class="sub-tabs">' + TABS.map(([k, t]) =>
+      '<div class="sub-tab ' + (this.state.treatmentTab === k ? 'active' : '') +
+      '" data-act="ttab" data-v="' + k + '">' + t + '</div>').join('') +
       '</div><div id="treatmentContent"></div>';
-    page.innerHTML = html;
 
-    page.querySelectorAll('[data-ttab]').forEach(el => {
-      el.addEventListener('click', () => {
-        this.state.treatmentTab = el.dataset.ttab;
-        page.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
-        el.classList.add('active');
-        this.renderTreatmentContent();
-      });
-    });
-
+    TNR_UI.delegateClick(page, { 'data-act': (v, el) => this.onTreatmentAct(v, el) }, 'treatment');
+    this.bindTreatmentInputs(page);
     this.renderTreatmentContent();
   },
 
-  async renderTreatmentContent() {
-    if (this.state.treatmentTab === 'operate') {
-      this.renderTreatmentOperate();
-    } else {
-      this.renderTreatmentList();
+  renderTreatmentContent() {
+    if (this.state.treatmentTab === 'list') this.renderTreatmentList();
+    else if (this.state.treatmentTab === 'quick') this.renderTreatmentQuick();
+    else this.renderTreatmentFlow();
+  },
+
+  /* 输入事件同样要委托。
+     处置项目卡里的日期 / 芯片号 / 备注是**边输边存**的，而卡片会被
+     `refreshItemCard()` 局部重建 —— 每次重建都重绑一遍必然漏掉某条路径，
+     漏掉的表现是「改了值，保存时还是旧的」，且不报错。 */
+  bindTreatmentInputs(page) {
+    if (this._txInputBound) return;
+    this._txInputBound = true;
+    const handler = (e) => this.onTreatmentInput(e.target);
+    page.addEventListener('input', handler);
+    page.addEventListener('change', handler);
+  },
+
+  /* ==================== 诊疗看板 ==================== */
+  async renderTreatmentFlow() {
+    const c = document.getElementById('treatmentContent');
+    if (!c) return;
+    if (this.state.treatmentFlow) { this.renderFlowView(); return; }
+    c.innerHTML = '<div class="loading-state">加载中...</div>';
+    try {
+      // 两条都是**严格读**（失败抛错）。用静默读的话，403/500 会被渲染成
+      // 「该分类下暂无动物」—— 把「加载失败」伪装成「没有数据」，
+      // 操作员会以为真的没病人。
+      const [board, materials] = await Promise.all([
+        TNR_API.getTreatmentBoard(),
+        TNR_API.getMaterialsStrict()
+      ]);
+      this.state.treatmentBoard = board;
+      this._txMaterials = materials || [];
+      this.renderBoard();
+    } catch (e) {
+      c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div>'
+        + '<div class="empty-state-text">诊疗看板加载失败</div>'
+        + '<div class="empty-state-desc">' + this.escape(e.message || '请稍后重试') + '</div></div>';
     }
   },
 
-  async renderTreatmentOperate() {
+  txBoardRows(kind) {
+    const board = this.state.treatmentBoard || {};
+    return board[kind] || [];
+  },
+
+  txStageBadge(row) {
+    if (row.stage === 'checking') return '<span class="badge badge-warning">待接诊</span>';
+    if (row.stage === 'treating') return '<span class="badge badge-info">诊疗中</span>';
+    return row.is_disposed
+      ? '<span class="badge badge-success">已办结</span>'
+      : '<span class="badge badge-warning">待出院</span>';
+  },
+
+  renderBoard() {
+    const c = document.getElementById('treatmentContent');
+    if (!c) return;
+    const FILTERS = [
+      { k: 'pending', t: '待接诊', tip: '已交接、尚未提交检查单' },
+      { k: 'treating', t: '诊疗中', tip: '检查已提交、尚未诊疗完成' },
+      { k: 'done', t: '诊疗完毕', tip: '诊疗完成（待出院 / 已办结）' }
+    ];
+    let html = '<div class="tx-filter-tabs">';
+    FILTERS.forEach(f => {
+      html += '<button class="tx-ft ' + (this.state.treatmentFilter === f.k ? 'active' : '') + '"'
+        + ' data-act="tx-filter" data-v="' + f.k + '" title="' + this.escape(f.tip) + '">'
+        + f.t + ' <span class="cnt">' + this.txBoardRows(f.k).length + '</span></button>';
+    });
+    html += '<button class="btn btn-sm btn-secondary" data-act="tx-refresh"'
+      + ' style="margin-left:auto;flex:none;">刷新</button></div>';
+
+    html += '<div class="tx-tip inf"><span>🧭</span><div>'
+      + '<b>流程：</b>点选动物 → <b>诊疗前检查</b>（暂存 / 提交）→ <b>医嘱与处方</b>'
+      + '（诊断完成）→ <b>执行与办结</b>（逐项治疗完成 → 诊疗完成 → 选择办结去向）。<br>'
+      + '入院签收在「动物交接管理」里完成，本页不再逐只签收。</div></div>';
+
+    const rows = this.txBoardRows(this.state.treatmentFilter);
+    if (!rows.length) {
+      html += '<div class="tx-empty">该分类下暂无动物</div>';
+    } else {
+      rows.forEach(r => {
+        const attr = [r.species, r.gender, r.breed, r.color]
+          .filter(Boolean).map(x => this.escape(x)).join(' · ') || '—';
+        const intake = '接收 ' + this.formatDate(r.receive_date)
+          + ' · 转运单 ' + this.escape(r.transfer_no || '—')
+          + ' · ' + this.escape(r.shelter || '—');
+        html += '<div class="tx-pet-item" data-act="tx-open" data-v="' + r.pet_id + '">'
+          + '<div class="ico">' + (r.species === '狗' ? '🐕' : '🐈') + '</div>'
+          + '<div class="info">'
+          + '<div class="l1">' + this.escape(r.pet_code) + ' · ' + this.escape(r.pet_name || '未命名')
+          + ' ' + this.txStageBadge(r) + '</div>'
+          + '<div class="l2">' + attr + '</div>'
+          + '<div class="l2">' + intake + '</div>'
+          + '</div><div class="go">›</div></div>';
+      });
+    }
+    c.innerHTML = html;
+  },
+
+  /* ==================== 三步流程 ==================== */
+  async openTreatmentFlow(petId) {
+    const c = document.getElementById('treatmentContent');
+    if (c) c.innerHTML = '<div class="loading-state">正在进入诊疗流程...</div>';
+    try {
+      const res = await TNR_API.openTreatment(petId);
+      // `_post` 失败**不抛异常**（业务错误是 200 + success:false），
+      // 不过一遍 assertOk 的话 catch 是死代码，界面会谎报成功。
+      TNR_UI.assertOk(res, '进入诊疗流程失败');
+      this.startTreatmentFlow(res.data);
+    } catch (e) {
+      TNR_UI.toast(e.message || '进入诊疗流程失败', 'danger');
+      this.state.treatmentFlow = null;
+      this.renderTreatmentFlow();
+    }
+  },
+
+  /* 用服务端返回的诊疗单详情重建本地草稿。
+     `stepOverride` 用于「保存后停在原步骤」/「提交后前进到下一步」；
+     不传时按 `stage` 派生（checking→1 / treating→2 / done→3）。 */
+  startTreatmentFlow(detail, stepOverride) {
+    if (!detail) return;
+    const pet = detail.pet || {};
+    const draft = {
+      species: pet.species || '', gender: pet.gender || '',
+      breed: pet.breed || '', color: pet.color || '', weight: pet.weight || '',
+      temperature: detail.temperature === null || detail.temperature === undefined
+        ? '' : String(detail.temperature),
+      temperatureFlag: detail.temperature_flag || '',
+      commonFindings: (detail.common_findings_list || []).slice(),
+      commonOther: detail.common_other || '',
+      commonOtherOn: !!detail.common_other,
+      infectious: Object.assign({}, detail.infectious || {}),
+      skinMucosa: detail.skin_mucosa || '',
+      skinOther: detail.skin_other || '',
+      checkNote: detail.check_note || '',
+      advice: detail.advice || '',
+      disposal: detail.disposal || '',
+      items: {}
+    };
+    const byKey = {};
+    (detail.items || []).forEach(it => { byKey[it.item_key] = it; });
+    ((detail.options || {}).items || []).forEach(meta => {
+      const it = byKey[meta.key];
+      draft.items[meta.key] = {
+        id: it ? it.id : null,
+        plannedDate: it ? (it.planned_date || '') : '',
+        chipNo: it ? (it.chip_no || '') : '',
+        notes: it ? (it.notes || '') : '',
+        rxOther: it ? (it.rx_other || '') : '',
+        vetName: it ? (it.vet_name || '') : (detail.vet_name || ''),
+        vetLicense: it ? (it.vet_license || '') : (detail.vet_license || ''),
+        isDone: it ? !!it.is_done : false,
+        doneAt: it ? (it.done_at || '') : '',
+        isMust: it ? !!it.is_must : false,
+        rx: it ? (it.rx || []).map(r => r.material_id) : []
+      };
+    });
+    // 折叠态：默认全折叠；已填过内容的自动展开，便于回看
+    const open = {};
+    Object.keys(draft.items).forEach(k => {
+      const p = draft.items[k];
+      if (p.rx.length || String(p.rxOther).trim() || String(p.chipNo).trim()) open[k] = true;
+    });
+
+    const derived = detail.stage === 'done' ? 3 : (detail.stage === 'treating' ? 2 : 1);
+    const step = stepOverride || derived;
+    this.state.treatmentFlow = {
+      detail: detail, draft: draft, step: step,
+      maxStep: Math.max(derived, step), open: open
+    };
+    this.renderTreatmentContent();
+  },
+
+  renderFlowView() {
+    const c = document.getElementById('treatmentContent');
+    if (!c) return;
+    const f = this.state.treatmentFlow;
+    if (!f) { this.renderTreatmentFlow(); return; }
+    const detail = f.detail || {};
+    const pet = detail.pet || {};
+    const STEPS = ['诊疗前检查', '医嘱与处方', '执行与办结'];
+    const attr = [pet.species, pet.gender, pet.breed, pet.color]
+      .filter(Boolean).map(x => this.escape(x)).join(' · ');
+
+    let html = '<div class="tx-flow-head">'
+      + '<button class="btn btn-sm btn-secondary" data-act="tx-back">‹ 返回看板</button>'
+      + '<span class="who">' + this.escape(detail.pet_code || '') + ' · '
+      + this.escape(pet.name || '未命名') + '</span>'
+      + '<span class="meta">' + attr + '</span>'
+      + TNR_UI.printDocBtn('treatment', detail.id, '打印诊疗单')
+      + '</div>';
+
+    html += '<div class="tx-steps">';
+    STEPS.forEach((s, i) => {
+      const n = i + 1;
+      let cls = n === f.step ? 'cur' : (n < f.step ? 'done' : '');
+      if (n > f.maxStep) cls += ' lock';
+      html += '<div class="tx-step ' + cls + '" data-act="tx-step" data-v="' + n + '">'
+        + '<div class="dot">' + (n < f.step ? '✓' : n) + '</div>'
+        + '<div class="lb">' + s + '</div></div>';
+    });
+    html += '</div>';
+
+    html += '<div>' + (f.step === 1 ? this.step1HTML()
+      : (f.step === 2 ? this.step2HTML() : this.step3HTML())) + '</div>';
+    html += '<div class="tx-bottom-bar">' + this.bottomBarHTML() + '</div>';
+    c.innerHTML = html;
+
+    const scrollBox = document.getElementById('adminContent');
+    if (scrollBox) scrollBox.scrollTop = 0;
+    window.scrollTo(0, 0);
+  },
+
+  /* ---------- 步骤 1：诊疗前检查 ---------- */
+  step1HTML() {
+    const f = this.state.treatmentFlow;
+    const d = f.draft;
+    const detail = f.detail || {};
+    const pet = detail.pet || {};
+    const opts = detail.options || {};
+    const tests = opts.infectious_tests || [];
+    const results = opts.test_results || [];
+    const intake = detail.intake || {};
+    const locked = !!detail.is_disposed;
+    const dis = locked ? ' disabled' : '';
+
+    let h = '<div class="card mb-5"><div class="card-header">'
+      + '<div class="card-title"><span class="card-title-bar"></span>基础信息</div>'
+      + '<div class="text-muted fs-sm">转运档案带出 · 可修改</div></div><div class="card-body">';
+
+    h += '<div class="tx-row3">'
+      + '<div class="tx-fld"><label>种类<span class="req">*</span></label>'
+      + '<select class="tx-sel" data-inp="species"' + dis + '>'
+      + ['猫', '狗'].map(s => '<option' + (d.species === s ? ' selected' : '') + '>' + s + '</option>').join('')
+      + '</select></div>'
+      + '<div class="tx-fld"><label>公母</label><select class="tx-sel" data-inp="gender"' + dis + '>'
+      + ['公', '母'].map(s => '<option' + (d.gender === s ? ' selected' : '') + '>' + s + '</option>').join('')
+      + '</select></div>'
+      + '<div class="tx-fld"><label>品种</label><input class="tx-inp" data-inp="breed" value="'
+      + this.escape(d.breed) + '"' + dis + '></div>'
+      + '</div>';
+
+    h += '<div class="tx-row2">'
+      + '<div class="tx-fld"><label>体重（kg）</label><div class="tx-unit">'
+      + '<input class="tx-inp" data-inp="weight" value="' + this.escape(d.weight) + '"' + dis + '>'
+      + '<span class="u">kg</span></div></div>'
+      + '<div class="tx-fld"><label>毛色</label><input class="tx-inp" data-inp="color" value="'
+      + this.escape(d.color) + '"' + dis + '></div>'
+      + '</div>';
+
+    h += '<div class="tx-kv" style="margin-top:6px;">'
+      + '<div><div class="k">档案编号</div><div class="v">' + this.escape(detail.pet_code || '—') + '</div></div>'
+      + '<div><div class="k">来源捕捉点</div><div class="v">' + this.escape(intake.shelter || '—') + '</div></div>'
+      + '<div><div class="k">转运单号</div><div class="v">' + this.escape(intake.transfer_no || '—') + '</div></div>'
+      + '<div><div class="k">接收日期</div><div class="v">' + this.formatDate(intake.receive_date) + '</div></div>'
+      + '</div>';
+
+    if (!locked) {
+      h += '<div class="tx-tip wrn"><span>✎</span><div>以上为动物基础属性，'
+        + '修改后写回档案并留痕（记录操作人与时间）。</div></div>';
+    }
+    h += '</div></div>';
+
+    /* 体检项目 */
+    h += '<div class="card mb-5"><div class="card-header">'
+      + '<div class="card-title"><span class="card-title-bar"></span>体检项目</div>'
+      + '<div class="text-muted fs-sm">带 * 为提交必填</div></div><div class="card-body">';
+
+    h += '<div class="tx-fld"><label>1. 体温检测<span class="req">*</span></label>'
+      + '<div class="tx-chips">'
+      + '<span class="tx-chip ' + (d.temperatureFlag === 'normal' ? 'active ok' : '')
+      + '" data-act="tx-temp" data-v="normal" data-d="38.5">正常 38.5℃</span>'
+      + '<span class="tx-chip ' + (d.temperatureFlag === 'fever' ? 'active warn' : '')
+      + '" data-act="tx-temp" data-v="fever" data-d="40.5">发烧 40.5℃</span>'
+      + '</div>'
+      + '<div class="tx-unit" style="margin-top:9px;max-width:200px;">'
+      + '<input class="tx-inp" data-inp="temperature" value="' + this.escape(d.temperature)
+      + '" placeholder="选择上项后自动填入，可手改"' + dis + '><span class="u">℃</span></div></div>';
+
+    const common = opts.common_findings || [];
+    h += '<div class="tx-fld"><label>2. 常见病检查</label><div class="tx-chips">'
+      + common.map(v => '<span class="tx-chip ' + (d.commonFindings.indexOf(v) >= 0 ? 'active' : '')
+        + '" data-act="tx-common" data-v="' + this.escape(v) + '">' + this.escape(v) + '</span>').join('')
+      + '<span class="tx-chip ' + (d.commonOtherOn ? 'active' : '')
+      + '" data-act="tx-common-other">其他</span>'
+      + '</div>'
+      + '<input class="tx-inp" id="txCommonOther" data-inp="commonOther" style="margin-top:9px;'
+      + (d.commonOtherOn ? '' : 'display:none;') + '"'
+      + ' placeholder="其他异常，请填写" value="' + this.escape(d.commonOther) + '"' + dis + '></div>';
+
+    h += '<div class="tx-fld"><label>3. 传染病检查 '
+      + '<span class="text-light" style="font-weight:400;">（按种类：' + this.escape(d.species || '未指定') + '）</span></label>';
+    if (!tests.length) {
+      h += '<div class="tx-rx-empty">该种类没有预置传染病快检项</div>';
+    } else {
+      h += '<div style="max-width:560px;">';
+      tests.forEach(t => {
+        const v = d.infectious[t.key] || 'none';
+        h += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 0;border-bottom:1px solid var(--border-faint);">'
+          + '<span style="flex:1;min-width:110px;font-size:var(--fs-base);">' + this.escape(t.label) + '</span>'
+          + '<span class="tx-seg">'
+          + results.map(r => '<button class="' + (v === r.key ? 'on-' + r.key : '')
+            + '" data-act="tx-test" data-v="' + t.key + '" data-d="' + r.key + '">'
+            + this.escape(r.label) + '</button>').join('')
+          + '</span></div>';
+      });
+      h += '</div>';
+    }
+    h += '</div>';
+
+    const skin = opts.skin_mucosa || [];
+    h += '<div class="tx-fld"><label>4. 皮肤黏膜检查</label><div class="tx-chips">'
+      + skin.map(v => '<span class="tx-chip ' + (d.skinMucosa === v ? 'active' : '')
+        + '" data-act="tx-skin" data-v="' + this.escape(v) + '">' + this.escape(v) + '</span>').join('')
+      + '<span class="tx-chip ' + (d.skinMucosa === '其他' ? 'active' : '')
+      + '" data-act="tx-skin" data-v="其他">其他</span>'
+      + '</div>'
+      + '<input class="tx-inp" id="txSkinOther" data-inp="skinOther" style="margin-top:9px;'
+      + (d.skinMucosa === '其他' ? '' : 'display:none;') + '"'
+      + ' placeholder="其他情况，请填写" value="' + this.escape(d.skinOther) + '"' + dis + '></div>';
+
+    h += '<div class="tx-fld"><label>5. 其它</label>'
+      + '<textarea class="tx-tar" data-inp="checkNote" placeholder="其它需要记录的情况"' + dis + '>'
+      + this.escape(d.checkNote) + '</textarea></div>';
+
+    h += '</div></div>';
+
+    /* 检查单状态（服务端时间戳，只读回显） */
+    h += '<div class="card mb-5"><div class="card-header">'
+      + '<div class="card-title"><span class="card-title-bar"></span>检查单记录</div></div><div class="card-body">'
+      + '<div class="tx-kv">'
+      + '<div><div class="k">创建时间</div><div class="v">' + this.formatDateTime(detail.created_at) + '</div></div>'
+      + '<div><div class="k">单据号</div><div class="v">' + this.escape(detail.ledger_no || '—') + '</div></div>'
+      + '<div><div class="k">检查提交</div><div class="v">' + this.formatDateTime(detail.checked_at) + '</div></div>'
+      + '<div><div class="k">诊断完成</div><div class="v">' + this.formatDateTime(detail.diagnosed_at) + '</div></div>'
+      + '<div><div class="k">当前阶段</div><div class="v">' + this.txStageText(detail.stage) + '</div></div>'
+      + '<div><div class="k">状态</div><div class="v">'
+      + (detail.checked_at ? '<span class="badge badge-success">已提交</span>'
+                           : '<span class="badge badge-warning">草稿</span>') + '</div></div>'
+      + '</div></div></div>';
+    return h;
+  },
+
+  txStageText(stage) {
+    const map = { checking: '待接诊', treating: '诊疗中', done: '诊疗完毕' };
+    return map[stage] || this.escape(stage || '—');
+  },
+
+  /* ---------- 步骤 2：医嘱与处方 ---------- */
+  step2HTML() {
+    const f = this.state.treatmentFlow;
+    const detail = f.detail || {};
+    const opts = detail.options || {};
+    const items = opts.items || [];
+    const tpl = opts.advice_templates || [];
+    const diagnosed = !!detail.diagnosed_at;
+    let h = '';
+
+    if (diagnosed) {
+      h += '<div class="tx-tip suc"><span>✓</span><div>诊断已完成，本单已进入执行阶段。'
+        + '如需修改医嘱 / 处方，请先点底部「撤回诊断」。</div></div>';
+    }
+
+    h += '<div class="card mb-5"><div class="card-header">'
+      + '<div class="card-title"><span class="card-title-bar"></span>医嘱</div>'
+      + '<div class="text-muted fs-sm">文字记录 · 整单</div></div><div class="card-body">'
+      + '<textarea class="tx-tar" data-inp="advice" style="min-height:104px;"'
+      + (diagnosed ? ' disabled' : '')
+      + ' placeholder="填写医嘱，如：术前禁食禁水 12 小时；术后观察精神食欲……">'
+      + this.escape(f.draft.advice) + '</textarea>';
+    if (!diagnosed && tpl.length) {
+      h += '<div class="tx-tpl-row">' + tpl.map((t, i) =>
+        '<span class="t" data-act="tx-advice-tpl" data-v="' + i + '">＋ '
+        + this.escape(t) + '</span>').join('') + '</div>';
+    }
+    h += '</div></div>';
+
+    h += '<div class="tx-sec-head"><span class="bar"></span>处置项目'
+      + '<span class="hint">已填写 <b style="color:var(--bamboo-green);" id="txItemCount">'
+      + this.txMustItems().length + '</b> / ' + items.length + ' 项 · 点击标题展开</span></div>';
+    items.forEach(meta => { h += this.itemCardHTML(meta, diagnosed); });
+
+    h += '<div class="tx-tip wrn"><span>⚠</span><div><b>填写规则：</b>'
+      + '展开要做的项目、选好<b>处方</b>即视为<b>必须执行</b>'
+      + '（执行阶段不完成则无法「诊疗完成」）；不选处方 = 该项目跳过。'
+      + '预计执行时间默认当天，可用「3天后 / 5天后」快捷改。</div></div>';
+    return h;
+  },
+
+  txItemMeta(key) {
+    const opts = ((this.state.treatmentFlow || {}).detail || {}).options || {};
+    return (opts.items || []).find(m => m.key === key) || null;
+  },
+
+  /* 项目三态：blank 未填写 / filled 已填写 / half 待补全（有处方但缺日期）。
+     ⚠ `needs_chip` 不能写成 `meta.needs_chip` 直接参与布尔运算 —— 缺该属性的
+     项目会得到 `undefined`，使 `hasRx` 变成 `undefined`、`half` 恒为真，
+     把「诊断完成」永久拦死。 */
+  txItemState(key) {
+    const f = this.state.treatmentFlow;
+    const item = (f && f.draft.items[key]) || { rx: [] };
+    const meta = this.txItemMeta(key) || {};
+    const hasDate = !!item.plannedDate;
+    const hasRx = item.rx.length > 0 || !!String(item.rxOther).trim()
+      || (!!meta.needs_chip && !!String(item.chipNo).trim());
+    const state = hasRx ? (hasDate ? 'filled' : 'half') : 'blank';
+    return { hasDate: hasDate, hasRx: hasRx, must: hasRx, half: state === 'half', state: state };
+  },
+
+  txMustItems() {
+    const f = this.state.treatmentFlow;
+    if (!f) return [];
+    return Object.keys(f.draft.items).filter(k => this.txItemState(k).must);
+  },
+
+  itemCardHTML(meta, locked) {
+    const f = this.state.treatmentFlow;
+    const item = f.draft.items[meta.key] || { rx: [] };
+    const st = this.txItemState(meta.key);
+    const open = !!f.open[meta.key];
+    const badge = st.state === 'filled' ? '<span class="badge badge-success">已填写</span>'
+      : (st.state === 'half' ? '<span class="badge badge-danger">待补全</span>'
+        : '<span class="badge badge-default">未填写</span>');
+    const dis = locked ? ' disabled' : '';
+
+    let h = '<div class="tx-item-card ' + st.state + ' ' + (open ? 'open' : 'collapsed')
+      + '" data-item="' + meta.key + '">'
+      + '<div class="tx-item-h" data-act="tx-item-toggle" data-v="' + meta.key + '">'
+      + '<span class="ic">' + this.escape(meta.icon || '') + '</span>'
+      + '<div class="nm">' + this.escape(meta.name) + '<small>'
+      + this.escape(meta.hint || '') + '</small></div>'
+      + badge + '<span class="arr">›</span></div>'
+      + '<div class="tx-item-b">';
+
+    h += '<div class="tx-fld"><label>预计执行时间</label><div class="tx-date-row">'
+      + '<input type="date" class="tx-inp" data-plan="' + meta.key + '" data-f="plannedDate" value="'
+      + this.escape(item.plannedDate) + '"' + dis + '>';
+    if (!locked) {
+      h += [['今天', 0], ['3天后', 3], ['5天后', 5], ['7天后', 7]].map(q =>
+        '<span class="tx-chip qk" data-act="tx-date-quick" data-v="' + meta.key
+        + '" data-d="' + q[1] + '">' + q[0] + '</span>').join('');
+    }
+    h += '</div></div>';
+
+    if (meta.needs_chip) {
+      h += '<div class="tx-fld"><label>芯片号</label>'
+        + '<div style="display:flex;gap:var(--sp-2);">'
+        + '<input class="tx-inp" style="flex:1;" data-plan="' + meta.key + '" data-f="chipNo" value="'
+        + this.escape(item.chipNo) + '" placeholder="扫描或输入芯片号"' + dis + '>'
+        + (locked ? '' : '<button class="btn btn-sm btn-secondary" data-act="tx-chip-open" data-v="'
+          + meta.key + '">选择</button>')
+        + '</div></div>';
+    }
+
+    h += '<div class="tx-fld"><label>处方 <span class="auto">库存用药 · 固定 1 头份</span></label>';
+    if (!locked) {
+      h += '<button class="btn btn-sm btn-secondary" data-act="tx-med-open" data-v="'
+        + meta.key + '">＋ 从库存药品中选择</button>';
+    }
+    h += '<div class="tx-rx-list">' + this.rxListHTML(meta.key) + '</div>';
+    if (!locked) {
+      h += '<input class="tx-inp" style="margin-top:8px;" data-plan="' + meta.key
+        + '" data-f="rxOther" placeholder="其他药品及数量（手写，仅记录、不统计库存）" value="'
+        + this.escape(item.rxOther) + '">';
+    } else if (item.rxOther) {
+      h += '<div class="tx-rx-empty" style="text-align:left;">手写：'
+        + this.escape(item.rxOther) + '</div>';
+    }
+    h += '</div>';
+
+    const noteTpl = meta.note_tpl || [];
+    h += '<div class="tx-fld"><label>注意事项</label>'
+      + '<input class="tx-inp" data-plan="' + meta.key + '" data-f="notes" value="'
+      + this.escape(item.notes) + '" placeholder="常用标签点选，或手写"' + dis + '>';
+    if (!locked && noteTpl.length) {
+      h += '<div class="tx-tpl-row">' + noteTpl.map((t, i) =>
+        '<span class="t" data-act="tx-note-tpl" data-v="' + meta.key + '" data-d="' + i + '">＋ '
+        + this.escape(t) + '</span>').join('') + '</div>';
+    }
+    h += '</div>';
+
+    const detail = f.detail || {};
+    const vetName = item.vetName || detail.vet_name || '';
+    const vetLicense = item.vetLicense || detail.vet_license || '';
+    h += '<div class="tx-fld"><label>操作人 <span class="auto">默认当前账号</span></label>'
+      + '<input class="tx-inp" value="' + this.escape(vetName)
+      + (vetLicense ? '（' + this.escape(vetLicense) + '）' : '') + '" readonly></div>'
+      + '<div class="tx-sign-strip">'
+      + '<div class="stamp">' + this.escape(detail.hospital_seal || detail.hospital_name || '电子章')
+      + '</div>'
+      + '<div class="sd"><div class="n">' + this.escape(vetName || '未登记') + '</div>'
+      + '<div class="d">' + this.escape(vetLicense || '未登记执业证号') + '</div></div></div>';
+
+    h += '</div></div>';
+    return h;
+  },
+
+  rxListHTML(key) {
+    const f = this.state.treatmentFlow;
+    const item = (f && f.draft.items[key]) || { rx: [] };
+    if (!item.rx.length) return '<div class="tx-rx-empty">尚未选择药品</div>';
+    return item.rx.map((mid, i) => {
+      const m = this.txMaterial(mid) || {};
+      return '<div class="tx-rx-row">'
+        + '<div class="nm">' + this.escape(m.name || '—') + '<small>'
+        + this.escape(m.specification || '') + ' · '
+        + this.escape(TNR_API.getMaterialCategoryText(m.category)) + '</small></div>'
+        + '<span class="qty">1 头份</span>'
+        + '<button class="del" data-act="tx-rx-del" data-v="' + key + '" data-d="' + i
+        + '">✕</button></div>';
+    }).join('');
+  },
+
+  txMaterial(id) {
+    return (this._txMaterials || []).find(m => String(m.id) === String(id)) || null;
+  },
+
+  /* 局部刷新单张卡（不重建 DOM，避免打断正在输入的字段） */
+  refreshItemCard(key) {
+    const wrap = document.querySelector('#page-treatment .tx-item-card[data-item="' + key + '"]');
+    const meta = this.txItemMeta(key);
+    if (!wrap || !meta) return;
+    const detail = (this.state.treatmentFlow || {}).detail || {};
+    const tmp = document.createElement('div');
+    tmp.innerHTML = this.itemCardHTML(meta, !!detail.diagnosed_at);
+    const fresh = tmp.firstElementChild;
+    if (!fresh) return;
+    wrap.className = fresh.className;
+    wrap.querySelector('.tx-item-h').innerHTML = fresh.querySelector('.tx-item-h').innerHTML;
+    wrap.replaceChild(fresh.querySelector('.tx-item-b'), wrap.querySelector('.tx-item-b'));
+    this.refreshItemCount();
+  },
+
+  /* 只改配色与徽章，连 header 都不重建 —— 用于「边输边存」的输入事件 */
+  refreshItemState(key) {
+    const wrap = document.querySelector('#page-treatment .tx-item-card[data-item="' + key + '"]');
+    if (!wrap) return;
+    const st = this.txItemState(key);
+    wrap.classList.toggle('filled', st.state === 'filled');
+    wrap.classList.toggle('half', st.state === 'half');
+    wrap.classList.toggle('blank', st.state === 'blank');
+    const badge = wrap.querySelector('.tx-item-h .badge');
+    if (badge) {
+      badge.className = 'badge ' + (st.state === 'filled' ? 'badge-success'
+        : (st.state === 'half' ? 'badge-danger' : 'badge-default'));
+      badge.textContent = st.state === 'filled' ? '已填写'
+        : (st.state === 'half' ? '待补全' : '未填写');
+    }
+    this.refreshItemCount();
+  },
+
+  refreshItemCount() {
+    const cnt = document.getElementById('txItemCount');
+    if (cnt) cnt.textContent = this.txMustItems().length;
+  },
+
+  /* ---------- 步骤 3：执行与办结 ---------- */
+  step3HTML() {
+    const f = this.state.treatmentFlow;
+    const detail = f.detail || {};
+    const opts = detail.options || {};
+    const must = this.txMustItems();
+    const disposed = !!detail.is_disposed;
+    const doneN = must.filter(k => f.draft.items[k].isDone).length;
+
+    let h = '<div class="card mb-5"><div class="card-header">'
+      + '<div class="card-title"><span class="card-title-bar"></span>处置执行清单</div>'
+      + '<div class="text-muted fs-sm">' + doneN + ' / ' + must.length + ' 已完成</div>'
+      + '</div><div class="card-body">';
+    if (!must.length) {
+      h += '<div class="tx-empty">本单未选择任何处置项目（未填写处方）。<br>'
+        + '可直接点击下方「诊疗完成」进入办结。</div>';
+    } else {
+      must.forEach(k => {
+        const item = f.draft.items[k];
+        const meta = this.txItemMeta(k) || {};
+        const names = item.rx.map(id => (this.txMaterial(id) || {}).name || '')
+          .filter(Boolean).join('、');
+        h += '<div class="tx-exec-row ' + (item.isDone ? 'done' : '') + '">'
+          + '<span class="ic">' + this.escape(meta.icon || '') + '</span>'
+          + '<div class="info"><div class="nm">' + this.escape(meta.name || k) + ' '
+          + (item.isDone ? '<span class="badge badge-success">已完成</span>'
+                         : '<span class="badge badge-warning">待执行</span>') + '</div>'
+          + '<div class="sub">处方：<b>' + this.escape(names || item.rxOther || '—') + '</b>'
+          + ((item.rxOther && names) ? '，手写：' + this.escape(item.rxOther) : '')
+          + (item.chipNo ? '，芯片：' + this.escape(item.chipNo) : '') + '</div>'
+          + '<div class="sub">预计 ' + this.escape(item.plannedDate || '—')
+          + (item.isDone ? ' · 实际 ' + this.formatDateTime(item.doneAt) : '') + '</div></div>'
+          + '<div class="act">' + (item.isDone
+            ? '<button class="btn btn-sm btn-secondary" data-act="tx-undo" data-v="' + item.id
+              + '"' + (disposed ? ' disabled' : '') + '>撤销</button>'
+            : '<button class="btn btn-sm btn-success" data-act="tx-exec" data-v="' + item.id
+              + '"' + (disposed ? ' disabled' : '') + '>治疗完成</button>')
+          + '</div></div>';
+      });
+    }
+    h += '</div></div>';
+    h += '<div class="tx-tip inf"><span>💊</span><div>点「治疗完成」时<b>扣减该项处方药品的'
+      + '本院库存</b>并生成消耗流水；手写药品仅记录、不扣库存。芯片植入同时扣芯片物料'
+      + '库存，并把该芯片绑定到本动物档案（芯片永久不可复用）。</div></div>';
+
+    h += '<div class="card mb-5" style="margin-top:14px;"><div class="card-header">'
+      + '<div class="card-title"><span class="card-title-bar"></span>办结去向</div>'
+      + '<div class="text-muted fs-sm">单选 · 诊疗完成后可选</div></div><div class="card-body">';
+    if (!detail.diagnosed_at) {
+      h += '<div class="tx-empty">请先完成「医嘱与处方」并点击「诊断完成」。</div>';
+    } else {
+      h += '<div class="tx-disposal-grid">';
+      (opts.disposals || []).forEach(dsp => {
+        h += '<div class="tx-dsp ' + (f.draft.disposal === dsp.key ? 'active' : '')
+          + '" data-act="tx-disposal" data-v="' + dsp.key + '">'
+          + '<span class="ic">' + (TX_DISPOSAL_ICON[dsp.key] || '📌') + '</span>'
+          + '<div class="tx"><div class="n">' + this.escape(dsp.label) + '</div>'
+          + '<div class="d">' + this.escape(TX_DISPOSAL_DESC[dsp.key] || '') + '</div>'
+          + '</div></div>';
+      });
+      h += '</div>';
+      if (f.draft.disposal) {
+        const sel = (opts.disposals || []).find(x => x.key === f.draft.disposal) || {};
+        h += '<div class="tx-tip suc" style="margin-top:12px;"><span>✓</span><div>已选去向：<b>'
+          + this.escape(sel.label || f.draft.disposal) + '</b>。本步只变更动物状态并记录去向，'
+          + '具体单据（领养 / 放归 / 领回 / 安乐死 / 无害化）由对应模块后续开具。</div></div>';
+      }
+    }
+    h += '</div></div>';
+    return h;
+  },
+
+  bottomBarHTML() {
+    const f = this.state.treatmentFlow;
+    const detail = f.detail || {};
+    if (detail.is_disposed) {
+      return '<button class="btn btn-primary" data-act="tx-back">返回看板（本单已办结）</button>';
+    }
+    if (f.step === 1) {
+      return '<button class="btn btn-ghost" data-act="tx-check-save">暂存</button>'
+        + '<button class="btn btn-primary" data-act="tx-check-submit">'
+        + (detail.checked_at ? '保存修改并下一步' : '提交并下一步') + '</button>';
+    }
+    if (f.step === 2) {
+      if (detail.diagnosed_at) {
+        return '<button class="btn btn-ghost" data-act="tx-undiagnose">撤回诊断</button>'
+          + '<button class="btn btn-primary" data-act="tx-next3">进入执行与办结 ›</button>';
+      }
+      return '<button class="btn btn-ghost" data-act="tx-plan-save">暂存</button>'
+        + '<button class="btn btn-primary" data-act="tx-diagnose">诊断完成</button>';
+    }
+    if (!detail.diagnosed_at) {
+      return '<button class="btn btn-primary" data-act="tx-step" data-v="2">‹ 回到医嘱与处方</button>';
+    }
+    const must = this.txMustItems();
+    if (!detail.done_at) {
+      const left = must.filter(k => !f.draft.items[k].isDone).length;
+      const blocked = must.length > 0 && left > 0;
+      return '<button class="btn btn-primary" data-act="tx-treat-done"' + (blocked ? ' disabled' : '')
+        + '>' + (blocked ? '还有 ' + left + ' 项未完成' : '诊疗完成（转待出院）') + '</button>';
+    }
+    const hasDisposal = !!f.draft.disposal;
+    return '<button class="btn btn-primary" data-act="tx-finish"' + (hasDisposal ? '' : ' disabled')
+      + '>' + (hasDisposal ? '完成办结，返回看板' : '请先选择办结去向') + '</button>';
+  },
+
+  /* ==================== 事件分发（全部走委托） ==================== */
+  onTreatmentAct(act, el) {
+    const f = this.state.treatmentFlow;
+    const k = el.dataset.v;
+    const i = el.dataset.d;
+
+    if (act === 'ttab') {
+      this.state.treatmentTab = k;
+      document.querySelectorAll('#page-treatment .sub-tab')
+        .forEach(t => t.classList.toggle('active', t.dataset.v === k));
+      this.renderTreatmentContent();
+      return;
+    }
+    if (act === 'tx-filter') { this.state.treatmentFilter = k; this.renderBoard(); return; }
+    if (act === 'tx-refresh') { this.renderTreatmentFlow(); return; }
+    if (act === 'tx-open') { this.openTreatmentFlow(k); return; }
+    if (act === 'tx-back') { this.state.treatmentFlow = null; this.renderTreatmentFlow(); return; }
+    if (!f) return;
+
+    if (act === 'tx-step') {
+      const n = Number(k);
+      if (n <= f.maxStep) { f.step = n; this.renderFlowView(); }
+      return;
+    }
+    if (act === 'tx-temp') {
+      const d = f.draft;
+      if (d.temperatureFlag === k) { d.temperatureFlag = ''; d.temperature = ''; }
+      else { d.temperatureFlag = k; d.temperature = el.dataset.d; }
+      this.renderFlowView();
+      return;
+    }
+    if (act === 'tx-common') {
+      const d = f.draft;
+      let picked = d.commonFindings.slice();
+      if (k === '无异常') {
+        // 「无异常」与其它项**互斥** —— 服务端也会拦（`apply_check`），
+        // 前端必须同口径，否则用户看到「无异常 + 有跳蚤」同时点亮，
+        // 一点保存就被 400 打回来，却不知道哪里错了。
+        picked = picked.indexOf('无异常') >= 0 ? [] : ['无异常'];
+      } else {
+        picked = picked.filter(x => x !== '无异常');
+        picked = picked.indexOf(k) >= 0 ? picked.filter(x => x !== k) : picked.concat([k]);
+      }
+      d.commonFindings = picked;
+      this.renderFlowView();
+      return;
+    }
+    if (act === 'tx-common-other') {
+      f.draft.commonOtherOn = !f.draft.commonOtherOn;
+      if (!f.draft.commonOtherOn) f.draft.commonOther = '';
+      this.renderFlowView();
+      const box = document.getElementById('txCommonOther');
+      if (box && f.draft.commonOtherOn) box.focus();
+      return;
+    }
+    if (act === 'tx-test') { f.draft.infectious[k] = i; this.renderFlowView(); return; }
+    if (act === 'tx-skin') {
+      f.draft.skinMucosa = f.draft.skinMucosa === k ? '' : k;
+      if (f.draft.skinMucosa !== '其他') f.draft.skinOther = '';
+      this.renderFlowView();
+      const box = document.getElementById('txSkinOther');
+      if (box && f.draft.skinMucosa === '其他') box.focus();
+      return;
+    }
+    if (act === 'tx-item-toggle') { f.open[k] = !f.open[k]; this.refreshItemCard(k); return; }
+    if (act === 'tx-date-quick') {
+      const item = f.draft.items[k];
+      if (item) item.plannedDate = this.addDays(i);
+      this.refreshItemCard(k);
+      return;
+    }
+    if (act === 'tx-advice-tpl') {
+      const t = (((f.detail || {}).options || {}).advice_templates || [])[Number(k)];
+      if (t) f.draft.advice = f.draft.advice ? (f.draft.advice.replace(/\s*$/, '') + '\n' + t) : t;
+      this.renderFlowView();
+      return;
+    }
+    if (act === 'tx-note-tpl') {
+      const meta = this.txItemMeta(k) || {};
+      const t = (meta.note_tpl || [])[Number(i)];
+      const item = f.draft.items[k];
+      if (item && t) item.notes = item.notes ? (item.notes.replace(/\s*$/, '') + '；' + t) : t;
+      this.refreshItemCard(k);
+      return;
+    }
+    if (act === 'tx-rx-del') {
+      const item = f.draft.items[k];
+      if (item) item.rx.splice(Number(i), 1);
+      this.refreshItemCard(k);
+      return;
+    }
+    if (act === 'tx-med-open') { this.openMedPicker(k); return; }
+    if (act === 'tx-chip-open') { this.openChipPicker(k); return; }
+    if (act === 'tx-check-save') { this.saveTreatmentCheck(true); return; }
+    if (act === 'tx-check-submit') { this.saveTreatmentCheck(false); return; }
+    if (act === 'tx-plan-save') { this.saveTreatmentPlan(false); return; }
+    if (act === 'tx-diagnose') { this.diagnoseTreatment(); return; }
+    if (act === 'tx-undiagnose') { this.undiagnoseTreatment(); return; }
+    if (act === 'tx-next3') {
+      f.step = 3; f.maxStep = Math.max(f.maxStep, 3); this.renderFlowView(); return;
+    }
+    if (act === 'tx-exec') { this.executeTreatmentItem(k); return; }
+    if (act === 'tx-undo') { this.undoTreatmentItem(k); return; }
+    if (act === 'tx-treat-done') { this.markTreatmentDone(); return; }
+    if (act === 'tx-disposal') { f.draft.disposal = k; this.renderFlowView(); return; }
+    if (act === 'tx-finish') { this.finishTreatment(); return; }
+  },
+
+  onTreatmentInput(target) {
+    const f = this.state.treatmentFlow;
+    if (!f || !target || !target.dataset) return;
+    const d = target.dataset;
+    if (d.inp) {
+      f.draft[d.inp] = target.value;
+      // 传染病快检项**按物种**下发，改了种类必须重渲染，否则「猫的 FPV」
+      // 会跟着狗的检查单一起提交，被服务端 400 拒绝。
+      if (d.inp === 'species') this.renderFlowView();
+      return;
+    }
+    if (d.plan) {
+      const item = f.draft.items[d.plan];
+      if (!item) return;
+      item[d.f] = target.value;
+      this.refreshItemState(d.plan);
+    }
+  },
+
+  addDays(n) {
+    const d = new Date();
+    d.setDate(d.getDate() + Number(n || 0));
+    const p = (x) => String(x).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  },
+
+  /* ==================== 写操作 ==================== */
+  txCheckPayload() {
+    const d = this.state.treatmentFlow.draft;
+    // `temperature` 一律显式传（空串 = 清空）。不传的话「用户把体温删了」
+    // 会保留旧值，而服务端「提交必须填体温」的校验会拿旧值放行 —— 界面空白、
+    // 单据却有体温，且不报错。
+    return {
+      species: d.species, gender: d.gender, breed: d.breed,
+      color: d.color, weight: d.weight,
+      temperature: String(d.temperature).trim() === '' ? null : d.temperature,
+      temperature_flag: d.temperatureFlag,
+      common_findings: d.commonFindings,
+      common_other: d.commonOther,
+      infectious_tests: d.infectious,
+      skin_mucosa: d.skinMucosa,
+      skin_other: d.skinOther,
+      check_note: d.checkNote
+    };
+  },
+
+  async saveTreatmentCheck(isDraft) {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    const d = f.draft;
+    if (!isDraft) {
+      if (String(d.temperature).trim() === '') {
+        TNR_UI.toast('请先完成「体温检测」再提交', 'warning'); return;
+      }
+      if (!d.temperatureFlag) {
+        TNR_UI.toast('请选择体温判定（正常 / 发烧）再提交', 'warning'); return;
+      }
+    }
+    try {
+      const payload = this.txCheckPayload();
+      payload.draft = !!isDraft;
+      const res = await TNR_API.treatmentCheck(f.detail.id, payload);
+      TNR_UI.assertOk(res, '检查单保存失败');
+      // 暂存停在原步骤（提交才前进），否则「点了暂存却被弹到第二步」。
+      this.startTreatmentFlow(res.data, isDraft ? f.step : 2);
+      TNR_UI.toast(isDraft ? '检查单已暂存' : '检查单已提交，进入医嘱与处方', 'success');
+    } catch (e) {
+      TNR_UI.toast(e.message || '保存失败', 'danger');
+    }
+  },
+
+  /* 与后端 `_replace_items()` **同口径**的前端预检。
+     前端漏拦不会造成脏数据（服务端也会拒），但用户会看到一句与自己操作
+     对不上的报错；这里提前拦并把出问题的项目自动展开。 */
+  txPlanProblem() {
+    const f = this.state.treatmentFlow;
+    const keys = Object.keys(f.draft.items);
+    for (let idx = 0; idx < keys.length; idx++) {
+      const k = keys[idx];
+      const meta = this.txItemMeta(k) || {};
+      const item = f.draft.items[k];
+      if (meta.needs_chip && item.plannedDate && !String(item.chipNo).trim()) {
+        f.open[k] = true;
+        this.renderFlowView();
+        return (meta.name || k) + '：填写了预计执行时间就必须填芯片号';
+      }
+      if (this.txItemState(k).half) {
+        f.open[k] = true;
+        this.renderFlowView();
+        return (meta.name || k) + '：已选处方但未填预计执行时间，请补上';
+      }
+    }
+    return '';
+  },
+
+  txPlanPayload() {
+    const f = this.state.treatmentFlow;
+    const items = Object.keys(f.draft.items).map(k => {
+      const it = f.draft.items[k];
+      return {
+        key: k,
+        planned_date: it.plannedDate || '',
+        chip_no: it.chipNo || '',
+        notes: it.notes || '',
+        rx_other: it.rxOther || '',
+        rx: it.rx.slice()
+      };
+    });
+    return { advice: f.draft.advice || '', items: items };
+  },
+
+  async saveTreatmentPlan(advance) {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    const bad = this.txPlanProblem();
+    if (bad) { TNR_UI.toast(bad, 'warning'); return; }
+    try {
+      const res = await TNR_API.treatmentPlan(f.detail.id, this.txPlanPayload());
+      TNR_UI.assertOk(res, '医嘱与处方保存失败');
+      this.startTreatmentFlow(res.data, advance ? 3 : f.step);
+      TNR_UI.toast('医嘱与处方已暂存', 'success');
+    } catch (e) {
+      TNR_UI.toast(e.message || '保存失败', 'danger');
+    }
+  },
+
+  async diagnoseTreatment() {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    const bad = this.txPlanProblem();
+    if (bad) { TNR_UI.toast(bad, 'warning'); return; }
+    if (!String(f.draft.advice).trim() && !this.txMustItems().length) {
+      TNR_UI.toast('请至少填写医嘱，或为某个处置项目填写时间与处方', 'warning'); return;
+    }
+    try {
+      const saveRes = await TNR_API.treatmentPlan(f.detail.id, this.txPlanPayload());
+      TNR_UI.assertOk(saveRes, '医嘱与处方保存失败');
+      const res = await TNR_API.treatmentDiagnose(f.detail.id);
+      TNR_UI.assertOk(res, '诊断完成失败');
+      this.startTreatmentFlow(res.data, 3);
+      TNR_UI.toast('诊断完成，进入执行阶段', 'success');
+    } catch (e) {
+      TNR_UI.toast(e.message || '操作失败', 'danger');
+    }
+  },
+
+  async undiagnoseTreatment() {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    const ok = await TNR_UI.confirm('撤回诊断后可以继续修改医嘱与处方，确定撤回吗？', '撤回诊断');
+    if (!ok) return;
+    try {
+      const res = await TNR_API.treatmentUndiagnose(f.detail.id);
+      TNR_UI.assertOk(res, '撤回诊断失败');
+      this.startTreatmentFlow(res.data, 2);
+      TNR_UI.toast('已撤回诊断，可继续修改医嘱与处方', 'warning');
+    } catch (e) {
+      TNR_UI.toast(e.message || '撤回失败', 'danger');
+    }
+  },
+
+  async executeTreatmentItem(itemId) {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    if (!itemId) { TNR_UI.toast('请先保存医嘱与处方，再执行项目', 'warning'); return; }
+    try {
+      const res = await TNR_API.treatmentExecuteItem(f.detail.id, itemId);
+      TNR_UI.assertOk(res, '执行失败');
+      this.startTreatmentFlow(res.data, 3);
+      TNR_UI.toast(res.message || '已执行完成，库存已扣减', 'success');
+    } catch (e) {
+      TNR_UI.toast(e.message || '执行失败', 'danger');
+    }
+  },
+
+  async undoTreatmentItem(itemId) {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    const ok = await TNR_UI.confirm('撤销后该项的库存会退回、芯片会退回「可用」，确定撤销吗？', '撤销执行');
+    if (!ok) return;
+    try {
+      const res = await TNR_API.treatmentUndoItem(f.detail.id, itemId);
+      TNR_UI.assertOk(res, '撤销失败');
+      this.startTreatmentFlow(res.data, 3);
+      TNR_UI.toast(res.message || '已撤销执行', 'warning');
+    } catch (e) {
+      TNR_UI.toast(e.message || '撤销失败', 'danger');
+    }
+  },
+
+  async markTreatmentDone() {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    try {
+      const res = await TNR_API.treatmentDone(f.detail.id);
+      TNR_UI.assertOk(res, '诊疗完成失败');
+      this.startTreatmentFlow(res.data, 3);
+      TNR_UI.toast('诊疗完成，请在下方选择办结去向', 'success');
+    } catch (e) {
+      TNR_UI.toast(e.message || '操作失败', 'danger');
+    }
+  },
+
+  async finishTreatment() {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    const disposal = f.draft.disposal;
+    if (!disposal) { TNR_UI.toast('请先选择办结去向', 'warning'); return; }
+    try {
+      const res = await TNR_API.treatmentDispose(f.detail.id, disposal);
+      TNR_UI.assertOk(res, '办结失败');
+      TNR_UI.toast('已办结，动物状态已更新', 'success');
+      this.state.treatmentFlow = null;
+      this.state.treatmentFilter = 'done';
+      this.renderTreatmentFlow();
+    } catch (e) {
+      TNR_UI.toast(e.message || '办结失败', 'danger');
+    }
+  },
+
+  /* ==================== 药品弹层 ====================
+     处方药品走**现有物料体系**（`Material` 的「药品 / 疫苗 / 驱虫药」三类），
+     不新建独立药品字典 —— 与后端 `services_treatment.RX_CATEGORIES` 同口径。
+     类别常量在这里再写一份是**故意**的：它是「前端筛选口径」而不是业务真源，
+     真源仍是后端 `_replace_items()` 的校验（类别不对会被 400 拒绝）。 */
+  openMedPicker(key) {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    const item = f.draft.items[key];
+    if (!item) return;
+    const RX_CATS = ['medicine', 'vaccine', 'dewormer'];
+    const CATS = [['all', '全部'], ['medicine', '药品'], ['vaccine', '疫苗'], ['dewormer', '驱虫药']];
+    let group = 'all';
+    let kw = '';
+
+    TNR_UI.modal({
+      title: '从库存药品中选择',
+      size: 'lg',
+      body: (bodyEl) => {
+        bodyEl.innerHTML = '<div class="form-group" style="margin-bottom:0;">'
+          + '<input class="form-input" data-role="kw" placeholder="搜索药品名称 / 批号">'
+          + '</div>'
+          + '<div data-role="cats" style="display:flex;gap:var(--sp-2);flex-wrap:wrap;margin:var(--sp-3) 0;"></div>'
+          + '<div data-role="rows"></div>';
+        const rowsEl = bodyEl.querySelector('[data-role="rows"]');
+        const catsEl = bodyEl.querySelector('[data-role="cats"]');
+        const kwEl = bodyEl.querySelector('[data-role="kw"]');
+
+        const renderRows = () => {
+          const meds = (this._txMaterials || []).filter(m => {
+            if (RX_CATS.indexOf(m.category) < 0) return false;
+            if (group !== 'all' && m.category !== group) return false;
+            if (!kw) return true;
+            const hay = (String(m.name || '') + ' ' + String(m.batch_no || '')).toLowerCase();
+            return hay.indexOf(kw) >= 0;
+          });
+          if (!meds.length) {
+            rowsEl.innerHTML = '<div class="tx-empty">该条件下暂无可用药品</div>';
+            return;
+          }
+          rowsEl.innerHTML = meds.map(m => {
+            const on = item.rx.some(id => String(id) === String(m.id));
+            const stock = Number(m.hospital_stock || 0);
+            const out = stock <= 0;
+            return '<div style="display:flex;align-items:center;gap:var(--sp-3);'
+              + 'padding:10px 11px;border:1px solid ' + (on ? 'var(--bamboo-green)' : 'var(--border-light)')
+              + ';border-radius:var(--r-lg);margin-bottom:8px;'
+              + (on ? 'background:var(--bamboo-light);' : '') + (out ? 'opacity:.55;' : '') + '">'
+              + '<div style="flex:1;min-width:0;">'
+              + '<div style="font-size:var(--fs-md);font-weight:600;">' + this.escape(m.name)
+              + (out ? ' <span class="badge badge-default">无库存</span>' : '') + '</div>'
+              + '<div style="font-size:var(--fs-xs);color:var(--ink-light);margin-top:2px;">'
+              + this.escape(m.specification || '') + ' · '
+              + this.escape(TNR_API.getMaterialCategoryText(m.category))
+              + (m.batch_no ? ' · 批号 ' + this.escape(m.batch_no) : '') + '</div></div>'
+              + '<div style="flex:none;text-align:right;">'
+              + '<div style="font-size:var(--fs-xs);color:var(--ink-muted);margin-bottom:3px;">本院库存 '
+              + '<b class="' + (stock <= 3 ? 'text-danger' : '') + '">' + stock + '</b></div>'
+              + (out ? '<button class="btn btn-sm btn-secondary" disabled>不可选</button>'
+                     : '<button class="btn btn-sm ' + (on ? 'btn-success' : 'btn-outline')
+                       + '" data-role="pick" data-v="' + m.id + '">'
+                       + (on ? '✓ 已选' : '＋1 头份') + '</button>')
+              + '</div></div>';
+          }).join('');
+          rowsEl.querySelectorAll('[data-role="pick"]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const mid = btn.dataset.v;
+              const at = item.rx.findIndex(id => String(id) === String(mid));
+              if (at >= 0) item.rx.splice(at, 1); else item.rx.push(mid);
+              renderRows();
+              this.refreshItemCard(key);
+            });
+          });
+        };
+
+        const renderCats = () => {
+          catsEl.innerHTML = CATS.map(c => '<button class="btn btn-sm '
+            + (group === c[0] ? 'btn-primary' : 'btn-secondary') + '" data-role="cat" data-v="'
+            + c[0] + '">' + c[1] + '</button>').join('');
+          catsEl.querySelectorAll('[data-role="cat"]').forEach(btn => {
+            btn.addEventListener('click', () => { group = btn.dataset.v; renderCats(); renderRows(); });
+          });
+        };
+
+        // 搜索框**不进重渲染区域**：整块重画会让输入框失焦、光标跳走。
+        kwEl.addEventListener('input', () => {
+          kw = String(kwEl.value || '').trim().toLowerCase();
+          renderRows();
+        });
+        renderCats();
+        renderRows();
+      },
+      actions: '<button class="btn btn-primary" data-action="close">完成</button>'
+    });
+  },
+
+  /* ==================== 芯片选择弹层 ==================== */
+  async openChipPicker(key) {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    const item = f.draft.items[key];
+    if (!item) return;
+    const meta = this.txItemMeta(key) || {};
+
+    TNR_UI.modal({
+      title: '选择可用芯片 · ' + this.escape(meta.name || ''),
+      size: 'lg',
+      body: async (bodyEl) => {
+        bodyEl.innerHTML = '<div class="loading-state">加载可用芯片...</div>';
+        let chips = [];
+        try {
+          const res = await TNR_API.getAvailableChips(meta.materialId || null);
+          chips = (res && res.data) || [];
+        } catch (e) {
+          bodyEl.innerHTML = '<div class="tx-empty">加载失败：' + this.escape(e.message || '') + '</div>';
+          return;
+        }
+        if (!chips.length) {
+          bodyEl.innerHTML = '<div class="tx-empty">本院暂无可用芯片。<br>请先确认芯片物料已采购/下发并签收。</div>';
+          return;
+        }
+        const cur = String(item.chipNo || '').trim();
+        bodyEl.innerHTML = '<div class="form-group" style="margin-bottom:var(--sp-3);">'
+          + '<input class="form-input" data-role="kw" placeholder="搜索芯片号">'
+          + '</div><div data-role="rows"></div>';
+        const rowsEl = bodyEl.querySelector('[data-role="rows"]');
+        const kwEl = bodyEl.querySelector('[data-role="kw"]');
+        let kw = '';
+
+        const renderRows = () => {
+          const list = chips.filter(ch => {
+            if (!kw) return true;
+            return String(ch.number || '').toLowerCase().includes(kw);
+          });
+          if (!list.length) {
+            rowsEl.innerHTML = '<div class="tx-empty">没有匹配的芯片号</div>';
+            return;
+          }
+          rowsEl.innerHTML = list.map(ch => {
+            const on = cur === String(ch.number || '');
+            return '<div style="display:flex;align-items:center;gap:var(--sp-3);'
+              + 'padding:10px 11px;border:1px solid ' + (on ? 'var(--bamboo-green)' : 'var(--border-light)')
+              + ';border-radius:var(--r-lg);margin-bottom:8px;'
+              + (on ? 'background:var(--bamboo-light);' : '') + '">'
+              + '<div style="flex:1;min-width:0;">'
+              + '<div style="font-size:var(--fs-md);font-weight:600;font-family:var(--font-mono);">' + this.escape(ch.number || '') + '</div>'
+              + '<div style="font-size:var(--fs-xs);color:var(--ink-light);margin-top:2px;">'
+              + this.escape(ch.materialName || '') + (ch.batchNo ? ' · 批号 ' + this.escape(ch.batchNo) : '') + '</div></div>'
+              + '<div style="flex:none;">'
+              + '<button class="btn btn-sm ' + (on ? 'btn-success' : 'btn-outline') + '" data-role="pick" data-v="' + this.escape(ch.number || '') + '">'
+              + (on ? '✓ 已选' : '选择') + '</button></div></div>';
+          }).join('');
+          rowsEl.querySelectorAll('[data-role="pick"]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              item.chipNo = btn.dataset.v;
+              renderRows();
+              this.refreshItemCard(key);
+            });
+          });
+        };
+        kwEl.addEventListener('input', () => {
+          kw = String(kwEl.value || '').trim().toLowerCase();
+          renderRows();
+        });
+        renderRows();
+      },
+      actions: '<button class="btn btn-primary" data-action="close">完成</button>'
+    });
+  },
+
+  /* ==================== 旧口径「快速登记」 ==================== */
+  async renderTreatmentQuick() {
     const c = document.getElementById('treatmentContent');
     if (!c) return;
     c.innerHTML = '<div class="loading-state">加载中...</div>';
@@ -579,7 +1909,11 @@ const Hospital = {
       const selectedPet = pets.find(p => String(p.id) === String(this.state.treatmentPetId)) || pets[0];
       this.state.treatmentPetId = selectedPet.id;
 
-      let html = '<div class="card mb-5"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>选择诊疗动物</div></div><div class="card-body"><div style="display:grid;gap:var(--sp-2);">';
+      let html = '<div class="tx-tip wrn"><span>ℹ️</span><div>这是**旧口径**的一次性登记：'
+        + '提交时当场扣减库存。新收治请优先用「诊疗流程」页签走三步流程；'
+        + '这里保留用于补录绝育手术病历（手术日期 / 主刀 / 麻醉 / 诊断 / 手术过程 / 恢复），'
+        + '这些字段打印页与政府端详情在读。</div></div>';
+      html += '<div class="card mb-5"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>选择诊疗动物</div></div><div class="card-body"><div style="display:grid;gap:var(--sp-2);">';
       pets.forEach(p => {
         html += '<div class="pet-select-item ' + (String(p.id) === String(selectedPet.id) ? 'selected' : '') + '" data-pet="' + p.id + '">' +
           '<div class="photo-placeholder">🐾</div>' +
@@ -594,13 +1928,14 @@ const Hospital = {
         el.addEventListener('click', () => {
           this.state.treatmentPetId = el.dataset.pet;
           this.state.treatmentData = {items: {}, sterilization: null, vaccine: null, deworming: null, chip: null};
-          this.renderTreatmentOperate();
+          this.renderTreatmentQuick();
         });
       });
 
       this.renderTreatmentForm(selectedPet);
     } catch (e) {
-      c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div></div>';
+      c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div>'
+        + '<div class="empty-state-desc">' + this.escape(e.message || '') + '</div></div>';
     }
   },
 
@@ -842,7 +2177,7 @@ const Hospital = {
       if (res.success) {
         TNR_UI.toast('诊疗记录保存成功' + (allChecked ? '，诊疗已完成' : ''), 'success');
         this.state.treatmentData = {items: {}, sterilization: null, vaccine: null, deworming: null, chip: null};
-        this.renderTreatmentOperate();
+        this.renderTreatmentQuick();
       } else {
         TNR_UI.toast(res.message || '保存失败', 'danger');
       }
@@ -1000,12 +2335,13 @@ const Hospital = {
     page.innerHTML = '<div class="tabs">' +
       '<div class="tab-item ' + (this.state.materialTab === 'pending' ? 'active' : '') + '" data-mtab="pending">待接收物料 (' + pending + ')</div>' +
       '<div class="tab-item ' + (this.state.materialTab === 'stock' ? 'active' : '') + '" data-mtab="stock">实时库存</div>' +
+      '<div class="tab-item ' + (this.state.materialTab === 'chip' ? 'active' : '') + '" data-mtab="chip">芯片库存</div>' +
       '<div class="tab-item ' + (this.state.materialTab === 'adjustment' ? 'active' : '') + '" data-mtab="adjustment">库存异动 (' + adjustments + ')</div>' +
       '<div class="tab-item ' + (this.state.materialTab === 'ledger' ? 'active' : '') + '" data-mtab="ledger">出入库台账 (' + txns.length + ')</div>' +
       '</div>' +
-      // 四个标签页共用一条筛选条，位置紧跟 .tabs（CSS 里 .tabs 钉 top:0、.filter-bar 钉 top:46px）。
+      // 五个标签页共用一条筛选条，位置紧跟 .tabs（CSS 里 .tabs 钉 top:0、.filter-bar 钉 top:46px）。
       TNR_UI.renderFilterBar([
-        { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料 / 单号 / 批号 / 操作人' },
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料 / 单号 / 批号 / 操作人 / 芯片号' },
         { key: 'start_date', label: '开始日期', type: 'date' },
         { key: 'end_date', label: '结束日期', type: 'date' }
       ], '', { id: 'materialFilterBar' }) +
@@ -1014,8 +2350,8 @@ const Hospital = {
     page.querySelectorAll('[data-mtab]').forEach(el => {
       el.addEventListener('click', () => {
         this.state.materialTab = el.dataset.mtab;
-        page.querySelectorAll('.tab-item').forEach((t, i) => {
-          t.classList.toggle('active', ['pending','stock','adjustment','ledger'][i] === this.state.materialTab);
+        page.querySelectorAll('.tab-item').forEach(t => {
+          t.classList.toggle('active', t.dataset.mtab === this.state.materialTab);
         });
         this.renderMaterialTab(txns);
       });
@@ -1042,6 +2378,7 @@ const Hospital = {
     if (!c) return;
     if (this.state.materialTab === 'pending') this.renderMaterialPending(c, txns);
     else if (this.state.materialTab === 'stock') this.renderMaterialStock(c);
+    else if (this.state.materialTab === 'chip') this.renderMaterialChip(c);
     else if (this.state.materialTab === 'adjustment') this.renderMaterialAdjustment(c, txns);
     else if (this.state.materialTab === 'ledger') this.renderMaterialLedger(c, txns);
   },
@@ -1175,6 +2512,64 @@ const Hospital = {
       }
     } catch (e) {
       TNR_UI.toast(e.message || '操作失败', 'danger');
+    }
+  },
+
+  /* ---------- 芯片库存（第四十六轮：按号码逐颗管理） ---------- */
+  async renderMaterialChip(c) {
+    c.innerHTML = '<div class="loading-state">加载中...</div>';
+    try {
+      const q = this._matQuery();
+      const res = await TNR_API.getChips({});
+      const all = (res && res.data && res.data.items) || [];
+      const total = (res && res.data && res.data.total) || all.length;
+      const chips = all.filter(ch => q.ok([ch.number, ch.materialName, ch.batchNo, ch.petCode].join(' ')));
+      if (all.length === 0) {
+        c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📡</div><div class="empty-state-text">暂无芯片记录</div><div class="empty-state-desc">芯片随物料采购或下发入库后在此显示</div></div>';
+        return;
+      }
+      if (chips.length === 0) {
+        c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-text">没有符合筛选条件的芯片</div></div>';
+        return;
+      }
+      const statusBadge = {
+        available: ['badge-success', '可用'],
+        in_transit: ['badge-warning', '在途'],
+        used: ['badge-cinnabar', '已植入'],
+        void: ['badge-default', '作废']
+      };
+      const rows = chips.map(ch => {
+        const [cls, text] = statusBadge[ch.status] || ['badge-default', ch.status];
+        return {
+          number: '<span class="font-mono fs-sm">' + this.escape(ch.number || '') + '</span>',
+          _status: '<span class="badge ' + cls + '">' + text + '</span>',
+          material_name: ch.materialName || '—',
+          batch_no: ch.batchNo || '—',
+          pet_code: ch.petCode || '—',
+          _used: ch.usedAt ? this.formatDateTime(ch.usedAt) : '—',
+          created_at: ch.createdAt || '',
+        };
+      });
+      let html = '';
+      if (total > chips.length) {
+        html += '<div class="tx-tip inf" style="margin-bottom:var(--sp-3);"><span>ℹ️</span><div>本院共有 <b>' + total + '</b> 颗芯片，当前显示前 ' + chips.length + ' 条。请用筛选条缩小范围。</div></div>';
+      }
+      html += '<div data-mt="hospital.material.chip"></div>';
+      c.innerHTML = html;
+      TNR_UI.mountTable('[data-mt="hospital.material.chip"]', { id: 'hospital.material.chip', columns: [
+          { title: '芯片号', key: 'number', sortable: false },
+          { title: '状态', key: '_status', sortable: false },
+          { title: '所属物料', key: 'material_name' },
+          { title: '批号', key: 'batch_no' },
+          { title: '绑定宠物', key: 'pet_code' },
+          { title: '使用时间', key: '_used', sortable: false },
+          { title: '入库时间', key: 'created_at' },
+        ], data: rows, emptyText: '暂无芯片记录' });
+    } catch (e) {
+      c.innerHTML = '<div class="card"><div class="card-body" style="text-align:center;padding:var(--sp-6);">'
+        + '<div style="font-size:var(--fs-2xl);">⚠️</div>'
+        + '<div style="font-weight:600;margin-top:var(--sp-3);">芯片数据加载失败</div>'
+        + '<div class="fs-sm text-muted mt-2">' + this.escape(e.message || '') + '</div></div></div>';
     }
   },
 
