@@ -3884,6 +3884,25 @@ const Shelter = {
 
   async showBlacklistForm(rec, afterSave) {
     const isEdit = !!rec;
+    // 归属区县：`blacklist_create` **拒绝「全市（市级）」**，市级捕捉点操作员
+    // 必须显式指定一个具体区县。此前表单里根本没有这个控件 —— 市级账号点
+    // 「保存」恒定 400「归属区县不能是市级，请选择具体区县」，而界面上无处可选，
+    // 提示让用户做的事在界面里做不到：**该功能对市级捕捉点 100% 不可用**。
+    // 口径与「新增捕捉登记」一致：捕捉点本身挂在具体区县时锁定为该区县
+    // （服务端 `resolve_district_scope` 同口径），挂在市级时才放开由操作员指定。
+    const districts = await TNR_API.getDistricts();
+    const blUser = TNR_API.getCurrentUser();
+    const blInstitutions = await TNR_API.getInstitutions('shelter');
+    const blMyInstitution = (blInstitutions || []).find(i => i.id === blUser?.institution_id);
+    const blRealDistricts = (districts || []).filter(
+      d => !d.isCity && (d.status === 'active' || d.id === blMyInstitution?.districtId));
+    const blOwnDistrictId = blMyInstitution?.districtId;
+    const blDistrictLocked = !!blOwnDistrictId
+      && blRealDistricts.some(d => d.id === blOwnDistrictId);
+    const blDistrictValue = blDistrictLocked ? blOwnDistrictId
+      : (blRealDistricts.some(d => d.id === blUser?.district_id)
+          ? blUser.district_id : (blRealDistricts[0] || {}).id);
+
     const body = (el) => {
       el.innerHTML = `
         <div class="form-row">
@@ -3895,6 +3914,15 @@ const Shelter = {
           ${['弃养', '私自转赠', '打卡不合格', '虐待动物', '其他'].map(r => '<option value="' + r + '"' + (rec && rec.reason === r ? ' selected' : '') + '>' + r + '</option>').join('')}
         </select></div>
         <div class="form-group"><label class="form-label">违规日期</label><input type="date" class="form-input" id="bl_date" value="${rec ? rec.violationDate : TNR_UI.formatDate(new Date())}"></div>
+        ${isEdit ? '' : `
+        <div class="form-group"><label class="form-label">归属区县<span class="req">*</span></label>
+          <select class="form-select" id="bl_district"${blDistrictLocked ? ' disabled' : ''}>
+            ${blRealDistricts.map(d => '<option value="' + d.id + '"' + (d.id === blDistrictValue ? ' selected' : '') + '>' + TNR_UI.escape(d.name) + '</option>').join('')}
+          </select>
+          <div class="form-hint">${blDistrictLocked
+            ? '已按当前捕捉点所在区县锁定'
+            : '黑名单必须归属到具体区县（市级不接收），请选择'}</div>
+        </div>`}
       `;
     };
     const { close } = TNR_UI.modal({
@@ -3925,12 +3953,16 @@ const Shelter = {
           TNR_UI.toast('保存失败：' + (e.message || '未知错误'), 'danger');
         }
       } else {
+        // 归属区县必须一并提交：`blacklist_create` 拒「市级」，不提交的话
+        // 市级捕捉点操作员恒定 400（服务端会按捕捉点锚点推导，推不出具体区县）。
+        const blDistrictEl = document.getElementById('bl_district');
         const res = await TNR_API.createBlacklist({
           name: name,
           phone: phone,
           id_card: idCard,
           reason: reason,
-          violation_date: document.getElementById('bl_date').value
+          violation_date: document.getElementById('bl_date').value,
+          district_id: blDistrictEl ? blDistrictEl.value : ''
         });
         if (res && res.success !== false) {
           TNR_UI.toast('已加入黑名单', 'success');

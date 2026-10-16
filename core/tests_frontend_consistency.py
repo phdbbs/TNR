@@ -437,6 +437,40 @@ class CaptureDistrictDefaultTest(SimpleTestCase):
         self.assertIn('defaultDistrictId', block, '区县下拉应使用 defaultDistrictId 作为默认选中值')
 
 
+class BlacklistFormDistrictTest(SimpleTestCase):
+    """「加入黑名单」必须能选归属区县。
+
+    服务端 `blacklist_create` 走 `resolve_district_scope()`，**拒绝「全市（市级）」**
+    （放宽等于让市级归属渗进业务记录，区县政府看不到本区数据）。但旧表单里
+    根本没有区县控件：市级捕捉点操作员（机构挂在市级）点「保存」恒定 400
+    「归属区县不能是市级，请选择具体区县」——**提示让用户做的事在界面里做不到**，
+    该功能对市级捕捉点 100% 不可用（`business_blacklist` 长期 0 行就是这么来的）。
+    """
+
+    def _form_source(self):
+        source = read(PORTALS['shelter'])
+        anchor = source.find('id="bl_name"')
+        self.assertGreater(anchor, 0, '未找到「加入黑名单」表单')
+        # 到下一个方法为止（提交体在保存按钮之后，不能只截到按钮）
+        end = source.find('showBlacklistCheck', anchor)
+        self.assertGreater(end, anchor, '未找到黑名单表单的结束位置')
+        return source[anchor:end]
+
+    def test_form_has_district_select_excluding_city(self):
+        block = self._form_source()
+        self.assertIn('id="bl_district"', block,
+                      '「加入黑名单」必须提供归属区县下拉：服务端拒「市级」，'
+                      '没有这个控件时市级捕捉点永远提交不了')
+        self.assertIn('blRealDistricts', block,
+                      '区县下拉必须过滤掉「全市（市级）」——黑名单不能归属到市级')
+
+    def test_create_payload_submits_district_id(self):
+        block = self._form_source()
+        self.assertIn('district_id', block,
+                      '创建黑名单时必须一并提交 district_id，'
+                      '否则市级捕捉点操作员恒定 400')
+
+
 class CheckInStatusMappingTest(SimpleTestCase):
     """回访打卡状态在捕捉点端是内联三元表达式，单独断言其覆盖全部取值。
 
