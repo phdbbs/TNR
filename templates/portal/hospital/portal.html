@@ -846,14 +846,9 @@ const Hospital = {
     try {
       let detail;
       if (treatmentId) {
-        const res = await TNR_API.getData('/api/business/treatments/' + treatmentId + '/');
-        if (!res || !res.success) {
-          TNR_UI.toast((res && res.message) || '加载诊疗单失败', 'danger');
-          this.state.treatmentFlow = null;
-          this.renderTreatmentFlow();
-          return;
-        }
-        detail = res.data;
+        // ⚠ `getData` 已经解包（返回 `data.data`），失败会 throw —— 不能再查
+        // `res.success`，那永远是 undefined，会把正常响应误判成失败。
+        detail = await TNR_API.getData('/api/business/treatments/' + treatmentId + '/');
       } else {
         const res = await TNR_API.openTreatment(petId);
         // `_post` 失败**不抛异常**（业务错误是 200 + success:false），
@@ -1959,8 +1954,9 @@ const Hospital = {
         bodyEl.innerHTML = '<div class="loading-state">加载可用芯片...</div>';
         let chips = [];
         try {
-          const res = await TNR_API.getAvailableChips(meta.materialId || null);
-          chips = (res && res.data) || [];
+          // ⚠ `getData` 已经解包（返回 `data.data` 数组本身）—— 再取 `.data`
+          // 恒为 undefined，会把「有芯片」渲染成「本院暂无可用芯片」。
+          chips = await TNR_API.getAvailableChips(meta.materialId || null) || [];
         } catch (e) {
           bodyEl.innerHTML = '<div class="tx-empty">加载失败：' + this.escape(e.message || '') + '</div>';
           return;
@@ -2704,9 +2700,11 @@ const Hospital = {
     c.innerHTML = '<div class="loading-state">加载中...</div>';
     try {
       const q = this._matQuery();
+      // ⚠ `getChips` 走 `getData`，已解包返回 `{total, items}` —— 再取 `.data`
+      // 恒为 undefined，芯片库存页会显示「暂无芯片记录」。
       const res = await TNR_API.getChips({});
-      const all = (res && res.data && res.data.items) || [];
-      const total = (res && res.data && res.data.total) || all.length;
+      const all = (res && res.items) || [];
+      const total = (res && res.total) || all.length;
       const chips = all.filter(ch => q.ok([ch.number, ch.materialName, ch.batchNo, ch.petCode].join(' ')));
       if (all.length === 0) {
         c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📡</div><div class="empty-state-text">暂无芯片记录</div><div class="empty-state-desc">芯片随物料采购或下发入库后在此显示</div></div>';
