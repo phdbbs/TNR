@@ -34,6 +34,7 @@ from business.services import (
     generate_doc_no, get_district_filtered_queryset,
     adjust_stock, use_chip, get_hospital_stock,
     get_active_pet, get_scoped_object, expired_material_error,
+    get_hospital_scoped_pet,
     find_hospital_chip_material, validate_uploaded_images,
 )
 from business import services_treatment as st
@@ -254,13 +255,19 @@ def treatment_open(request):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    pet = get_active_pet(pet_id, user)
-    if pet is None:
-        return json_fail('宠物不存在或无权访问', status=404)
-
+    # ⚠ 「未绑定医院」必须**前置**到取单之前：取单口径已按机构收口
+    # （`get_hospital_scoped_pet` 在无机构时返回 None），若先取单，
+    # 账号没绑机构会被报成 404「宠物不存在或无权访问」—— 把**账号配置问题**
+    # 伪装成「数据不存在」，运维照 404 去查数据永远查不到。
     hospital = getattr(user, 'institution', None)
     if hospital is None:
         return json_fail('当前账号未绑定医院')
+
+    # 按「本院在治 ∪ 本院诊疗过」取单（与看板同口径）。不能用按区县收敛的
+    # `get_active_pet`：跨区县送医的动物会「看板看得见、点开 404」。
+    pet = get_hospital_scoped_pet(pet_id, user)
+    if pet is None:
+        return json_fail('宠物不存在或无权访问', status=404)
 
     district_id = pet.district_id or getattr(user, 'district_id', None)
     if not district_id:
@@ -570,8 +577,15 @@ def treatment_create(request):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    # 按区县范围取宠物，并排除已逻辑删除的档案
-    pet = get_active_pet(pet_id, user)
+    # ⚠ 同 `treatment_open`：「缺少医院信息」必须**前置**到取单之前。
+    # 取单已按机构收口，先取单会把**账号配置问题**报成 404「宠物不存在」。
+    # 文案沿用原值（`test_hospital_quirk_no_hospital_info` 锁死）。
+    if not getattr(user, 'institution_id', None):
+        return json_fail('缺少医院信息')
+
+    # 按「本院在治 ∪ 本院诊疗过」取单（与看板同口径），排除已逻辑删除的档案。
+    # 同 `treatment_open`：不能用按区县收敛的 `get_active_pet`。
+    pet = get_hospital_scoped_pet(pet_id, user)
     if pet is None:
         return json_fail('宠物不存在或无权访问', status=404)
 

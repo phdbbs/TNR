@@ -874,6 +874,29 @@ def hospital_pet_scope(user):
             | Q(treatments__hospital_id=user.institution_id))
 
 
+def get_hospital_scoped_pet(pk, user):
+    """按「本院在治 ∪ 本院诊疗过」取**单条**宠物档案（与 `hospital_pet_scope` 同口径）。
+
+    ⚠ 医院端的取单**不能**沿用 `get_active_pet`（按区县收敛）：转运允许
+    **跨区县送医**（`transfer_create` 不限制目标医院区县），市级捕捉点把
+    樊城区的动物送到襄城区的医院后，医院**签收成功、看板也列得出来**
+    （看板走 `hospital_pet_scope`），但点开诊疗单会回 404「宠物不存在或无权访问」
+    —— **看得见、点不开**（第四十六轮实测：TNR261016006 花花 / district 33
+    送到爱心宠物医院 / district 32）。取单口径必须与列表口径一致，
+    否则「点不开」会被当成「数据没了」。
+
+    ⚠ 仍保留机构收口（`hospital_pet_scope` 按 `institution_id` 收敛）：
+    同区县可能有多家医院，按区县取单会让 A 院打开 B 院动物的完整档案。
+    """
+    if not user.institution_id:
+        return None
+    # 单条 Q 组合（`hospital_pet_scope` 返回的就是一个 Q），
+    # 不要写成 `qs.filter(a) | qs.filter(b)` —— 那会丢前置过滤并产生重复行。
+    return (Pet.objects.filter(is_deleted=False)
+            .filter(hospital_pet_scope(user))
+            .filter(pk=pk).distinct().first())
+
+
 def pet_has_pending_release(pet):
     """宠物是否已有「待放归」记录。
 
