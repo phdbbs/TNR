@@ -18,7 +18,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from business.models import (
-    Pet, Chip, Blacklist, Transfer,
+    Pet, Chip, Blacklist, Transfer, Capture,
     Release, Adoption, MaterialBatch,
 )
 from core.http import (body_dict, body_list, body_str,  # noqa: F401
@@ -1154,23 +1154,34 @@ def busy_transfer_codes(codes, district_id=None):
 
 
 def capture_transfers(capture):
-    """取与本捕捉单相关的全部转运单（含未回填 capture 外键的历史数据）。
+    """取与本捕捉单相关的全部转运单（**一律按宠物编号精确比对**）。
 
-    早期转运单由前端「选择在途宠物」直接下发，未回填 capture 外键，
-    因此这里额外按宠物编号做精确比对补齐，避免漏算导致状态失真。
+    ⚠ 一张转运单可以同时装下**多张捕捉单**的动物（「选择在途宠物」直接勾选
+    下发），而 `Transfer.capture` 只能指向其中一张（首只有 capture 的动物）。
+    早先这里只查 `capture=capture`，再对 `capture__isnull=True` 的历史数据按
+    编号补齐 —— 于是「装在同一张转运单里、但不是首只动物所属」的捕捉单
+    永远查不到那张单：`transferred` 恒为 0、状态永久停在「待转运」，
+    `can_edit/can_delete` 也一直是 True（动物早已被领养，捕捉单还能改能删）。
+
+    这与列表页用的 `capture_states_bulk()`（**一律按编号匹配**）口径不一致：
+    同一张单在列表里是「已完成」、在详情/写接口里是「待转运」。这里统一为
+    按编号比对，`capture` 外键只作为额外候选，最后按主键去重。
     """
-    transfers = list(Transfer.objects.filter(capture=capture))
-
-    codes = list(Pet.objects.filter(capture=capture).values_list('code', flat=True))
+    codes = set(Pet.objects.filter(capture=capture).values_list('code', flat=True))
+    found = {}
+    for t in Transfer.objects.filter(capture=capture):
+        found[t.pk] = t
     if codes:
-        legacy_q = Q()
+        probe = Q()
         for code in codes:
-            legacy_q |= Q(pet_codes__contains=code)
+            probe |= Q(pet_codes__contains=code)
         # contains 只是预筛（存在子串误命中），下面按编号集合精确取交集
-        for t in Transfer.objects.filter(capture__isnull=True).filter(legacy_q):
-            if set(_split_codes(t.pet_codes)) & set(codes):
-                transfers.append(t)
-    return transfers
+        for t in Transfer.objects.filter(probe):
+            if t.pk in found:
+                continue
+            if set(_split_codes(t.pet_codes)) & codes:
+                found[t.pk] = t
+    return list(found.values())
 
 
 def capture_transfer_state(capture):
@@ -1306,6 +1317,37 @@ def recalc_capture_status(capture, save=True):
         capture.status = new_status
         capture.save(update_fields=['status', 'updated_at'])
     return new_status
+
+
+def recalc_captures_for_transfer(transfer, save=True):
+    """重算一张转运单所涉**全部**捕捉单的状态。
+
+    ⚠ `Transfer.capture` 只能指向一张捕捉单（首只有 capture 的动物），
+    但一张转运单可以装下**多张捕捉单**的动物。四处写接口
+    （创建 / 签收 / 驳回 / 撤回）原先都只重算 `transfer.capture`，
+    其余捕捉单的状态就永久停在旧值 —— 签收后仍是「待转运」、
+    撤回或驳回后仍是「已完成」，且 `can_edit/can_delete` 跟着错。
+
+    这里按 `pet_codes` 反查宠物归属，逐张重算；`transfer.capture`
+    只作为额外候选（防历史数据里 pet_codes 与归属不一致）。
+
+    :return: 各捕捉单重算后的状态列表
+    """
+    if transfer is None:
+        return []
+    cap_ids = set()
+    if transfer.capture_id:
+        cap_ids.add(transfer.capture_id)
+    codes = _split_codes(transfer.pet_codes)
+    if codes:
+        cap_ids |= set(
+            Pet.objects.filter(code__in=codes)
+            .exclude(capture__isnull=True)
+            .values_list('capture_id', flat=True))
+    return [
+        recalc_capture_status(cap, save=save)
+        for cap in Capture.objects.filter(id__in=cap_ids)
+    ]
 
 
 def get_district_scope(request):

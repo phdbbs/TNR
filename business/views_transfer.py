@@ -15,6 +15,7 @@ from business.services import (
     body_str, body_int, body_list,
     generate_doc_no, get_district_filtered_queryset,
     resolve_district_scope, recalc_capture_status, get_scoped_object,
+    recalc_captures_for_transfer,
     busy_transfer_codes, inactive_institution_error,
     get_own_institution_object, is_city_shelter,
 )
@@ -197,6 +198,9 @@ def transfer_create(request):
 
     created = []
     assigned_pet_ids = set()  # 防止同一宠物被拆分进多家医院
+    # 本次落库触及的**全部**捕捉单：一张转运单可装下多张捕捉单的动物，
+    # 而 `Transfer.capture` 只指向其中一张，重算时必须按宠物归属回捞。
+    touched_capture_ids = set()
 
     # 停用的医院不能接收新的转运单：`Institution.status` 此前在后端**没有任何
     # 读取点**，停用一家医院只改了列表里的一个徽标 —— 下拉照旧列出它、
@@ -272,11 +276,16 @@ def transfer_create(request):
             pet.hospital = hospital
             pet.save(update_fields=['hospital'])
 
+        touched_capture_ids.update(p.capture_id for p in pets if p.capture_id)
         created.append(serialize_instance(transfer))
 
-    # 转运单提交后重算相关捕捉单状态（待转运 / 部分转运 / 已完成）
-    for cap in {t['capture'] for t in created if t.get('capture')}:
-        capture_obj = Capture.objects.filter(id=cap).first()
+    # 转运单提交后重算相关捕捉单状态（待转运 / 部分转运 / 已完成）。
+    # ⚠ 只重算 `t['capture']` 会让「装在同一张转运单里、但不是首只动物所属」
+    #    的捕捉单永久停在旧状态：列表页按 bulk 口径显示「已完成」、详情页按
+    #    单条口径显示「待转运」，`can_edit/can_delete` 仍为 True
+    #    —— 动物早已被领养，捕捉单还能改能删。
+    for cap_id in touched_capture_ids:
+        capture_obj = Capture.objects.filter(id=cap_id).first()
         if capture_obj:
             recalc_capture_status(capture_obj)
 
@@ -309,8 +318,8 @@ def transfer_receive(request, pk):
     pet_codes = [c.strip() for c in transfer.pet_codes.split(',') if c.strip()]
     Pet.objects.filter(code__in=pet_codes).update(status='in_treatment')
 
-    if transfer.capture_id:
-        recalc_capture_status(transfer.capture)
+    # 本单可能装有多张捕捉单的动物，按宠物归属逐张重算
+    recalc_captures_for_transfer(transfer)
 
     return json_ok(serialize_instance(transfer), message='签收成功')
 
@@ -341,8 +350,8 @@ def transfer_reject(request, pk):
     Pet.objects.filter(code__in=pet_codes).update(status='in_transit', hospital=None)
 
     # 若该捕捉单还存在其它未退回的转运单，则保持已转运，不重复回退
-    if transfer.capture_id:
-        recalc_capture_status(transfer.capture)
+    # （本单可能装有多张捕捉单的动物，按宠物归属逐张重算）
+    recalc_captures_for_transfer(transfer)
 
     return json_ok(serialize_instance(transfer), message='已驳回')
 
@@ -391,7 +400,7 @@ def transfer_withdraw(request, pk):
     Pet.objects.filter(code__in=pet_codes, district_id=transfer.district_id).update(
         status='in_transit', hospital=None)
 
-    if transfer.capture_id:
-        recalc_capture_status(transfer.capture)
+    # 本单可能装有多张捕捉单的动物，按宠物归属逐张重算
+    recalc_captures_for_transfer(transfer)
 
     return json_ok(serialize_instance(transfer), message='转运单已撤回，宠物回退为待转运')

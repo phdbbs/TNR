@@ -8,6 +8,7 @@ from django.test import override_settings
 from django.utils import timezone
 
 from business.models import Capture, OwnerReturn, Pet, Transfer
+from business.services import capture_states_bulk, capture_transfer_state
 from business.tests.base import (
     assert_doc_no,
     BusinessTestBase, make_capture, make_district, make_image_file,
@@ -521,6 +522,59 @@ class CaptureStatusTest(BusinessTestBase):
         for pet in Pet.objects.filter(code__in=codes):
             self.assertIsNone(pet.hospital_id)
             self.assertEqual(pet.status, 'in_transit')
+
+    def test_multi_capture_transfer_completes_every_capture(self):
+        """一张转运单装下**多张捕捉单**的动物时，每张捕捉单都要变「已完成」。
+
+        ⚠ `Transfer.capture` 只能指向首只动物所属的那一张。四处写接口
+        （创建 / 签收 / 驳回 / 撤回）早先都只重算 `transfer.capture`，
+        其余捕捉单永久停在旧状态 —— 列表页按 `capture_states_bulk()` 口径
+        显示「已完成」，详情 / 写接口按 `capture_transfer_state()` 口径
+        显示「待转运」，`can_edit/can_delete` 仍是 True：动物早已被领养，
+        捕捉单却还能改、还能删。
+        """
+        cap_a, codes_a = self._new_capture(pet_count=1)
+        cap_b, codes_b = self._new_capture(pet_count=1)
+        self.assertNotEqual(cap_a.id, cap_b.id)
+
+        # 一张单同时装下两张捕捉单的动物（同区县，允许合并下发）
+        self._transfer(codes_a + codes_b)
+
+        cap_a.refresh_from_db()
+        cap_b.refresh_from_db()
+        self.assertEqual(cap_a.status, 'completed')
+        self.assertEqual(cap_b.status, 'completed')
+
+        # 单条口径必须与列表页用的批量口径一致（同一张单不能有两个说法）
+        for cap in (cap_a, cap_b):
+            self.assertEqual(capture_transfer_state(cap),
+                             capture_states_bulk([cap])[cap.id])
+
+        # 业务后果：动物已下发，两张捕捉单都不许再改
+        self.login_as(self.shelter_user_a)
+        for cap in (cap_a, cap_b):
+            self.expect_fail(
+                self.post_json(f'{CAPTURES_URL}{cap.id}/update/',
+                               {'property_name': '改名'}),
+                message='不可修改')
+
+    def test_multi_capture_transfer_rollback_touches_every_capture(self):
+        """驳回 / 撤回同样要覆盖本单装下的**每一张**捕捉单。"""
+        cap_a, codes_a = self._new_capture(pet_count=1)
+        cap_b, codes_b = self._new_capture(pet_count=1)
+        transfer_id = self._transfer(codes_a + codes_b)
+
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'/api/business/transfers/{transfer_id}/reject/',
+                               {'reason': '笼位不足'}))
+
+        cap_a.refresh_from_db()
+        cap_b.refresh_from_db()
+        self.assertEqual(cap_a.status, 'pending')
+        self.assertEqual(cap_b.status, 'pending')
+        for cap in (cap_a, cap_b):
+            self.assertEqual(capture_transfer_state(cap),
+                             capture_states_bulk([cap])[cap.id])
 
     def test_rejected_pet_can_be_owner_returned(self):
         """退回后的宠物应能办理主人领回（此前因残留医院归属被拦）。"""
