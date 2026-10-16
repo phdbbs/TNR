@@ -91,6 +91,19 @@ RX_CATEGORIES = ('medicine', 'vaccine', 'dewormer')
 MAX_RX_ITEMS = 30          # 单个项目的处方条目上限（防误输）
 MAX_ITEM_COUNT = len(ITEM_META)
 
+# 体温判定的发烧线：≥ 此值判「发烧」。口径按猫的正常上限（约 38.0~39.5℃）
+# 取 39.5 —— 本系统以猫为主，狗的正常上限略低（约 39.0℃），混养时统一按
+# 猫的上限是保守选择：最多把个别偏高的狗多判一次「发烧」（看一眼就排除），
+# 不会漏掉真发烧（漏判会绕过疫病监测）。将来要分物种设阈值，只改这一处；
+# 前端 `syncTempFlag()` 与本函数必须同口径，阈值随 `check_options()` 下发，
+# 前端不另抄一份。
+FEVER_THRESHOLD = 39.5
+
+
+def fever_judge(value):
+    """体温数值 → 判定（normal / fever）。交叉校验与前端自动判定共用这一条线。"""
+    return 'fever' if value >= FEVER_THRESHOLD else 'normal'
+
 
 def check_options(species):
     """下发给前端的选项表（按物种给不同的传染病项）。"""
@@ -103,6 +116,8 @@ def check_options(species):
         'items': ITEM_META,
         'disposals': [{'key': k, 'label': l} for k, l in Treatment.DISPOSAL_CHOICES],
         'advice_templates': ADVICE_TEMPLATES,
+        # 发烧线下发给前端做「手改数值 → 自动判定」，前端不另抄一份。
+        'fever_threshold': FEVER_THRESHOLD,
     }
 
 
@@ -218,6 +233,23 @@ def apply_check(treatment, body, submit=False):
             raise ValueError(f'体温判定「{flag}」不合法')
         treatment.temperature_flag = flag
         updated.append('temperature_flag')
+
+    # 数值与判定的交叉校验：两者都有值时必须落在发烧线（`FEVER_THRESHOLD`）
+    # 的同侧 —— 「40.2℃ + 正常」一旦落库，打印单、体温趋势、疫病监测会
+    # 互相矛盾，而且没人会去核对。前端手改数值时已自动点亮判定，这里兜底
+    # 拦 API 直调 / 前端漏拦的矛盾组合。⚠ 对**最终组合**校验而不是「本次
+    # 请求是否传了体温」：暂存分两次填（先数值后判定）不会误拦，而库里
+    # 已是矛盾组合的旧单，任何一次保存都会被拦下来逼着修正 —— 渐进清洗。
+    if treatment.temperature is not None and treatment.temperature_flag:
+        expect = fever_judge(treatment.temperature)
+        if treatment.temperature_flag != expect:
+            labels = dict(Treatment.TEMP_FLAG_CHOICES)
+            expect_label = '发烧' if expect == 'fever' else '正常'
+            picked_label = labels.get(treatment.temperature_flag,
+                                      treatment.temperature_flag)
+            raise ValueError(
+                f'体温 {treatment.temperature}℃ 与判定「{picked_label}」矛盾：'
+                f'按发烧线 {FEVER_THRESHOLD}℃ 应判「{expect_label}」，请修正')
 
     if submit:
         if treatment.temperature is None:
@@ -397,7 +429,9 @@ def _replace_items(treatment, items, hospital):
                 raise ValueError(f'药品不存在（id={mid}）')
             if material.category not in RX_CATEGORIES:
                 raise ValueError(f'「{material.name}」不是可开处方的物资（当前类别：{material.get_category_display()}）')
-            err = expired_material_error(material, '用于处方')
+            # B5：批次级过期判据（传 institution=hospital）—— 开方时只看
+            # 「本院是否还有未过期批次」，真正扣哪批由执行时的 FEFO 决定。
+            err = expired_material_error(material, '用于处方', institution=hospital)
             if err:
                 raise ValueError(err)
             # 原型「无库存 = 不可选」。这里提前告知，真正的闸门在执行时
@@ -535,7 +569,8 @@ def execute_item(treatment, item, user):
         material = rx.material
         if material is None:
             raise ValueError('处方药品已被删除，无法执行')
-        err = expired_material_error(material, '用于诊疗')
+        # B5 起传 institution=hospital 走批次级判据（与 views_treatment 同口径）
+        err = expired_material_error(material, '用于诊疗', institution=hospital)
         if err:
             raise ValueError(err)
         # ⚠ 医院侧 `adjust_stock` **故意不判余额**（见 services_stock 的长注释），
@@ -658,6 +693,14 @@ def undo_item(treatment, item, user):
                 note=f'{treatment.pet_code} 撤销芯片植入 {chip_row.number}',
                 ledger_no=generate_doc_no('ADJ'),
             )
+
+    if item.item_key == 'chip':
+        # 撤销执行 = 植入结果一并作废（`execute_item` 写入的对称清理）。
+        # 不清的话，诊疗单/打印页仍显示「已植入 xxx」，而动物档案那侧
+        # （`_release_chip`）已经清空 —— 单据与档案自相矛盾。
+        treatment.chip_no = ''
+        treatment.chip_date = None
+        treatment.save(update_fields=['chip_no', 'chip_date'])
 
     item.is_done = False
     item.done_at = None

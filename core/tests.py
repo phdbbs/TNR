@@ -2,6 +2,7 @@
 import json
 import os
 import re
+from unittest import mock
 
 from django.apps import apps
 from django.conf import settings
@@ -779,6 +780,23 @@ class AllApiPostRoutesContractTest(BusinessTestBase):
         # ⚠ 500 默认会让测试客户端**重新抛出异常**，整个枚举在第一处就中断，
         # 拿不到完整清单。关掉它才能一次看到全部 offender。
         self.client.raise_request_exception = False
+        # ⚠⚠ 审计写入必须在本类**整个执行期**patch 掉，否则进程被 OOM kill。
+        #
+        # 本闸门一次要打 20 万+ 请求（路由 × 角色 × 参数名 × 畸形值），而
+        # 审计中间件对**每一个**经过 `/api/` 的写请求都落一行 AuditLog。
+        # TestCase 把所有请求包在**同一个未提交事务**里：in-memory SQLite
+        # 未提交事务的页永远无法释放，几十万行审计 + 每请求的页变更把进程
+        # 内存顶到沙箱上限，表现为 exit 137（SIGKILL，连输出都不留 ——
+        # 所以它长得像「测试崩了」而不是「内存满了」）。
+        #
+        # patch 的对象是 `core.audit.write_log`（生产代码里审计写库的**唯一**
+        # 入口：中间件 → `audit.record` → `write_log`）。判据不受影响：
+        # 本类只断言响应契约（状态码 + Content-Type），与审计无关；
+        # `model_counts()` 的排除表里本来就有 `core.AuditLog`。
+        # patch 用 addCleanup 收口，不会泄漏到同一进程里的其它测试类。
+        audit_patch = mock.patch('core.audit.write_log')
+        audit_patch.start()
+        self.addCleanup(audit_patch.stop)
 
     def _sweep(self, bodies, label):
         """用 `bodies` 打全部路由 × 全部角色，返回问题清单。"""

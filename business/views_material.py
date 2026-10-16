@@ -4,7 +4,7 @@ Task 7: 物料供应链与双台账
 - 捕捉点台账 / 医院台账
 - 芯片：按「首号 + 数量」逐号入库 / 下发（第四十六轮重构）
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
@@ -13,7 +13,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
-from business.models import Material, MaterialTransaction
+from business.models import Material, MaterialBatch, MaterialTransaction
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
@@ -23,6 +23,9 @@ from business.services import (
     # 第四十五轮：市级捕捉点 + 机构库存
     can_dispatch_across_districts, get_institution_stock, get_shelter_stock,
     inactive_institution_error, is_city_shelter,
+    # B5：物料批次
+    batch_expiry_state, fefo_sorted, get_material_batches,
+    plan_fefo_deduction, NEAR_EXPIRY_DAYS,
 )
 from business.services_chip import (
     chip_batch_create, chip_batch_dispatch, chip_batch_precheck,
@@ -213,6 +216,7 @@ def purchase_create(request):
 
     material_id = body_int(data, 'material_id')
     material = None
+    new_material = None
     if material_id:
         # 按可操作范围取物料：区县内的物料 ∪ 在本机构有库存的物料
         # （第四十五轮：市级下发的物料其区县是市级，只按区县收敛会让
@@ -234,7 +238,10 @@ def purchase_create(request):
             return json_fail('缺少区县信息')
         material = Material.objects.filter(name=name, category=category, district_id=district_id).first()
         if not material:
-            material = Material.objects.create(
+            # ⚠ 新建物料**必须等进采购事务再建**：芯片重号等失败会让整笔
+            #   回滚；在事务外先建的话，autocommit 已经提交，失败后留下的
+            #   是一个从未入过库的孤儿物料行。
+            new_material = dict(
                 name=name,
                 category=category,
                 unit=str(body_str(data, 'unit') or '支'),
@@ -245,9 +252,11 @@ def purchase_create(request):
                 district_id=district_id,
             )
 
-    district_id = material.district_id
-    # 库存记到哪个机构（第四十五轮）：捕捉点账号 = 自己的机构。
-    institution = _receiving_institution(user, material)
+    # 新建路径下 material 还是 None —— 事务前的判断一律用待建属性。
+    is_chip = ((material.category if material is not None
+                else new_material['category']) == 'chip')
+    if material is not None:
+        district_id = material.district_id
 
     # 芯片采购：号码**必须在写库之前全部校验完**（项目约定「多表写入两段式：
     # 先全校验 → 再事务落库」）。
@@ -260,7 +269,7 @@ def purchase_create(request):
     # 兼容期：`chip_range_start` 是重构前（第四十六轮）的参数名，字段已删除，
     # 但前端在阶段 8 之前仍可能传它，故一并读入。阶段 8 之后可只留 `chip_start`。
     chip_first_number = ''
-    if material.category == 'chip':
+    if is_chip:
         chip_first_number = (body_str(data, 'chip_start')
                              or body_str(data, 'chip_range_start'))
         try:
@@ -270,54 +279,83 @@ def purchase_create(request):
         except ValueError as e:
             return json_fail(str(e))
 
+    # 效期在事务**外**解析一次：批次行（adjust_stock）与主表快照用同一个值，
+    # 两处各解析一遍就会出现「批次 10 月到期、主表 11 月」的漂移。
+    # 解析失败静默当 None（与主表快照的既有容忍口径一致），不拦采购。
+    expiry_date = None
+    if data.get('expiry_date'):
+        try:
+            expiry_date = datetime.strptime(str(data['expiry_date'])[:10], '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            expiry_date = None
+
     # 校验全部通过，从这里开始才写库。整体包一个事务：
-    # 采购要同时写「物料行 / 采购流水 / 机构库存 / 芯片逐号行」，
+    # 采购要同时写「物料行 / 采购流水 / 机构库存 / 批次行 / 芯片逐号行」，
     # 中途任何异常都不该留下半截数据。
-    with transaction.atomic():
-        # 创建采购流水（捕捉点侧，hospital=None）
-        txn = adjust_stock(
-            material=material,
-            hospital=None,
-            quantity=quantity,
-            txn_type='purchase',
-            institution=institution,
-            operator=user,
-            operator_name=user.get_full_name() or user.username,
-            supplier=body_str(data, 'supplier'),
-            batch_no=body_str(data, 'batch_no'),
-            from_to=body_str(data, 'supplier'),
-            note=body_str(data, 'note', '采购入库'),
-            ledger_no=generate_doc_no('PUR'),
-            district_id=district_id,
-        )
+    #
+    # ⚠ `try` 是给 `chip_batch_create()` 的重号 `ValueError` 兜底的：
+    #   下发（`dispatch_create`）和异动（`stock_adjustment`）都有这层
+    #   （异常转 400 + 具体号码文案），唯独采购漏了 —— 重号直接打成 500，
+    #   用户只看到「服务器错误」，拿不到「芯片号已存在：xxx」。
+    try:
+        with transaction.atomic():
+            # 新建物料放进事务里（见上面 `new_material` 的注释），
+            # 之后所有分支用的都是建好的 material。
+            if new_material is not None:
+                material = Material.objects.create(**new_material)
+            # 库存记到哪个机构（第四十五轮）：捕捉点账号 = 自己的机构。
+            # 必须在 material 建好后才能算（依赖物料的区县）。
+            institution = _receiving_institution(user, material)
 
-        # 更新物料扩展信息
-        update_fields = []
-        if data.get('supplier'):
-            material.supplier = data['supplier']
-            update_fields.append('supplier')
-        if data.get('batch_no'):
-            material.batch_no = data['batch_no']
-            update_fields.append('batch_no')
-        if data.get('expiry_date'):
-            try:
-                material.expiry_date = datetime.strptime(str(data['expiry_date'])[:10], '%Y-%m-%d').date()
-                update_fields.append('expiry_date')
-            except (ValueError, TypeError):
-                pass
-        if update_fields:
-            material.save(update_fields=update_fields)
-
-        # 芯片采购：按「首号 + 数量」逐号建行，归属本机构与本物料。
-        # `batch_no` 记采购单号 —— 用于回答「这颗芯片是哪一批进来的」。
-        if material.category == 'chip':
-            chip_batch_create(
+            # 创建采购流水（捕捉点侧，hospital=None）。
+            # B5 起 adjust_stock 返回**列表**（出库跨批次会拆多笔）；
+            # 采购是单笔入库，取 txns[0]。
+            txns = adjust_stock(
                 material=material,
+                hospital=None,
+                quantity=quantity,
+                txn_type='purchase',
                 institution=institution,
-                first_number=chip_first_number,
-                count=quantity,
-                batch_no=txn.ledger_no,
+                operator=user,
+                operator_name=user.get_full_name() or user.username,
+                supplier=body_str(data, 'supplier'),
+                batch_no=body_str(data, 'batch_no'),
+                expiry_date=expiry_date,
+                from_to=body_str(data, 'supplier'),
+                note=body_str(data, 'note', '采购入库'),
+                ledger_no=generate_doc_no('PUR'),
+                district_id=district_id,
             )
+            txn = txns[0]
+
+            # 更新物料扩展信息（主表 batch_no/expiry_date 保留为
+            # 「最近一次采购」的快照 —— 旧界面仍显示它；真正的批次台账
+            # 在 MaterialBatch，B5 起不要再用主表单值做任何判据）。
+            update_fields = []
+            if data.get('supplier'):
+                material.supplier = data['supplier']
+                update_fields.append('supplier')
+            if data.get('batch_no'):
+                material.batch_no = data['batch_no']
+                update_fields.append('batch_no')
+            if expiry_date is not None:
+                material.expiry_date = expiry_date
+                update_fields.append('expiry_date')
+            if update_fields:
+                material.save(update_fields=update_fields)
+
+            # 芯片采购：按「首号 + 数量」逐号建行，归属本机构与本物料。
+            # `batch_no` 记采购单号 —— 用于回答「这颗芯片是哪一批进来的」。
+            if is_chip:
+                chip_batch_create(
+                    material=material,
+                    institution=institution,
+                    first_number=chip_first_number,
+                    count=quantity,
+                    batch_no=txn.ledger_no,
+                )
+    except ValueError as e:
+        return json_fail(str(e))
 
     chip_note = f'，芯片 {quantity} 颗（{chip_first_number} 起）' if material.category == 'chip' else ''
     return json_ok(serialize_instance(txn),
@@ -445,11 +483,15 @@ def dispatch_create(request):
     # ⚠ 第四十六轮把这三步（建流水 / 记接收方 / 芯片标在途）包进同一个事务：
     #   芯片标在途失败时，扣掉的库存必须一起回滚，否则「库存少了、芯片还在」
     #   两个真源当场错开且不报错。
+    #
+    # B5：跨批次的下发在 `adjust_stock` 里按 FEFO 拆成**多笔**流水
+    # （同 ledger_no，每笔一行批次）—— 签收按单号整单走（见 `material_receive`），
+    # 芯片关联与返回给前端的都是首笔 txns[0]。
     try:
         with transaction.atomic():
-            txn = adjust_stock(
+            txns = adjust_stock(
                 material=material,
-                hospital=None,
+                hospital=target,  # 对方机构（医院或捕捉点），直接随流水建
                 quantity=quantity,
                 txn_type='dispatch',
                 institution=sender,
@@ -460,9 +502,7 @@ def dispatch_create(request):
                 ledger_no=generate_doc_no('DIS'),
                 district_id=material.district_id,
             )
-            # 关联接收方到流水（用于对方查看待签收列表），但不影响对方库存
-            txn.hospital = target
-            txn.save(update_fields=['hospital'])
+            txn = txns[0]
 
             if material.category == 'chip':
                 chip_batch_dispatch(material, sender, chip_first_number, quantity, txn)
@@ -504,6 +544,11 @@ def material_receive(request, pk):
     # ⚠ 关联判据用 `ref_no`：接收单自第四十六轮起有**独立**的 RCV 单号，
     #   与下发单的关联靠 `ref_no` 指向下发单号 —— 旧实现「复用下发单号」
     #   两张单无法区分，也不能单独打印归档。
+    #
+    # ⚠ B5 起这个判据是「按**下发单号**整单判」：跨批次下发的单子在物理上是
+    #   多笔流水（同 ledger_no，每笔一行批次），若按「本笔」签收，第一笔的
+    #   receive 建出来之后兄弟行会被误判成已签收（货只到了一半）。
+    #   整单签收 = 签任何一笔都把全部兄弟行一起收（见下面的事务块）。
     already_received = MaterialTransaction.objects.filter(
         material=txn.material,
         hospital=txn.hospital,
@@ -512,6 +557,12 @@ def material_receive(request, pk):
     ).exists()
     if already_received:
         return json_fail('此物料已签收')
+
+    # 同一下发单的全部兄弟行（B5 跨批次拆行；单批次/历史单 = 只有 txn 自己）。
+    siblings = list(MaterialTransaction.objects.filter(
+        ledger_no=txn.ledger_no, type='dispatch').order_by('id'))
+    if txn not in siblings:  # 理论不可达（txn 本身就是 dispatch 行），防御性兜底
+        siblings.insert(0, txn)
 
     # 标记原 dispatch 流水为已签收 + 创建签收流水，整体一个事务。
     #
@@ -524,43 +575,60 @@ def material_receive(request, pk):
     #   会抛 `ValueError`（见那里的注释）。不接住的话它会打成 500，
     #   用户只看到「服务器错误」，而真正的原因（这批芯片被人为改过）
     #   完全说不出口。接住后 400 + 具体文案，且事务照旧回滚。
+    #
+    # B5：每笔兄弟行各建一条 receive（同 RCV 单号、ref_no 同指下发单号），
+    # 批号随行、效期取**发起方批次表**里该批号的效期 —— 接收方的批次行
+    # 因此带着正确效期诞生，FEFO/过期拦截在接收侧从第一笔起就是对的。
+    receive_ledger_no = generate_doc_no('RCV')
+    total_qty = sum(s.quantity for s in siblings)
     try:
         with transaction.atomic():
-            txn.note = (txn.note + ' [已签收]' if txn.note else '[已签收]').strip()
-            txn.save(update_fields=['note'])
+            for s in siblings:
+                s.note = (s.note + ' [已签收]' if s.note else '[已签收]').strip()
+                s.save(update_fields=['note'])
 
-            receive_txn = adjust_stock(
-                material=txn.material,
-                hospital=txn.hospital,
-                quantity=txn.quantity,
-                txn_type='receive',
-                institution=user.institution,
-                operator=user,
-                operator_name=user.get_full_name() or user.username,
-                from_to=txn.from_to or '捕捉点下发',
-                batch_no=txn.batch_no,
-                supplier=txn.supplier,
-                ledger_no=generate_doc_no('RCV'),  # 接收单独立单号，打印归档可数
-                ref_no=txn.ledger_no,  # 关联下发单号（单据链：DIS → RCV）
-                # 归属区县按**接收机构**推导，不沿用发起方的（第四十五轮起
-                # 跨区县下发是允许的）：甲区发到乙区医院，这条签收记录发生在
-                # 乙区，沿用甲区会让乙区政府的台账里看不到本院入库。
-                district=user.institution.district,
-                note=f'签收下发物料（原单号：{txn.ledger_no}）',
-            )
+            receive_txns = []
+            for s in siblings:
+                # 发起方该批号的批次行 → 效期随货带走（没有批次行 = 存量单，
+                # 效期给 None，不拿主表快照猜 —— 快照是「最近一次采购」的，
+                # 对老批次恰恰是错的）。
+                sender_batch = MaterialBatch.objects.filter(
+                    material=s.material, batch_no=s.batch_no,
+                    institution=s.institution).first()
+                receive_txns.append(adjust_stock(
+                    material=s.material,
+                    hospital=s.hospital,
+                    quantity=s.quantity,
+                    txn_type='receive',
+                    institution=user.institution,
+                    operator=user,
+                    operator_name=user.get_full_name() or user.username,
+                    from_to=s.from_to or '捕捉点下发',
+                    batch_no=s.batch_no,
+                    expiry_date=getattr(sender_batch, 'expiry_date', None),
+                    supplier=s.supplier,
+                    ledger_no=receive_ledger_no,  # 同一张接收单，多笔共用单号
+                    ref_no=s.ledger_no,  # 关联下发单号（单据链：DIS → RCV）
+                    # 归属区县按**接收机构**推导，不沿用发起方的（第四十五轮起
+                    # 跨区县下发是允许的）：甲区发到乙区医院，这条签收记录发生在
+                    # 乙区，沿用甲区会让乙区政府的台账里看不到本院入库。
+                    district=user.institution.district,
+                    note=f'签收下发物料（原单号：{s.ledger_no}）',
+                )[0])
 
             # 芯片签收：把这批**在途**芯片转到本机构名下、状态回到「可用」。
             # ⚠ 必须与库存写入同一个事务 —— 库存加了、芯片没转（或反过来），
             #   「芯片数」与「库存数」当场错开，且没有任何报错。
             # ⚠ 数量与下发单不一致时 `chip_batch_receive()` 会抛错拒绝签收：
             #   照单全收会让错开被「合法化」，事后无从追。
+            #   芯片走单行流水（`adjust_stock` 对 chip 不拆行），首笔即全部。
             if txn.material.category == 'chip':
                 chip_batch_receive(txn, user.institution)
     except ValueError as e:
         return json_fail(str(e))
 
-    return json_ok(serialize_instance(receive_txn),
-                   message=f'签收成功，{user.institution.name}库存已增加')
+    return json_ok(serialize_instance(receive_txns[0]),
+                   message=f'签收成功，{user.institution.name}库存已增加 {total_qty}')
 
 
 @csrf_exempt
@@ -663,7 +731,9 @@ def stock_adjustment(request):
     #   事务会**提交**，半截状态就留在库里了。
     try:
         with transaction.atomic():
-            txn = adjust_stock(
+            # B5：adjust_stock 返回列表（非芯片跨批次拆多笔），异动取首笔返回；
+            # 芯片（首号作废）走单行流水，数量即全部。
+            txns = adjust_stock(
                 material=material,
                 hospital=hospital,
                 quantity=quantity,
@@ -676,6 +746,7 @@ def stock_adjustment(request):
                 ledger_no=generate_doc_no('ADJ'),
                 district_id=material.district_id,
             )
+            txn = txns[0]
             if material.category == 'chip':
                 chip_batch_void(material, institution, chip_first_number, quantity)
     except ValueError as e:
@@ -850,3 +921,160 @@ def dispatch_target_options(request):
 #     库存加了、芯片一颗没建，全程无提示；
 #   - 建出的 `Chip` 行**没有机构归属**，查不出「这批在谁手上」。
 #   现在芯片一律走 `services_chip.chip_batch_create()`（「首号 + 数量」）。
+
+
+# ============================================
+# 物料批次（B5，只读）
+# ============================================
+def _batch_institution(request, material):
+    """批次接口的「本机构」判定。
+
+    捕捉点 / 医院账号 → 自己的机构（批次明细是「我这个点的库存构成」）；
+    政府端没有自己的库存 → 该物料在**全部机构**上的批次按机构分组返回
+    （监管视角：每批货在谁手上、还剩多少）。
+    """
+    inst = getattr(request.user, 'institution', None)
+    if inst is not None and getattr(inst, 'type', None) in ('shelter', 'hospital'):
+        return inst
+    return None
+
+
+def _serialize_batch(batch, today):
+    """批次行的 JSON 形态。临期/过期标记在后端算好 —— 前端只管标红，
+    不再各写一份「效期减几天」的判据（判据漂移是本项目反复栽的坑）。"""
+    expired = bool(batch.expiry_date and batch.expiry_date < today)
+    near_expiry = bool(
+        not expired and batch.expiry_date
+        and batch.expiry_date <= today + timedelta(days=NEAR_EXPIRY_DAYS))
+    return {
+        'id': batch.id,
+        'batch_no': batch.batch_no,
+        'expiry_date': batch.expiry_date.isoformat() if batch.expiry_date else None,
+        'quantity': batch.quantity,
+        'expired': expired,
+        'near_expiry': near_expiry,
+        'created_at': batch.created_at.isoformat(),
+    }
+
+
+@csrf_exempt
+@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
+def material_batches(request, pk):
+    """某物料的批次明细（GET）。
+
+    - 捕捉点 / 医院账号：只返回**本机构**的批次（FEFO 顺序，含余量为 0 的
+      批次档案）；
+    - 政府端：返回**全部机构**的批次，按机构分组 —— 监管视角要回答的是
+      「这批货发到了谁手上、还剩多少」。
+
+    权限：物料必须在 `operable_material_queryset` 范围内（与签收 / 异动
+    同一把尺子），跨区县的物料不因「知道 id」就能看到批次构成。
+    """
+    material = get_operable_material(pk, request.user)
+    if material is None:
+        return json_fail('物料不存在或无权操作', status=404)
+
+    today = timezone.localdate()
+    inst = _batch_institution(request, material)
+    if inst is not None:
+        batches = get_material_batches(material, inst)
+        return json_ok({
+            'institution_id': inst.id,
+            'institution_name': inst.name,
+            'batches': [_serialize_batch(b, today) for b in batches],
+        })
+
+    # 政府端：全部持有机构的批次，按机构分组（FEFO 顺序）
+    groups = []
+    qs = MaterialBatch.objects.filter(
+        material=material, institution__status='active'
+    ).select_related('institution').order_by('institution__id')
+    by_inst = {}
+    for b in qs:
+        by_inst.setdefault(b.institution, []).append(b)
+    for inst_obj, rows in by_inst.items():
+        groups.append({
+            'institution_id': inst_obj.id,
+            'institution_name': inst_obj.name,
+            'institution_type': inst_obj.type,
+            'batches': [_serialize_batch(b, today) for b in fefo_sorted(rows)],
+        })
+    return json_ok({'institution_id': None, 'institution_name': None, 'groups': groups})
+
+
+@csrf_exempt
+@role_required('shelter', 'hospital')
+@login_required
+def material_batch_preview(request, pk):
+    """FEFO 扣减预览（POST，**只读不写库** —— 与芯片 `chip_preview` 同款）。
+
+    请求体：`{"quantity": 30, "txn_type": "consume|dispatch|adjustment"}`
+    返回：`{"plan": [{batch_no, expiry_date, take}...], "available": N,
+    "expired_skipped": N, "enough": true|false, "message": "..."}`
+
+    为什么 txn_type 必传：consume 会**跳过已过期批次**（过期药品不能用于
+    诊疗），dispatch / adjustment 不跳（下发/报废正是过期物料的出口）——
+    不告诉服务端「这是哪类操作」，预览给出的批次顺序与实际落库就会错开，
+    预检就成了新的孪生漂移源。
+
+    判据与落库共用 `plan_fefo_deduction`（同一份实现）—— 预览说「这些批次
+    会被扣」，提交时就扣这些批次；预览说不够，提交时就 400，不会两边各判。
+    """
+    if request.method != 'POST':
+        return json_fail('仅支持 POST', status=405)
+
+    material = get_operable_material(pk, request.user)
+    if material is None:
+        return json_fail('物料不存在或无权操作', status=404)
+
+    inst = _batch_institution(request, material)
+    if inst is None:
+        return json_fail('仅捕捉点/医院账号可预览批次扣减', status=403)
+
+    data = parse_json_body(request) or {}
+    quantity = body_int(data, 'quantity')
+    if quantity is None:
+        return json_fail('数量必须是正整数')
+    txn_type = body_str(data, 'txn_type') or 'consume'
+    if txn_type not in ('consume', 'dispatch', 'adjustment'):
+        return json_fail('txn_type 仅支持 consume/dispatch/adjustment')
+
+    # 存量物料可能还没有批次行（shelter_stock 直写字段的形态）——
+    # 预览里如实给「无批次台账」，别拿主表快照拼一个假计划出来。
+    if not MaterialBatch.objects.filter(material=material, institution=inst).exists():
+        current = get_institution_stock(material, inst)
+        return json_ok({
+            'has_batches': False, 'plan': [], 'available': current,
+            'expired_skipped': 0, 'enough': current >= quantity,
+            'message': '该物料还没有批次台账（存量数据），扣减不区分批次',
+        })
+
+    today = timezone.localdate()
+    available, expired_qty = batch_expiry_state(material, inst, today)
+    try:
+        plan = plan_fefo_deduction(
+            material, inst, quantity,
+            skip_expired=(txn_type == 'consume'), today=today)
+        message = '、'.join(
+            f'批次「{b.batch_no}」扣 {take}'
+            f'（{b.expiry_date.isoformat() if b.expiry_date else "无效期"}）'
+            for b, take in plan)
+    except ValueError as e:
+        plan, message = [], str(e)
+
+    return json_ok({
+        'has_batches': True,
+        'plan': [{
+            'batch_no': b.batch_no,
+            'expiry_date': b.expiry_date.isoformat() if b.expiry_date else None,
+            'take': take,
+        } for b, take in plan],
+        'available': available,
+        'expired_skipped': expired_qty,
+        # plan 非空 = FEFO 计划成立（服务端同一份判据跑过、没抛错）；
+        # 抛错时 plan 为空 + message 带原因。不要用「文案是否以某字开头」
+        # 这类脆弱判断 —— 文案一改前端就跟着错。
+        'enough': bool(plan),
+        'message': message,
+    })

@@ -2023,6 +2023,7 @@ const Shelter = {
         <div class="tab-item" data-tab="purchase">采购入库</div>
         <div class="tab-item" data-tab="outbound">下发出库</div>
         <div class="tab-item" data-tab="pending">待签收</div>
+        <div class="tab-item" data-tab="chip">芯片台账</div>
         <div class="tab-item" data-tab="adjustment">库存异动</div>
         <div class="tab-item" data-tab="flow">流向查询</div>
       </div>
@@ -2123,6 +2124,68 @@ const Shelter = {
       return;
     }
 
+    if (tab === 'chip') {
+      /* 芯片台账（C2）：本机构名下逐颗芯片 + 追溯入口。
+       *
+       * ⚠ 与医院端 `renderMaterialChip` 读**同一个接口**（`chips/`）——
+       * 服务端按「机构账号只看本机构」收口，这里不用也不能再自己过滤一遍
+       * （自己拼判据就是给孪生漂移开门）。
+       * 状态文案与医院端口径一致：available=可用 / in_transit=在途 /
+       * used=已植入 / void=作废。
+       */
+      wrap.innerHTML = '<div class="card"><div class="card-body" style="text-align:center;padding:var(--sp-6);">'
+        + '<div style="font-size:var(--fs-2xl);">📡</div>'
+        + '<div style="font-weight:600;margin-top:var(--sp-3);">加载中...</div></div></div>';
+      let chipRes;
+      try {
+        chipRes = await TNR_API.getData('/api/business/chips/');
+      } catch (e) {
+        /* 严格读（失败抛错）：芯片列表加载失败必须**说出来**，
+         * 静默渲染成空表会让操作员以为「本捕捉点没有芯片」。
+         * （样式沿用本文件 `render_material` 的失败卡片，不用
+         *   hospital 端的 `empty-state` 类 —— 那个类在本端 CSS 没定义。） */
+        wrap.innerHTML = '<div class="card"><div class="card-body" style="text-align:center;padding:var(--sp-6);">'
+          + '<div style="font-size:var(--fs-2xl);">⚠️</div>'
+          + '<div style="font-weight:600;margin-top:var(--sp-3);">芯片数据加载失败</div>'
+          + '<div class="fs-sm text-muted mt-2">' + TNR_UI.escape(e.message || '') + '</div>'
+          + '</div></div>';
+        return;
+      }
+      const all = (chipRes && chipRes.items) || [];
+      const total = (chipRes && chipRes.total) || all.length;
+      const chipStatus = { available: ['可用', 'success'], in_transit: ['在途', 'warning'],
+                           used: ['已植入', 'cinnabar'], void: ['作废', 'default'] };
+      const chipCols = [
+        { title: '芯片号', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.number || '') + '</span>' },
+        { title: '状态', render: r => { const s = chipStatus[r.status] || [r.status, 'default'];
+          return TNR_UI.statusBadge(s[0], s[1]); } },
+        { title: '所属物料', render: r => TNR_UI.escape(r.materialName || '—') },
+        { title: '批号', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.batchNo || '—') + '</span>' },
+        { title: '持有机构', render: r => TNR_UI.escape(r.institutionName || '—') },
+        { title: '绑定宠物', render: r => TNR_UI.escape(r.petCode || '—') },
+        { title: '使用时间', key: 'usedAt', render: r => r.usedAt || '—' },
+        { title: '操作', render: r => '<button class="btn btn-outline btn-sm" data-chiptrace="'
+          + TNR_UI.escape(r.number) + '">追溯</button>' }
+      ];
+      let chipHtml = '';
+      if (total > all.length) {
+        chipHtml += '<div style="background:var(--autumn-light);border-left:3px solid var(--autumn-gold);'
+          + 'padding:var(--sp-3) var(--sp-4);border-radius:8px;margin-bottom:var(--sp-4);font-size:13px;">'
+          + 'ℹ 本机构共有 <b>' + total + '</b> 颗芯片，当前显示前 ' + all.length
+          + ' 条，请用筛选缩小范围。</div>';
+      }
+      chipHtml += '<div data-mt="shelter.material.chip"></div>';
+      wrap.innerHTML = chipHtml;
+      TNR_UI.mountTable('[data-mt="shelter.material.chip"]', {
+        id: 'shelter.material.chip', columns: chipCols, data: all, emptyText: '暂无芯片记录'
+      });
+      // 行内「追溯」走事件委托：mountTable 排序/翻页会整体重建 tbody
+      TNR_UI.delegateClick(wrap, {
+        'data-chiptrace': (number) => TNR_UI.showChipTrace(number)
+      }, 'ShelterChipRows');
+      return;
+    }
+
     if (tab === 'stock') {
       let html = TNR_UI.renderFilterBar([
             { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料名称 / 规格 / 批次' },
@@ -2163,7 +2226,12 @@ const Shelter = {
           const color = stock <= 0 ? 'var(--rouge)' : (stock <= safety ? 'var(--autumn-gold)' : 'var(--bamboo-green)');
           return '<div class="stock-bar" style="width:100px;"><div class="stock-bar-fill" style="width:' + pct + '%;background:' + color + ';"></div></div>';
         }},
-        { title: '有效期', key: 'expiryDate', render: r => r.expiryDate || '—' }
+        { title: '有效期', key: 'expiryDate', render: r => r.expiryDate || '—' },
+        /* B5：批次明细行内展开。「批次」列上那个批号只是主表快照（最近一次
+         * 入库的），老批次还剩多少、哪批临期/过期，点这里逐批看。
+         * 展开逻辑在 TNR_UI.bindBatchExpand（事件委托，mountTable 排序/
+         * 翻页重建 tbody 也不丢绑定）。 */
+        { title: '批次', sortable: false, render: r => '<button type="button" class="btn btn-outline btn-sm" data-batch-toggle="1" data-material-id="' + r.id + '">明细</button>' }
       ];
       wrap.innerHTML = html;
       const stockBar = document.getElementById('matStockFilterBar');
@@ -2190,7 +2258,8 @@ const Shelter = {
       };
       renderStock();
       TNR_UI.bindFilter(renderStock, stockBar);
-
+      // B5：批次行内展开的事件委托（带防重标记，renderMatTab 重入不叠加）
+      TNR_UI.bindBatchExpand(wrap);
     } else if (tab === 'purchase') {
       let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>采购入库登记</div></div><div class="card-body">';
       html += '<div class="form-row-3">';
@@ -2203,7 +2272,12 @@ const Shelter = {
       html += '<div class="form-group"><label class="form-label">采购日期</label><input type="date" class="form-input" id="pu_date"></div>';
       html += '</div><div class="form-row-3">';
       html += '<div class="form-group"><label class="form-label">批号</label><input class="form-input" id="pu_batchNo" placeholder="批号"></div>';
-      html += '<div class="form-group" id="pu_chipRangeGroup" style="display:none;"><label class="form-label">芯片起始号</label><input class="form-input" id="pu_chipStart" placeholder="如 042060107000177"></div>';
+      // B5：批号 + 有效期 = 批次台账的身份证。没有效期输入，新批次在
+      // 过期拦截里永远「不过期」（expiry_date 为空 = 无效期概念），
+      // 临期提示也无从谈起 —— 所以此前批次效期全靠主表快照单值硬撑。
+      html += '<div class="form-group"><label class="form-label">有效期至</label><input type="date" class="form-input" id="pu_expiry" placeholder="如 2026-12-31"><div class="fs-sm text-muted mt-2">药品/疫苗填有效期，猫粮等耗材可不填</div></div>';
+      html += '<div class="form-group" id="pu_chipRangeGroup" style="display:none;"><label class="form-label">芯片起始号</label><input class="form-input" id="pu_chipStart" placeholder="如 042060107000177" inputmode="numeric"><div class="fs-sm mt-2" id="pu_chipPreview"><span class="text-muted">填写起始号后，这里会预览将要生成的号码范围</span></div></div>';
+      html += '</div><div class="form-row-3">';
       html += '<div class="form-group"><label class="form-label">备注</label><input class="form-input" id="pu_note" placeholder="备注"></div>';
       html += '</div>';
       html += '<button class="btn btn-primary" id="btnPurchase">提交采购入库</button>';
@@ -2248,6 +2322,9 @@ const Shelter = {
       });
       // 采购数量：PC/移动端统一的 −/+ 步进按钮
       TNR_UI.bindQtyStepper('pu_qty');
+      // 芯片「首号 + 数量」实时预览（C1）：重号在提交前就能看见，
+      // 而不是填完一整个表单才被服务端 400 打回来。
+      TNR_UI.bindChipPreview('purchase', 'pu_chipStart', 'pu_qty', 'pu_chipPreview');
 
       document.getElementById('btnPurchase').addEventListener('click', async () => {
         const cat = document.getElementById('pu_category').value;
@@ -2266,6 +2343,7 @@ const Shelter = {
           quantity: qty,
           unit: document.getElementById('pu_unit').value.trim() || '支',
           batch_no: document.getElementById('pu_batchNo').value.trim(),
+          expiry_date: document.getElementById('pu_expiry').value || '',
           supplier: document.getElementById('pu_supplier').value.trim(),
           date: document.getElementById('pu_date').value || TNR_UI.formatDate(new Date()),
           note: document.getElementById('pu_note').value.trim(),
@@ -2305,8 +2383,12 @@ const Shelter = {
       html += '<div class="form-group"><label class="form-label">批号</label><input class="form-input" id="ob_batchNo" placeholder="批号"></div>';
       html += '<div class="form-group"><label class="form-label">备注</label><input class="form-input" id="ob_note" placeholder="备注"></div>';
       html += '</div><div class="form-row-3">';
-      html += '<div class="form-group" id="ob_chipRangeGroup" style="display:none;"><label class="form-label">芯片起始号</label><input class="form-input" id="ob_chipStart" placeholder="如：042060107000177"></div>';
+      html += '<div class="form-group" id="ob_chipRangeGroup" style="display:none;"><label class="form-label">芯片起始号</label><input class="form-input" id="ob_chipStart" placeholder="如：042060107000177" inputmode="numeric"><div class="mt-2" id="ob_chipSegments"></div><div class="fs-sm mt-2" id="ob_chipPreview"><span class="text-muted">填写起始号后，这里会预览将要下发的号码范围</span></div></div>';
       html += '</div>';
+      // B5：提交前预览「会扣哪几批」。下发不跳过过期批次（与 consume 不同）
+      // —— 但预览会如实显示所扣批次的效期，把过期货发出去之前操作员
+      // 能看见「扣的是 2025-06 到期的那批」，比事后对台账容易挽回。
+      html += '<div class="form-group"><div class="fs-sm" id="ob_batchHint"><span class="text-muted">填写数量后，这里会预览将要扣减的批次</span></div></div>';
       html += '<button class="btn btn-primary" id="btnOutbound">提交下发</button>';
       html += '</div></div>';
 
@@ -2406,16 +2488,47 @@ const Shelter = {
           + '</option>').join('');
       };
 
+      // 芯片「首号 + 数量」预览（C1）：dispatch 预检还会逐颗校验
+      // 「属于本机构 + 属于该物料 + 状态可用」，跟提交走同一判据。
+      const obPreview = TNR_UI.bindChipPreview('dispatch', 'ob_chipStart', 'ob_qty', 'ob_chipPreview',
+        () => ({ material_id: matSel.value }));
+      // B5：FEFO 批次扣减预览（与服务端落库共用 plan_fefo_deduction 判据）
+      const obBatchPreview = TNR_UI.bindBatchPreview('ob_qty', 'ob_batchHint',
+        () => matSel.value || null, 'dispatch');
       matSel.addEventListener('change', (e) => {
         const mat = materials.find(m => String(m.id) === String(e.target.value));
-        document.getElementById('ob_chipRangeGroup').style.display = (mat && mat.category === 'chip') ? '' : 'none';
+        const isChip = !!(mat && mat.category === 'chip');
+        document.getElementById('ob_chipRangeGroup').style.display = isChip ? '' : 'none';
+        // 可用号段摘要（C2）：点一段自动把段首填进起始号。
+        // 换物料时必须重拉 —— 不同物料可用的号码完全不同。
+        if (isChip) {
+          TNR_UI.renderChipSegments('ob_chipSegments', mat.id, (start) => {
+            document.getElementById('ob_chipStart').value = start;
+            if (obPreview) obPreview.rerun();
+          });
+        } else {
+          document.getElementById('ob_chipSegments').innerHTML = '';
+        }
         // 物料换了 → 可下发范围可能跟着变（范围由发起方层级 + 物料区县共同决定）
         loadTargets();
+        // 物料换了，带上新 material_id 的预检结果才是有效的
+        if (obPreview) obPreview.rerun();
+        if (obBatchPreview) obBatchPreview.rerun();
       });
       typeSel.addEventListener('change', loadTargets);
       // 下发数量：PC/移动端统一的 −/+ 步进按钮（上限仍由提交时的库存校验兜底）
       TNR_UI.bindQtyStepper('ob_qty');
       loadTargets();
+      // 首屏默认选中的物料若就是芯片，同样亮出起始号与号段摘要
+      // （change 监听只管「换物料」，初始选中不会触发它）。
+      const initMat = materials.find(m => String(m.id) === String(matSel.value));
+      if (initMat && initMat.category === 'chip') {
+        document.getElementById('ob_chipRangeGroup').style.display = '';
+        TNR_UI.renderChipSegments('ob_chipSegments', initMat.id, (start) => {
+          document.getElementById('ob_chipStart').value = start;
+          if (obPreview) obPreview.rerun();
+        });
+      }
 
       document.getElementById('btnOutbound').addEventListener('click', async () => {
         const mat = materials.find(m => String(m.id) === String(matSel.value));
@@ -2540,6 +2653,14 @@ const Shelter = {
         + '<select class="form-select" id="adjMaterial"><option value="">请选择</option>' + opts + '</select></div>'
         + '<div class="form-group"><label class="form-label">数量<span class="req">*</span></label>'
         + '<input type="number" class="form-input" id="adjQty" value="1" min="1" /></div></div>'
+        + '<div class="form-group" id="adjChipGroup" style="display:none;"><label class="form-label">芯片起始号<span class="req">*</span></label>'
+        + '<input class="form-input" id="adjChipStart" placeholder="如 042060107000177" inputmode="numeric">'
+        + '<div class="fs-sm text-muted mt-2">按「首号 + 数量」作废连续号码的芯片，作废后不可恢复</div>'
+        + '<div class="mt-2" id="adjChipSegments"></div>'
+        + '<div class="fs-sm mt-2" id="adjChipPreview"><span class="text-muted">填写起始号后，这里会预览将要作废的号码范围</span></div></div>'
+        // B5：异动 = 过期物料的正规出口，预览不跳过过期批次 —— 操作员
+        // 能明确看到「报废扣的就是那批 2025-06 到期的」，提交前心里有数。
+        + '<div class="form-group"><div class="fs-sm" id="adjBatchHint"><span class="text-muted">填写数量后，这里会预览将要扣减的批次</span></div></div>'
         + '<div class="form-group"><label class="form-label">原因说明<span class="req">*</span></label>'
         + '<textarea class="form-textarea" id="adjReason" placeholder="请说明异动原因（过期报废/破损/盘亏等）"></textarea></div>'
         + '<div style="display:flex;justify-content:flex-end;">'
@@ -2566,6 +2687,34 @@ const Shelter = {
         });
       }
       TNR_UI.bindQtyStepper('adjQty');
+      // 芯片物料按号码作废（「首号 + 数量」口径）：选到芯片时才亮出起始号，
+      // 否则后端 `chip_batch_void()` 拿不到号码直接 400 —— 而界面上
+      // 原来没有任何地方能填，芯片报废这条路完全走不通。
+      // 作废是**不可恢复**操作，预览（void 预检）在提交前逐颗核对，
+      // 比事后发现「作废错了号码」挽救成本低得多。
+      const adjPreview = TNR_UI.bindChipPreview('void', 'adjChipStart', 'adjQty', 'adjChipPreview',
+        () => ({ material_id: document.getElementById('adjMaterial').value }));
+      // B5：FEFO 批次扣减预览（adjustment：过期物料不跳过，报废正是出口）
+      const adjBatchPreview = TNR_UI.bindBatchPreview('adjQty', 'adjBatchHint',
+        () => document.getElementById('adjMaterial')?.value || null, 'adjustment');
+      const adjToggleChip = () => {
+        const m = materials.find(x => String(x.id) === String(document.getElementById('adjMaterial').value));
+        const isChip = !!(m && m.category === 'chip');
+        document.getElementById('adjChipGroup').style.display = isChip ? '' : 'none';
+        if (isChip) {
+          TNR_UI.renderChipSegments('adjChipSegments', m.id, (start) => {
+            document.getElementById('adjChipStart').value = start;
+            if (adjPreview) adjPreview.rerun();
+          });
+        } else {
+          document.getElementById('adjChipSegments').innerHTML = '';
+        }
+      };
+      wrap.querySelector('#adjMaterial')?.addEventListener('change', () => {
+        adjToggleChip();
+        // 物料切换 → 批次预览跟着重跑（bindBatchPreview 只监听数量输入）
+        if (adjBatchPreview) adjBatchPreview.rerun();
+      });
       wrap.querySelector('#adjSubmitBtn')
         ?.addEventListener('click', () => this.saveStockAdjustment());
 
@@ -2720,11 +2869,17 @@ const Shelter = {
     if (!mid) { TNR_UI.toast('请选择物料', 'warning'); return; }
     if (!qty || qty <= 0) { TNR_UI.toast('请输入有效数量', 'warning'); return; }
     if (!reason) { TNR_UI.toast('请填写原因说明', 'warning'); return; }
+    // 芯片物料：异动 = 按「首号 + 数量」作废号码。空号码先在前端挡一道，
+    // 后端 `chip_batch_void()` 还有第二道（「请填写起始芯片号」）。
+    const mat = (this._materials || []).find(x => String(x.id) === String(mid));
+    const chipStart = (mat && mat.category === 'chip')
+      ? (document.getElementById('adjChipStart')?.value || '').trim() : '';
+    if (mat && mat.category === 'chip' && !chipStart) { TNR_UI.toast('请填写芯片起始号', 'warning'); return; }
 
     let res;
     try {
       res = await TNR_API.adjustStock({
-        material_id: parseInt(mid, 10), quantity: qty, reason: reason
+        material_id: parseInt(mid, 10), quantity: qty, reason: reason, chip_start: chipStart
       });
     } catch (e) {
       TNR_UI.toast(e.message || '操作失败', 'danger');

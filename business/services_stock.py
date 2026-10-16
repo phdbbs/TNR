@@ -5,10 +5,13 @@ TNR 业务系统 - 机构库存服务层（从 services.py 拆出）
 `business/services.py` 仍 re-export 这些名字，旧导入路径继续可用；
 新代码建议直接 `from business.services_stock import ...`。
 """
+import datetime
+from datetime import timedelta
+
 from django.db.models import F, Sum
 from django.utils import timezone
 
-from business.models import Material, MaterialStock, MaterialTransaction
+from business.models import Material, MaterialBatch, MaterialStock, MaterialTransaction
 from core.models import Institution
 
 
@@ -275,22 +278,203 @@ def get_institution_ledger_total(material, institution):
 
 
 # ============================================
+# 物料批次（B5）
+# ============================================
+NEAR_EXPIRY_DAYS = 30  # 临期提示窗口（前端批次明细标红用，判据只有这一份）
+
+
+def _initial_batch_no(material):
+    """存量/未登记批号的「初始批次」命名 —— 与 `stock_init.initial_batch_no` 同口径。"""
+    from business import stock_init
+    return stock_init.initial_batch_no(material)
+
+
+def fefo_sorted(batches):
+    """FEFO 排序：近效期在前、无效期垫底；同效期（或同无效期）按 id 先后。
+
+    ⚠ 在 Python 里排而不是 ORM `order_by(F('expiry_date').asc(nulls_last=True))`：
+    MySQL/MariaDB 不支持 `NULLS LAST` 语法，写在 ORM 里换库就 500。
+    批次行数「一个机构 × 一种物料」通常是个位数，内存排序零成本。
+    """
+    return sorted(batches, key=lambda b: (b.expiry_date is None, b.expiry_date or '', b.id))
+
+
+def get_material_batches(material, institution):
+    """某机构在某物料上的批次明细（FEFO 顺序）。含余量为 0 的批次 ——
+    批次档案（批号/效期）在耗尽后仍要可查（追溯、签收回填效期都靠它）。"""
+    if material is None or institution is None:
+        return []
+    return fefo_sorted(MaterialBatch.objects.filter(
+        material=material, institution=institution))
+
+
+def batch_expiry_state(material, institution, today=None):
+    """批次余量按「是否过期」二分 → (可用, 已过期)。
+
+    「有任一未过期余量 → 可用」这条判据在**预检**
+    （`services.expired_material_error`）与**落库**（`plan_fefo_deduction`）
+    共用这一份 —— 两处各写一遍就是「预检说能用、提交却被拦」的孪生漂移。
+    """
+    today = today or timezone.localdate()
+    available = expired = 0
+    for b in MaterialBatch.objects.filter(material=material, institution=institution):
+        if b.quantity <= 0:
+            continue
+        if b.expiry_date and b.expiry_date < today:
+            expired += b.quantity
+        else:
+            available += b.quantity
+    return available, expired
+
+
+def batch_available_quantity(material, institution):
+    """未过期批次可用量合计（`expired_material_error` 的批次级判据用）。"""
+    return batch_expiry_state(material, institution)[0]
+
+
+def materialize_initial_batches(material, institution):
+    """把「有机构库存、但还没有任何批次行」物化成一条初始批次。
+
+    什么时候发生：B5 迁移只回填**当时已有** `MaterialStock` 行的物料；
+    `shelter_stock` 直写字段、还没建过库存行的存量物料走
+    `_opening_quantity_for_new_row` 的结转路径，第一次业务发生时
+    库存行与批次行必须**同时**诞生，否则「库存行 == Σ批次」从第一笔起
+    就不成立（对账规则从上线第一天就全是红）。
+
+    幂等：已有任何批次行 → 直接返回，不重复结转。
+    """
+    if material is None or institution is None:
+        return
+    if MaterialBatch.objects.filter(material=material, institution=institution).exists():
+        return
+    current = get_institution_stock(material, institution)
+    if current <= 0:
+        return
+    MaterialBatch.objects.create(
+        material=material, institution=institution,
+        batch_no=_initial_batch_no(material),
+        expiry_date=getattr(material, 'expiry_date', None),
+        quantity=current)
+
+
+def plan_fefo_deduction(material, institution, quantity, skip_expired=False, today=None):
+    """出库扣减计划（FEFO）：返回 [(批次, 扣减量), ...]。
+
+    - 近效期先出、同效期按入库先后（`fefo_sorted`）；
+    - `skip_expired=True`（consume）时跳过已过期批次 —— 过期药品不能用于
+      诊疗，但**不是**扣它旁边的有效批次：扣错批次 = 台账上的批号与
+      实际用在动物身上的药对不上，出了不良反应查不到源头；
+    - dispatch / adjustment **不**跳过：过期物料的正规出口就是
+      「下发退回供应商 / 异动报废」，再拦就把死库存焊死在账上。
+
+    :raises ValueError: 可用量不足。文案区分两种成因（全过期 vs 普通不足），
+        「全部批次过期」要引导用户走异动报废，而不是让他反复减数量重试。
+    """
+    today = today or timezone.localdate()
+    batches = [b for b in get_material_batches(material, institution) if b.quantity > 0]
+    usable = [b for b in batches
+              if not (skip_expired and b.expiry_date and b.expiry_date < today)]
+    plan, remaining = [], quantity
+    for b in usable:
+        take = min(b.quantity, remaining)
+        if take > 0:
+            plan.append((b, take))
+            remaining -= take
+        if remaining <= 0:
+            break
+    if remaining > 0:
+        available = sum(b.quantity for b in usable)
+        expired_qty = sum(b.quantity for b in batches) - available
+        if skip_expired and available == 0 and expired_qty > 0:
+            raise ValueError(
+                f'「{material.name}」可用批次已全部过期（共 {expired_qty}），'
+                f'不能用于诊疗；请先做库存异动（过期报废）处理')
+        if expired_qty > 0:
+            raise ValueError(
+                f'「{material.name}」可用库存不足（可用 {available}，'
+                f'需 {quantity}，另有 {expired_qty} 已过期被跳过）')
+        raise ValueError(
+            f'「{material.name}」批次库存不足（可用 {available}，需 {quantity}）')
+    return plan
+
+
+def _parse_expiry(value):
+    """把外部传入的效期规整成 date；无效/空 → None（不猜）。"""
+    if value in (None, ''):
+        return None
+    if isinstance(value, datetime.date):
+        return value
+    try:
+        return datetime.datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _credit_batch(material, inst, txn_type, amount, extra):
+    """入库方向的批次记入：返回 (批次, 数量)。
+
+    - purchase / receive：批号取 extra（表单/下发单），空则退「初始批次」；
+      同批号再次入库 = 同一批货，**累加**并更新效期；
+    - 负数 adjustment（撤销退回）：没有明确批号 —— 退回 FEFO 最前排的
+      批次（撤销所退的量通常正是刚从前排扣走的，近似还原；
+      一行批次都没有时按主表快照批号建一条）。
+    """
+    expiry = _parse_expiry(extra.get('expiry_date'))
+    if txn_type == 'adjustment':
+        batches = list(MaterialBatch.objects.filter(material=material, institution=inst))
+        if batches:
+            return fefo_sorted(batches)[0], amount
+        batch_no = _initial_batch_no(material)
+    else:
+        batch_no = (extra.get('batch_no') or '').strip() or _initial_batch_no(material)
+    batch, _created = MaterialBatch.objects.get_or_create(
+        material=material, institution=inst, batch_no=batch_no,
+        defaults={'quantity': 0, 'expiry_date': expiry})
+    if expiry is not None and batch.expiry_date != expiry:
+        # 同批号再次入库：效期随之更新（批号相同 = 同一批货，新效期为准）。
+        MaterialBatch.objects.filter(pk=batch.pk).update(expiry_date=expiry)
+    return batch, amount
+
+
+def _deduct_batches(material, inst, amount, txn_type):
+    """出库方向的 FEFO 扣减计划。没有任何批次行 → 返回 None（legacy 回退）。
+
+    legacy 回退的场景：测试助手 / 历史调用直接造流水，机构还没有批次行 ——
+    此时批次行数为 0，硬走 `plan_fefo_deduction` 会把「无批次」当成
+    「库存为 0」拦下来，旧行为回归全挂。"""
+    if not MaterialBatch.objects.filter(material=material, institution=inst).exists():
+        return None
+    return plan_fefo_deduction(
+        material, inst, amount, skip_expired=(txn_type == 'consume'))
+
+
+# ============================================
 # 库存调整
 # ============================================
 def adjust_stock(material, hospital, quantity, txn_type, institution=None, **extra):
-    """创建物资流水并调整库存。
+    """创建物资流水并调整库存（B5 起带**批次记账**）。
 
     :param material: 物料对象
     :param hospital: **对方机构**（下发时的接收方）；None 表示无对方机构
-    :param quantity: 数量（正整数）
+    :param quantity: 数量（正整数；负数仅用于 adjustment 的撤销退回）
     :param txn_type: 流水类型 purchase/dispatch/receive/consume/adjustment
     :param institution: **库存归属机构** —— 本笔流水动的是谁的库存。
         捕捉点侧传发起捕捉点，医院侧传该医院。不传时退化为 `hospital`；
         两者都没有则走**兼容路径**（只动旧的 `shelter_stock` 字段，
-        不写机构库存表）—— 那条路径只为历史调用与单元测试保留，
-        生产代码一律显式传 `institution`。
-    :param extra: 额外字段，如 operator/batch_no/supplier/from_to/note/ledger_no/district
-    :return: 创建的 MaterialTransaction 对象
+        不写机构库存表、也不记批次）—— 那条路径只为历史调用与单元测试
+        保留，生产代码一律显式传 `institution`。
+    :param extra: 额外字段，如 operator/batch_no/expiry_date/supplier/
+        from_to/note/ledger_no/district/ref_no
+    :return: 创建的 MaterialTransaction **列表**。B5 起出库跨批次会自动拆成
+        多笔（同 ledger_no/note，每笔 batch_no = 所扣批次、quantity = 该批
+        扣减量）——「一笔业务」在物理上就是 N 行，返回单条会让调用方
+        漏改兄弟行（下发的兄弟行就是签收的入口，漏改 = 签收链路断裂）。
+
+    批次规则（只对 institution 明确的生产路径生效，legacy 路径行为不变）：
+    - 入库（purchase/receive）：按批号 get_or_create 批次行并累加，效期随之
+      更新；效期从 extra['expiry_date'] 传入（采购 = 表单，签收 = 发起方批次）；
+    - 出库（dispatch/consume/adjustment）：FEFO 扣减，consume 跳过已过期批次；
+    - 负数 adjustment（撤销退回）：退回 FEFO 最前排批次。
 
     ⚠ 库存判据必须在**建流水之前**。
     原先先 `MaterialTransaction.objects.create()` 再判库存，库存不足时抛
@@ -327,13 +511,31 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
         elif material.shelter_stock < quantity:
             raise ValueError(f'捕捉点库存不足（当前 {material.shelter_stock}，需 {quantity}）')
 
-    txn = MaterialTransaction.objects.create(
+    # ---- 批次计划（B5）----
+    # 必须在建流水**之前**：计划抛错（全过期/批次不足）时不能留下半截子流水。
+    # legacy 路径（无机构归属）不做批次记账，batch_plan 保持 None。
+    batch_plan = None
+    if inst is not None:
+        # 存量结转：还没物化批次行的库存，趁第一笔业务一起物化
+        materialize_initial_batches(material, inst)
+        delta = stock_delta(txn_type, quantity) if quantity else 0
+        if delta > 0:
+            batch_plan = [_credit_batch(material, inst, txn_type, delta, extra)]
+        elif delta < 0:
+            batch_plan = _deduct_batches(material, inst, -delta, txn_type)
+
+    # 芯片**不拆行**：号码才是芯片的真源（`Chip` 表逐号管理，全部挂在
+    # 同一条 dispatch 流水下），拆行会让 `chip_batch_receive` 的
+    # 「在途数 == 下发单数量」强绑定校验当场错开（数量只落在第一行上）。
+    # 批次行照常按 FEFO 计划更新（Σ批次 == 库存的等式不破），
+    # 只是流水保持单行、批号沿用主表快照。
+    split_rows = batch_plan is not None and material.category != 'chip'
+
+    common_fields = dict(
         type=txn_type,
         material=material,
         material_name=material.name,
-        quantity=quantity,
         unit=material.unit,
-        batch_no=extra.get('batch_no', material.batch_no),
         supplier=extra.get('supplier', material.supplier),
         from_to=extra.get('from_to', ''),
         hospital=hospital,
@@ -347,13 +549,46 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
         note=extra.get('note', ''),
     )
 
+    txns = []
+    if batch_plan and split_rows:
+        if stock_delta(txn_type, quantity) < 0:
+            # 出库拆行：每笔流水 = 「从某批次扣了多少」，quantity 为正、
+            # 方向由 type 表达（与既有流水的符号约定一致）。
+            for batch, take in batch_plan:
+                txns.append(MaterialTransaction.objects.create(
+                    **common_fields, quantity=take, batch_no=batch.batch_no))
+        else:
+            # 入库（含负数 adjustment 撤销退回）：单批记入，
+            # quantity 原样保留（撤销退回时它就是负数）。
+            batch, _amount = batch_plan[0]
+            txns.append(MaterialTransaction.objects.create(
+                **common_fields, quantity=quantity, batch_no=batch.batch_no))
+    else:
+        # 芯片（批次行更新但不拆行）或 legacy 无批次路径：单行流水。
+        txns.append(MaterialTransaction.objects.create(
+            **common_fields,
+            quantity=quantity,
+            batch_no=extra.get('batch_no', material.batch_no)))
+
     # ---- 库存落账 ----
     # 两条路径，**不要合并**：
     #  ① 有机构归属（生产路径）→ 增量维护 `MaterialStock` 那一行；
     #     若归属是捕捉点，同时把旧的 `shelter_stock` **按新表重算**，
     #     让兼容字段与真源恒等（对账规则因此可以写成硬判据）。
-    #  ② 无机构归属（历史调用 / 单元测试）→ 只动旧字段，行为与改造前一致。
+    # ② 无机构归属（历史调用 / 单元测试）→ 只动旧字段，行为与改造前一致。
     if inst is not None:
+        total_delta = stock_delta(txn_type, quantity) if quantity else 0
+        # 批次行增量维护 —— 与 MaterialStock 同一事务、同一「已算好的结果」
+        # 口径；出库按计划逐批减、入库单批加，Σ批次 == 库存行 恒等。
+        if batch_plan:
+            if total_delta < 0:
+                for batch, take in batch_plan:
+                    MaterialBatch.objects.filter(pk=batch.pk).update(
+                        quantity=F('quantity') - take)
+            else:
+                batch = batch_plan[0][0]
+                MaterialBatch.objects.filter(pk=batch.pk).update(
+                    quantity=F('quantity') + total_delta)
         apply_stock_delta(material, inst, txn_type, quantity)
         if inst.type == 'shelter':
             material.shelter_stock = get_shelter_stock(material)
@@ -365,4 +600,4 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
             material.shelter_stock -= quantity
         material.save(update_fields=['shelter_stock'])
 
-    return txn
+    return txns

@@ -29,8 +29,9 @@
 """
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.db.models import Sum
 
-from business.models import Material, MaterialStock
+from business.models import Material, MaterialBatch, MaterialStock
 from business.services import get_institution_ledger_total, get_shelter_stock
 
 
@@ -101,6 +102,55 @@ class Command(BaseCommand):
                                 shelter_stock=current)
                     self.stdout.write(self.style.SUCCESS(f'已修正 {len(drift)} 条物料'))
 
-        if not apply_changes and (planned or options['shelter_field']):
+        # ---- B5：批次对账（库存行 == Σ批次）----
+        # 批次行与库存行同为「已算好的结果」，两者必须精确相等；不等 =
+        # 批次记账路径漏了一次维护（或有人绕过 adjust_stock 直改批次）。
+        # 修法与主对账同向：以**库存行**为基准把批次余量整体重铺
+        # （比例分配无意义 —— 批次是物理批次，库存行是它们的合计，
+        #   合计对了、分布错了只能按 FEFO 顺序前铺，至少与扣减顺序一致）。
+        batch_drift = []
+        for row in MaterialStock.objects.select_related('material', 'institution'):
+            batch_total = MaterialBatch.objects.filter(
+                material=row.material, institution=row.institution
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+            if batch_total != row.quantity:
+                batch_drift.append((row, batch_total))
+        if not batch_drift:
+            self.stdout.write('机构库存与批次明细全部一致')
+        else:
+            self.stdout.write(self.style.WARNING(
+                f'发现 {len(batch_drift)} 行机构库存与批次合计不一致：'))
+            for row, batch_total in batch_drift[:limit]:
+                self.stdout.write(
+                    f'    - {row.institution.name} / {row.material.name}：'
+                    f'库存 {row.quantity}，批次合计 {batch_total}')
+            if len(batch_drift) > limit:
+                self.stdout.write(f'    …（其余 {len(batch_drift) - limit} 行未列出）')
+            if apply_changes:
+                with transaction.atomic():
+                    for row, batch_total in batch_drift:
+                        # 差额（库存 - 批次合计）落到 **FEFO 前排**的批次上：
+                        # 与扣减顺序同向，误差集中在最快被消耗核对掉的批次，
+                        # 而不是按比例摊薄到每个批次（那会把漂移伪装成正常）。
+                        # 没有任何批次行时（库存行在、批次从未物化）按主表
+                        # 快照补一条初始批次 —— 与 0029 迁移同口径。
+                        delta = row.quantity - batch_total
+                        first = MaterialBatch.objects.filter(
+                            material=row.material, institution=row.institution
+                        ).order_by('expiry_date', 'id').first()
+                        if first is not None:
+                            MaterialBatch.objects.filter(pk=first.pk).update(
+                                quantity=first.quantity + delta)
+                        elif row.quantity:
+                            from business.stock_init import initial_batch_no
+                            MaterialBatch.objects.create(
+                                material=row.material, institution=row.institution,
+                                batch_no=initial_batch_no(row.material),
+                                expiry_date=row.material.expiry_date,
+                                quantity=row.quantity)
+                self.stdout.write(self.style.SUCCESS(
+                    f'已按库存行修正 {len(batch_drift)} 组批次余量'))
+
+        if not apply_changes and (planned or batch_drift or options['shelter_field']):
             self.stdout.write('')
             self.stdout.write('这是 **dry-run**，什么都没有写。确认无误后加 --apply。')

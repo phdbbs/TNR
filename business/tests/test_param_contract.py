@@ -863,15 +863,19 @@ class AdjustStockAtomicityTest(BusinessTestBase):
         self.assertEqual(material.shelter_stock, 5, '库存被改动了')
 
     def test_sufficient_stock_still_writes(self):
-        """正向对照：够库存时必须照常写流水 + 扣库存。"""
+        """正向对照：够库存时必须照常写流水 + 扣库存。
+
+        B5 起 `adjust_stock` 返回**列表**（出库跨批次拆多笔流水）——
+        legacy 路径（无机构归属）恒为单元素列表。
+        """
         material = make_material(district=self.district_a,
                                  name='原子性物料2', shelter_stock=5)
-        txn = adjust_stock(material, None, 3, 'dispatch')
+        txns = adjust_stock(material, None, 3, 'dispatch')
         self.assertEqual(MaterialTransaction.objects.filter(
             material=material).count(), 1)
         material.refresh_from_db()
         self.assertEqual(material.shelter_stock, 2)
-        self.assertEqual(txn.type, 'dispatch')
+        self.assertEqual(txns[0].type, 'dispatch')
 
     def test_purchase_is_not_blocked_by_stock_check(self):
         """正向对照：`purchase` 是加库存，不该被库存判据拦住。"""

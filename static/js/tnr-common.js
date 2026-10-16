@@ -175,6 +175,277 @@ const TNR_UI = {
     return { drawerEl, close: closeFn };
   },
 
+  // === 芯片「首号 + 数量」配套组件（捕捉点 / 医院两端共用） ===
+  // 三个方法的文案与判据只有**这一份实现** —— 两端各自写一遍的话，
+  // 追溯时间线的标题、状态徽章迟早漂移成两种口径。
+
+  /* 实时预览（oninput 防抖调 `chips/preview/`）。
+   * 预检与提交走**服务端同一判据**，前端只做展示、不另立判据；
+   * `purpose`：purchase / dispatch / void；后两者经 `getExtra()` 动态带
+   * `material_id`（物料下拉随时会换）。返回 `{rerun}` 供物料变化时手动重跑。 */
+  bindChipPreview(purpose, startId, qtyId, hintId, getExtra) {
+    const startEl = document.getElementById(startId);
+    const qtyEl = document.getElementById(qtyId);
+    const hintEl = document.getElementById(hintId);
+    if (!startEl || !qtyEl || !hintEl) return null;
+    let timer = null;
+    let seq = 0;  // 丢弃过期响应：网络慢时前一次的结果不能盖掉最新一次
+    const run = async () => {
+      const first = startEl.value.trim();
+      const count = parseInt(qtyEl.value, 10) || 0;
+      if (!first) {
+        hintEl.innerHTML = '<span class="text-muted">填写起始号后，这里会预览将要生成 / 操作的号码范围</span>';
+        return;
+      }
+      if (count < 1) {
+        hintEl.innerHTML = '<span style="color:var(--rouge);font-size:13px;">数量至少为 1</span>';
+        return;
+      }
+      const mySeq = ++seq;
+      const res = await TNR_API.previewChips(Object.assign(
+        { purpose: purpose, first_number: first, count: count },
+        getExtra ? getExtra() : {}));
+      if (mySeq !== seq) return;
+      const d = (res && res.data) || {};
+      if (d.ok) {
+        hintEl.innerHTML = '<span style="color:var(--bamboo-green);font-size:13px;">✔ 将处理 '
+          + '<b class="font-mono">' + this.escape(d.first_number) + ' ~ ' + this.escape(d.last_number)
+          + '</b>，共 ' + d.count + ' 颗</span>';
+      } else {
+        hintEl.innerHTML = '<span style="color:var(--rouge);font-size:13px;">✘ '
+          + this.escape(d.reason || '无法处理该号码范围') + '</span>';
+      }
+    };
+    const debounced = () => { clearTimeout(timer); timer = setTimeout(run, 300); };
+    startEl.addEventListener('input', debounced);
+    qtyEl.addEventListener('input', debounced);
+    return { rerun: run };
+  },
+
+  /* 可用芯片的连续号段摘要：点击一段 → `onPick(段首)` 由调用方填进起始号。
+   * 「看得到号段」比「逼操作员翻台账抄号码」少一半录入错误。 */
+  async renderChipSegments(boxId, materialId, onPick) {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    if (!materialId) { box.innerHTML = ''; return; }
+    let res;
+    try {
+      res = await TNR_API.getChipSegments(materialId);
+    } catch (e) {
+      box.innerHTML = '<div class="fs-sm" style="color:var(--rouge);">号段加载失败：'
+        + this.escape(e.message || '') + '</div>';
+      return;
+    }
+    const segs = (res && res.segments) || [];
+    if (!segs.length) {
+      box.innerHTML = '<div class="fs-sm text-muted">本机构该物料暂无可用芯片</div>';
+      return;
+    }
+    box.innerHTML = '<div class="fs-sm text-muted" style="margin-bottom:var(--sp-2);">可用号段（点击填入起始号）：</div>'
+      + segs.map(s => '<button type="button" class="btn btn-outline btn-sm font-mono" style="margin:0 var(--sp-2) var(--sp-2) 0;"'
+        + ' data-segstart="' + this.escape(s.start) + '" data-segend="' + this.escape(s.end) + '">'
+        + this.escape(s.start) + (s.start !== s.end ? ' ~ ' + this.escape(s.end) : '')
+        + '<span class="text-muted">（' + s.count + '颗）</span></button>').join('');
+    box.querySelectorAll('[data-segstart]').forEach(b => {
+      b.addEventListener('click', () => { if (onPick) onPick(b.dataset.segstart); });
+    });
+  },
+
+  /* 芯片追溯时间线抽屉。事件顺序 = 采购 → 下发 → 签收 → 植入 → 作废，
+   * 由服务端 `chips/trace/` 排好序返回，这里只负责展示。 */
+  async showChipTrace(number) {
+    let res;
+    try {
+      res = await TNR_API.traceChip(number);
+    } catch (e) {
+      this.toast('追溯加载失败：' + (e.message || ''), 'danger');
+      return;
+    }
+    const chip = (res && res.chip) || {};
+    const events = (res && res.events) || [];
+    const statusText = { available: '可用', in_transit: '在途', used: '已植入', void: '作废' };
+    let html = '<div style="padding:var(--sp-4);">'
+      + this.renderDescList([
+        { label: '芯片号', value: '<span class="font-mono">' + this.escape(chip.number || number) + '</span>' },
+        { label: '当前状态', value: statusText[chip.status] || chip.status || '—' },
+        { label: '持有机构', value: this.escape(chip.institutionName || '—') },
+        { label: '绑定宠物', value: chip.petCode ? this.escape(chip.petCode) : '—' }
+      ]) + '</div>';
+    if (!events.length) {
+      html += '<div class="fs-sm text-muted" style="padding:0 var(--sp-4) var(--sp-4);">暂无流转记录</div>';
+    } else {
+      html += '<div style="padding:0 var(--sp-4) var(--sp-4);">';
+      events.forEach(ev => {
+        html += '<div style="display:flex;gap:var(--sp-3);padding:var(--sp-2) 0;">'
+          + '<div style="width:8px;height:8px;border-radius:50%;background:var(--bamboo-green);margin-top:7px;flex:none;"></div>'
+          + '<div><div style="font-weight:600;">' + this.escape(ev.title || '')
+          + ' <span class="fs-sm text-muted">' + this.escape(ev.time || '') + '</span></div>'
+          + (ev.detail ? '<div class="fs-sm text-muted">' + this.escape(ev.detail) + '</div>' : '')
+          + '</div></div>';
+      });
+      html += '</div>';
+    }
+    this.drawer({ title: '芯片追溯 · ' + this.escape(number), body: html });
+  },
+
+  // === 物料批次配套组件（B5：捕捉点 / 医院两端共用） ===
+  // 与芯片组件同一原则：文案与判据只有这一份实现，两端不各写一遍。
+
+  /* 批次明细表 HTML（FEFO 顺序，过期标红/临期标橙）。表格行内展开与
+   * 医院端卡片展开共用同一份渲染 —— 两处各写一遍，红/橙/绿的口径
+   * 迟早一边改了一边没改。 */
+  batchDetailHtml(batches) {
+    return '<table class="data-table" style="margin:0;"><thead><tr>'
+      + '<th>批号</th><th>有效期至</th><th>余量</th><th>状态</th></tr></thead><tbody>'
+      + batches.map(b => {
+        const expiry = b.expiry_date || '无效期';
+        const badge = b.expired
+          ? '<span style="color:var(--rouge);font-weight:600;">已过期</span>'
+          : (b.near_expiry
+            ? '<span style="color:#c07800;font-weight:600;">临期</span>'
+            : '<span style="color:var(--bamboo-green);">正常</span>');
+        const expiryStyle = b.expired ? 'color:var(--rouge);font-weight:600;text-decoration:line-through;'
+          : (b.near_expiry ? 'color:#c07800;font-weight:600;' : '');
+        return '<tr><td class="font-mono">' + this.escape(b.batch_no) + '</td>'
+          + '<td style="' + expiryStyle + '">' + this.escape(expiry) + '</td>'
+          + '<td>' + b.quantity + '</td><td>' + badge + '</td></tr>';
+      }).join('')
+      + '</tbody></table>';
+  },
+
+  /* 医院端「实时库存」卡片的批次展开（卡片不是表格行，不适配
+   * bindBatchExpand 的 tr 结构）：按钮点击 → fetch 一次 → toggle 卡片内
+   * 的批次区。`boxId` 是卡片内预留的容器，按钮与容器由调用方渲染。 */
+  async toggleCardBatches(materialId, boxEl) {
+    if (!boxEl) return;
+    if (boxEl.dataset.loaded) {
+      boxEl.style.display = boxEl.style.display === 'none' ? '' : 'none';
+      return;
+    }
+    boxEl.innerHTML = '<span class="fs-sm text-muted">批次加载中…</span>';
+    boxEl.style.display = '';
+    let res;
+    try {
+      res = await TNR_API.getMaterialBatches(materialId);
+    } catch (err) {
+      boxEl.innerHTML = '<span class="fs-sm" style="color:var(--rouge);">'
+        + '批次加载失败：' + this.escape(err.message || '') + '</span>';
+      return;
+    }
+    boxEl.dataset.loaded = '1';
+    const batches = (res && res.batches) || [];
+    if (!batches.length) {
+      boxEl.innerHTML = '<span class="fs-sm text-muted">本机构暂无批次台账</span>';
+      return;
+    }
+    boxEl.innerHTML = '<div class="fs-sm" style="font-weight:600;margin:var(--sp-2) 0;">批次明细'
+      + '<span class="text-muted" style="font-weight:400;">（近效期优先扣减）</span></div>'
+      + this.batchDetailHtml(batches);
+  },
+
+  /* 物料列表的「批次」行内展开/收起。按钮带 `data-material-id` /
+   * `data-material-name`，点击后在其所在行下方插入一条批次明细子行；
+   * 再次点击收起。政府端物料列表没有本机构概念，不适用（台账另有展示）。
+   *
+   * 为什么用事件委托签名 `bindBatchExpand(container)`：两端列表都是
+   * JS 重渲染的，逐个按钮绑事件会在重渲染后失效；委托绑在容器上一次即可。 */
+  bindBatchExpand(container) {
+    const box = typeof container === 'string'
+      ? document.getElementById(container) : container;
+    if (!box || box._batchExpandBound) return;
+    box._batchExpandBound = true;
+    box.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-batch-toggle]');
+      if (!btn) return;
+      const tr = btn.closest('tr');
+      if (!tr) return;
+      const existing = tr.nextElementSibling;
+      if (existing && existing.classList.contains('batch-detail-row')) {
+        // 已展开过：只做显隐切换（数据不重取 —— 批次在当前页停留期间
+        // 变化的窗口很小，重取反而让「点一下闪一下」）。
+        existing.style.display = existing.style.display === 'none' ? '' : 'none';
+        return;
+      }
+      const materialId = btn.dataset.materialId;
+      const detailRow = document.createElement('tr');
+      detailRow.className = 'batch-detail-row';
+      detailRow.innerHTML = '<td colspan="99"><span class="fs-sm text-muted">批次加载中…</span></td>';
+      tr.after(detailRow);
+      let res;
+      try {
+        res = await TNR_API.getMaterialBatches(materialId);
+      } catch (err) {
+        detailRow.innerHTML = '<td colspan="99"><span class="fs-sm" style="color:var(--rouge);">'
+          + '批次加载失败：' + this.escape(err.message || '') + '</span></td>';
+        return;
+      }
+      const batches = (res && res.batches) || [];
+      if (!batches.length) {
+        detailRow.innerHTML = '<td colspan="99"><span class="fs-sm text-muted">'
+          + '本机构暂无批次台账（该物料还没有入库 / 签收记录）</span></td>';
+        return;
+      }
+      detailRow.innerHTML = '<td colspan="99" style="background:var(--bg-secondary,#f8f7f4);padding:var(--sp-3);">'
+        + '<div class="fs-sm" style="font-weight:600;margin-bottom:var(--sp-2);">批次明细'
+        + '<span class="text-muted" style="font-weight:400;">（按近效期优先排序，扣减时先扣前排）</span></div>'
+        + this.batchDetailHtml(batches) + '</td>';
+    });
+  },
+
+  /* 消耗 / 下发 / 异动表单的「将扣批次预览」（C1 芯片预检同款）。
+   * `getMaterialId()` 动态取当前选中的物料，`txnType` 固定传给服务端 ——
+   * consume 跳过过期批次、dispatch/adjustment 不跳，预览与落库同判据。 */
+  bindBatchPreview(qtyId, hintId, getMaterialId, txnType) {
+    const qtyEl = document.getElementById(qtyId);
+    const hintEl = document.getElementById(hintId);
+    if (!qtyEl || !hintEl) return null;
+    let timer = null;
+    let seq = 0;  // 丢弃过期响应：物料切换后上一次的结果不能盖掉最新一次
+    const run = async () => {
+      const materialId = getMaterialId ? getMaterialId() : null;
+      const qty = parseInt(qtyEl.value, 10) || 0;
+      if (!materialId) {
+        hintEl.innerHTML = '<span class="fs-sm text-muted">选择物料后，这里会预览将要扣减的批次</span>';
+        return;
+      }
+      if (qty < 1) {
+        hintEl.innerHTML = '<span class="fs-sm text-muted">填写数量后，这里会预览将要扣减的批次</span>';
+        return;
+      }
+      const mySeq = ++seq;
+      let res;
+      try {
+        res = await TNR_API.previewMaterialBatches(materialId, {
+          quantity: qty, txn_type: txnType,
+        });
+      } catch (e) {
+        if (mySeq !== seq) return;
+        hintEl.innerHTML = '<span class="fs-sm text-muted">批次预览不可用</span>';
+        return;
+      }
+      if (mySeq !== seq) return;
+      const d = (res && res.data) || {};
+      if (!d.has_batches) {
+        hintEl.innerHTML = '<span class="fs-sm text-muted">该物料暂无批次台账'
+          + (typeof d.available === 'number' ? '（当前库存 ' + d.available + '）' : '')
+          + '，扣减不区分批次</span>';
+        return;
+      }
+      if (!d.enough) {
+        hintEl.innerHTML = '<span class="fs-sm" style="color:var(--rouge);">✘ '
+          + this.escape(d.message || '批次库存不足') + '</span>';
+        return;
+      }
+      const skipped = d.expired_skipped > 0
+        ? '<span style="color:#c07800;">（另有 ' + d.expired_skipped + ' 已过期批次被跳过）</span>' : '';
+      hintEl.innerHTML = '<span class="fs-sm" style="color:var(--bamboo-green);">✔ 将扣：</span>'
+        + '<span class="fs-sm">' + this.escape(d.message) + skipped + '</span>';
+    };
+    const debounced = () => { clearTimeout(timer); timer = setTimeout(run, 300); };
+    qtyEl.addEventListener('input', debounced);
+    return { rerun: run };
+  },
+
   // === 渲染表格（旧接口，保持兼容；标准列表请用 mountTable） ===
   renderTable({ columns, data, emptyText = '暂无数据', rowActions = null }) {
     if (!data || data.length === 0) {

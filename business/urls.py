@@ -61,6 +61,8 @@ urlpatterns = [
          views_treatment.treatment_item_undo, name='treatment_item_undo'),
     path('treatments/<int:pk>/done/', views_treatment.treatment_done, name='treatment_done'),
     path('treatments/<int:pk>/dispose/', views_treatment.treatment_dispose, name='treatment_dispose'),
+    # 诊疗后照片（B2）：第三步办结环节的当场留证，独立接口见视图注释。
+    path('treatments/<int:pk>/photo/', views_treatment.treatment_photo, name='treatment_photo'),
     path('treatments/<int:pk>/', views_treatment.treatment_detail, name='treatment_detail'),
 
     # ============================================
@@ -78,11 +80,21 @@ urlpatterns = [
          name='dispatch_target_options'),
     path('materials/shelter-ledger/', views_material.shelter_stock_ledger, name='shelter_stock_ledger'),
     path('materials/hospital-ledger/', views_material.hospital_stock_ledger, name='hospital_stock_ledger'),
+    # 物料批次（B5）：只读接口。批次记账收口在 `adjust_stock`（写路径仍走
+    # 采购/下发/签收/异动那些接口），这里只提供「本机构的批次明细」与
+    # 「FEFO 扣减预览」两个读面，供前端行内展开与表单预检。
+    path('materials/<int:pk>/batches/', views_material.material_batches, name='material_batches'),
+    path('materials/<int:pk>/batch-preview/', views_material.material_batch_preview,
+         name='material_batch_preview'),
     # 芯片（第四十六轮）：只读接口。写路径（入库/下发/签收）留在
     # `materials/purchase|dispatch|<pk>/receive` —— 它们本来就是
     # 「一笔物料业务」的两半，拆开会让「库存扣了、芯片没动」重新出现。
+    # `preview` 是 POST 但同样**不写库**（只读预检，见它的 docstring）。
     path('chips/', views_chip.chip_list, name='chip_list'),
     path('chips/available/', views_chip.chip_available, name='chip_available'),
+    path('chips/preview/', views_chip.chip_preview, name='chip_preview'),
+    path('chips/segments/', views_chip.chip_segments, name='chip_segments'),
+    path('chips/trace/', views_chip.chip_trace, name='chip_trace'),
 
     # ============================================
     # Task 8: 放归闭环

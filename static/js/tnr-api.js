@@ -192,6 +192,14 @@ const TNR_API = {
   async treatmentUndoItem(id, itemId) { return this._post('/api/business/treatments/' + id + '/items/' + itemId + '/undo/', {}); },
   async treatmentDone(id) { return this._post('/api/business/treatments/' + id + '/done/', {}); },
   async treatmentDispose(id, disposal) { return this._post('/api/business/treatments/' + id + '/dispose/', { disposal: disposal }); },
+  /* 诊疗后照片（B2）：multipart 走诊疗单独立接口。⚠ 不能复用
+     `uploadPetPhoto()`（领养 edit-info）—— 它会顺带把动物挂进领养大厅，
+     给「放归 / 无害化」动物传照片等于意外上架。 */
+  async uploadTreatmentPhoto(id, file) {
+    const fd = new FormData();
+    fd.append('photo', file);
+    return this._postForm('/api/business/treatments/' + id + '/photo/', fd);
+  },
   /* ---- 芯片（第四十六轮：按号码逐颗管理）---- */
   async getChips(params) {
     const qs = [];
@@ -205,6 +213,20 @@ const TNR_API = {
     const url = '/api/business/chips/available/'
       + (materialId ? '?material_id=' + encodeURIComponent(materialId) : '');
     return this.getData(url);
+  },
+  /* 提交前的「首号 + 数量」预检（C1）。虽然是 POST 但服务端**不写库** ——
+     永远返回 200，重号/非数字等都是 `ok:false` 的预检结果而非请求失败，
+     所以 oninput 里可以放心调。 */
+  async previewChips(data) { return this._post('/api/business/chips/preview/', data); },
+  /* 本机构可用芯片的连续号段摘要（C2）：`{total, segments}`，
+     segments 是 `[{start, end, count}]`。 */
+  async getChipSegments(materialId) {
+    const qs = materialId ? '?material_id=' + encodeURIComponent(materialId) : '';
+    return this.getData('/api/business/chips/segments/' + qs);
+  },
+  /* 单颗芯片的追溯时间线（C3）：`{chip, events}`。 */
+  async traceChip(number) {
+    return this.getData('/api/business/chips/trace/?number=' + encodeURIComponent(number));
   },
   async getMaterials() { return this._get('/api/business/materials/'); },
   async purchaseMaterial(data) { return this._post('/api/business/materials/purchase/', data); },
@@ -220,6 +242,20 @@ const TNR_API = {
   async getDispatchTargets(materialId) {
     const qs = materialId ? `?material_id=${encodeURIComponent(materialId)}` : '';
     return this.getData(`/api/business/materials/dispatch-targets/${qs}`);
+  },
+  /* ---- 物料批次（B5）---- */
+  /* 某物料的批次明细（本机构 FEFO 顺序；政府端返回按机构分组）。
+     `expired/near_expiry` 标记由服务端算好，前端只管标红 —— 效期判据
+     不在前端再写一份。 */
+  async getMaterialBatches(materialId) {
+    return this.getData(`/api/business/materials/${materialId}/batches/`);
+  },
+  /* FEFO 扣减预览：提交消耗/下发/异动前告诉用户「会扣哪几批、各扣多少」。
+     与芯片 preview 同款 —— POST 但服务端**不写库**，永远 200，
+     预检结果在 `data.plan` 里。`txn_type` 必传：consume 跳过过期批次，
+     dispatch/adjustment 不跳，预览与落库共用同一份 FEFO 判据。 */
+  async previewMaterialBatches(materialId, data) {
+    return this._post(`/api/business/materials/${materialId}/batch-preview/`, data);
   },
   async getReleases() { return this._get('/api/business/releases/'); },
   async createRelease(data) { return this._post('/api/business/releases/create/', data); },

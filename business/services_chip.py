@@ -88,6 +88,27 @@ def parse_chip_numbers(first_number, count):
     return numbers
 
 
+def find_duplicate_chip_numbers(numbers):
+    """这批号码里**已存在**的（全局查、不分机构）。
+
+    采购预检（`views_chip.chip_preview`）与入库（`chip_batch_create`）
+    共用同一份判据 —— 两处各写一份的话，迟早出现「预检说能用、
+    入库却报重号」的孪生漂移。查询不带机构过滤：重号既可能是
+    「这批货入过库了」，也可能是「别的机构手上有同一号码」（数据事故）。
+    """
+    return sorted(set(
+        Chip.objects.filter(number__in=numbers).values_list('number', flat=True)))
+
+
+def _duplicate_message(existed):
+    """把已存在号码列表拼成用户能看懂的报错文案（预检 / 入库共用）。"""
+    if not existed:
+        return ''
+    sample = '、'.join(existed[:3])
+    more = '' if len(existed) <= 3 else f' 等 {len(existed)} 个'
+    return f'芯片号已存在：{sample}{more}'
+
+
 def chip_batch_create(material, institution, first_number, count, batch_no=''):
     """批量入库：按「首号 + 数量」建出这一批 `Chip` 行。
 
@@ -96,20 +117,15 @@ def chip_batch_create(material, institution, first_number, count, batch_no=''):
     ⚠ 号码**全局唯一**（`Chip.number` 有 unique 约束）。先一次性查出来报错，
     而不是让 `bulk_create` 撞 `IntegrityError` 打成 500 —— 后者在事务里
     还会把连接标记成「需要回滚」，调用方连错误文案都拼不出来。
-    查询**不带机构过滤**：重号既可能是「这批货入过库了」，
-    也可能是「别的机构手上有同一号码」（数据事故），两种都必须拦。
     """
     if material is None or institution is None:
         raise ValueError('芯片入库必须指明物料与持有机构')
 
     numbers = parse_chip_numbers(first_number, count)
 
-    existed = set(
-        Chip.objects.filter(number__in=numbers).values_list('number', flat=True))
+    existed = find_duplicate_chip_numbers(numbers)
     if existed:
-        sample = '、'.join(sorted(existed)[:3])
-        more = '' if len(existed) <= 3 else f' 等 {len(existed)} 个'
-        raise ValueError(f'芯片号已存在：{sample}{more}')
+        raise ValueError(_duplicate_message(existed))
 
     Chip.objects.bulk_create([
         Chip(number=num, status='available', institution=institution,
@@ -246,7 +262,12 @@ def chip_batch_receive(txn, receiver):
             f'在途芯片数（{transit_count}）与下发数量（{txn.quantity}）不一致，'
             f'拒绝签收，请联系管理员核对')
 
-    transit.update(institution=receiver, status='available', dispatch_txn=None)
+    # ⚠ `dispatch_txn` **不再清空**：它从「在途标记」升级为「最后一次
+    #   下发的单据」—— 在途的判断本来就只看 `status`，与这里无关；
+    #   而清空的话，签收后的芯片就查不到「从哪张下发单来的」，
+    #   追溯链（采购 → 下发 → 签收 → 使用）在中间断掉（C3）。
+    #   芯片再次被下发时 `chip_batch_dispatch()` 会用新单覆盖。
+    transit.update(institution=receiver, status='available')
     return transit_count
 
 
@@ -282,3 +303,28 @@ def available_chip_queryset(institution, material=None):
     if material is not None:
         qs = qs.filter(material=material)
     return qs.order_by('number')
+
+
+def available_chip_segments(institution, material=None):
+    """某机构**可用**芯片的连续号段摘要 —— 供表单里「我手上有哪些号」用。
+
+    :return: ``[{'start': '...0177', 'end': '...0226', 'count': 50}, ...]``，
+             按段首号码升序。
+
+    下发 / 作废表单要填「首号」，而操作员面对的是一堆散号 —— 没有
+    号段摘要的话只能凭记忆或翻 Excel（C2）。段的连续性按**数值 +1**
+    判断；长度不同但数值相邻（如 '9' 与 '10'）也算同一段，
+    展示时原样显示号码即可。
+    """
+    if institution is None:
+        return []
+    numbers = available_chip_queryset(institution, material) \
+        .values_list('number', flat=True)
+    segments = []
+    for num in sorted(numbers, key=int):
+        if segments and int(num) - int(segments[-1]['end']) == 1:
+            segments[-1]['end'] = num
+            segments[-1]['count'] += 1
+        else:
+            segments.append({'start': num, 'end': num, 'count': 1})
+    return segments

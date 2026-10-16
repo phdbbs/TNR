@@ -596,6 +596,68 @@ class MaterialStock(models.Model):
         return f'{self.institution.name} - {self.material.name} x{self.quantity}'
 
 
+class MaterialBatch(models.Model):
+    """物料批次子表（B5）—— 「一行 = 一个机构 × 一种物料 × 一个批号」。
+
+    为什么要有这张表
+    ----------------
+    在这之前，批号 / 效期挂在 `Material` **主表**上，而主表那一对字段每次采购
+    都会被**覆盖写回**（见 `views_material.purchase_create` 的快照更新）——
+    于是「上一批还剩 60 支、效期 10 月」的信息随第二次采购**凭空消失**，
+    连带着：
+
+    - 「过期拦截」按主表单值判：老批次过期、新批次明明有效，诊疗却被一刀切
+      拒掉（假拦截）；反过来新采购把效期顶新，老批次的存货照样能用（漏拦截）；
+    - 「扣的是哪一批」在数据里**根本不存在** —— 出库流水只带调用方随手
+      填的批号文本，既不参与扣减、也与库存无关。
+
+    这张表把批次变成**可记账的库存维度**：
+
+    - 入库（采购 / 签收）：按批号 `get_or_create` 并累加（同批号再次入库
+      视为同一批货，效期随之更新）；
+    - 出库（下发 / 消耗 / 异动）：FEFO —— 近效期先出、同效期按入库先后，
+      跨批次自动拆多笔流水（同 `ledger_no`，每笔 `batch_no` = 所扣批次）；
+    - 对账：`MaterialStock.quantity == Σ 该机构该物料批次.quantity`
+      （精确等式，见 `reconcile_material_stock`）。
+
+    ⚠ `quantity` 可为 0（批次耗尽）：批次的**档案**（批号/效期）要留着 ——
+    签收方回填效期、追溯「这批货去哪了」都靠它；删行会把历史变成孤儿。
+
+    ⚠ 效期 `expiry_date` 可为空：药品/疫苗有效期，猫粮/耗材没有 —— 空 =
+    「无效期概念」，FEFO 排序时垫底（不会挡在有过期风险的批次前面）。
+    """
+    material = models.ForeignKey(
+        'business.Material', on_delete=models.CASCADE,
+        related_name='batches', verbose_name='物资')
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.CASCADE,
+        related_name='material_batches', verbose_name='持有机构')
+    batch_no = models.CharField('批号', max_length=50, db_index=True)
+    expiry_date = models.DateField('有效期至', null=True, blank=True)
+    # 批次当前余量 —— 与 MaterialStock 同样用「已算好的结果」口径，
+    # 增量维护（F() 自增），不现算。
+    quantity = models.IntegerField('批次余量', default=0)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    # 同 MaterialStock：不加冗余 district 外键，区县隔离沿机构派生。
+    # 不声明的话区县角色一访问就 FieldError 500（市级账号测不出来）。
+    DISTRICT_LOOKUP = 'institution__district'
+
+    class Meta:
+        ordering = ['expiry_date', 'id']
+        verbose_name = '物料批次'
+        verbose_name_plural = verbose_name
+        constraints = [
+            models.UniqueConstraint(
+                fields=['material', 'institution', 'batch_no'],
+                name='uniq_material_institution_batch'),
+        ]
+
+    def __str__(self):
+        return f'{self.institution.name} - {self.material.name} [{self.batch_no}] x{self.quantity}'
+
+
 # ============================================
 # 芯片
 # ============================================

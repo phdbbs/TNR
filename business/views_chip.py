@@ -16,11 +16,15 @@ from django.contrib.auth.decorators import login_required
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
-from business.models import Chip
+from business.models import Chip, MaterialTransaction
 from business.services import (
-    get_district_filtered_queryset, json_fail, json_ok, parse_int_param,
+    body_str, get_district_filtered_queryset, json_fail, json_ok,
+    parse_int_param, parse_json_body,
 )
-from business.services_chip import available_chip_queryset
+from business.services_chip import (
+    _duplicate_message, available_chip_segments, available_chip_queryset,
+    chip_batch_precheck, find_duplicate_chip_numbers, parse_chip_numbers,
+)
 from business.views_material import get_operable_material
 
 # 单次返回的芯片上限。存在的意义不是「性能」而是**防静默截断**：
@@ -135,3 +139,189 @@ def chip_available(request):
 
     qs = available_chip_queryset(institution, material).select_related('material')
     return json_ok([_chip_row(c) for c in qs])
+
+
+@csrf_exempt
+@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
+def chip_preview(request):
+    """「首号 + 数量」的只读预检（C1）—— 提交前就知道这批号码能不能用。
+
+    POST 参数：`first_number`、`count`、`purpose`（`purchase` / `dispatch`
+    / `void`）、`material_id`（dispatch / void 时必填）。
+
+    ⚠ 预检结果**总是 200**：`ok: false` 是一种正常的预检结果，不是请求
+    失败 —— 前端在 oninput 里防抖调用，输入拼写中间态层出不穷，用 400
+    语义的话每次都会打一条 Bad Request 日志，把真正的错误淹没。
+
+    虽然是 POST，但**不写任何库表**（与文件头「只有只读接口」的约定
+    一致）：POST 只是为了把首号/数量/用途一起带上。
+    """
+    data = parse_json_body(request)
+    user = request.user
+
+    purpose = str(body_str(data, 'purpose') or 'purchase').strip()
+    if purpose not in ('purchase', 'dispatch', 'void'):
+        return json_fail('预检类型无效')
+
+    first_number = body_str(data, 'first_number')
+    count, err = parse_int_param(data.get('count'), '数量', minimum=0)
+    if err:
+        return json_ok({'ok': False, 'reason': err})
+
+    material = None
+    if purpose in ('dispatch', 'void'):
+        material_id, m_err = parse_int_param(data.get('material_id'), '物料')
+        if m_err:
+            return json_ok({'ok': False, 'reason': m_err})
+        if not material_id:
+            return json_ok({'ok': False, 'reason': '请先选择物料'})
+        material = get_operable_material(material_id, user)
+        if material is None:
+            return json_fail('物料不存在或无权访问', status=404)
+
+    try:
+        if purpose == 'purchase':
+            numbers = parse_chip_numbers(first_number, count)
+            existed = find_duplicate_chip_numbers(numbers)
+            if existed:
+                return json_ok({
+                    'ok': False,
+                    'reason': _duplicate_message(existed),
+                    'duplicates': existed[:10],
+                })
+        else:
+            institution = user.institution
+            if institution is None:
+                return json_ok({'ok': False, 'reason': '当前账号未挂机构'})
+            # dispatch 与 void 的预检判据相同（存在 / 归属本机构 / 归属该
+            # 物料 / 状态可用），与真正落库的 `chip_batch_dispatch` /
+            # `chip_batch_void` 走同一个 `chip_batch_precheck` ——
+            # 「预检说能用、提交却被拦」就是孪生漂移（本项目反复栽过的形态）。
+            numbers = chip_batch_precheck(material, institution,
+                                          first_number, count)
+    except ValueError as e:
+        return json_ok({'ok': False, 'reason': str(e)})
+
+    return json_ok({
+        'ok': True,
+        'first_number': numbers[0],
+        'last_number': numbers[-1],
+        'count': len(numbers),
+    })
+
+
+@csrf_exempt
+@role_required('shelter', 'hospital')
+@login_required
+def chip_segments(request):
+    """本机构**可用**芯片的连续号段摘要（C2）—— 下发/作废表单里
+    「我手上有哪些号」的答案，点一段自动填首号，不用凭记忆翻 Excel。
+
+    查询参数 `material_id`（可选）：只看该物料的。
+    """
+    user = request.user
+    institution = user.institution
+    if institution is None:
+        return json_fail('当前账号未挂机构')
+
+    material_id, err = parse_int_param(request.GET.get('material_id'), '物料')
+    if err:
+        return json_fail(err)
+
+    material = None
+    if material_id:
+        material = get_operable_material(material_id, user)
+        if material is None:
+            return json_fail('物料不存在或无权访问', status=404)
+
+    segments = available_chip_segments(institution, material)
+    return json_ok({
+        'total': sum(s['count'] for s in segments),
+        'segments': segments,
+    })
+
+
+@csrf_exempt
+@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
+def chip_trace(request):
+    """单颗芯片的追溯时间线（C3）：采购 → 下发 → 签收 → 植入 / 作废。
+
+    查询参数 `number`：芯片号。
+
+    环节串联方式（`Chip` 行是唯一真源）：
+
+    - 采购：`chip.batch_no` 记的是**采购单号**（`chip_batch_create` 落的），
+      反查 `type='purchase'` 的流水拿到日期 / 供应商 / 操作人；
+    - 下发：`chip.dispatch_txn` —— 签收后**保留**（见 `chip_batch_receive`
+      的注释），指向最后一次下发的流水；
+    - 签收：接收单 `ref_no` 指向下发单号（`material_receive` 的关联口径）；
+    - 植入：`chip.pet` + `chip.used_at`；
+    - 作废：`status='void'`（作废流水不含号码级关联，时间不可考，
+      时间线里放在最后并注明）。
+    """
+    user = request.user
+    number = (request.GET.get('number') or '').strip()
+    if not number:
+        return json_fail('请提供芯片号')
+
+    chip = (get_district_filtered_queryset(Chip, user)
+            .select_related('institution', 'material', 'pet', 'dispatch_txn')
+            .filter(number=number).first())
+    if chip is None:
+        return json_fail('芯片不存在或无权访问', status=404)
+
+    events = []
+
+    # 1) 采购入库
+    purchase = None
+    if chip.batch_no:
+        purchase = MaterialTransaction.objects.filter(
+            ledger_no=chip.batch_no, type='purchase').first()
+    purchase_time = (purchase.date.isoformat() if purchase and purchase.date
+                     else chip.created_at.isoformat())
+    purchase_detail = f'采购单 {chip.batch_no or "（未记录）"}'
+    if purchase and purchase.supplier:
+        purchase_detail += f'，供应商 {purchase.supplier}'
+    if purchase and purchase.operator_name:
+        purchase_detail += f'，操作人 {purchase.operator_name}'
+    events.append({'time': purchase_time, 'type': 'purchase',
+                   'title': '采购入库', 'detail': purchase_detail})
+
+    # 2) 下发出库 + 3) 签收入库（有下发单才谈得上签收）
+    dispatch = chip.dispatch_txn
+    if dispatch is not None:
+        events.append({
+            'time': dispatch.date.isoformat() if dispatch.date else '',
+            'type': 'dispatch', 'title': '下发出库',
+            'detail': f'下发单 {dispatch.ledger_no}'
+                      + (f'，接收方 {dispatch.from_to}' if dispatch.from_to else ''),
+        })
+        receive = MaterialTransaction.objects.filter(
+            ref_no=dispatch.ledger_no, type='receive').first()
+        if receive is not None:
+            receiver_name = (receive.institution.name if receive.institution_id
+                             else (receive.hospital.name if receive.hospital_id else ''))
+            events.append({
+                'time': receive.date.isoformat() if receive.date else '',
+                'type': 'receive', 'title': '签收入库',
+                'detail': f'接收单 {receive.ledger_no}'
+                          + (f'，{receiver_name} 签收' if receiver_name else ''),
+            })
+
+    # 4) 植入使用
+    if chip.status == 'used' and chip.pet is not None:
+        events.append({
+            'time': chip.used_at.isoformat() if chip.used_at else '',
+            'type': 'use', 'title': '植入使用',
+            'detail': f'动物 {chip.pet.code}（{chip.pet.get_status_display()}）',
+        })
+
+    # 5) 作废（无号码级流水关联，时间不可考 —— 排序时放最后）
+    if chip.status == 'void':
+        events.append({'time': '', 'type': 'void', 'title': '已作废',
+                       'detail': '作废流水不含号码级关联，作废时间未记录'})
+
+    events.sort(key=lambda e: e['time'] or '9999')
+    return json_ok({'chip': _chip_row(chip), 'events': events})

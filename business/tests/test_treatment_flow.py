@@ -9,10 +9,16 @@
 ⚠ 反向对照成对：只测「被拒」的话，把判据写成「一律拒绝」也能通过。
 凡是有「拦住」的用例，都配一条「正常路径能过」的对照。
 """
+import io
+
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from PIL import Image
 
 from business import services_treatment as st
-from business.models import Chip, MaterialStock, Pet, Treatment, TreatmentItem
+from business.models import (
+    AdoptionHallListing, Chip, MaterialStock, Pet, Treatment, TreatmentItem,
+)
 from business.services import get_hospital_stock
 from business.tests.base import (
     BusinessTestBase, make_chip, make_hospital_txn, make_institution,
@@ -103,6 +109,13 @@ class ItemMetaTest(TestCase):
         for species in ('猫', '狗'):
             options = st.check_options(species)
             self.assertEqual(len(options['infectious_tests']), 3, species)
+
+    def test_options_expose_fever_threshold(self):
+        """发烧线随选项表下发 —— 前端「手改数值自动判定」与后端交叉校验
+        必须同一条线；漏发的话前端 `syncTempFlag` 直接不动作，
+        等于自动判定静默失效、矛盾组合只能靠 400 兜底。"""
+        options = st.check_options('猫')
+        self.assertEqual(options['fever_threshold'], st.FEVER_THRESHOLD)
 
 
 # ============================================================
@@ -206,6 +219,75 @@ class CheckStepTest(FlowBase):
         resp = self.post_json(f'{URL}{detail["id"]}/check/',
                               {'temperature': 38.5, 'temperature_flag': 'hot'})
         self.expect_fail(resp, 400, '不合法')
+
+    # ---- 体温数值与判定的交叉校验（B3）----
+    # 背景：点 chip 自动填数值、手改数值不联动判定 —— 「40.2℃ + 正常」
+    # 这种矛盾组合曾经可以照常提交，打印单与体温趋势互相矛盾且无人核对。
+    def test_fever_temperature_cannot_be_marked_normal(self):
+        """发烧线的数值配「正常」判定必须拦 —— 这是「测了高温却漏改判定」，
+        漏标的发烧会绕过疫病监测，是交叉校验里危害最大的方向。"""
+        detail = self._open()
+        resp = self.post_json(f'{URL}{detail["id"]}/check/',
+                              {'temperature': 40.2, 'temperature_flag': 'normal'})
+        self.expect_fail(resp, 400, '矛盾')
+
+    def test_normal_temperature_cannot_be_marked_fever(self):
+        """反向矛盾同样拦：判定与数值必须落在发烧线同侧，数据才可统计。"""
+        detail = self._open()
+        resp = self.post_json(f'{URL}{detail["id"]}/check/',
+                              {'temperature': 38.5, 'temperature_flag': 'fever'})
+        self.expect_fail(resp, 400, '矛盾')
+
+    def test_fever_pair_submits_ok(self):
+        """正常对照：数值与判定一致时必须放行（只测「拦」的话，
+        把校验写成「一律拒绝」也能通过）。"""
+        detail = self._open()
+        body = self.ok(self._check(detail['id'], temperature=40.2,
+                                   temperature_flag='fever'))['data']
+        self.assertEqual(body['temperature'], 40.2)
+        self.assertEqual(body['temperature_flag'], 'fever')
+
+    def test_threshold_boundary_is_fever(self):
+        """边界值 39.5 恰好等于发烧线：≥ 判发烧（与前端自动判定同一条线）。"""
+        self.assertEqual(st.fever_judge(39.5), 'fever')
+        self.assertEqual(st.fever_judge(39.4), 'normal')
+        detail = self._open()
+        resp = self.post_json(f'{URL}{detail["id"]}/check/',
+                              {'temperature': 39.5, 'temperature_flag': 'normal'})
+        self.expect_fail(resp, 400, '矛盾')
+        body = self.ok(self._check(detail['id'], temperature=39.5,
+                                   temperature_flag='fever'))['data']
+        self.assertEqual(body['temperature_flag'], 'fever')
+
+    def test_draft_allows_temperature_without_flag(self):
+        """暂存允许填一半：只填数值没选判定时不触发交叉校验
+        （提交时两者都必填，那时才校验组合）。"""
+        detail = self._open()
+        body = self.ok(self._check(detail['id'], submit=False,
+                                   temperature=40.2, temperature_flag=''))['data']
+        self.assertEqual(body['temperature'], 40.2)
+
+    def test_draft_rejects_contradictory_pair(self):
+        """暂存也拦矛盾组合 —— 暂存不是「存错的豁免」，矛盾数据一旦落库，
+        看板/打印都会展示出来。"""
+        detail = self._open()
+        resp = self.post_json(f'{URL}{detail["id"]}/check/',
+                              {'temperature': 40.2, 'temperature_flag': 'normal',
+                               'draft': True})
+        self.expect_fail(resp, 400, '矛盾')
+
+    def test_stale_contradiction_blocks_later_save(self):
+        """存量矛盾单（修复前落库的旧数据）在任何一次保存时被拦下来
+        逼着修正 —— 交叉校验对**最终组合**生效，而不是只看本次传没传体温。
+        前端每次保存都显式带体温字段，浏览器路径行为一致。"""
+        detail = self._open()
+        stale = Treatment.objects.get(id=detail['id'])
+        stale.temperature = 40.2
+        stale.temperature_flag = 'normal'
+        stale.save(update_fields=['temperature', 'temperature_flag'])
+        resp = self.post_json(f'{URL}{detail["id"]}/check/',
+                              {'check_note': '精神可'}, )
+        self.expect_fail(resp, 400, '矛盾')
 
     def test_common_findings_conflict_rejected(self):
         """「无异常」与其它项互斥 —— 前端 chips 拦不住时服务端必须拦。"""
@@ -553,6 +635,29 @@ class UndoStepTest(FlowBase):
         self.assertIsNone(chip.pet_id)
         self.assertEqual(self.pet.chip_no, '')
 
+    def test_undo_clears_treatment_chip_fields(self):
+        """撤销植入要清掉诊疗单上的芯片号/植入日期 —— `execute_item` 的对称清理。
+
+        原实现只清 `pet.chip_no` 与 `Chip` 行，`treatment.chip_no` 原样留着：
+        打印页/台账照样显示「已植入 xxx」，与动物档案（已清空）自相矛盾。
+        """
+        chip = make_chip(number='CHIPUNDO0003', institution=self.hospital_a)
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid, [{
+            'key': 'chip', 'chip_no': chip.number, 'planned_date': '2026-03-01'}])
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+
+        treatment = Treatment.objects.get(pk=tid)
+        self.assertEqual(treatment.chip_no, chip.number)
+        self.assertIsNotNone(treatment.chip_date)
+
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/undo/', {}))
+        treatment.refresh_from_db()
+        self.assertEqual(treatment.chip_no, '')
+        self.assertIsNone(treatment.chip_date)
+
     def test_undo_chip_rebound_to_other_pet_rejected(self):
         """芯片已被别的档案绑走时不能退回 —— 否则一颗芯片两条档案。"""
         chip = make_chip(number='CHIPUNDO0002', institution=self.hospital_a)
@@ -763,6 +868,96 @@ class PermissionTest(FlowBase):
         self.login_as(self.gov_a)
         body = self.ok(self.get_json(f'{URL}{tid}/'))['data']
         self.assertEqual(body['id'], tid)
+
+
+class TreatmentPhotoTest(FlowBase):
+    """诊疗后照片（B2）：第三步办结环节的当场留证。
+
+    判据落在业务结果上：照片真落 `Pet.photo_treatment`、领养大厅**没有**
+    被顺带创建 —— 若复用领养 edit-info 接口，给「放归 / 无害化」动物传
+    照片会意外挂进领养大厅且不报错（见 `treatment_photo` 视图注释）。
+    """
+
+    def _png(self, name='after.png'):
+        """一张真正能被 Pillow 解码的 PNG。"""
+        buf = io.BytesIO()
+        Image.new('RGB', (8, 8), (90, 130, 170)).save(buf, 'PNG')
+        return SimpleUploadedFile(name, buf.getvalue(), content_type='image/png')
+
+    def _fake(self, name='fake.png'):
+        """扩展名伪装成 png 的文本：按文件名 / Content-Type 判断都会放行。"""
+        return SimpleUploadedFile(name, b'definitely not an image',
+                                  content_type='image/png')
+
+    def test_upload_saves_photo_without_listing(self):
+        """正常路径：照片落档案字段，且**不**创建领养展示位。"""
+        detail = self._open()
+        resp = self.client.post(f'{URL}{detail["id"]}/photo/',
+                                {'photo': self._png()})
+        body = self.ok(resp)
+        self.pet.refresh_from_db()
+        self.assertTrue(self.pet.photo_treatment)
+        # 出参是整份 detail —— 前端照片回显靠 pet.photo_treatment。
+        self.assertTrue(body['data']['pet']['photo_treatment'])
+        # ⚠ 副作用防护：独立接口不得顺带把动物挂进领养大厅。
+        self.assertEqual(
+            AdoptionHallListing.objects.filter(pet=self.pet).count(), 0)
+
+    def test_upload_replaces_photo(self):
+        """再传一张 = 更换（覆盖同一字段），不是叠加。"""
+        detail = self._open()
+        self.ok(self.client.post(f'{URL}{detail["id"]}/photo/',
+                                 {'photo': self._png('a.png')}))
+        first = Pet.objects.get(id=self.pet.id).photo_treatment.name
+        self.ok(self.client.post(f'{URL}{detail["id"]}/photo/',
+                                 {'photo': self._png('b.png')}))
+        second = Pet.objects.get(id=self.pet.id).photo_treatment.name
+        self.assertNotEqual(first, second)
+
+    def test_non_image_rejected_and_untouched(self):
+        """假图片必须拦，且档案字段一个字节都不能动（先校验后落库）。"""
+        detail = self._open()
+        resp = self.client.post(f'{URL}{detail["id"]}/photo/',
+                                {'photo': self._fake()})
+        self.expect_fail(resp, 400, '不是有效的图片文件')
+        self.pet.refresh_from_db()
+        self.assertFalse(self.pet.photo_treatment)
+
+    def test_missing_file_rejected(self):
+        detail = self._open()
+        resp = self.client.post(f'{URL}{detail["id"]}/photo/', {})
+        self.expect_fail(resp, 400, '请选择')
+
+    def test_other_hospital_gets_404(self):
+        """他院拿到诊疗单 id 也必须 404（与 `_own_treatment` 口径一致，
+        「存在但不属于本院」与「不存在」不可区分）。"""
+        detail = self._open()
+        other = make_institution(type='hospital', district=self.district_a,
+                                 name='甲区照像测试医院')
+        other_user = make_user('hospital_photo_t', role='hospital',
+                               district=self.district_a, institution=other)
+        self.login_as(other_user)
+        resp = self.client.post(f'{URL}{detail["id"]}/photo/',
+                                {'photo': self._png()})
+        self.expect_fail(resp, 404)
+        self.pet.refresh_from_db()
+        self.assertFalse(self.pet.photo_treatment)
+
+    def test_disposed_rejects_replacement(self):
+        """办结后照片锁定（与检查单 `disposed_at` 拦截口径一致）。"""
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{detail["id"]}/items/{item_id}/execute/', {}))
+        self.ok(self.post_json(f'{URL}{detail["id"]}/done/', {}))
+        self.ok(self.post_json(f'{URL}{detail["id"]}/dispose/',
+                               {'disposal': 'released'}))
+        resp = self.client.post(f'{URL}{detail["id"]}/photo/',
+                                {'photo': self._png()})
+        self.expect_fail(resp, 400, '已办结')
+        self.pet.refresh_from_db()
+        self.assertFalse(self.pet.photo_treatment)
 
 
 class ChipStockReconcileTest(FlowBase):

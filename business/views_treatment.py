@@ -34,7 +34,7 @@ from business.services import (
     generate_doc_no, get_district_filtered_queryset,
     adjust_stock, use_chip, get_hospital_stock,
     get_active_pet, get_scoped_object, expired_material_error,
-    find_hospital_chip_material,
+    find_hospital_chip_material, validate_uploaded_images,
 )
 from business import services_treatment as st
 
@@ -448,6 +448,48 @@ def treatment_dispose(request, pk):
     return json_ok(_treatment_detail_data(treatment), message='已办结')
 
 
+@csrf_exempt
+@role_required('hospital')
+@login_required
+def treatment_photo(request, pk):
+    """上传 / 更换「诊疗后照片」（B2：第三步办结环节的当场留证）。
+
+    落 ``Pet.photo_treatment`` —— 领养大厅「诊疗后」与领养资料页读的就是
+    这一个字段，一张照片两处展示，不需要再传第二遍。
+
+    ⚠ **必须走本独立接口，不能复用领养资料的 ``adoption_edit_info``**：
+    那个接口传照片会 ``get_or_create`` 领养展示位并把 ``published_at``
+    置为今天 —— 办结去向是「放归 / 无害化」的动物若借它传照片，
+    会被**意外挂进领养大厅**，而且不报错（领养人能看到一只已经
+    安乐死的猫）。本接口只写宠物档案的照片字段，不碰领养业务。
+    """
+    treatment = _own_treatment(pk, request.user)
+    if treatment is None:
+        return json_fail('诊疗单不存在或无权访问', status=404)
+
+    pet = treatment.pet
+    if pet is None:
+        return json_fail('该诊疗单没有关联的动物档案')
+
+    if treatment.is_disposed:
+        return json_fail('本单已办结，诊疗后照片不能再更换')
+
+    if request.FILES.get('photo') is None:
+        return json_fail('请选择要上传的照片')
+
+    # 先校验后落库（两段式）：图片非法时档案字段一个字节都不动。
+    err = validate_uploaded_images(request.FILES, {'photo': '诊疗后照片'})
+    if err:
+        return json_fail(err)
+
+    pet.photo_treatment = request.FILES['photo']
+    pet.save(update_fields=['photo_treatment'])
+
+    # 审计用上下文（与 adoption_edit_info 同口径：照片落在宠物档案上）
+    request.audit_district = pet.district
+    return json_ok(_treatment_detail_data(treatment), message='诊疗后照片已保存')
+
+
 # ============================================
 # 列表 / 详情（Task 6 起，第四十六轮扩展）
 # ============================================
@@ -577,7 +619,9 @@ def treatment_create(request):
         if vaccine_material is None:
             return json_fail('疫苗物料不存在')
         # 过期疫苗不能用于诊疗。判据在 services 里只有一份，与其它接口共用。
-        err = expired_material_error(vaccine_material, '用于诊疗')
+        # B5 起传 institution=hospital 走批次级判据：老批次过期、新批次有效
+        # 时放行（FEFO 会扣有效批次），而不是按主表快照一刀切。
+        err = expired_material_error(vaccine_material, '用于诊疗', institution=hospital)
         if err:
             return json_fail(err)
         if get_hospital_stock(vaccine_material, hospital) < vaccine_qty:
@@ -589,7 +633,7 @@ def treatment_create(request):
             id=body_int(dew, 'material_id'), category='dewormer').first()
         if deworming_material is None:
             return json_fail('驱虫药物料不存在')
-        err = expired_material_error(deworming_material, '用于诊疗')
+        err = expired_material_error(deworming_material, '用于诊疗', institution=hospital)
         if err:
             return json_fail(err)
         if get_hospital_stock(deworming_material, hospital) < deworming_qty:
@@ -626,7 +670,7 @@ def treatment_create(request):
             #   区县**的芯片物料，本院那条一颗都不减、外区那条被凭空扣掉，
             #   而且不报错。
             chip_material = find_hospital_chip_material(hospital, district_id)
-            err = expired_material_error(chip_material, '用于诊疗')
+            err = expired_material_error(chip_material, '用于诊疗', institution=hospital)
             if err:
                 return json_fail(err)
 

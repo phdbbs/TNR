@@ -140,3 +140,46 @@ def initialize(Material, MaterialStock, MaterialTransaction, Institution):
     shelter_rows, hospital_rows = init_stock_rows(
         Material, MaterialStock, MaterialTransaction, Institution)
     return filled, shelter_rows, hospital_rows
+
+
+def initial_batch_no(material_row):
+    """存量/未登记批号时的「初始批次」命名。
+
+    主表 `Material.batch_no` 有值就沿用（历史界面一直显示它）；
+    为空时用「初始批次」占位 —— 批号是批次表的唯一键组成部分，
+    空串会与「下一次也没填批号的入库」合并成一批，反而是错的。
+    """
+    return (getattr(material_row, 'batch_no', '') or '').strip() or '初始批次'
+
+
+def init_batch_rows(Material, MaterialStock, MaterialBatch):
+    """B5 存量迁移：把**已有的**机构库存行物化成一条初始批次。返回新建行数。
+
+    口径（与运行时 `materialize_initial_batches` 同源，见 `services_stock`）：
+    - 每一行 `MaterialStock` → 一条批次行（批号取主表快照、效期取主表效期），
+      `quantity` 直接等于库存行的当前值 —— **不造假流水**（与 `0020` 的
+      `opening_quantity` 思路一致：批次余量天然含期初）；
+    - 只处理「还没有任何批次行」的 (物料, 机构) —— 幂等，重跑不翻倍；
+    - `quantity == 0` 的库存行也建（批次档案留着，口径统一）；
+      但**完全没有库存行**的物料不建批次（`shelter_stock` 直写字段的
+      存量结转形态，等第一次业务发生时由运行时物化）。
+    """
+    created = 0
+    for stock in MaterialStock.objects.iterator():
+        exists = MaterialBatch.objects.filter(
+            material_id=stock.material_id, institution_id=stock.institution_id).exists()
+        if exists:
+            continue
+        material = stock.material if hasattr(stock, 'material') else Material.objects.filter(
+            pk=stock.material_id).first()
+        if material is None:
+            continue
+        MaterialBatch.objects.create(
+            material_id=stock.material_id,
+            institution_id=stock.institution_id,
+            batch_no=initial_batch_no(material),
+            expiry_date=getattr(material, 'expiry_date', None),
+            quantity=stock.quantity,
+        )
+        created += 1
+    return created

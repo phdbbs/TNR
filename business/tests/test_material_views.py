@@ -3,7 +3,7 @@ from datetime import date
 
 from django.utils import timezone
 
-from business.models import Chip, MaterialTransaction
+from business.models import Chip, Material, MaterialTransaction
 from business.services import get_hospital_stock
 from business.services_chip import CHIP_BATCH_MAX
 from business.tests.base import (
@@ -143,6 +143,28 @@ class PurchaseTest(BusinessTestBase):
             'chip_start': '9000000001',
         }), message='单批最多')
         self.assertFalse(Chip.objects.filter(material=material).exists())
+
+    def test_purchase_chip_duplicate_number_rejected_no_orphan(self):
+        """芯片重号 → 400 + 具体号码；且失败时不留下孤儿物料行。
+
+        原实现：采购事务没有 `try`（下发/异动都有），`chip_batch_create`
+        的重号 `ValueError` 直接打成 500；且「按名称新建物料」在事务外、
+        autocommit 已提交 —— 失败后留下一个从未入过库的物料行。
+        """
+        first = make_material(category='chip', district=self.district_a)
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(f'{URL}purchase/', {
+            'material_id': first.id, 'quantity': 2, 'chip_start': '9100000001',
+        }))
+
+        resp = self.post_json(f'{URL}purchase/', {
+            'name': '重号芯片测试', 'category': 'chip', 'quantity': 2,
+            'chip_start': '9100000001',
+        })
+        self.expect_fail(resp, message='芯片号已存在')
+        self.assertFalse(
+            Material.objects.filter(name='重号芯片测试').exists(),
+            '采购失败的物料行不应留下（孤儿物料）')
 
     def test_hospital_cannot_purchase(self):
         self.login_as(self.hospital_user_a)

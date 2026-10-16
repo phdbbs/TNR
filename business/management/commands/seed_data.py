@@ -15,11 +15,12 @@ from django.utils import timezone
 from accounts.models import User
 from business.models import (
     Pet, Capture, Transfer, Treatment, Material, MaterialStock,
-    MaterialTransaction,
+    MaterialTransaction, MaterialBatch,
     Chip, Release, Adoption, AdoptionHallListing, CheckIn, Blacklist,
     Euthanasia, Message,
 )
 from business.stock_init import initialize as init_material_stock
+from business.stock_init import init_batch_rows
 from business.services import generate_doc_no
 from business.services_chip import parse_chip_numbers
 from core.models import District, Institution
@@ -249,6 +250,7 @@ class Command(BaseCommand):
             self._seed_treatments(districts, institutions, users, pets)
             self._seed_material_txns(districts, institutions, users, materials)
             self._seed_material_stocks()
+            self._seed_material_batches()
             self._seed_releases(districts, institutions, users, pets)
             self._seed_adoptions(districts, institutions, users, pets)
             self._seed_hall_listings(institutions, pets)
@@ -975,6 +977,18 @@ class Command(BaseCommand):
             self.stdout.write(
                 f'  流水归属回填 {filled} 行；捕捉点库存 {shelter_rows} 行；'
                 f'医院库存 {hospital_rows} 行')
+
+    def _seed_material_batches(self):
+        """把存量机构库存物化成「初始批次」行（B5）。
+
+        ⚠ 与 `0029_backfill_material_batch` 迁移**共用同一份实现**
+        （`business/stock_init.init_batch_rows`）：全新库与升级库必须得到
+        同一种数据形态 —— 批次对账判据（库存行 == Σ批次）的基线由它奠定。
+        """
+        self.stdout.write('创建物料批次...')
+        created = init_batch_rows(Material, MaterialStock, MaterialBatch)
+        if created:
+            self.stdout.write(f'  初始批次 {created} 行')
 
     # ============================================
     # 12. 放归记录

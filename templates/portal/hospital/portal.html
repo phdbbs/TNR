@@ -1009,7 +1009,11 @@ const Hospital = {
       + '</div>'
       + '<div class="tx-unit" style="margin-top:9px;max-width:200px;">'
       + '<input class="tx-inp" data-inp="temperature" value="' + this.escape(d.temperature)
-      + '" placeholder="选择上项后自动填入，可手改"' + dis + '><span class="u">℃</span></div></div>';
+      + '" placeholder="点上方快速填入，或直接输入数值"' + dis + '><span class="u">℃</span></div>'
+      // 手改数值会自动刷新判定（`syncTempFlag`），把规则提前亮出来，
+      // 医生才不会困惑「chip 怎么自己亮了」。阈值来自 `check_options()`。
+      + '<div class="text-muted fs-sm" style="margin-top:5px;">手改数值后，判定按 ≥'
+      + this.escape(opts.fever_threshold) + '℃ 自动刷新</div></div>';
 
     const common = opts.common_findings || [];
     h += '<div class="tx-fld"><label>2. 常见病检查</label><div class="tx-chips">'
@@ -1333,6 +1337,25 @@ const Hospital = {
       + '本院库存</b>并生成消耗流水；手写药品仅记录、不扣库存。芯片植入同时扣芯片物料'
       + '库存，并把该芯片绑定到本动物档案（芯片永久不可复用）。</div></div>';
 
+    // 诊疗后照片（B2）：办结环节当场留证，落 Pet.photo_treatment —— 领养
+    // 大厅与领养资料页的「诊疗后」读的就是同一字段，一张照片两处展示。
+    // 走诊疗单独立接口（tx-photo → uploadTreatmentPhoto），**不能**复用
+    // 领养 edit-info —— 那会顺带把「放归 / 无害化」动物挂进领养大厅。
+    // 已办结只读展示（与检查单的锁定口径一致）。
+    const petPhoto = ((detail.pet || {}).photo_treatment) || '';
+    h += '<div class="card mb-5" style="margin-top:14px;"><div class="card-header">'
+      + '<div class="card-title"><span class="card-title-bar"></span>诊疗后照片</div>'
+      + '<div class="text-muted fs-sm">'
+      + (disposed ? '已办结 · 仅展示' : '选填 · 点击上传 / 更换') + '</div></div>'
+      + '<div class="card-body"><div style="display:flex;gap:var(--sp-4);align-items:flex-start;">'
+      + '<div' + (disposed ? '' : ' data-act="tx-photo" title="点击上传 / 更换" style="cursor:pointer;flex:none;width:160px;"')
+      + '><div class="photo-placeholder-lg">' + (petPhoto
+        ? '<img src="' + this.escape(petPhoto) + '" alt="诊疗后照片" style="width:100%;height:100%;object-fit:cover;" />'
+        : '📷') + '</div></div>'
+      + '<div class="text-muted fs-sm" style="flex:1;padding-top:4px;">'
+      + '诊疗结束后的现场留证（如术后伤口、精神状态），与领养资料「诊疗后」为同一张照片，'
+      + '无需重复上传。</div></div></div></div>';
+
     h += '<div class="card mb-5" style="margin-top:14px;"><div class="card-header">'
       + '<div class="card-title"><span class="card-title-bar"></span>办结去向</div>'
       + '<div class="text-muted fs-sm">单选 · 诊疗完成后可选</div></div><div class="card-body">';
@@ -1499,7 +1522,52 @@ const Hospital = {
     if (act === 'tx-undo') { this.undoTreatmentItem(k); return; }
     if (act === 'tx-treat-done') { this.markTreatmentDone(); return; }
     if (act === 'tx-disposal') { f.draft.disposal = k; this.renderFlowView(); return; }
+    if (act === 'tx-photo') { this.txUploadPhoto(); return; }
     if (act === 'tx-finish') { this.finishTreatment(); return; }
+  },
+
+  /* 诊疗后照片上传（B2）：弹层选文件 + 预览（与领养页 uploadPhoto 同款交互），
+     但走诊疗单独立接口 —— 落 Pet.photo_treatment 且**不碰**领养展示位。
+     成功后用服务端返回的整份 detail 重建流程、停在当前步骤，
+     照片 url 回显靠 detail.pet.photo_treatment。 */
+  txUploadPhoto() {
+    const f = this.state.treatmentFlow;
+    if (!f || (f.detail || {}).is_disposed) return;
+    TNR_UI.modal({
+      title: '上传诊疗后照片',
+      body: (bodyEl, closeFn) => {
+        bodyEl.innerHTML = '<div class="form-group"><label class="form-label">选择图片文件</label>'
+          + '<input type="file" accept="image/*" id="txPhotoInput" class="form-input" style="padding:4px;" /></div>'
+          + '<div id="txPhotoPreview" style="margin-top:var(--sp-3);"></div>'
+          + '<div style="display:flex;gap:var(--sp-3);justify-content:flex-end;margin-top:var(--sp-4);">'
+          + '<button class="btn btn-secondary" data-close>取消</button>'
+          + '<button class="btn btn-primary" id="txPhotoUploadBtn">上传</button></div>';
+        bodyEl.querySelector('[data-close]').onclick = closeFn;
+        bodyEl.querySelector('#txPhotoInput').addEventListener('change', e => {
+          const file = e.target.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = ev => {
+            bodyEl.querySelector('#txPhotoPreview').innerHTML =
+              '<img src="' + ev.target.result + '" style="width:100%;border-radius:var(--r-md);" />';
+          };
+          reader.readAsDataURL(file);
+        });
+        bodyEl.querySelector('#txPhotoUploadBtn').onclick = async () => {
+          const file = bodyEl.querySelector('#txPhotoInput').files[0];
+          if (!file) { TNR_UI.toast('请选择图片文件', 'warning'); return; }
+          try {
+            const res = await TNR_API.uploadTreatmentPhoto(f.detail.id, file);
+            TNR_UI.assertOk(res, '照片上传失败');
+            closeFn();
+            this.startTreatmentFlow(res.data, f.step);
+            TNR_UI.toast('诊疗后照片已保存', 'success');
+          } catch (e) {
+            TNR_UI.toast(e.message || '上传失败', 'danger');
+          }
+        };
+      }
+    });
   },
 
   onTreatmentInput(target) {
@@ -1511,6 +1579,11 @@ const Hospital = {
       // 传染病快检项**按物种**下发，改了种类必须重渲染，否则「猫的 FPV」
       // 会跟着狗的检查单一起提交，被服务端 400 拒绝。
       if (d.inp === 'species') this.renderFlowView();
+      // 体温手改后自动刷新判定：点 chip 会自动填数值，但反过来「手改数值」
+      // 原本不联动判定 —— 测出 40.2℃ 判定却停在「正常」，会被服务端的
+      // 交叉校验 400 打回。阈值从 `check_options()` 下发，与服务端
+      // `fever_judge()` 同一条线，前端不另抄一份。
+      if (d.inp === 'temperature') this.syncTempFlag(target.value);
       return;
     }
     if (d.plan) {
@@ -1519,6 +1592,27 @@ const Hospital = {
       item[d.f] = target.value;
       this.refreshItemState(d.plan);
     }
+  },
+
+  /* 体温数值 → 判定 chip 的实时同步（≥ 阈值判发烧，阈值由 check_options 下发）。
+     只直接 toggle chip 的 class，**不整块重渲染** —— renderFlowView 会让
+     输入框失焦，用户一次只能输一个字符。清空 / 输入到一半（非数字）时
+     不动判定：草稿判定保留，提交前的必填校验与服务端交叉校验兜底。 */
+  syncTempFlag(raw) {
+    const f = this.state.treatmentFlow;
+    if (!f) return;
+    const th = ((f.detail || {}).options || {}).fever_threshold;
+    if (th === undefined || th === null) return;
+    const v = parseFloat(raw);
+    if (String(raw).trim() === '' || isNaN(v)) return;
+    const flag = v >= Number(th) ? 'fever' : 'normal';
+    f.draft.temperatureFlag = flag;
+    document.querySelectorAll('#page-treatment [data-act="tx-temp"]').forEach(ch => {
+      const on = ch.dataset.v === flag;
+      ch.classList.toggle('active', on);
+      ch.classList.toggle('ok', on && flag === 'normal');
+      ch.classList.toggle('warn', on && flag === 'fever');
+    });
   },
 
   addDays(n) {
@@ -2445,9 +2539,25 @@ const Hospital = {
           '<div style="text-align:right;"><div style="font-family:var(--font-display);font-size:var(--fs-2xl);font-weight:700;color:' + color + ';">' + stock + '</div><div style="font-size:var(--fs-xs);color:var(--ink-light);">/ ' + safety + ' ' + this.escape(m.unit || '') + '</div></div></div>' +
           '<div class="desc-list mt-4"><div class="desc-item"><div class="desc-label">供应商</div><div class="desc-value">' + this.escape(m.supplier || '—') + '</div></div>' +
           '<div class="desc-item"><div class="desc-label">批号</div><div class="desc-value">' + this.escape(m.batch_no || '—') + '</div></div>' +
-          '<div class="desc-item"><div class="desc-label">有效期</div><div class="desc-value">' + this.formatDate(m.expiry_date) + '</div></div></div></div></div>';
+          '<div class="desc-item"><div class="desc-label">有效期</div><div class="desc-value">' + this.formatDate(m.expiry_date) + '</div></div></div>' +
+          // B5：批次行内展开。主表那对批号/效期只是「最近一次入库」的快照 ——
+          // 老批次还剩多少、是否临期，点开批次明细才看得到（展开逻辑在 TNR_UI）。
+          '<div style="margin-top:var(--sp-3);"><button type="button" class="btn btn-outline btn-sm" data-batchcard="' + m.id + '">批次明细</button>' +
+          '<div id="batchbox-' + m.id + '" style="display:none;margin-top:var(--sp-2);"></div></div></div></div>';
       }).join('');
       c.innerHTML = '<div class="stat-grid">' + cards + '</div>';
+      // 批次展开走事件委托：卡片由筛选条重渲染，逐卡绑事件会失效。
+      // ⚠ 标记防重：#materialTabContent 这个节点跨渲染复用，每次都
+      // addEventListener 会让一次点击触发 N 次展开请求。
+      if (!c._batchCardBound) {
+        c._batchCardBound = true;
+        c.addEventListener('click', (e) => {
+          const btn = e.target.closest('[data-batchcard]');
+          if (!btn) return;
+          TNR_UI.toggleCardBatches(btn.dataset.batchcard,
+            document.getElementById('batchbox-' + btn.dataset.batchcard));
+        });
+      }
     } catch (e) {
       c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div></div>';
     }
@@ -2476,6 +2586,13 @@ const Hospital = {
       '<div class="form-row"><div class="form-group"><label class="form-label">物料<span class="req">*</span></label><select class="form-select" id="adjMaterial"><option value="">请选择</option>' +
       materials.map(m => '<option value="' + m.id + '">' + this.escape(m.name) + ' (当前:' + (m.hospital_stock || 0) + (m.unit || '') + ')</option>').join('') +
       '</select></div><div class="form-group"><label class="form-label">数量<span class="req">*</span></label><input type="number" class="form-input" id="adjQty" value="1" min="1" /></div></div>' +
+      '<div class="form-group" id="adjChipGroup" style="display:none;"><label class="form-label">芯片起始号<span class="req">*</span></label><input class="form-input" id="adjChipStart" placeholder="如 042060107000177" inputmode="numeric"><div class="fs-sm text-muted mt-2">按「首号 + 数量」作废连续号码的芯片，作废后不可恢复</div>'
+      + '<div class="mt-2" id="adjChipSegments"></div>'
+      + '<div class="fs-sm mt-2" id="adjChipPreview"><span class="text-muted">填写起始号后，这里会预览将要作废的号码范围</span></div></div>' +
+      // B5：提交前预览「会扣哪几批」—— 异动正是处理过期物料的出口，
+      // 预览不跳过过期批次（txn_type='adjustment'），操作员能明确看到
+      // 报废的就是那批过期的。
+      '<div class="form-group"><div class="fs-sm mt-2" id="adjBatchHint"><span class="text-muted">填写数量后，这里会预览将要扣减的批次</span></div></div>' +
       '<div class="form-group"><label class="form-label">原因说明<span class="req">*</span></label><textarea class="form-textarea" id="adjReason" placeholder="请说明异动原因（过期/破损/盘亏等）"></textarea></div>' +
       '<div style="display:flex;justify-content:flex-end;"><button class="btn btn-primary" id="adjSubmitBtn">提交报备</button></div></div></div></div></div>' +
       '<div class="card mt-5"><div class="card-body-flush">' + adjHtml + '</div></div>';
@@ -2491,6 +2608,35 @@ const Hospital = {
     }
     // 异动数量：PC/移动端统一的 −/+ 步进按钮
     TNR_UI.bindQtyStepper('adjQty');
+    // 芯片物料按号码作废（「首号 + 数量」口径）：选到芯片时才亮出起始号，
+    // 否则后端 `chip_batch_void()` 拿不到号码直接 400 —— 而界面上
+    // 原来没有任何地方能填，芯片报废这条路完全走不通。
+    // 作废是**不可恢复**操作，void 预检在提交前逐颗核对；
+    // 号段摘要与捕捉点端同一份实现（TNR_UI），两端口径不会漂移。
+    const adjPreview = TNR_UI.bindChipPreview('void', 'adjChipStart', 'adjQty', 'adjChipPreview',
+      () => ({ material_id: document.getElementById('adjMaterial').value }));
+    const adjToggleChip = () => {
+      const m = materials.find(x => String(x.id) === String(document.getElementById('adjMaterial').value));
+      const isChip = !!(m && m.category === 'chip');
+      document.getElementById('adjChipGroup').style.display = isChip ? '' : 'none';
+      if (isChip) {
+        TNR_UI.renderChipSegments('adjChipSegments', m.id, (start) => {
+          document.getElementById('adjChipStart').value = start;
+          if (adjPreview) adjPreview.rerun();
+        });
+      } else {
+        document.getElementById('adjChipSegments').innerHTML = '';
+      }
+    };
+    // B5：批次扣减预览（adjustment 不跳过过期批次 —— 异动正是过期物料的出口）
+    const adjBatchPreview = TNR_UI.bindBatchPreview('adjQty', 'adjBatchHint',
+      () => document.getElementById('adjMaterial')?.value || null, 'adjustment');
+    c.querySelector('#adjMaterial')?.addEventListener('change', () => {
+      adjToggleChip();
+      // 物料切换 → 批次预览重跑（bindBatchPreview 只监听数量输入，
+      // 物料维度的变化由这里驱动 —— 与芯片 preview 的 rerun 同一模式）
+      if (adjBatchPreview) adjBatchPreview.rerun();
+    });
     c.querySelector('#adjSubmitBtn')?.addEventListener('click', () => this.saveStockAdjustment(materials));
   },
 
@@ -2501,9 +2647,15 @@ const Hospital = {
     if (!mid) { TNR_UI.toast('请选择物料', 'warning'); return; }
     if (!qty || qty <= 0) { TNR_UI.toast('请输入有效数量', 'warning'); return; }
     if (!reason) { TNR_UI.toast('请填写原因说明', 'warning'); return; }
+    // 芯片物料：异动 = 按「首号 + 数量」作废号码。空号码先在前端挡一道，
+    // 后端 `chip_batch_void()` 还有第二道（「请填写起始芯片号」）。
+    const mat = (materials || []).find(x => String(x.id) === String(mid));
+    const chipStart = (mat && mat.category === 'chip')
+      ? (document.getElementById('adjChipStart')?.value || '').trim() : '';
+    if (mat && mat.category === 'chip' && !chipStart) { TNR_UI.toast('请填写芯片起始号', 'warning'); return; }
 
     try {
-      const res = await TNR_API.adjustStock({material_id: parseInt(mid), quantity: qty, reason: reason});
+      const res = await TNR_API.adjustStock({material_id: parseInt(mid), quantity: qty, reason: reason, chip_start: chipStart});
       if (res.success) {
         TNR_UI.toast('异动报备已提交，库存已扣减', 'success');
         this.render_material();
@@ -2548,6 +2700,7 @@ const Hospital = {
           pet_code: ch.petCode || '—',
           _used: ch.usedAt ? this.formatDateTime(ch.usedAt) : '—',
           created_at: ch.createdAt || '',
+          _op: '<button class="btn btn-outline btn-sm" data-chiptrace="' + this.escape(ch.number) + '">追溯</button>',
         };
       });
       let html = '';
@@ -2564,7 +2717,13 @@ const Hospital = {
           { title: '绑定宠物', key: 'pet_code' },
           { title: '使用时间', key: '_used', sortable: false },
           { title: '入库时间', key: 'created_at' },
+          { title: '操作', key: '_op', sortable: false },
         ], data: rows, emptyText: '暂无芯片记录' });
+      // 行内「追溯」走事件委托（mountTable 排序/翻页会整体重建 tbody）；
+      // 抽屉本体在 TNR_UI.showChipTrace —— 与捕捉点端同一份实现。
+      TNR_UI.delegateClick(c, {
+        'data-chiptrace': (number) => TNR_UI.showChipTrace(number)
+      }, 'HospitalChipRows');
     } catch (e) {
       c.innerHTML = '<div class="card"><div class="card-body" style="text-align:center;padding:var(--sp-6);">'
         + '<div style="font-size:var(--fs-2xl);">⚠️</div>'

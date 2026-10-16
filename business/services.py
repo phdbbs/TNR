@@ -19,7 +19,7 @@ from django.utils import timezone
 from accounts.models import User
 from business.models import (
     Pet, Chip, Blacklist, Transfer,
-    Release, Adoption,
+    Release, Adoption, MaterialBatch,
 )
 from core.http import (body_dict, body_list, body_str,  # noqa: F401
                        json_fail, json_ok, read_json_body, to_camel_key,
@@ -31,11 +31,13 @@ from core.scope import (EMPTY_DISTRICT_SCOPE, is_empty_scope,
 # 库存 / 市级捕捉点判据已拆分至 services_stock.py，
 # 此处 re-export 保持 `from business.services import adjust_stock` 等旧导入路径兼容
 from business.services_stock import (  # noqa: E402,F401
-    INBOUND_TXN_TYPES, OUTBOUND_TXN_TYPES,
+    INBOUND_TXN_TYPES, OUTBOUND_TXN_TYPES, NEAR_EXPIRY_DAYS,
     _opening_quantity_for_new_row,
-    adjust_stock, apply_stock_delta, can_dispatch_across_districts,
-    find_hospital_chip_material, get_hospital_stock, get_institution_ledger_total,
-    get_institution_stock, get_shelter_stock, is_city_shelter, stock_delta,
+    adjust_stock, apply_stock_delta, batch_available_quantity, batch_expiry_state,
+    can_dispatch_across_districts, fefo_sorted, find_hospital_chip_material,
+    get_hospital_stock, get_institution_ledger_total, get_institution_stock,
+    get_material_batches, get_shelter_stock, is_city_shelter,
+    materialize_initial_batches, plan_fefo_deduction, stock_delta,
 )
 
 
@@ -1597,14 +1599,26 @@ def inactive_district_error(district):
     return None
 
 
-def expired_material_error(material, action='使用'):
-    """物料已过有效期时返回错误信息，否则 None。
+def expired_material_error(material, action='使用', institution=None):
+    """物料已过有效期时返回错误信息，否则 None（B5 起升级为**批次级**判据）。
 
     **「有效期」必须真的拦住点什么。** 此前 `Material.expiry_date` 在整个后端
     只有「写入 + 展示」两类读取点：`purchase_create` 写它、医院门户 `formatDate`
     显示它 —— **没有任何一处把它当判据**。后果是拿一支过期 325 天的疫苗做诊疗，
     系统照收不误，界面上只多显示一个日期。与 `inactive_institution_error()`
     同属「字段存在但无人读」。
+
+    B5 之前的判据是主表 `expiry_date` 单值 —— 而它是「最近一次采购」的快照，
+    于是两头都错：老批次过期、新批次明明有效 → 一刀切拒掉（假拦截）；
+    新采购把效期顶新、老批次还压在库里 → 照放行（漏拦截）。
+    有了 `MaterialBatch` 后，判据改为「**该机构的批次余量里是否还有
+    未过期的**」：
+
+    * 传了 `institution` 且该机构**有批次行** → 只要任一未过期批次有余量
+      就放行（真正扣哪批由 `adjust_stock` 的 FEFO 决定，过期批次在消耗时
+      被跳过）；全部余量过期 → 报错；
+    * 没传 `institution` 或还没有批次行 → 沿用主表快照判据（直接造流水
+      的存量/测试形态，行为与 B5 之前**完全一致**）。
 
     与停用判据同一条原则：**已失效的实体不能再用在新业务上**。但拦截面必须
     逐条想清楚，不能一律禁：
@@ -1626,11 +1640,25 @@ def expired_material_error(material, action='使用'):
 
     :param material: Material 对象（None 直接放行，便于调用点少写一层判断）
     :param action: 出现在文案里的动作名，如「用于诊疗」「消耗」
+    :param institution: 库存归属机构 —— 传了且该机构有批次行时走批次级判据
     :return: 错误文案，或 None
     """
-    if material is None or material.expiry_date is None:
+    if material is None:
         return None
     today = timezone.localdate()
+
+    # ---- 批次级判据（B5 生产路径）----
+    if institution is not None and MaterialBatch.objects.filter(
+            material=material, institution=institution).exists():
+        available, expired_qty = batch_expiry_state(material, institution, today)
+        if expired_qty > 0 and available == 0:
+            return (f'「{material.name}」可用批次已全部过期（共 {expired_qty}），'
+                    f'不能{action}；请先做库存异动（过期报废）处理')
+        return None
+
+    # ---- 主表快照判据（存量/测试形态，行为与 B5 之前一致）----
+    if material.expiry_date is None:
+        return None
     if material.expiry_date < today:
         overdue = (today - material.expiry_date).days
         return (f'{material.name} 已于 {material.expiry_date} 过期'

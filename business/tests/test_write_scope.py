@@ -325,7 +325,12 @@ class HospitalWriteScopeContractTest(BusinessTestBase):
             if not roles or 'hospital' not in roles:
                 continue
             fn = getattr(cb, '__name__', '')
-            # 只看写操作（detail / lifecycle 这类纯读接口另有读侧判据）
+            # 只看写操作（detail / lifecycle 这类纯读接口另有读侧判据）。
+            # ⚠ 先排除预检类接口：`preview` 里含子串 `review`（p-REVIEW），
+            #   不排除的话只读的 FEFO/芯片预检会被当成写接口误报 ——
+            #   预检接口 POST 但不落库，本来就不在「写库前机构判据」的射程内。
+            if 'preview' in fn:
+                continue
             if not re.search(r'(edit|receive|reject|review|confirm|update|delete|create|'
                              r'toggle|withdraw|reclaim|apply)', fn):
                 continue
