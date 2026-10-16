@@ -761,7 +761,12 @@ def stock_adjustment(request):
 def _scoped_txn_queryset(user):
     """物资流水的可见范围。
 
-    机构账号（医院 / 捕捉点）：**区县范围内 ∪ 与本机构相关**的流水。
+    **医院**：只看**本院相关**的流水（`hospital_id` / `institution_id` 命中本院）。
+    ⚠ 不能用 `get_district_filtered_queryset`（区县）来收口：同一区县可能有多家
+    医院（襄城区就有爱心 / 瑞鹏），按区县会让 A 院读到 B 院的采购与库存流水。
+    `test_material_views.LedgerViewsTest` 把这条锁死。
+
+    **捕捉点**：本区县台账 ∪ 与本机构相关的流水。
     ⚠ 那一半「与本机构相关」不能省（第四十五轮）：跨区县下发的那条 dispatch
     归属区县是**发起方**的（市级），接收方按自己的区县过滤会**看不到
     发给自己的单** —— 于是「待签收」恒为空、货到了签不了收，
@@ -770,7 +775,7 @@ def _scoped_txn_queryset(user):
     ⚠ 也不能反过来写成「**只**看本机构」（第一版就是这么写的，被回归抓到）：
     改造前的历史行 `institution` 为空（`dispatch` 行无法回填发起方，
     见 `0020` 迁移），只按机构收口会让这些行在捕捉点台账里**凭空消失**。
-    所以是**并集**，不是替换 —— 可见面只增不减。
+    所以捕捉点这一支是**并集**，不是替换 —— 可见面只增不减。
 
     政府 / 平台账号：沿用区县收敛（`get_district_filtered_queryset`）。
     """
@@ -782,8 +787,15 @@ def _scoped_txn_queryset(user):
     # （那会丢前置过滤并产生重复行，见项目约定）。
     own = Q(hospital_id=inst_id) | Q(institution_id=inst_id)
     if user.role == 'hospital':
-        # 医院：本院相关的（`base` 上再收口，范围不比改造前宽）
-        return base.filter(own).distinct()
+        # 医院：**只**看本院相关的流水。
+        # ⚠ 不能写成 `base.filter(own)`（区县 ∩ 本院，实测的缺陷）：市级捕捉点
+        # 给区县医院下发的 dispatch，归属区县是**发起方**的（市级），按医院的
+        # 区县过滤会先把它滤掉 —— 「本院相关」那一半救不回来，于是
+        # 「待接收物料」恒空、货到了签不了收，界面上只显示「暂无数据」（C4 同族）。
+        # ⚠ 也不能写成「本区县 ∪ 本院」（同区县别院的流水会被读出来，回归抓到）：
+        # 跨区县那一半由 `hospital_id=本院` 覆盖，**不需要**区县兜底 ——
+        # 医院的每一行流水都必然挂在本院名下（采购 / 接收 / 消耗 / 异动）。
+        return MaterialTransaction.objects.filter(own).distinct()
     # 捕捉点：本区县台账（含无法回填归属的历史行）∪ 与本机构相关的跨区县流水
     return MaterialTransaction.objects.filter(
         Q(pk__in=base.values('pk')) | own).distinct()
