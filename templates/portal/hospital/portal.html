@@ -818,7 +818,12 @@ const Hospital = {
         const intake = '接收 ' + this.formatDate(r.receive_date)
           + ' · 转运单 ' + this.escape(r.transfer_no || '—')
           + ' · ' + this.escape(r.shelter || '—');
-        html += '<div class="tx-pet-item" data-act="tx-open" data-v="' + r.pet_id + '">'
+        // ⚠ `data-tid` 必须带上：`openTreatment()` 只找 `status='in_progress'`
+        // 的单，点「诊疗完毕」里已办结的动物会被后端**新建一张空单**——
+        // 原单再也看不到，等于「已出院不能编辑可以接受，但连查看都做不到」。
+        // 有 tid 就按 tid 直接开那张单（已办结自然只读），没有（孤儿宠物）才新建。
+        html += '<div class="tx-pet-item" data-act="tx-open" data-v="' + r.pet_id + '"'
+          + ' data-tid="' + (r.treatment_id || '') + '">'
           + '<div class="ico">' + (r.species === '狗' ? '🐕' : '🐈') + '</div>'
           + '<div class="info">'
           + '<div class="l1">' + this.escape(r.pet_code) + ' · ' + this.escape(r.pet_name || '未命名')
@@ -832,15 +837,31 @@ const Hospital = {
   },
 
   /* ==================== 三步流程 ==================== */
-  async openTreatmentFlow(petId) {
+  /* 点看板动物进流程。
+     `treatmentId` 有值时直接开**那张**单（看板行自带 tid，已办结的单也能查看）；
+     没有（孤儿宠物，尚未开单）才走 `openTreatment()` 现场新建。 */
+  async openTreatmentFlow(petId, treatmentId) {
     const c = document.getElementById('treatmentContent');
     if (c) c.innerHTML = '<div class="loading-state">正在进入诊疗流程...</div>';
     try {
-      const res = await TNR_API.openTreatment(petId);
-      // `_post` 失败**不抛异常**（业务错误是 200 + success:false），
-      // 不过一遍 assertOk 的话 catch 是死代码，界面会谎报成功。
-      TNR_UI.assertOk(res, '进入诊疗流程失败');
-      this.startTreatmentFlow(res.data);
+      let detail;
+      if (treatmentId) {
+        const res = await TNR_API.getData('/api/business/treatments/' + treatmentId + '/');
+        if (!res || !res.success) {
+          TNR_UI.toast((res && res.message) || '加载诊疗单失败', 'danger');
+          this.state.treatmentFlow = null;
+          this.renderTreatmentFlow();
+          return;
+        }
+        detail = res.data;
+      } else {
+        const res = await TNR_API.openTreatment(petId);
+        // `_post` 失败**不抛异常**（业务错误是 200 + success:false），
+        // 不过一遍 assertOk 的话 catch 是死代码，界面会谎报成功。
+        TNR_UI.assertOk(res, '进入诊疗流程失败');
+        detail = res.data;
+      }
+      this.startTreatmentFlow(detail);
     } catch (e) {
       TNR_UI.toast(e.message || '进入诊疗流程失败', 'danger');
       this.state.treatmentFlow = null;
@@ -923,6 +944,17 @@ const Hospital = {
       + '<span class="meta">' + attr + '</span>'
       + TNR_UI.printDocBtn('treatment', detail.id, '打印诊疗单')
       + '</div>';
+
+    // 已办结 = 只读查看：办结时间与去向是这张单的历史事实，改不得。
+    // 提示条放在头部下面、步骤条上面，避免和步骤条视觉打架。
+    if (detail.is_disposed) {
+      const dspList = (detail.options || {}).disposals || [];
+      const dspSel = dspList.find(x => x.key === detail.disposal) || {};
+      html += '<div class="tx-tip suc"><span>✅</span><div>'
+        + '<b>该诊疗单已办结，仅可查看、不可编辑。</b>'
+        + (detail.disposed_at ? '办结时间 ' + this.escape(TNR_UI.formatDate(detail.disposed_at)) + '，' : '')
+        + '去向：' + this.escape(dspSel.label || detail.disposal || '—') + '。</div></div>';
+    }
 
     html += '<div class="tx-steps">';
     STEPS.forEach((s, i) => {
@@ -1432,7 +1464,7 @@ const Hospital = {
     }
     if (act === 'tx-filter') { this.state.treatmentFilter = k; this.renderBoard(); return; }
     if (act === 'tx-refresh') { this.renderTreatmentFlow(); return; }
-    if (act === 'tx-open') { this.openTreatmentFlow(k); return; }
+    if (act === 'tx-open') { this.openTreatmentFlow(k, el.dataset.tid || ''); return; }
     if (act === 'tx-back') { this.state.treatmentFlow = null; this.renderTreatmentFlow(); return; }
     if (!f) return;
 
