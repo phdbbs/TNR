@@ -10,6 +10,7 @@
 import glob
 import os
 import re
+import sys
 
 from django.test import SimpleTestCase, TestCase
 from html.parser import HTMLParser
@@ -19,6 +20,14 @@ from business.models import Adoption, Capture, CheckIn, MaterialTransaction, Pet
 from business.services import MANAGEABLE_ROLES
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# `scripts/jslex.py` 提供「只抹注释、保留字符串字面量」的剥离器。本文件里
+# 断言**用户可见文案**的用例都必须用它 —— 见 `MarkdownLeakInUiCopyTest`。
+_SCRIPTS = os.path.join(ROOT, 'scripts')
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+
+from jslex import blank_comments  # noqa: E402
 
 PORTALS = {
     'shelter': 'templates/portal/shelter/portal.html',
@@ -2512,6 +2521,94 @@ class TemplateCommentLeakTest(SimpleTestCase):
             offenders, [],
             '以下 `{#` 没有在同一行闭合 —— 注释内容会被当成正文渲染出来：\n  '
             + '\n  '.join(offenders))
+
+
+class MarkdownLeakInUiCopyTest(SimpleTestCase):
+    """UI 文案里不许出现 Markdown 的 `**加粗**` —— 星号会**原样显示**给用户。
+
+    `TNR_UI.confirm()` / 各列表渲染走的是 **HTML**，不是 Markdown。作者在提示语
+    里写 `**无法撤回**` 想表达加粗，但这里没有任何 Markdown 解析器：用户看到的
+    就是一对星号。第四十六轮走查实测两处：
+
+      * `platform/portal.html` 发布公告确认框：`公告一经发布**无法撤回**`
+      * `hospital/portal.html` 旧口径提示条：`这是**旧口径**的一次性登记`
+
+    两处都不报错、不 500、接口全 200 —— 只有真的把页面打开、把弹窗读出来
+    才会发现（本轮是在平台端发布公告时顺带撞到的）。所以必须机械化。
+
+    ⚠ 判据必须先**剥注释**：本项目里大量解释性注释（`/** … **/`、
+    `<!-- … ** … -->`）会让「源码里出现 `**`」这条断言**恒真**。
+    这里用 `scripts/jslex.blank_comments()` —— 它**只抹注释、保留字符串
+    字面量**。反过来用 `strip_js` 会把字面量一起抹掉，于是 `assertIn`
+    **恒假**，同样抓不到真缺陷（两个方向都踩过）。
+    """
+
+    #: HTML 注释。`blank_comments()` 只管 `<script>` 内的 JS 注释。
+    HTML_COMMENT_RE = re.compile(r'<!--.*?-->', re.DOTALL)
+    #: `<style>` 整块 —— CSS 注释（`/* … */`）住在里面，同样是「解释性文字」。
+    STYLE_BLOCK_RE = re.compile(r'<style\b.*?</style\s*>', re.DOTALL)
+
+    @staticmethod
+    def _blank(match):
+        """等长抹白（保留换行）—— 抹掉的同时行号仍然可用。"""
+        return re.sub(r'[^\n]', ' ', match.group(0))
+
+    @classmethod
+    def _visible_source(cls, src):
+        """返回「用户可见文本」的等长副本：注释被抹白，正文原样保留。"""
+        probe = blank_comments(src)
+        probe = cls.HTML_COMMENT_RE.sub(cls._blank, probe)
+        probe = cls.STYLE_BLOCK_RE.sub(cls._blank, probe)
+        return probe
+
+    def test_no_markdown_bold_in_ui_copy(self):
+        files = sorted(glob.glob(
+            os.path.join(ROOT, 'templates', '**', '*.html'), recursive=True))
+        self.assertGreater(len(files), 10,
+                           '一个模板都没扫到 —— 扫描逻辑失效了，不是「全部通过」')
+        offenders = []
+        for path in files:
+            rel = os.path.relpath(path, ROOT)
+            with open(path, encoding='utf-8') as f:
+                src = f.read()
+            probe = self._visible_source(src)
+            # 等长性自检：抹白若把整份文件抹没了，下面会「全部通过」。
+            self.assertEqual(len(probe), len(src),
+                             f'{rel}: 剥离器改变了长度，判据不可信')
+            for m in re.finditer(r'\*\*', probe):
+                lineno = src.count('\n', 0, m.start()) + 1
+                line = src.split('\n')[lineno - 1].strip()
+                offenders.append(f'{rel}:{lineno}: {line[:80]}')
+        self.assertEqual(
+            offenders, [],
+            '以下 UI 文案里的 `**` 会被原样渲染（HTML 不解析 Markdown）——'
+            ' 想加粗请写 <strong>：\n  ' + '\n  '.join(offenders))
+
+    def test_scanner_can_actually_see_a_planted_defect(self):
+        """反向对照：判据写成「一律通过」也能过，所以必须证明它抓得到。
+
+        同时验证「注释里的 `**` 不算数」—— 否则这条判据会把本项目里上千条
+        解释性注释全报出来，第一个真缺陷反而被淹没。
+        """
+        planted = (
+            '<div>正常文案</div>\n'
+            '<!-- 注释里的 **不该被抓** -->\n'
+            '<style>/* CSS 注释里的 **也不该被抓** */</style>\n'
+            '<script>\n'
+            "  var tip = '这是**加粗**文案';\n"
+            '  // JS 注释里的 **同样不该被抓**\n'
+            '</script>\n'
+        )
+        probe = self._visible_source(planted)
+        self.assertEqual(len(probe), len(planted), '剥离器必须等长')
+        hits = [m.start() for m in re.finditer(r'\*\*', probe)]
+        self.assertEqual(
+            len(hits), 2,
+            '应当且只应当抓到字符串字面量里的那一对星号，实得 %d 个' % len(hits))
+        self.assertIn('加粗', probe[hits[0]:hits[1] + 2],
+                      '抓到的位置不对 —— 不是那对包着「加粗」的星号')
+        for word in ('不该被抓', '也不该被抓', '同样不该被抓'):
+            self.assertNotIn(word, probe, '注释没有被抹白')
 
 
 def css_rule(css, selector):

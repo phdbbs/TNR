@@ -2031,7 +2031,7 @@ const Hospital = {
       const selectedPet = pets.find(p => String(p.id) === String(this.state.treatmentPetId)) || pets[0];
       this.state.treatmentPetId = selectedPet.id;
 
-      let html = '<div class="tx-tip wrn"><span>ℹ️</span><div>这是**旧口径**的一次性登记：'
+      let html = '<div class="tx-tip wrn"><span>ℹ️</span><div>这是<strong>旧口径</strong>的一次性登记：'
         + '提交时当场扣减库存。新收治请优先用「诊疗流程」页签走三步流程；'
         + '这里保留用于补录绝育手术病历（手术日期 / 主刀 / 麻醉 / 诊断 / 手术过程 / 恢复），'
         + '这些字段打印页与政府端详情在读。</div></div>';
