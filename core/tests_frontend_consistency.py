@@ -2220,6 +2220,114 @@ class InstitutionFormScopeContractTest(SimpleTestCase):
                       '挂市级的捕捉点编辑保存时会被静默改判到某个具体区县。')
 
 
+class AccountFormCascadeContractTest(SimpleTestCase):
+    """「所属区县 → 关联机构」必须**逐级联动**（第四十六轮实测两处）。
+
+    两个缺陷形态不同，根子都是「下拉选项与实际规则脱钩」：
+
+    1. **前端收窄 = 静默做不到**。捕捉点操作员的区县下拉只列了市级，
+       而服务端 `user_create` 明确允许 `shelter` 挂「市级或具体区县」。
+       于是「区县级捕捉点操作员」在界面上根本建不出来 —— 不报错、不 400，
+       用户只会以为系统不支持。
+    2. **前端放开 = 白填一遍**。两个角色的机构下拉都是全量列出，
+       选了襄城区还能挑樊城的医院，提交时才被 `validate_operator_district()`
+       拦下。更隐蔽的是「市级 + 区县捕捉点」：所属区县是市级 ⇒ 读取范围是全市，
+       代表区县捕捉点就等于「看全市档案、以区县机构身份操作」——
+       不报错、不 500，数据隔离已经破了。
+
+    ⚠ 本判据锁的是**结构**（选项来源 + 是否存在全量 append 的退路）。
+    真正的行为验证靠浏览器实测：市级→只列市级捕捉点、襄城区→只列襄城的
+    捕捉点与医院、无机构的区县→明确提示而不是空下拉。
+    """
+
+    def _modal(self):
+        source = read(PORTALS['platform'])
+        m = re.search(r'showAccountModal\(\)\s*\{', source)
+        self.assertIsNotNone(
+            m, 'platform portal 里找不到 showAccountModal —— 本测试需要同步更新')
+        body = brace_body(source, source.index('{', m.start()))
+        self.assertIsNotNone(body, 'showAccountModal 方法体的花括号不配对')
+        return body
+
+    def _refresh_fn(self):
+        body = self._modal()
+        m = re.search(r'refreshInstitutionOptions\s*=\s*async\s*\(\)\s*=>\s*\{', body)
+        self.assertIsNotNone(
+            m, '找不到 refreshInstitutionOptions —— 机构按区县筛选的逻辑被移走了')
+        fn = brace_body(body, body.index('{', m.start()))
+        self.assertIsNotNone(fn, 'refreshInstitutionOptions 的花括号不配对')
+        return fn
+
+    def test_shelter_district_options_cover_city_and_counties(self):
+        """捕捉点操作员的区县下拉必须**同时**有市级与具体区县。
+
+        只列 `cityDistricts` 就是「区县级捕捉点操作员建不出来」——
+        服务端允许、前端藏起来，比撞 400 更难发现。
+
+        ⚠ 锚点必须先收进 `updateDistrictOptions()` 内部再找 shelter 分支：
+        `refreshInstitutionOptions()` 里也有一处 `role === 'shelter'`
+        （三元表达式选机构类型），从整个模态框里搜会命中那一处，
+        断言落在机构筛选的代码上，**区县分支改了也发现不了**。
+
+        ⚠ 截取范围必须卡在**本分支的 `}`** 上，不能用固定长度窗口：
+        实测 `+2000` 会越过 shelter 分支、抓到后面
+        `gov_district || hospital` 分支里的 `realDistricts.forEach`，
+        于是「把 shelter 的区县选项整块删掉」这个回归**判据仍然是绿的**。
+        """
+        body = self._modal()
+        m = re.search(r'updateDistrictOptions\s*=\s*async\s*\(\)\s*=>\s*\{', body)
+        self.assertIsNotNone(m, '找不到 updateDistrictOptions —— 角色联动逻辑被移走了')
+        upd = brace_body(body, body.index('{', m.start()))
+        self.assertIsNotNone(upd, 'updateDistrictOptions 的花括号不配对')
+        seg_m = re.search(r"role === 'shelter'\)\s*\{", upd)
+        self.assertIsNotNone(seg_m, 'updateDistrictOptions 里找不到 shelter 分支')
+        start = seg_m.start()
+        nxt = re.search(r'\}\s*else if \(role === ', upd[start:])
+        end = start + nxt.start() if nxt else len(upd)
+        seg = upd[start:end]
+        self.assertIn(
+            'cityDistricts', seg,
+            '捕捉点操作员的区县下拉没有市级选项 —— 市级捕捉点操作员建不出来')
+        self.assertIn(
+            'realDistricts', seg,
+            '捕捉点操作员的区县下拉没有具体区县选项 ——\n'
+            '服务端 `user_create` 允许 shelter 挂区县，前端藏起来等于「静默做不到」')
+
+    def test_institution_options_are_filtered_by_selected_district(self):
+        """机构下拉必须按 `district_id` 过滤，且**不能留全量 append 的退路**。
+
+        反向对照（`all.forEach` 必须不存在）是关键：只断言「出现了
+        district_id 字样」抓不到「过滤写了但全量 append 还留着」——
+        那种代码照样把所有机构列出来，判据却是绿的。
+        """
+        fn = self._refresh_fn()
+        self.assertRegex(
+            fn, r"all\.filter\([\s\S]{0,120}?i\.district_id",
+            '机构下拉没有按 `district_id` 过滤 —— 选了区县仍能挑到别区的机构')
+        self.assertNotRegex(
+            fn, r"\ball\.forEach\b",
+            '机构下拉存在全量 append 的写法 —— 按区县筛选会被它架空，\n'
+            '用户在襄城区仍能选到樊城的机构，提交时才撞 400')
+
+    def test_district_change_refreshes_institution_options(self):
+        """区县变化必须重刷机构，否则会留下「区县=樊城、机构=襄城医院」的组合。"""
+        body = self._modal()
+        self.assertRegex(
+            body, r"districtSelect\.addEventListener\(\s*'change'\s*,\s*refreshInstitutionOptions\s*\)",
+            '区县下拉没有绑定机构刷新 —— 换区县后机构清单还是旧的')
+
+    def test_empty_institution_list_is_explained(self):
+        """该区县没有可用机构时必须给提示，不能只留一个空下拉。
+
+        「没报错的地方最危险」：空下拉会被读成「系统里没有机构」，
+        而实际是该区县没有启用的捕捉点/医院 —— 两种情况的处置完全不同。
+        """
+        fn = self._refresh_fn()
+        self.assertIn(
+            '暂无启用', fn,
+            '机构下拉为空时没有提示 —— 用户会以为系统里根本没有机构')
+
+
 class NarrowedOptionContractTest(SimpleTestCase):
     """「前端把选项收窄了、后端不校验」这一类（第十七轮）。
 

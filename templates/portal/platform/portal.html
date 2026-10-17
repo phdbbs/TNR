@@ -557,7 +557,7 @@ const PlatformPortal = {
       { role: 'platform_admin', name: '平台管理员', desc: '全局设置：区县与机构管理、账号权限管理、编号规则、公告发布、操作日志。可见范围：全部区县，不受区县约束。' },
       { role: 'gov_city', name: '市级管理员', desc: '全市数据查看、机构管理、账号管理、区县管理、系统配置、全业务监管。所属区域：市级。' },
       { role: 'gov_district', name: '区级管理员', desc: '本区县数据查看、本区县机构管理、本区县账号管理（限捕捉点/医院）。所属区域：具体区县。' },
-      { role: 'shelter', name: '捕捉点操作员', desc: '捕捉登记、转运派单、物料采购下发、放归管理、领养审核、回访管控。所属区域：市级，须关联捕捉点。' },
+      { role: 'shelter', name: '捕捉点操作员', desc: '捕捉登记、转运派单、物料采购下发、放归管理、领养审核、回访管控。所属区域：市级捕捉点挂「全市（市级）」、区县捕捉点挂对应区县，须关联捕捉点且与机构同区县。' },
       { role: 'hospital', name: '医院操作员', desc: '动物接收、诊疗绝育、物料消耗、领养资料维护、安乐死处置。所属区域：具体区县，须关联医院。' }
     ];
     document.getElementById('rolePermGrid').innerHTML = perms.map(p => `
@@ -649,6 +649,65 @@ const PlatformPortal = {
     const instHint = m.overlay.querySelector('#acct-institution-hint');
     const districtGroup = m.overlay.querySelector('#acct-district-group');
 
+    /* 机构清单在模态框生命周期内不变，按角色懒加载一次并缓存 ——
+     * 区县每切一次都重新打接口会产生竞态（后发的请求先返回，
+     * 用旧区县的清单覆盖新区县的），而且切换快时白等网络。
+     */
+    const instCache = { shelter: null, hospital: null };
+    const loadInstitutions = async (type) => {
+      if (!instCache[type]) {
+        const list = await TNR_API.getInstitutions(type);
+        instCache[type] = (list || []).filter(i => i.status === 'active');
+      }
+      return instCache[type];
+    };
+
+    /* 关联机构按「所选区县」逐级筛选 —— 本表单最容易出错的一处。
+     *
+     * 服务端 `validate_operator_district()` 要求「账号所属区县」与「机构所在区县」
+     * 自洽：医院必须**完全相等**；捕捉点挂具体区县时也必须相等（挂市级另说，见下）。
+     * 前端若把全部机构不分区县地列出来，用户会按机构名去选、区县留在默认值，
+     * 提交时撞 400「账号所属区县（襄城区）与机构所在区县（樊城区）不一致」——
+     * 白填一遍，而且提示里的两个区县名跟他在下拉里看到的值对不上，无从下手。
+     *
+     * 反过来，「选了市级却还能选区县捕捉点」更隐蔽：所属区县是市级 ⇒
+     * `has_global_district_scope()` 为 True ⇒ 读取范围是**全市**。
+     * 这样的账号会「看到全市档案、以某个区县捕捉点的身份操作」，
+     * 不报错、不 500，数据隔离已经破了。所以市级只列市级捕捉点。
+     */
+    const refreshInstitutionOptions = async () => {
+      const role = roleSelect.value;
+      instSelect.innerHTML = '<option value="">请选择</option>';
+      if (role !== 'shelter' && role !== 'hospital') { instHint.textContent = ''; return; }
+
+      const type = role === 'shelter' ? 'shelter' : 'hospital';
+      const label = role === 'shelter' ? '捕捉点' : '医院';
+      const all = await loadInstitutions(type);
+      const districtId = districtSelect.value;
+      const matched = districtId
+        ? all.filter(i => String(i.district_id) === String(districtId))
+        : [];
+
+      matched.forEach(i => {
+        const opt = document.createElement('option');
+        opt.value = i.id;
+        opt.textContent = i.name + '（' + (i.district_name || '') + '）';
+        instSelect.appendChild(opt);
+      });
+
+      if (!districtId) {
+        instHint.textContent = '请先选择所属区县，机构会按区县筛选';
+      } else if (!matched.length) {
+        // 空下拉**不能静默**：用户会以为「系统里没有机构」，
+        // 实际是该区县没有启用的捕捉点/医院 —— 两种情况的处置完全不同。
+        instHint.textContent = '所选区县暂无启用的' + label
+          + '，请先在「机构管理」中添加，或改选其他区县';
+      } else {
+        instHint.textContent = '只列出与「所属区县」一致的' + label
+          + '（共 ' + matched.length + ' 个）';
+      }
+    };
+
     const updateDistrictOptions = async () => {
       const role = roleSelect.value;
       districtSelect.innerHTML = '<option value="">请选择</option>';
@@ -662,14 +721,39 @@ const PlatformPortal = {
         // 会直接建不出平台账号（下拉为空 → 校验拦下 → 永远提交不了）。
         districtGroup.style.display = 'none';
         districtHint.textContent = '平台管理员为全局角色，不受区县约束';
-      } else if (role === 'gov_city' || role === 'shelter') {
-        // 市级角色 → 必须选市级区县
+      } else if (role === 'gov_city') {
+        // 市级管理员 → 必须选市级区县
         cityDistricts.forEach(d => {
           const opt = document.createElement('option');
-          opt.value = d.id; opt.textContent = d.name + '（市级）';
+          // 区县名本身可能已经带「市级」字样（现场数据叫「全市（市级）」），
+          // 无条件拼后缀会渲染成「全市（市级）（市级）」。
+          opt.value = d.id;
+          opt.textContent = /市级|全市/.test(d.name) ? d.name : d.name + '（市级）';
           districtSelect.appendChild(opt);
         });
-        districtHint.textContent = '市管理员/捕捉点操作员必须选市级区县';
+        districtHint.textContent = '市级管理员必须选市级区县';
+      } else if (role === 'shelter') {
+        /* 捕捉点操作员：服务端允许挂**市级或具体区县**（`user_create` 第 668 行
+         * 「shelter 可挂市级或区县，不做限制」）。原先这里只列 `cityDistricts`，
+         * 于是「区县级捕捉点操作员」在界面上**根本建不出来** ——
+         * 服务端允许、前端藏起来，属于「静默做不到」，比撞 400 更难发现。
+         */
+        if (this.isGlobalScope()) {
+          // 区级管理员看不到市级：他建不了「代表市级机构」的账号
+          // （`validate_user_manage_scope()` 会判「无权管理其他区县的账号」）。
+          cityDistricts.forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.id;
+            opt.textContent = /市级|全市/.test(d.name) ? d.name : d.name + '（市级）';
+            districtSelect.appendChild(opt);
+          });
+        }
+        realDistricts.forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d.id; opt.textContent = d.name;
+          districtSelect.appendChild(opt);
+        });
+        districtHint.textContent = '市级捕捉点选「全市（市级）」，区县捕捉点选对应区县；关联机构会按区县筛选';
       } else if (role === 'gov_district' || role === 'hospital') {
         // 区级角色 → 必须选具体区县，不能选市级
         realDistricts.forEach(d => {
@@ -677,36 +761,24 @@ const PlatformPortal = {
           opt.value = d.id; opt.textContent = d.name;
           districtSelect.appendChild(opt);
         });
-        districtHint.textContent = '区级管理员/医院操作员必须选具体区县，不能选市级';
+        districtHint.textContent = role === 'hospital'
+          ? '医院操作员必须选具体区县；关联机构会按所选区县筛选'
+          : '区级管理员必须选具体区县，不能选市级';
       } else {
         districtHint.textContent = '请先选择角色';
       }
 
       // shelter/hospital 需要关联机构
-      if (role === 'shelter') {
+      if (role === 'shelter' || role === 'hospital') {
         instGroup.style.display = 'block';
-        instHint.textContent = '捕捉点操作员必须关联一个捕捉点机构';
-        const shelters = await TNR_API.getInstitutions('shelter');
-        const activeShelters = (shelters || []).filter(s => s.status === 'active');
-        activeShelters.forEach(s => {
-          const opt = document.createElement('option');
-          opt.value = s.id; opt.textContent = s.name + '（' + (s.district_name || '') + '）';
-          instSelect.appendChild(opt);
-        });
-      } else if (role === 'hospital') {
-        instGroup.style.display = 'block';
-        instHint.textContent = '医院操作员必须关联一个医院机构';
-        const hospitals = await TNR_API.getInstitutions('hospital');
-        const activeHospitals = (hospitals || []).filter(h => h.status === 'active');
-        activeHospitals.forEach(h => {
-          const opt = document.createElement('option');
-          opt.value = h.id; opt.textContent = h.name + '（' + (h.district_name || '') + '）';
-          instSelect.appendChild(opt);
-        });
+        await refreshInstitutionOptions();
       }
     };
 
     roleSelect.addEventListener('change', updateDistrictOptions);
+    // 区县变了必须重刷机构：不重刷就会留下「区县=樊城区、机构=爱心宠物医院」
+    // 这种自相矛盾的组合，提交时被服务端拦下。
+    districtSelect.addEventListener('change', refreshInstitutionOptions);
     // 初始化一次
     await updateDistrictOptions();
 
