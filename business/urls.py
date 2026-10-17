@@ -44,7 +44,11 @@ urlpatterns = [
     # Task 6: 诊疗与物料库存联动
     # ============================================
     path('treatments/', views_treatment.treatment_list, name='treatment_list'),
-    path('treatments/create/', views_treatment.treatment_create, name='treatment_create'),
+    # 注：treatments/create/（Task 6 旧口径「一次请求提交整张单、当场扣库存」）
+    # 已移除 —— 第四十七轮。它唯一的界面入口是医院端「快速登记」标签，删除前
+    # 已把唯一独有价值（绝育手术病历）并入三步流程的「绝育」项目卡片；
+    # 且这条路径「当场扣库存」与三步流程「执行时才扣」是两套会漂移的口径。
+    # 读写同一批 `items_*` 列的只剩三步流程一条写路径。
     # v5.1 三步流程（第四十六轮）：库存在「执行」那一刻才扣。
     # 具体路径放在 `<int:pk>` 之前 —— 虽然 `board` / `open` 不会被
     # `<int:pk>` 匹配，但把通配放最后是这条路由表一直以来的约定，

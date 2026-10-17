@@ -277,7 +277,8 @@ class SilentReadInventoryTest(SimpleTestCase):
         ('shelter', 'showRecoverModal'),
         # 医院端：失败时置空/降级，行内显示「未知」或「暂无」
         ('hospital', 'renderReceiveTab'),
-        ('hospital', 'renderTreatmentForm'),
+        # 第四十七轮：`renderTreatmentForm`（快速登记表单）随「快速登记」整块删除，
+        # 它的降级点一并消失 —— 不是被「修掉」的，是本功能不存在了。
         ('hospital', 'render_material'),
         ('hospital', 'renderMaterialAdjustment'),
         # 领养人端：失败时只展示领养记录

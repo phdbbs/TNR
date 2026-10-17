@@ -28,11 +28,12 @@ from django.db import transaction
 from django.utils import timezone
 
 from .models import (
-    Chip, Material, MaterialStock, Pet, Treatment, TreatmentItem, TreatmentRx,
+    AdoptionHallListing, Chip, Material, MaterialStock, Pet, Treatment,
+    TreatmentItem, TreatmentRx,
 )
 from .services import (
     adjust_stock, expired_material_error, generate_doc_no, get_hospital_stock,
-    use_chip,
+    parse_int_param, use_chip,
 )
 
 # ============================================
@@ -61,9 +62,15 @@ ADVICE_TEMPLATES = [
 # 处置项目的展示元数据。⚠ 与 `TreatmentItem.ITEM_CHOICES` 的 key 集合
 # **必须完全一致** —— 判据 `test_item_meta_covers_every_choice` 盯着这件事：
 # 少一个 key = 那个处置项目在界面上永远没有入口（枚举值存在、产生点缺失）。
+#
+# `needs_record` = 该项目还要填一份**绝育手术病历**（手术日期 / 主刀 / 麻醉 /
+# 诊断 / 手术过程 / 恢复）。第四十七轮从旧「快速登记」表单并入：
+# 这几个字段只在 sterilization 卡片里出现，服务端 `save_sterilization()`
+# 校验「勾了绝育就必须填全」。
 ITEM_META = [
     {'key': 'sterilization', 'icon': '✂️', 'name': '绝育',
      'hint': '母猫卵巢子宫摘除 / 公猫去势',
+     'needs_record': True,
      'note_tpl': ['术前禁食 12h、禁水 4h', '术后 7 日复查拆线', '术后戴伊丽莎白圈 7 日']},
     {'key': 'deworming', 'icon': '💊', 'name': '驱虫', 'hint': '体内外驱虫',
      'note_tpl': ['驱虫后 7 日内避免洗澡', '空腹口服效果更佳']},
@@ -90,6 +97,32 @@ RX_CATEGORIES = ('medicine', 'vaccine', 'dewormer')
 
 MAX_RX_ITEMS = 30          # 单个项目的处方条目上限（防误输）
 MAX_ITEM_COUNT = len(ITEM_META)
+
+# ============================================
+# 绝育手术病历（第四十七轮：从旧「快速登记」表单并入三步流程）
+# ============================================
+# 六个「旧口径」列。⚠ 不新建平行字段：`views_print.TREATMENT_FIELDS`、
+# 监管统计、宠物档案时间轴、政府端 / 医院端列表**都在读这几列**，
+# 新建字段 = 那几处一起印出空白，而且不报错。
+STERILIZATION_FIELDS = (
+    ('surgery_date', 'sterilization_surgery_date'),
+    ('surgeon', 'sterilization_surgeon'),
+    ('anesthesia', 'sterilization_anesthesia'),
+    ('diagnosis', 'sterilization_diagnosis'),
+    ('procedure', 'sterilization_procedure'),
+    ('recovery', 'sterilization_recovery'),
+)
+# 给用户看的字段名（报错时要点名是哪一栏）
+STERILIZATION_LABELS = {
+    'surgery_date': '手术日期', 'surgeon': '主刀医生',
+    'anesthesia': '麻醉方式', 'diagnosis': '诊断',
+    'procedure': '手术过程', 'recovery': '恢复情况',
+}
+ANESTHESIA_CHOICES = ('吸入麻醉', '注射麻醉', '复合麻醉')
+# 病历必填项（手术日期走 `_parse_date()` 另做格式校验，不在此列）
+STERILIZATION_REQUIRED = ('surgeon', 'diagnosis', 'procedure', 'recovery')
+STERILIZATION_TEXT_MAX = 500      # 单栏文本上限，与 `notes` 同量级
+
 
 # 体温判定的发烧线：≥ 此值判「发烧」。口径按猫的正常上限（约 38.0~39.5℃）
 # 取 39.5 —— 本系统以猫为主，狗的正常上限略低（约 39.0℃），混养时统一按
@@ -364,8 +397,24 @@ def save_plan(treatment, body):
         raise ValueError('处置项目必须是数组')
     if len(items) > MAX_ITEM_COUNT:
         raise ValueError(f'处置项目最多 {MAX_ITEM_COUNT} 项')
+
+    # 绝育项目**没有处方也没有芯片号**，`has_rx` 永远是假 —— 按「三样全空就跳过」
+    # 的规则它会被静默丢掉，而 `save_sterilization()` 随即以 `has_item=False`
+    # 把刚填好的六列清空。表现为「病历填完、保存成功、再打开是空的」，
+    # 打印页也印不出手术信息（第四十七轮实测）。所以「病历填了」本身要算「要做」。
+    ster_body = body.get('sterilization')
+    ster_filled = isinstance(ster_body, dict) and any(
+        str(ster_body.get(k) or '').strip()
+        for k in STERILIZATION_REQUIRED + ('surgery_date',))
+    record_keys = {'sterilization'} if ster_filled else set()
+
     if items:
-        _replace_items(treatment, items, hospital)
+        _replace_items(treatment, items, hospital, record_keys=record_keys)
+
+    # 绝育病历：必须在 `_replace_items()` **之后**判 —— 「本单有没有勾绝育」
+    # 要以替换后的子表为准，否则先撤勾再保存会漏清空旧病历。
+    has_ster = treatment.items.filter(item_key='sterilization').exists()
+    updated.extend(save_sterilization(treatment, has_ster, body))
 
     if updated:
         treatment.save(update_fields=sorted(set(updated)))
@@ -373,8 +422,76 @@ def save_plan(treatment, body):
     return updated
 
 
-def _replace_items(treatment, items, hospital):
+def save_sterilization(treatment, has_item, body):
+    """把绝育手术病历写进诊疗单的六个旧口径列。
+
+    ⚠ 第四十七轮起这是**唯一**的写入路径：旧的「快速登记」整块删掉了，
+    病历入口并到了三步流程的「绝育」项目卡片里。
+
+    两条规则，都不报错的那种错最需要注意：
+    1. 勾了绝育就必须填全病历 —— 否则打出来的单子「绝育手术：是、
+      手术日期：—」，归档时看不出来漏没漏。
+    2. **没勾绝育就清空病历**。留着的话会出现「没勾绝育却印得出手术日期」
+       的单子，而打印页与政府端详情都在读这几列。
+
+    :param has_item: 本单是否勾选了「绝育」处置项目（按替换后的子表判）
+    :return: 被更新的**列名**列表（可直接并入 `update_fields`）
+    """
+    ster = body.get('sterilization')
+    if ster is None:
+        ster = {}
+    if not isinstance(ster, dict):
+        raise ValueError('绝育病历格式不正确')
+
+    if not has_item:
+        cleared = []
+        for _, col in STERILIZATION_FIELDS:
+            old = getattr(treatment, col)
+            if col.endswith('_date'):
+                blank = None
+            else:
+                blank = ''
+            if old != blank:
+                setattr(treatment, col, blank)
+                cleared.append(col)
+        return cleared
+
+    values = {}
+    for key in STERILIZATION_REQUIRED:
+        val = str(ster.get(key) or '').strip()
+        if not val:
+            raise ValueError(f'绝育病历「{STERILIZATION_LABELS[key]}」不能为空')
+        if len(val) > STERILIZATION_TEXT_MAX:
+            raise ValueError(
+                f'绝育病历「{STERILIZATION_LABELS[key]}」不能超过 '
+                f'{STERILIZATION_TEXT_MAX} 字')
+        values[key] = val
+
+    anesthesia = str(ster.get('anesthesia') or '').strip()
+    if anesthesia not in ANESTHESIA_CHOICES:
+        raise ValueError('麻醉方式取值不正确')
+    values['anesthesia'] = anesthesia
+
+    raw_date = str(ster.get('surgery_date') or '').strip()
+    if not raw_date:
+        raise ValueError('绝育病历「手术日期」不能为空')
+    values['surgery_date'] = _parse_date(raw_date)
+
+    updated = []
+    for key, col in STERILIZATION_FIELDS:
+        val = values[key]
+        if getattr(treatment, col) != val:
+            setattr(treatment, col, val)
+            updated.append(col)
+    return updated
+
+
+def _replace_items(treatment, items, hospital, record_keys=()):
     """全量替换该诊疗单的处置项目与处方（草稿语义：每次保存覆盖）。
+
+    :param record_keys: 「靠病历而不是处方表达」的项目 key（当前只有绝育）。
+        这些项目只要病历填了就该落库 —— 它们没有处方，按 `has_rx` 判会被
+        静默跳过，随后 `save_sterilization()` 又会把病历清空。
 
     ⚠ 先**全校验**再落库：任何一项不合法就整体拒绝，不产生半截子表。
     """
@@ -399,6 +516,17 @@ def _replace_items(treatment, items, hospital):
         if not isinstance(rx_ids, list):
             raise ValueError('处方必须是数组')
         rx_ids = [i for i in rx_ids if i not in (None, '')]
+        # ⚠ 元素形态同样要守卫（与旧「快速登记」的 `material_id` 同族）：
+        # `{"rx": [[1,2,3]]}` / `{"rx": ["abc"]}` 会让
+        # `Material.objects.filter(pk=<值>)` 抛 `TypeError`/`ValueError`
+        # → 500；超长数字串则会带着 MySQL "Out of range" 一路炸到 500。
+        # 旧接口那条测试（`test_nested_material_id_malformed_is_rejected`）
+        # 随接口一起下线，判据必须搬到这里 —— 否则同类坑在新路径上复活。
+        # 判据不另写一份：直接走 `parse_int_param()`（三态语义同源）。
+        for pos, mid in enumerate(rx_ids, 1):
+            value, err = parse_int_param(mid, label='处方药品ID')
+            if err or value is None:
+                raise ValueError(err or '处方药品ID格式不正确')
         rx_other = str(raw.get('rx_other') or '').strip()[:500]
         chip_no = str(raw.get('chip_no') or '').strip()
         if len(rx_ids) > MAX_RX_ITEMS:
@@ -406,6 +534,9 @@ def _replace_items(treatment, items, hospital):
 
         planned_date = _parse_date(raw.get('planned_date'))
         has_rx = bool(rx_ids) or bool(rx_other) or bool(chip_no)
+        # 「病历类」项目（当前只有绝育）：填了病历就算「要做」——
+        # 它本来就没有处方、没有芯片号，按 `has_rx` 判会永远被跳过。
+        has_record = key in record_keys
 
         # 芯片项目：**填了预计执行时间就必须填芯片号**。
         # 只填时间不填号的话 `has_rx` 为假、整项会被下面静默跳过 ——
@@ -413,12 +544,13 @@ def _replace_items(treatment, items, hospital):
         if key == 'chip' and planned_date is not None and not chip_no:
             raise ValueError('芯片处置必须填写芯片号')
 
-        if not has_rx:
+        if not has_rx and not has_record:
             continue
 
         # 原型 `validatePlan()`：**有处方但没日期** = 待补全，拦住不让往下走。
-        # 这是「时间与处方互为必填」，不是「日期必填」—— 没处方就不要求日期。
-        if planned_date is None:
+        # 这是「时间与处方互为必填」，不是「日期必填」—— 没处方就不要求日期；
+        # 只有病历（绝育）的项目也不要求「预计执行时间」，手术日期在病历里。
+        if has_rx and planned_date is None:
             meta = _item_meta(key)
             raise ValueError(f'{meta["name"]}：已选处方但未填预计执行时间')
 
@@ -583,6 +715,14 @@ def execute_item(treatment, item, user):
     # 必须恒等（第四十六轮重构的目标）。不扣这一笔，可用芯片数就比库存多 1，
     # 而**没有任何报错**，只有把两边的账摊开才看得出来。
     if chip_row is not None and chip_row.material_id:
+        # 有效期判据（第四十七轮补）：芯片走「芯片号」而不是处方，开方阶段
+        # 看不到它的物料，所以这道闸只能落在执行时。旧「快速登记」在落库前
+        # 一次性判过 `chip_material` 的有效期，接口下线后判据必须搬到这里 ——
+        # 否则「过期芯片物料照植」在新路径上复活，且不报错。
+        err = expired_material_error(chip_row.material, '用于诊疗',
+                                     institution=hospital)
+        if err:
+            raise ValueError(err)
         chip_stock = get_hospital_stock(chip_row.material, hospital)
         if chip_stock < 1:
             raise ValueError(
@@ -788,6 +928,31 @@ def dispose(treatment, disposal, user):
     # 所以直接赋值即可。用一张映射表反而多一处会漏改的地方。
     pet.status = disposal
     pet.save(update_fields=['status'])
+
+    # 「领养」必须**当场**进领养大厅（第四十七轮）。
+    # 旧口径靠 `auto_promote_to_adoptable()` 在 5 天后补这一步，而它的判据是
+    # 「`Treatment.status='completed'` 且 `Pet.status='in_treatment'`」——
+    # 新流程这两件事是**同一条 UPDATE 里同时发生**的，那个中间态再也不存在，
+    # 定时任务永远命中不到。不在这里补，动物会变成「状态待领养、大厅里查不到」
+    # 的幽灵（界面上办结提示还写着「信息进入领养大厅」，承诺与事实不符）。
+    if disposal == 'pending_adopt' and not pet.is_deleted:
+        listing = AdoptionHallListing.objects.filter(pet=pet).first()
+        if listing is None:
+            AdoptionHallListing.objects.create(
+                pet=pet,
+                hospital=pet.hospital,
+                hospital_name=pet.hospital.name if pet.hospital else '',
+                is_active=True,
+                published_at=timezone.localdate(),
+            )
+        else:
+            # 已有记录时**显式置回 is_active**：领养完成/撤销时记录会被下架，
+            # 单靠 `get_or_create` 不会重新激活它。
+            listing.is_active = True
+            if pet.hospital_id and listing.hospital_id != pet.hospital_id:
+                listing.hospital = pet.hospital
+                listing.hospital_name = pet.hospital.name
+            listing.save(update_fields=['is_active', 'hospital', 'hospital_name'])
     return treatment
 
 
@@ -800,9 +965,16 @@ def item_is_must(item):
     ⚠ 落库时 `_replace_items()` 已经把「三样全空」的项目过滤掉了，
     所以理论上表里的每一行都是必执行的。这个函数仍然显式判一遍：
     数据可能来自 admin 或历史导入，判据不该依赖「写入侧已经过滤过」。
+
+    第四十七轮补充：**病历类项目（绝育）没有处方也是必执行**。它的「要做」
+    由病历表达 —— 勾了绝育并填完病历，就必须在执行阶段确认做完，
+    否则「诊疗完成」时这台手术既没执行记录、也没扣任何库存，
+    单子却已经办结。前端 `txItemState().must` 同口径。
     """
     if item is None:
         return False
+    if _item_meta(item.item_key).get('needs_record'):
+        return True
     return bool(item.rx_rows.exists() or (item.rx_other or '').strip()
                 or (item.chip_no or '').strip())
 

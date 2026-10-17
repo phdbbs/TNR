@@ -82,9 +82,9 @@ class UseChipTest(TestCase):
     def test_in_transit_chip_raises(self):
         """**在途**芯片不能用（第四十六轮新增的第三态）。
 
-        ⚠ 必须**直接测服务层**：接口层（`treatment_create`）另有一道同样的闸，
-        走接口的用例在服务层被变异后**照样通过**（第一道闸拦住了）——
-        实测变异 M「use_chip 不再拦在途」走接口就是抓不到的。
+        ⚠ 必须**直接测服务层**：接口层（`treatments/<id>/items/<id>/execute`）
+        另有一道同样的闸，走接口的用例在服务层被变异后**照样通过**（第一道闸
+        拦住了）—— 实测变异 M「use_chip 不再拦在途」走接口就是抓不到的。
         两道闸都在是对的（`use_chip` 是公共 API，别处调用时也得拦），
         所以判据要各自盯住自己那道。
         """

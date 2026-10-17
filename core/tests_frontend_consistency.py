@@ -1543,7 +1543,9 @@ FLOW_ENTRY_POINTS = {
     # 原单永远停在 rejected，于是同一单可反复下发、同一动物挂在多张未结单上。
     # 现在被驳回的动物自动回到「待转运」备选框，由操作员重新勾选下发新单。
     '转运撤回': 'withdrawTransfer(',
-    '诊疗登记': 'createTreatment(',
+    # 第四十七轮：原「快速登记」整块删除，诊疗登记入口换成三步流程的
+    # `openTreatment()`（进入流程即开单），绝育病历并入「绝育」项目卡片。
+    '诊疗登记': 'openTreatment(',
     '物料采购入库': 'purchaseMaterial(',
     '物料下发': 'dispatchMaterial(',
     '物料签收': 'receiveMaterial(',

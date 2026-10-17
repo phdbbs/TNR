@@ -1239,22 +1239,32 @@ class MalformedBodyRejectedTest(BusinessTestBase):
                 self.assertEqual(resp.status_code, 400, resp.content[:200])
                 self.assertIn('转运明细', resp.json().get('message', ''))
 
-    def test_nested_material_id_malformed_is_rejected(self):
-        """嵌套 dict 里的整型外键同样要守卫。
+    def test_nested_rx_id_malformed_is_rejected(self):
+        """嵌套数组里的整型外键同样要守卫（`{"rx": [[1,2,3]]}`）。
 
-        `{"vaccine": {"material_id": [1,2,3]}}` 会走到
-        `Material.objects.filter(id=vac['material_id'])` → 500。
-        外层 `vac` 是 dict（合法），所以只有**逐字段**检查才能发现。
+        这条判据原来钉在旧「快速登记」接口的嵌套 `material_id` 上；第四十七轮
+        该接口随「快速登记」标签一起下线，同一族参数搬到了三步流程「医嘱与处方」
+        的 `rx` 数组，判据跟着搬 —— 否则「接口删了、判据也删了」，同类坑会在
+        新路径上原样复活（`[1,2,3]` 抛 `TypeError`、`"abc"` 抛 `ValueError`、
+        24 位数字在 SQLite 绑定时 `OverflowError`）。
         """
         pet = make_pet(code='TNR250990001', status='in_treatment',
                        district=self.district_a, shelter=self.shelter_a,
                        hospital=self.hospital_a)
         self.login_as(self.hospital_user_a)
-        resp = self.post('/api/business/treatments/create/',
-                         '{"pet_id": %d, "items": {"vaccine": true},'
-                         ' "vaccine": {"material_id": [1,2,3]}}' % pet.id)
-        self.assertEqual(resp.status_code, 400, resp.content[:400])
-        self.assertIn('疫苗物料不存在', resp.json().get('message', ''))
+        tid = self.ok(self.post_json('/api/business/treatments/open/',
+                                     {'pet_id': pet.id}))['data']['id']
+        for value in ('[1,2,3]', '"abc"', '{"a":1}',
+                      '999999999999999999999999'):
+            with self.subTest(value=value):
+                resp = self.post(
+                    f'/api/business/treatments/{tid}/plan/',
+                    '{"items": [{"key": "other",'
+                    ' "planned_date": "2026-03-01", "rx": [%s]}]}' % value)
+                self.assertEqual(resp.status_code, 400, resp.content[:400])
+                self.assertIn('处方药品ID', resp.json().get('message', ''),
+                              '文案要指向具体字段，实际：%r'
+                              % resp.json().get('message'))
 
     def test_password_change_non_dict_body_is_rejected(self):
         """`/api/me/password/` 的三个字段同样不能裸用。"""

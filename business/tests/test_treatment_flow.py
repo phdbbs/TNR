@@ -401,6 +401,36 @@ class PlanStepTest(FlowBase):
                                  'rx': [chip_material.id]}])
         self.expect_fail(resp, 400, '不是可开处方的物资')
 
+    def test_plan_rejects_malformed_rx_id(self):
+        """`rx` 元素畸形必须报 400 并指出字段，不能是 500。
+
+        这条判据原来钉在旧「快速登记」接口的嵌套 `material_id` 上
+        （`test_nested_material_id_malformed_is_rejected`）：`{"rx": [[1,2,3]]}`
+        会让 `Material.objects.filter(pk=[1,2,3])` 抛 `TypeError`
+        （字符串抛 `ValueError`、超长数字串把 MySQL 的 out-of-range 一路带出来）。
+        接口下线后同类参数换了个位置，判据必须跟着搬过来。
+        """
+        detail = self._open()
+        tid = detail['id']
+        self.ok(self._check(tid))
+        for value in ([[1, 2, 3]], ['abc'], [{'a': 1}], [True],
+                      ['999999999999999999999999'], [-1]):
+            with self.subTest(rx=value):
+                resp = self._plan(tid, [{'key': 'other',
+                                         'planned_date': '2026-03-01',
+                                         'rx': value}])
+                self.assertEqual(resp.status_code, 400,
+                                 '畸形 rx 应该是 400，实际 %s：%r'
+                                 % (resp.status_code, resp.content[:200]))
+                self.assertIn('处方药品ID', resp.json().get('message', ''),
+                              '文案要指向具体字段，实际：%r'
+                              % resp.json().get('message'))
+
+        # 反向对照：正常数字 id 仍然能开方（否则上面的拒绝就是「一律拒绝」）
+        resp = self._plan(tid, [{'key': 'other', 'planned_date': '2026-03-01',
+                                 'rx': [self.med_a.id]}])
+        self.assertEqual(resp.status_code, 200, resp.content[:200])
+
     def test_plan_rejected_after_diagnosed(self):
         """已诊断必须先「撤回诊断」才能改 —— 否则改完处方再执行，
         库存按新处方扣，账实不符且无痕迹。"""
@@ -730,6 +760,53 @@ class DoneAndDisposeTest(FlowBase):
         self.assertEqual(treatment.status, 'completed')
         self.assertEqual(treatment.disposal, 'pending_adopt')
         self.assertTrue(treatment.disposed_at)
+
+    def test_dispose_adopt_lists_pet_in_hall(self):
+        """去向「领养」必须**当场**挂进领养大厅。
+
+        旧口径靠 `auto_promote_to_adoptable()` 在 5 天后补这一步；它的判据是
+        「`Treatment.status='completed'` 且 `Pet.status='in_treatment'`」，
+        而新流程这两件事在同一条 UPDATE 里同时发生 —— 中间态不存在，定时任务
+        永远命中不到。不在这里补，动物就是「状态待领养、大厅里查不到」的幽灵，
+        而办结提示还写着「信息进入领养大厅」。
+        """
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/done/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'pending_adopt'}))
+
+        listing = AdoptionHallListing.objects.get(pet=self.pet)
+        self.assertTrue(listing.is_active, '待领养的动物必须在大厅里可见')
+        self.assertEqual(listing.hospital_id, self.hospital_a.id)
+        self.assertIsNotNone(listing.published_at)
+
+    def test_dispose_adopt_reactivates_existing_listing(self):
+        """已有下架记录时必须显式置回 `is_active`（`get_or_create` 不会）。"""
+        AdoptionHallListing.objects.create(pet=self.pet, is_active=False)
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/done/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'pending_adopt'}))
+
+        self.assertTrue(AdoptionHallListing.objects.get(pet=self.pet).is_active)
+
+    def test_dispose_other_destinations_do_not_list_pet(self):
+        """反向对照：放归 / 安乐死等去向**不该**上架 —— 否则就是「一律上架」。"""
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/done/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'released'}))
+
+        self.assertFalse(AdoptionHallListing.objects.filter(pet=self.pet).exists())
 
     def test_dispose_dead_status_is_writable(self):
         """`dead`（死亡/无害化）是新拆出来的状态，必须真的能写出来 ——

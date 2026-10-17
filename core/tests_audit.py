@@ -549,12 +549,17 @@ class AuditCityOperatorAttributionTest(BusinessTestBase):
             'pet_codes': [p.code for p in pets]}))
         self._assert_district(self.district_a)
 
-    def test_treatment_create(self):
+    def test_treatment_open(self):
+        """诊疗单开立时也要落区县快照。
+
+        第四十七轮起走三步流程的 `treatments/open/`（旧「快速登记」的
+        `treatments/create/` 已删），开单动作本身不变。
+        """
         pet = make_pet(district=self.district_a, hospital=self.hospital_a,
                        status='in_treatment')
         self.login_as(self.city_hospital)
-        self.ok(self.post_json('/api/business/treatments/create/',
-                               {'pet_id': pet.id, 'items': {}}))
+        self.ok(self.post_json('/api/business/treatments/open/',
+                               {'pet_id': pet.id}))
         self._assert_district(self.district_a)
 
     def test_blacklist_create(self):

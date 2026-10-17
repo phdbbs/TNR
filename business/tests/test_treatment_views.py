@@ -1,7 +1,10 @@
 """诊疗视图测试：四项登记、库存联动、芯片绑定、状态机。"""
 from django.db.models import Max
 
-from business.models import Chip, MaterialTransaction, Treatment
+from business import services_treatment as st
+from business.models import (
+    Chip, MaterialTransaction, Treatment, TreatmentItem,
+)
 from business.services import get_hospital_stock
 from business.tests.base import (
     assert_doc_no,
@@ -12,23 +15,64 @@ from business.tests.base import (
 URL = '/api/business/treatments/'
 
 
-class TreatmentCreateTest(BusinessTestBase):
+class TreatmentFlowViewTest(BusinessTestBase):
+    """诊疗视图（三步流程）：库存联动、芯片绑定、状态机、绝育病历。
+
+    第四十七轮：旧「快速登记」的 `treatments/create/` 已删除，本类整体迁到
+    三步流程（open → check → plan → diagnose → execute → done → dispose）。
+    每条判据都落在**业务结果**上（库存真变了、芯片真绑了、病历真落了），
+    不停在状态码 —— 本地全绿 + 生产 200 也可能功能 100% 不可用。
+
+    ⚠ 旧口径「一次请求提交整张单、当场扣库存」的两条判据在这里**没有对应物**：
+    * 「数量」—— 新流程每个处方药品固定 1 条（`TreatmentRx.quantity`），
+      没有「填 0 / 填 3」这个入口，`test_invalid_quantity_rejected` 随之删除；
+    * 「被拒时不留诊疗记录」—— 新流程开单是**独立一步**（`open`），
+      草稿行本来就在，所以判据改成「不留处置项目 / 不扣库存」。
+    """
+
     def _pet(self, **kw):
         defaults = dict(district=self.district_a, hospital=self.hospital_a,
                         status='in_treatment')
         defaults.update(kw)
         return make_pet(**defaults)
 
-    def _create(self, pet, payload=None):
+    def _open(self, pet):
         self.login_as(self.hospital_user_a)
-        body = {'pet_id': pet.id}
-        body.update(payload or {})
-        return self.post_json(f'{URL}create/', body)
+        return self.ok(self.post_json(f'{URL}open/', {'pet_id': pet.id}))['data']
 
-    def test_minimal_in_progress(self):
+    def _plan(self, tid, items, **extra):
+        body = {'items': items}
+        body.update(extra)
+        return self.post_json(f'{URL}{tid}/plan/', body)
+
+    def _rx(self, tid, key, material, date='2026-03-01'):
+        return self._plan(tid, [{'key': key, 'planned_date': date,
+                                 'rx': [material.id]}])
+
+    def _diagnose(self, tid):
+        """过第一步检查单 → 诊断完成，返回 detail（执行阶段的前置）。"""
+        self.ok(self.post_json(f'{URL}{tid}/check/', {
+            'temperature': 38.5, 'temperature_flag': 'normal'}))
+        return self.ok(self.post_json(f'{URL}{tid}/diagnose/', {}))['data']
+
+    def _execute_all(self, tid):
+        detail = self._diagnose(tid)
+        for item in detail['items']:
+            self.ok(self.post_json(f'{URL}{tid}/items/{item["id"]}/execute/', {}))
+        return detail
+
+    def _execute_first(self, tid):
+        """只执行第一项 —— 负向用例用它拿「被拒」的响应（不能 `self.ok`）。"""
+        detail = self._diagnose(tid)
+        return self.post_json(
+            f'{URL}{tid}/items/{detail["items"][0]["id"]}/execute/', {})
+
+    # ---------- 开单 ----------
+
+    def test_open_creates_in_progress_treatment(self):
         pet = self._pet()
-        body = self.ok(self._create(pet, {'items': {}}))
-        treatment = Treatment.objects.get(id=body['data']['id'])
+        detail = self._open(pet)
+        treatment = Treatment.objects.get(id=detail['id'])
         self.assertEqual(treatment.status, 'in_progress')
         assert_doc_no(self, treatment.ledger_no, 'TRE')
         self.assertEqual(treatment.hospital, self.hospital_a)
@@ -36,32 +80,118 @@ class TreatmentCreateTest(BusinessTestBase):
         pet.refresh_from_db()
         self.assertEqual(pet.status, 'in_treatment')
 
-    def test_sterilization_fields_saved(self):
+    def test_missing_pet_id(self):
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}open/', {}), message='缺少宠物ID')
+
+    def test_unknown_pet(self):
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}open/', {'pet_id': 999999}),
+                         status=404, message='无权访问')
+
+    def test_cross_district_pet_404(self):
+        pet = make_pet(district=self.district_b, hospital=self.hospital_b,
+                       status='in_treatment')
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}open/', {'pet_id': pet.id}),
+                         status=404, message='无权访问')
+
+    def test_deleted_pet_rejected(self):
+        pet = self._pet(is_deleted=True)
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}open/', {'pet_id': pet.id}),
+                         status=404, message='无权访问')
+
+    def test_pending_adopt_pet_can_be_treated(self):
+        pet = self._pet(status='pending_adopt')
+        detail = self._open(pet)
+        self.assertEqual(detail['petCode'], pet.code)
+
+    def test_released_pet_rejected(self):
+        pet = self._pet(status='released')
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}open/', {'pet_id': pet.id}),
+                         message='不可诊疗')
+
+    def test_shelter_cannot_open(self):
         pet = self._pet()
-        body = self.ok(self._create(pet, {
-            'items': {'sterilization': True},
-            'sterilization': {'surgery_date': '2026-03-01', 'surgeon': '赵医生',
-                              'diagnosis': '健康', 'anesthesia': '呼吸麻醉',
-                              'procedure': '常规绝育', 'recovery': '良好'},
-        }))
-        treatment = Treatment.objects.get(id=body['data']['id'])
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}open/', {'pet_id': pet.id}),
+                         status=403)
+
+    def test_hospital_quirk_no_hospital_info(self):
+        """账号没绑医院时要报「未绑定医院」，不能报成「宠物不存在」。"""
+        pet = make_pet(district=self.district_a, status='in_treatment',
+                       hospital=None)
+        user = make_user(role='hospital', district=self.district_a)
+        self.login_as(user)
+        self.expect_fail(self.post_json(f'{URL}open/', {'pet_id': pet.id}),
+                         message='未绑定医院')
+
+    # ---------- 绝育病历（第四十七轮并入） ----------
+
+    STER_RECORD = {
+        'surgery_date': '2026-03-01', 'surgeon': '赵医生',
+        'diagnosis': '健康', 'anesthesia': '吸入麻醉',
+        'procedure': '常规绝育', 'recovery': '良好',
+    }
+
+    def test_sterilization_record_saved_through_plan(self):
+        """填了病历就必须落库 —— 这条项目没有处方，按 `has_rx` 判会被静默跳过，
+        随后 `save_sterilization()` 又把六列清空（「填完保存再打开是空的」）。"""
+        pet = self._pet()
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization'}],
+                           sterilization=self.STER_RECORD))
+
+        treatment = Treatment.objects.get(id=tid)
         self.assertTrue(treatment.items_sterilization)
         self.assertEqual(treatment.sterilization_surgeon, '赵医生')
         self.assertEqual(str(treatment.sterilization_surgery_date), '2026-03-01')
+        self.assertEqual(treatment.sterilization_anesthesia, '吸入麻醉')
+        item = TreatmentItem.objects.get(treatment=treatment,
+                                         item_key='sterilization')
+        self.assertTrue(st.item_is_must(item), '绝育病历类项目必须算「必执行」')
+
+    def test_sterilization_record_cleared_when_record_removed(self):
+        """撤掉病历时六列必须清空 —— 否则会印出「没勾绝育却有手术日期」的单子。"""
+        pet = self._pet()
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization'}],
+                           sterilization=self.STER_RECORD))
+        # UI 每次都发全部项目（空项目由服务端跳过）；`items: []` 是 no-op
+        self.ok(self._plan(tid, [{'key': 'other'},
+                                  {'key': 'sterilization'}]))
+
+        treatment = Treatment.objects.get(id=tid)
+        self.assertFalse(treatment.items_sterilization)
+        self.assertEqual(treatment.sterilization_surgeon, '')
+        self.assertIsNone(treatment.sterilization_surgery_date)
+        self.assertFalse(TreatmentItem.objects.filter(
+            treatment=treatment, item_key='sterilization').exists())
+
+    def test_partial_sterilization_record_rejected(self):
+        """病历填一半必须整单拒绝（0/6 或 6/6，不能 3/6）。"""
+        pet = self._pet()
+        tid = self._open(pet)['id']
+        partial = dict(self.STER_RECORD)
+        partial.pop('surgeon')
+        resp = self._plan(tid, [{'key': 'sterilization'}], sterilization=partial)
+        self.expect_fail(resp, message='不能为空')
+
+    # ---------- 库存联动 ----------
 
     def test_vaccine_consumes_hospital_stock(self):
         pet = self._pet()
         material = make_material(category='vaccine', district=self.district_a)
         make_hospital_txn(material, self.hospital_a, 'receive', 10)
-        body = self.ok(self._create(pet, {
-            'items': {'vaccine': True},
-            'vaccine': {'type': material.name, 'material_id': material.id,
-                        'batch_no': 'B1', 'date': '2026-03-01', 'quantity': 2},
-        }))
-        treatment = Treatment.objects.get(id=body['data']['id'])
+        tid = self._open(pet)['id']
+        self.ok(self._rx(tid, 'vaccine', material))
+        self._execute_all(tid)
+
+        treatment = Treatment.objects.get(id=tid)
         self.assertTrue(treatment.items_vaccine)
-        self.assertEqual(treatment.vaccine_quantity, 2)
-        self.assertEqual(get_hospital_stock(material, self.hospital_a), 8)
+        self.assertEqual(get_hospital_stock(material, self.hospital_a), 9)
         txn = MaterialTransaction.objects.filter(
             material=material, hospital=self.hospital_a, type='consume').first()
         self.assertIsNotNone(txn)
@@ -74,23 +204,18 @@ class TreatmentCreateTest(BusinessTestBase):
     def test_vaccine_out_of_stock_rejected(self):
         pet = self._pet()
         material = make_material(category='vaccine', district=self.district_a)
-        resp = self._create(pet, {
-            'items': {'vaccine': True},
-            'vaccine': {'material_id': material.id, 'quantity': 1},
-        })
-        self.expect_fail(resp, message='疫苗库存不足')
+        tid = self._open(pet)['id']
+        self.expect_fail(self._rx(tid, 'vaccine', material), message='库存为 0')
         self.assertFalse(MaterialTransaction.objects.filter(
             material=material, hospital=self.hospital_a, type='consume').exists())
 
-    def test_out_of_stock_leaves_no_treatment_record(self):
-        """库存不足被拒时不应留下孤立的诊疗记录（原实现先建记录再校验）。"""
+    def test_out_of_stock_leaves_no_items(self):
+        """被拒时不能留下处置项目 —— 否则「库存没扣、项目却要做」。"""
         pet = self._pet()
         material = make_material(category='vaccine', district=self.district_a)
-        self.expect_fail(self._create(pet, {
-            'items': {'vaccine': True},
-            'vaccine': {'material_id': material.id, 'quantity': 1},
-        }), message='疫苗库存不足')
-        self.assertEqual(Treatment.objects.filter(pet=pet).count(), 0)
+        tid = self._open(pet)['id']
+        self.expect_fail(self._rx(tid, 'vaccine', material), message='库存为 0')
+        self.assertFalse(TreatmentItem.objects.filter(treatment_id=tid).exists())
 
     def test_partial_failure_does_not_deduct_stock(self):
         """前一项库存充足、后一项不足时，前一项的库存也不能被扣掉。"""
@@ -99,15 +224,18 @@ class TreatmentCreateTest(BusinessTestBase):
         dewormer = make_material(category='dewormer', district=self.district_a)
         make_hospital_txn(vaccine, self.hospital_a, 'receive', 10)
         # 驱虫药库存为 0，必然失败
-        self.expect_fail(self._create(pet, {
-            'items': {'vaccine': True, 'deworming': True},
-            'vaccine': {'material_id': vaccine.id, 'quantity': 2},
-            'deworming': {'material_id': dewormer.id, 'quantity': 1},
-        }), message='驱虫药库存不足')
+        tid = self._open(pet)['id']
+        resp = self._plan(tid, [
+            {'key': 'vaccine', 'planned_date': '2026-03-01',
+             'rx': [vaccine.id]},
+            {'key': 'deworming', 'planned_date': '2026-03-01',
+             'rx': [dewormer.id]},
+        ])
+        self.expect_fail(resp, message='库存为 0')
 
         self.assertEqual(get_hospital_stock(vaccine, self.hospital_a), 10,
                          '整单被拒时疫苗库存不应被扣减')
-        self.assertEqual(Treatment.objects.filter(pet=pet).count(), 0)
+        self.assertFalse(TreatmentItem.objects.filter(treatment_id=tid).exists())
         self.assertFalse(MaterialTransaction.objects.filter(
             type='consume').exists())
 
@@ -115,50 +243,51 @@ class TreatmentCreateTest(BusinessTestBase):
         pet = self._pet()
         material = make_material(category='dewormer', district=self.district_a)
         make_hospital_txn(material, self.hospital_a, 'receive', 5)
-        self.ok(self._create(pet, {
-            'items': {'deworming': True},
-            'deworming': {'material_id': material.id, 'quantity': 1},
-        }))
+        tid = self._open(pet)['id']
+        self.ok(self._rx(tid, 'deworming', material))
+        self._execute_all(tid)
         self.assertEqual(get_hospital_stock(material, self.hospital_a), 4)
 
-    def test_deworming_out_of_stock_rejected(self):
-        pet = self._pet()
-        material = make_material(category='dewormer', district=self.district_a)
-        self.expect_fail(self._create(pet, {
-            'items': {'deworming': True},
-            'deworming': {'material_id': material.id, 'quantity': 3},
-        }), message='驱虫药库存不足')
+    # ---------- 芯片 ----------
+
+    def _chip_tid(self, pet, chip):
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'chip',
+                                  'planned_date': '2026-03-01',
+                                  'chip_no': chip.number}]))
+        return tid
 
     def test_chip_binds_pet_and_consumes(self):
         pet = self._pet()
-        chip = make_chip()
         chip_material = make_material(category='chip', district=self.district_a)
         make_hospital_txn(chip_material, self.hospital_a, 'receive', 5)
-        self.ok(self._create(pet, {
-            'items': {'chip': True},
-            'chip': {'chip_no': chip.number, 'date': '2026-03-01'},
-        }))
+        # 芯片必须带 `material` 才会扣「芯片物料」库存 —— 那是新形态；
+        # NULL 的是重构前的存量行（当时芯片还没有物料归属），扣不了也不该扣。
+        chip = make_chip(material=chip_material)
+        tid = self._chip_tid(pet, chip)
+        self._execute_all(tid)
+
         chip.refresh_from_db()
         pet.refresh_from_db()
         self.assertEqual(chip.status, 'used')
         self.assertEqual(chip.pet, pet)
         self.assertEqual(pet.chip_no, chip.number)
+        self.assertEqual(get_hospital_stock(chip_material, self.hospital_a), 4)
 
     def test_reused_chip_rejected(self):
         pet = self._pet()
         chip = make_chip(status='used')
-        resp = self._create(pet, {
-            'items': {'chip': True},
-            'chip': {'chip_no': chip.number},
-        })
-        self.expect_fail(resp, message='已被使用')
+        tid = self._chip_tid(pet, chip)
+        self.expect_fail(self._execute_first(tid), message='已被使用')
 
     def test_missing_chip_rejected(self):
+        """芯片号在库里查不到 —— 执行时拒绝（开方只记号码，不验存在）。"""
         pet = self._pet()
-        self.expect_fail(self._create(pet, {
-            'items': {'chip': True},
-            'chip': {'chip_no': 'GHOST-CHIP'},
-        }), message='不存在')
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'chip',
+                                  'planned_date': '2026-03-01',
+                                  'chip_no': 'GHOST-CHIP'}]))
+        self.expect_fail(self._execute_first(tid), message='不存在')
 
     def test_in_transit_chip_rejected(self):
         """**在途**芯片不能植入（第四十六轮新增的第三态）。
@@ -169,10 +298,8 @@ class TreatmentCreateTest(BusinessTestBase):
         """
         pet = self._pet()
         chip = make_chip(status='in_transit')
-        self.expect_fail(self._create(pet, {
-            'items': {'chip': True},
-            'chip': {'chip_no': chip.number},
-        }), message='在途')
+        tid = self._chip_tid(pet, chip)
+        self.expect_fail(self._execute_first(tid), message='在途')
 
     def test_chip_of_other_hospital_rejected(self):
         """**别院持有的**芯片不能植入（第四十六轮归属校验）。
@@ -183,62 +310,8 @@ class TreatmentCreateTest(BusinessTestBase):
         """
         pet = self._pet()
         chip = make_chip(institution=self.hospital_b)
-        self.expect_fail(self._create(pet, {
-            'items': {'chip': True},
-            'chip': {'chip_no': chip.number},
-        }), message='不属于')
-
-    def test_pending_adopt_pet_can_be_treated(self):
-        pet = self._pet(status='pending_adopt')
-        self.ok(self._create(pet, {'items': {}}))
-
-    def test_released_pet_rejected(self):
-        pet = self._pet(status='released')
-        self.expect_fail(self._create(pet, {'items': {}}), message='不可诊疗')
-
-    def test_missing_pet_id(self):
-        self.login_as(self.hospital_user_a)
-        self.expect_fail(self.post_json(f'{URL}create/', {}), message='缺少宠物ID')
-
-    def test_unknown_pet(self):
-        self.login_as(self.hospital_user_a)
-        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': 999999}),
-                  status=404, message='无权访问')
-
-    def test_cross_district_pet_404(self):
-        pet = make_pet(district=self.district_b, hospital=self.hospital_b,
-                       status='in_treatment')
-        self.login_as(self.hospital_user_a)
-        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
-                  status=404, message='无权访问')
-
-    def test_deleted_pet_rejected(self):
-        pet = self._pet(is_deleted=True)
-        self.login_as(self.hospital_user_a)
-        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
-                  status=404, message='无权访问')
-
-    def test_invalid_quantity_rejected(self):
-        pet = self._pet()
-        material = make_material(category='vaccine', district=self.district_a)
-        make_hospital_txn(material, self.hospital_a, 'receive', 10)
-        self.expect_fail(self._create(pet, {
-            'items': {'vaccine': True},
-            'vaccine': {'material_id': material.id, 'quantity': 0},
-        }), message='必须大于 0')
-
-    def test_shelter_cannot_create(self):
-        pet = self._pet()
-        self.login_as(self.shelter_user_a)
-        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}), status=403)
-
-    def test_hospital_quirk_no_hospital_info(self):
-        """宠物与操作员都没有医院信息时应被拒绝。"""
-        pet = make_pet(district=self.district_a, status='in_treatment', hospital=None)
-        user = make_user(role='hospital', district=self.district_a)
-        self.login_as(user)
-        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
-                  message='缺少医院信息')
+        tid = self._chip_tid(pet, chip)
+        self.expect_fail(self._execute_first(tid), message='不属于')
 
 
 class TreatmentListTest(BusinessTestBase):

@@ -177,7 +177,10 @@ const TNR_API = {
   // 注：resendTransfer（重新下发）已移除 —— 被驳回的动物会自动回到「待转运」备选框，
   // 由操作员重新勾选后下发新单；旧的「重新下发」可对同一单反复下发，已废弃。
   async getTreatments() { return this._get('/api/business/treatments/'); },
-  async createTreatment(data) { return this._post('/api/business/treatments/create/', data); },
+  // 注：createTreatment（快速登记，一次请求提交整张单）已移除 —— 第四十七轮
+  // 它唯一的界面入口（医院端「快速登记」标签）已删除，绝育病历并入三步流程的
+  // 「绝育」项目卡片。写接口没有消费者 = 半截功能，且它「当场扣库存」的口径与
+  // 三步流程「执行时才扣」不一致，留着就是两条会漂移的写路径。
   /* ---- 诊疗三步流程（第四十六轮 v5.1）----
      ⚠ 读接口走 `getData`（**严格读**：失败抛错），不走 `_get`（静默读会把
        400/500 变成一张空列表 —— 「加载失败」在界面上看起来就是「暂时没有数据」）。

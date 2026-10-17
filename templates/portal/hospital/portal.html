@@ -94,6 +94,10 @@
   #page-treatment .tx-fld>label{display:block;font-size:var(--fs-sm);color:var(--ink-muted);margin-bottom:5px;font-weight:500}
   #page-treatment .tx-fld>label .req{color:var(--cinnabar);margin-left:2px}
   #page-treatment .tx-fld>label .auto{font-size:var(--fs-xs);color:var(--bamboo-green);background:var(--bamboo-light);border-radius:var(--r-full);padding:0 6px;margin-left:5px;font-weight:600}
+  /* 绝育手术病历行（第四十七轮并入三步流程） */
+  #page-treatment .tx-rec-row{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+  #page-treatment .tx-rec-sum{flex:1;min-width:180px;font-size:var(--fs-sm);color:var(--ink-light);background:var(--rice-light);border:1px dashed var(--border-ink);border-radius:var(--r-md);padding:7px 11px}
+  #page-treatment .tx-rec-sum.on{color:var(--ink-text);border-style:solid;background:var(--white)}
   #page-treatment .tx-inp,#page-treatment .tx-sel,#page-treatment .tx-tar{width:100%;padding:8px 11px;border:1px solid var(--border-ink);border-radius:var(--r-md);background:var(--white);color:var(--ink-text);font-size:var(--fs-md);min-height:38px;outline:none;transition:border var(--t-fast)}
   #page-treatment .tx-inp:focus,#page-treatment .tx-sel:focus,#page-treatment .tx-tar:focus{border-color:var(--cinnabar);box-shadow:0 0 0 3px rgba(195,39,43,.1)}
   #page-treatment .tx-inp[readonly],#page-treatment .tx-inp:disabled,#page-treatment .tx-sel:disabled,#page-treatment .tx-tar:disabled{background:var(--rice-light);color:var(--ink-muted)}
@@ -209,7 +213,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20261017a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20261017b"></script>
 <script>
 /* ====================================================
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
@@ -257,7 +261,6 @@ const Hospital = {
     // 非空 = 正在看某只动物的流程；null = 停在看板
     treatmentFlow: null,
     treatmentPetId: null,
-    treatmentData: { items: {}, sterilization: null, vaccine: null, deworming: null, chip: null },
     // 首页看板「数据概览」的统计区间（任意起止）。空串 = 不限。
     dashStart: '',
     dashEnd: ''
@@ -699,20 +702,18 @@ const Hospital = {
     });
   },
 
-  /* ========== 3. 诊疗业务管理（第四十六轮 v5.1 三步流程） ==========
+  /* ========== 3. 诊疗业务管理（第四十七轮 v5.2 三步流程） ==========
    *
-   * 三个子页签：
-   *   flow   —— v5.1 原型口径：看板（待接诊 / 诊疗中 / 诊疗完毕）→ 点动物进三步流程
-   *   list   —— 诊疗记录（原有列表，保留）
-   *   quick  —— 旧口径「快速登记」（一次提交整单并当场扣库存）
+   * 两个子页签：
+   *   flow —— v5.2 口径：看板（待接诊 / 诊疗中 / 诊疗完毕）→ 点动物进三步流程
+   *   list —— 诊疗记录（原有列表，保留）
    *
-   * ⚠ `quick` 不是历史包袱，**不能删**：
-   *   1. 旧接口 `treatment_create` 还在（`TNR_API.createTreatment`），去掉唯一
-   *      调用点就成了「接口存在、界面没接」——流程在界面上不可达；
-   *   2. 旧口径的「绝育手术病历档案」（手术日期 / 主刀 / 麻醉 / 诊断 / 手术过程 /
-   *      恢复）在三步流程里**没有对应字段**，而打印页
-   *      （`views_print.TREATMENT_FIELDS`）与政府端详情**在读它们** ——
-   *      去掉入口会让这些列永远空白，且不报错。
+   * ⚠ 第四十七轮删掉了旧口径「快速登记」页签（一次性提交整单并当场扣库存，
+   *   字段口径与 v5.1 三步流程不一致）。删之前先把它的**唯一独有价值** ——
+   *   绝育手术病历（手术日期 / 主刀 / 麻醉 / 诊断 / 手术过程 / 恢复）——
+   *   并进了三步流程的「绝育」项目卡片；`treatment_create` 接口一并移除，
+   *   否则会变成「接口存在、界面没接」的半截功能。病历的读写现在统一走
+   *   `services_treatment.save_sterilization()`。
    *
    * 事件一律走 `TNR_UI.delegateClick`（绑在 `#page-treatment` 这个**稳定容器**上）：
    * 视图每次都是整体重渲染 `innerHTML`，直接绑在子节点上的监听器会随旧节点一起
@@ -720,7 +721,7 @@ const Hospital = {
    */
   async render_treatment() {
     const page = document.getElementById('page-treatment');
-    const TABS = [['flow', '诊疗流程'], ['list', '诊疗记录'], ['quick', '快速登记']];
+    const TABS = [['flow', '诊疗流程'], ['list', '诊疗记录']];
     page.innerHTML = '<div class="sub-tabs">' + TABS.map(([k, t]) =>
       '<div class="sub-tab ' + (this.state.treatmentTab === k ? 'active' : '') +
       '" data-act="ttab" data-v="' + k + '">' + t + '</div>').join('') +
@@ -733,7 +734,6 @@ const Hospital = {
 
   renderTreatmentContent() {
     if (this.state.treatmentTab === 'list') this.renderTreatmentList();
-    else if (this.state.treatmentTab === 'quick') this.renderTreatmentQuick();
     else this.renderTreatmentFlow();
   },
 
@@ -885,6 +885,16 @@ const Hospital = {
       checkNote: detail.check_note || '',
       advice: detail.advice || '',
       disposal: detail.disposal || '',
+      // 绝育手术病历（第四十七轮并入）。六个旧口径列由 `detail` 原样带回，
+      // 前端只用一套键名（与服务端 `STERILIZATION_FIELDS` 对齐）。
+      sterilization: {
+        surgery_date: detail.sterilization_surgery_date || '',
+        surgeon: detail.sterilization_surgeon || '',
+        anesthesia: detail.sterilization_anesthesia || '',
+        diagnosis: detail.sterilization_diagnosis || '',
+        procedure: detail.sterilization_procedure || '',
+        recovery: detail.sterilization_recovery || ''
+      },
       items: {}
     };
     const byKey = {};
@@ -1168,8 +1178,20 @@ const Hospital = {
     const hasDate = !!item.plannedDate;
     const hasRx = item.rx.length > 0 || !!String(item.rxOther).trim()
       || (!!meta.needs_chip && !!String(item.chipNo).trim());
-    const state = hasRx ? (hasDate ? 'filled' : 'half') : 'blank';
-    return { hasDate: hasDate, hasRx: hasRx, must: hasRx, half: state === 'half', state: state };
+    /* 病历类项目（绝育）：它没有处方，靠「病历填全了」表达「要做」。
+       服务端 `item_is_must()` 同口径 —— 两边不一致的后果是：界面显示
+       「0 项必执行」，点「诊疗完成」却被服务端拦住（或反过来，单子办结了
+       却没有任何手术记录）。 */
+    const rec = (f && f.draft.sterilization) || {};
+    const recFields = ['surgery_date', 'surgeon', 'anesthesia',
+                       'diagnosis', 'procedure', 'recovery'];
+    const recFilled = recFields.filter(k => !!String(rec[k] || '').trim()).length;
+    const hasRec = !!meta.needs_record && recFilled === recFields.length;
+    const must = hasRx || hasRec;
+    /* 病历已填时不再要求「预计执行时间」—— 手术日期就在病历里。 */
+    const state = must ? ((hasDate || hasRec) ? 'filled' : 'half') : 'blank';
+    return { hasDate: hasDate, hasRx: hasRx, must: must,
+             half: state === 'half', state: state, recFilled: recFilled };
   },
 
   txMustItems() {
@@ -1206,6 +1228,27 @@ const Hospital = {
         + '" data-d="' + q[1] + '">' + q[0] + '</span>').join('');
     }
     h += '</div></div>';
+
+    /* 绝育手术病历（第四十七轮并入）。勾了绝育就必须填全六项 ——
+       服务端 `save_sterilization()` 拦同一件事，两边共用一套键名。
+       空病历时按钮显示「填写」，填过显示日期+医生摘要，诊断完成后仍可
+       查看与补录（`locked` 只禁编辑，不禁查看）。 */
+    if (meta.needs_record) {
+      const rec = f.draft.sterilization || {};
+      const recFilled = !!(rec.surgery_date && rec.surgeon);
+      h += '<div class="tx-fld"><label>手术病历</label>'
+        + '<div class="tx-rec-row">'
+        + '<span class="tx-rec-sum' + (recFilled ? ' on' : '') + '">'
+        + (recFilled
+            ? this.escape(rec.surgery_date) + ' · ' + this.escape(rec.surgeon)
+              + (rec.anesthesia ? ' · ' + this.escape(rec.anesthesia) : '')
+            : '尚未填写手术病历')
+        + '</span>'
+        + '<button class="btn btn-sm ' + (recFilled ? 'btn-secondary' : 'btn-primary')
+        + '" data-act="tx-record-open" data-v="' + meta.key + '">'
+        + (recFilled ? '查看 / 修改病历' : '填写手术病历') + '</button>'
+        + '</div></div>';
+    }
 
     if (meta.needs_chip) {
       h += '<div class="tx-fld"><label>芯片号</label>'
@@ -1536,6 +1579,7 @@ const Hospital = {
       return;
     }
     if (act === 'tx-med-open') { this.openMedPicker(k); return; }
+    if (act === 'tx-record-open') { this.openSterilizationModal(); return; }
     if (act === 'tx-chip-open') { this.openChipPicker(k); return; }
     if (act === 'tx-check-save') { this.saveTreatmentCheck(true); return; }
     if (act === 'tx-check-submit') { this.saveTreatmentCheck(false); return; }
@@ -1714,6 +1758,18 @@ const Hospital = {
         this.renderFlowView();
         return (meta.name || k) + '：已选处方但未填预计执行时间，请补上';
       }
+      /* 绝育病历（第四十七轮）：**填了就必须填全**（0/6 或 6/6，不能 3/6）。
+         只填一半就提交，服务端会以「绝育病历『主刀医生』不能为空」整单拒绝；
+         这里提前告诉用户点哪里补。⚠ 不能写成「一律要求填全」—— 绝育是可选项，
+         没做绝育的单子不该被它拦死。 */
+      if (meta.needs_record) {
+        const filled = this.txItemState(k).recFilled;
+        if (filled > 0 && filled < 6) {
+          f.open[k] = true;
+          this.renderFlowView();
+          return '绝育手术病历尚未填写完整，请点「填写手术病历」补全';
+        }
+      }
     }
     return '';
   },
@@ -1731,7 +1787,8 @@ const Hospital = {
         rx: it.rx.slice()
       };
     });
-    return { advice: f.draft.advice || '', items: items };
+    return { advice: f.draft.advice || '', items: items,
+             sterilization: f.draft.sterilization || null };
   },
 
   async saveTreatmentPlan(advance) {
@@ -2014,210 +2071,17 @@ const Hospital = {
     });
   },
 
-  /* ==================== 旧口径「快速登记」 ==================== */
-  async renderTreatmentQuick() {
-    const c = document.getElementById('treatmentContent');
-    if (!c) return;
-    c.innerHTML = '<div class="loading-state">加载中...</div>';
 
-    try {
-      const pets = await TNR_API.getHospitalPetsStrict('in_treatment');
-      if (pets.length === 0) {
-        c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔬</div><div class="empty-state-text">暂无待诊疗动物</div><div class="empty-state-desc">请先在「动物交接管理」中确认接收转运单</div><button class="btn btn-primary mt-4" data-nav-btn="receive">前往动物交接管理</button></div>';
-        c.querySelector('[data-nav-btn]')?.addEventListener('click', () => this.navigateTo('receive'));
-        return;
-      }
-
-      const selectedPet = pets.find(p => String(p.id) === String(this.state.treatmentPetId)) || pets[0];
-      this.state.treatmentPetId = selectedPet.id;
-
-      let html = '<div class="tx-tip wrn"><span>ℹ️</span><div>这是<strong>旧口径</strong>的一次性登记：'
-        + '提交时当场扣减库存。新收治请优先用「诊疗流程」页签走三步流程；'
-        + '这里保留用于补录绝育手术病历（手术日期 / 主刀 / 麻醉 / 诊断 / 手术过程 / 恢复），'
-        + '这些字段打印页与政府端详情在读。</div></div>';
-      html += '<div class="card mb-5"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>选择诊疗动物</div></div><div class="card-body"><div style="display:grid;gap:var(--sp-2);">';
-      pets.forEach(p => {
-        html += '<div class="pet-select-item ' + (String(p.id) === String(selectedPet.id) ? 'selected' : '') + '" data-pet="' + p.id + '">' +
-          '<div class="photo-placeholder">🐾</div>' +
-          '<div style="flex:1;"><div style="font-weight:500;">' + this.escape(p.code) + ' · ' + this.escape(p.name || '') + '</div>' +
-          '<div style="font-size:var(--fs-sm);color:var(--ink-muted);">' + this.escape(p.species || '') + ' · ' + this.escape(p.breed || '') + ' · ' + this.escape(p.gender || '') + ' · ' + this.escape(p.age || '') + '</div></div>' +
-          '<span class="badge badge-info">' + TNR_API.getPetStatusText(p.status) + '</span></div>';
-      });
-      html += '</div></div></div><div id="treatmentFormArea"></div>';
-      c.innerHTML = html;
-
-      c.querySelectorAll('[data-pet]').forEach(el => {
-        el.addEventListener('click', () => {
-          this.state.treatmentPetId = el.dataset.pet;
-          this.state.treatmentData = {items: {}, sterilization: null, vaccine: null, deworming: null, chip: null};
-          this.renderTreatmentQuick();
-        });
-      });
-
-      this.renderTreatmentForm(selectedPet);
-    } catch (e) {
-      c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div>'
-        + '<div class="empty-state-desc">' + this.escape(e.message || '') + '</div></div>';
-    }
-  },
-
-  async renderTreatmentForm(pet) {
-    const area = document.getElementById('treatmentFormArea');
-    if (!area) return;
-    area.innerHTML = '<div class="loading-state">加载表单...</div>';
-
-    let materials = [];
-    try { materials = await TNR_API.getMaterials(); } catch(e) {}
-    const vaccines = materials.filter(m => m.category === 'vaccine');
-    const dewormers = materials.filter(m => m.category === 'dewormer');
-
-    /* 过期物料不能用于诊疗（服务端 `expired_material_error` 会拒），
-       界面必须同步把它从下拉里去掉 —— 否则是「界面上能选、服务端要拒」的死胡同。
-       ⚠ 但**当前已选中的那一条必须保留**（置灰）—— 否则编辑存量记录时下拉会退到
-       第一个选项，归属被静默改掉（同区县下拉「保留当前值兜底」的约定）。 */
-    const today = TNR_UI.todayStr();
-    const matExpiry = m => m.expiryDate || m.expiry_date || '';
-    const isExpired = m => !!matExpiry(m) && matExpiry(m) < today;
-    const keepSelected = (list, selectedId) => list.filter(m =>
-      !isExpired(m) || (selectedId != null && String(m.id) === String(selectedId)));
-
-    const td = this.state.treatmentData;
-    const esc = this.escape.bind(this);
-
-    let html = '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>诊疗操作 · ' + esc(pet.code) + '</div></div><div class="card-body">';
-
-    /* 基础信息 */
-    html += '<div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">📋</div><div class="form-section-title">基础信息</div></div><div class="form-section-body"><div class="desc-list">' +
-      '<div class="desc-item"><div class="desc-label">宠物编号</div><div class="desc-value">' + esc(pet.code) + '</div></div>' +
-      '<div class="desc-item"><div class="desc-label">名称</div><div class="desc-value">' + esc(pet.name || '—') + '</div></div>' +
-      '<div class="desc-item"><div class="desc-label">物种/品种</div><div class="desc-value">' + (pet.species ? esc(pet.species) + (pet.breed ? ' / ' + esc(pet.breed) : '') : '—') + '</div></div>' +
-      '<div class="desc-item"><div class="desc-label">性别/年龄</div><div class="desc-value">' + (pet.gender ? esc(pet.gender) + (pet.age ? ' / ' + esc(pet.age) : '') : (pet.age ? esc(pet.age) : '—')) + '</div></div>' +
-      '<div class="desc-item"><div class="desc-label">芯片号</div><div class="desc-value">' + esc(pet.chip_no || '—') + '</div></div>' +
-      '</div></div></div>';
-
-    /* 诊疗项目 */
-    html += '<div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">🔬</div><div class="form-section-title">诊疗项目（勾选执行）</div></div><div class="form-section-body">';
-
-    /* 绝育 */
-    html += '<div class="treatment-item-card ' + (td.items.sterilization ? 'checked' : '') + '" data-toggle="sterilization" style="margin-bottom:var(--sp-3);"><div class="treatment-item-header">' +
-      '<input type="checkbox" ' + (td.items.sterilization ? 'checked' : '') + ' data-check="sterilization" style="width:18px;height:18px;accent-color:var(--cinnabar);cursor:pointer;" />' +
-      '<div class="treatment-item-icon">✂️</div><div style="flex:1;"><div style="font-weight:500;">绝育手术</div><div style="font-size:var(--fs-sm);color:var(--ink-muted);">必填录入完整病历档案，无库存消耗</div></div>' +
-      (td.items.sterilization ? (td.sterilization ? '<span class="badge badge-success">已填写</span>' : '<span class="badge badge-warning">待填写</span>') : '') + '</div>' +
-      (td.items.sterilization ? '<div class="treatment-item-body">' + (td.sterilization ?
-        '<div style="display:flex;align-items:center;gap:var(--sp-3);"><span style="font-size:var(--fs-sm);color:var(--ink-muted);">手术日期：' + esc(td.sterilization.surgery_date || '—') + ' · 医生：' + esc(td.sterilization.surgeon || '—') + '</span><button class="btn btn-outline btn-sm" data-ster-modal>修改病历</button></div>'
-        : '<button class="btn btn-outline btn-sm" data-ster-modal>填写病历</button>') + '</div>' : '') +
-      '</div>';
-
-    /* 疫苗 */
-    html += '<div class="treatment-item-card ' + (td.items.vaccine ? 'checked' : '') + '" data-toggle="vaccine" style="margin-bottom:var(--sp-3);"><div class="treatment-item-header">' +
-      '<input type="checkbox" ' + (td.items.vaccine ? 'checked' : '') + ' data-check="vaccine" style="width:18px;height:18px;accent-color:var(--cinnabar);cursor:pointer;" />' +
-      '<div class="treatment-item-icon">💉</div><div style="flex:1;"><div style="font-weight:500;">疫苗接种</div><div style="font-size:var(--fs-sm);color:var(--ink-muted);">勾选后自动扣减医院疫苗库存-1，记录批次</div></div></div>' +
-      (td.items.vaccine ? '<div class="treatment-item-body"><div class="form-row"><div class="form-group" style="margin:0;"><label class="form-label">疫苗类型</label><select class="form-select" id="vaccineSelect"><option value="">请选择</option>' +
-        keepSelected(vaccines, td.vaccine && td.vaccine.material_id).map(v => '<option value="' + v.id + '" ' + (td.vaccine && String(td.vaccine.material_id) === String(v.id) ? 'selected' : '') + ' ' + (((v.hospital_stock || 0) <= 0 || isExpired(v)) ? 'disabled' : '') + '>' + esc(v.name) + (isExpired(v) ? '（已过期）' : '') + ' (库存:' + (v.hospital_stock || 0) + (v.unit || '') + ')</option>').join('') +
-        '</select></div><div class="form-group" style="margin:0;"><label class="form-label">批号</label><input type="text" class="form-input" id="vaccineBatch" value="' + (td.vaccine ? esc(td.vaccine.batch_no || '') : '') + '" readonly /></div></div>' +
-        '<div class="form-group" style="margin:var(--sp-2) 0 0;"><label class="form-label">接种日期</label><input type="date" class="form-input" id="vaccineDate" value="' + (td.vaccine ? td.vaccine.date : TNR_UI.todayStr()) + '" /></div></div>' : '') +
-      '</div>';
-
-    /* 驱虫 */
-    html += '<div class="treatment-item-card ' + (td.items.deworming ? 'checked' : '') + '" data-toggle="deworming" style="margin-bottom:var(--sp-3);"><div class="treatment-item-header">' +
-      '<input type="checkbox" ' + (td.items.deworming ? 'checked' : '') + ' data-check="deworming" style="width:18px;height:18px;accent-color:var(--cinnabar);cursor:pointer;" />' +
-      '<div class="treatment-item-icon">💊</div><div style="flex:1;"><div style="font-weight:500;">驱虫护理</div><div style="font-size:var(--fs-sm);color:var(--ink-muted);">勾选后自动扣减医院驱虫药库存-1，留存用药记录</div></div></div>' +
-      (td.items.deworming ? '<div class="treatment-item-body"><div class="form-row"><div class="form-group" style="margin:0;"><label class="form-label">驱虫药类型</label><select class="form-select" id="dewormerSelect"><option value="">请选择</option>' +
-        keepSelected(dewormers, td.deworming && td.deworming.material_id).map(d => '<option value="' + d.id + '" ' + (td.deworming && String(td.deworming.material_id) === String(d.id) ? 'selected' : '') + ' ' + (((d.hospital_stock || 0) <= 0 || isExpired(d)) ? 'disabled' : '') + '>' + esc(d.name) + (isExpired(d) ? '（已过期）' : '') + ' (库存:' + (d.hospital_stock || 0) + (d.unit || '') + ')</option>').join('') +
-        '</select></div><div class="form-group" style="margin:0;"><label class="form-label">批号</label><input type="text" class="form-input" id="dewormerBatch" value="' + (td.deworming ? esc(td.deworming.batch_no || '') : '') + '" readonly /></div></div>' +
-        '<div class="form-group" style="margin:var(--sp-2) 0 0;"><label class="form-label">用药日期</label><input type="date" class="form-input" id="dewormerDate" value="' + (td.deworming ? td.deworming.date : TNR_UI.todayStr()) + '" /></div></div>' : '') +
-      '</div>';
-
-    /* 芯片 */
-    html += '<div class="treatment-item-card ' + (td.items.chip ? 'checked' : '') + '" data-toggle="chip"><div class="treatment-item-header">' +
-      '<input type="checkbox" ' + (td.items.chip ? 'checked' : '') + ' data-check="chip" style="width:18px;height:18px;accent-color:var(--cinnabar);cursor:pointer;" />' +
-      '<div class="treatment-item-icon">📡</div><div style="flex:1;"><div style="font-weight:500;">芯片植入</div><div style="font-size:var(--fs-sm);color:var(--ink-muted);">输入可用芯片编号，绑定宠物档案，库存-1，芯片永久不可复用</div></div></div>' +
-      (td.items.chip ? '<div class="treatment-item-body"><div class="form-row"><div class="form-group" style="margin:0;"><label class="form-label">芯片编号<span class="req">*</span></label><input type="text" class="form-input" id="chipInput" value="' + (td.chip ? esc(td.chip.chip_no || '') : '') + '" placeholder="请输入可用芯片编号" /></div>' +
-        '<div class="form-group" style="margin:0;"><label class="form-label">植入日期</label><input type="date" class="form-input" id="chipDate" value="' + (td.chip ? td.chip.date : TNR_UI.todayStr()) + '" /></div></div></div>' : '') +
-      '</div>';
-
-    html += '</div></div>';
-
-    /* 操作按钮 */
-    html += '<div style="display:flex;gap:var(--sp-3);justify-content:flex-end;"><button class="btn btn-secondary" data-reset>重置</button><button class="btn btn-primary" data-save>保存诊疗记录</button></div>';
-    html += '</div></div>';
-
-    area.innerHTML = html;
-
-    /* 绑定事件 */
-    area.querySelectorAll('[data-toggle]').forEach(card => {
-      card.addEventListener('click', e => {
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA' || e.target.closest('button')) return;
-        const item = card.dataset.toggle;
-        const cb = card.querySelector('input[type="checkbox"]');
-        const checked = !cb.checked;
-        cb.checked = checked;
-        this.state.treatmentData.items[item] = checked;
-        if (!checked) {
-          if (item === 'sterilization') this.state.treatmentData.sterilization = null;
-          if (item === 'vaccine') this.state.treatmentData.vaccine = null;
-          if (item === 'deworming') this.state.treatmentData.deworming = null;
-          if (item === 'chip') this.state.treatmentData.chip = null;
-        }
-        this.renderTreatmentForm(pet);
-      });
-    });
-
-    area.querySelectorAll('[data-check]').forEach(cb => {
-      cb.addEventListener('change', e => {
-        e.stopPropagation();
-        const item = cb.dataset.check;
-        this.state.treatmentData.items[item] = cb.checked;
-        if (!cb.checked) {
-          if (item === 'sterilization') this.state.treatmentData.sterilization = null;
-          if (item === 'vaccine') this.state.treatmentData.vaccine = null;
-          if (item === 'deworming') this.state.treatmentData.deworming = null;
-          if (item === 'chip') this.state.treatmentData.chip = null;
-        }
-        this.renderTreatmentForm(pet);
-      });
-    });
-
-    area.querySelector('[data-ster-modal]')?.addEventListener('click', e => {
-      e.stopPropagation();
-      this.openSterilizationModal(pet);
-    });
-
-    area.querySelector('[data-reset]')?.addEventListener('click', () => {
-      this.state.treatmentData = {items: {}, sterilization: null, vaccine: null, deworming: null, chip: null};
-      this.renderTreatmentForm(pet);
-    });
-
-    area.querySelector('[data-save]')?.addEventListener('click', () => this.saveTreatment(pet));
-
-    /* 疫苗/驱虫选择联动 */
-    const vSel = area.querySelector('#vaccineSelect');
-    if (vSel) vSel.addEventListener('change', () => {
-      const mid = vSel.value;
-      if (!mid) { this.state.treatmentData.vaccine = null; return; }
-      const mat = materials.find(m => String(m.id) === String(mid));
-      if (mat) {
-        this.state.treatmentData.vaccine = {material_id: mid, type: mat.name, batch_no: mat.batch_no, date: area.querySelector('#vaccineDate')?.value || TNR_UI.todayStr(), quantity: 1};
-        const bEl = area.querySelector('#vaccineBatch');
-        if (bEl) bEl.value = mat.batch_no || '';
-      }
-    });
-
-    const dSel = area.querySelector('#dewormerSelect');
-    if (dSel) dSel.addEventListener('change', () => {
-      const mid = dSel.value;
-      if (!mid) { this.state.treatmentData.deworming = null; return; }
-      const mat = materials.find(m => String(m.id) === String(mid));
-      if (mat) {
-        this.state.treatmentData.deworming = {material_id: mid, type: mat.name, batch_no: mat.batch_no, date: area.querySelector('#dewormerDate')?.value || TNR_UI.todayStr(), quantity: 1};
-        const bEl = area.querySelector('#dewormerBatch');
-        if (bEl) bEl.value = mat.batch_no || '';
-      }
-    });
-  },
-
-  openSterilizationModal(pet) {
-    const td = this.state.treatmentData, ex = td.sterilization || {};
+  /* 绝育手术病历弹窗（第四十七轮：从旧「快速登记」表单并入三步流程）。
+   *
+   * 读写的是 `state.treatmentFlow.draft.sterilization`，不再有独立的
+   * `treatmentData` —— 旧表单整块删掉后那里已经不存在。
+   * 保存只落**前端草稿**，随「医嘱与处方」一起由 `txPlanPayload()` 提交；
+   * 服务端 `save_sterilization()` 负责按「勾没勾绝育」落库或清空。 */
+  openSterilizationModal() {
+    const f = this.state.treatmentFlow;
+    if (!f) { TNR_UI.toast('请先进入诊疗流程', 'warning'); return; }
+    const ex = f.draft.sterilization || {};
     TNR_UI.modal({
       title: '绝育手术病历档案',
       body: (bodyEl, closeFn) => {
@@ -2240,72 +2104,15 @@ const Hospital = {
             recovery: bodyEl.querySelector('#sterRecovery').value.trim()
           };
           if (!d.surgery_date || !d.surgeon || !d.diagnosis || !d.procedure || !d.recovery) { TNR_UI.toast('请填写所有必填项', 'warning'); return; }
-          this.state.treatmentData.sterilization = d;
-          TNR_UI.toast('病历档案已保存', 'success');
+          this.state.treatmentFlow.draft.sterilization = d;
+          TNR_UI.toast('病历档案已暂存，保存医嘱时一并提交', 'success');
           closeFn();
-          this.renderTreatmentForm(pet);
+          // 不整页重渲染：那样会丢掉同一步里其它没保存的输入。
+          // 只刷这张卡片的摘要与按钮即可。
+          this.refreshItemCard('sterilization');
         };
       }
     });
-  },
-
-  async saveTreatment(pet) {
-    const td = this.state.treatmentData;
-    const items = td.items;
-    if (!items.sterilization && !items.vaccine && !items.deworming && !items.chip) { TNR_UI.toast('请至少选择一项诊疗项目', 'warning'); return; }
-    if (items.sterilization && !td.sterilization) { TNR_UI.toast('请填写绝育手术病历', 'warning'); return; }
-
-    const area = document.getElementById('treatmentFormArea');
-    if (!area) return;
-
-    if (items.vaccine) {
-      const vSel = area.querySelector('#vaccineSelect');
-      if (!vSel || !vSel.value) { TNR_UI.toast('请选择疫苗类型', 'warning'); return; }
-      const vDate = area.querySelector('#vaccineDate')?.value || TNR_UI.todayStr();
-      const mat = await TNR_API.getMaterials().then(ms => ms.find(m => String(m.id) === String(vSel.value)));
-      td.vaccine = {material_id: vSel.value, type: mat ? mat.name : '', batch_no: mat ? mat.batch_no : '', date: vDate, quantity: 1};
-    }
-    if (items.deworming) {
-      const dSel = area.querySelector('#dewormerSelect');
-      if (!dSel || !dSel.value) { TNR_UI.toast('请选择驱虫药类型', 'warning'); return; }
-      const dDate = area.querySelector('#dewormerDate')?.value || TNR_UI.todayStr();
-      const mat = await TNR_API.getMaterials().then(ms => ms.find(m => String(m.id) === String(dSel.value)));
-      td.deworming = {material_id: dSel.value, type: mat ? mat.name : '', batch_no: mat ? mat.batch_no : '', date: dDate, quantity: 1};
-    }
-    if (items.chip) {
-      const cInput = area.querySelector('#chipInput');
-      if (!cInput || !cInput.value.trim()) { TNR_UI.toast('请输入芯片编号', 'warning'); return; }
-      td.chip = {chip_no: cInput.value.trim(), date: area.querySelector('#chipDate')?.value || TNR_UI.todayStr()};
-    }
-
-    const allChecked = items.sterilization && items.vaccine && items.deworming && items.chip;
-    const payload = {
-      pet_id: pet.id,
-      items: {
-        sterilization: !!items.sterilization,
-        vaccine: !!items.vaccine,
-        deworming: !!items.deworming,
-        chip: !!items.chip
-      },
-      sterilization: td.sterilization || null,
-      vaccine: td.vaccine || null,
-      deworming: td.deworming || null,
-      chip: td.chip || null,
-      status: allChecked ? 'completed' : 'in_progress'
-    };
-
-    try {
-      const res = await TNR_API.createTreatment(payload);
-      if (res.success) {
-        TNR_UI.toast('诊疗记录保存成功' + (allChecked ? '，诊疗已完成' : ''), 'success');
-        this.state.treatmentData = {items: {}, sterilization: null, vaccine: null, deworming: null, chip: null};
-        this.renderTreatmentQuick();
-      } else {
-        TNR_UI.toast(res.message || '保存失败', 'danger');
-      }
-    } catch (e) {
-      TNR_UI.toast(e.message || '操作失败', 'danger');
-    }
   },
 
   async renderTreatmentList() {

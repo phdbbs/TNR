@@ -5,7 +5,6 @@ from business.models import (
 )
 from business.services import get_hospital_stock
 from business.tests.base import BusinessTestBase, make_pet
-from business.tasks import auto_promote_to_adoptable
 API = '/api/business'
 
 
@@ -84,29 +83,50 @@ class FullLifecycleTest(BusinessTestBase):
         pets = list(Pet.objects.filter(code__in=pet_codes).order_by('id'))
         self.assertTrue(all(p.status == 'in_treatment' for p in pets))
 
-        # 4. 诊疗：绝育 + 疫苗 + 驱虫 + 芯片（完成态）
+        # 4. 诊疗（三步流程）：绝育（含手术病历）+ 疫苗 + 驱虫 + 芯片
+        #    第四十七轮起只有这一条写路径（旧「快速登记」接口已删），
+        #    库存在「执行」那一刻才扣。
         chip = self._available_chip()
         pet_a, pet_b = pets
         stock_before = get_hospital_stock(self.vaccine, self.hospital_a)
-        self.ok(self._post(f'{API}/treatments/create/', {
-            'pet_id': pet_a.id,
-            'items': {'sterilization': True, 'vaccine': True,
-                      'deworming': True, 'chip': True},
-            'sterilization': {'surgery_date': '2026-03-01', 'surgeon': '集成医生'},
-            'vaccine': {'type': self.vaccine.name, 'material_id': self.vaccine.id,
-                        'quantity': 1},
-            'deworming': {'type': self.dewormer.name, 'material_id': self.dewormer.id,
-                          'quantity': 1},
-            'chip': {'chip_no': chip.number},
-            'status': 'completed',
+        tid = self.ok(self._post(f'{API}/treatments/open/',
+                                 {'pet_id': pet_a.id}))['data']['id']
+        self.ok(self._post(f'{API}/treatments/{tid}/check/', {
+            'temperature': 38.6, 'temperature_flag': 'normal'}))
+        self.ok(self._post(f'{API}/treatments/{tid}/plan/', {
+            'advice': '术后 24 小时观察精神与食欲',
+            'items': [
+                {'key': 'sterilization', 'notes': '常规绝育'},
+                {'key': 'vaccine', 'planned_date': '2026-03-01',
+                 'rx': [self.vaccine.id]},
+                {'key': 'deworming', 'planned_date': '2026-03-01',
+                 'rx': [self.dewormer.id]},
+                {'key': 'chip', 'planned_date': '2026-03-01',
+                 'chip_no': chip.number},
+            ],
+            'sterilization': {
+                'surgery_date': '2026-03-01', 'surgeon': '集成医生',
+                'diagnosis': '健康', 'anesthesia': '吸入麻醉',
+                'procedure': '常规绝育', 'recovery': '良好',
+            },
         }))
+        detail = self.ok(self._post(f'{API}/treatments/{tid}/diagnose/', {}))['data']
+        for item in detail['items']:
+            self.ok(self._post(
+                f'{API}/treatments/{tid}/items/{item["id"]}/execute/', {}))
+        self.ok(self._post(f'{API}/treatments/{tid}/done/', {}))
+        self.ok(self._post(f'{API}/treatments/{tid}/dispose/',
+                           {'disposal': 'pending_adopt'}))
+
         self.assertEqual(get_hospital_stock(self.vaccine, self.hospital_a),
                          stock_before - 1)
         chip.refresh_from_db()
         self.assertEqual(chip.status, 'used')
 
-        # 5. 5 天后自动转待领养（任务直接调用模拟调度）
-        auto_promote_to_adoptable(force=True)
+        # 5. 办结去向「领养」必须**当场**进领养大厅（第四十七轮）。
+        #    旧口径靠 `auto_promote_to_adoptable()` 在 5 天后补这一步；
+        #    新流程 `dispose()` 同时落「诊疗单已完成」与「动物待领养」，
+        #    那个中间态不存在了，定时任务（`test_tasks.py` 覆盖存量行）命中不到。
         pet_a.refresh_from_db()
         self.assertEqual(pet_a.status, 'pending_adopt')
         self.assertTrue(AdoptionHallListing.objects.get(pet=pet_a).is_active)
@@ -127,10 +147,19 @@ class FullLifecycleTest(BusinessTestBase):
 
         # 6b. 线下登记支线：宠物B 由捕捉点登记领养（走 pending_claim）
         #     先完成诊疗再把医院确认领出串起来
+        #     ⚠ 这里只做到「诊疗完成」**不办结**：办结去向「放回原小区」会直接
+        #     把 `Pet.status` 置成 released，而 `releases/create` 只接受
+        #     `in_treatment` / `pending_adopt` —— 先办结就再也开不出放归单了。
+        #     （「医院直接结案」与「需小区确认的放归单」是两条路径，本用例覆盖后者。）
         self._login(self.hospital_user_a)
-        self.ok(self._post(f'{API}/treatments/create/', {
-            'pet_id': pet_b.id, 'items': {}, 'status': 'completed',
-        }))
+        tid = self.ok(self._post(f'{API}/treatments/open/',
+                                 {'pet_id': pet_b.id}))['data']['id']
+        self.ok(self._post(f'{API}/treatments/{tid}/check/', {
+            'temperature': 38.4, 'temperature_flag': 'normal'}))
+        self.ok(self._post(f'{API}/treatments/{tid}/plan/', {
+            'advice': '观察 24 小时', 'items': []}))
+        self.ok(self._post(f'{API}/treatments/{tid}/diagnose/', {}))
+        self.ok(self._post(f'{API}/treatments/{tid}/done/', {}))
 
         # 7. 放归闭环（宠物B 走放归而不是领养）
         self._login(self.shelter_user_a)

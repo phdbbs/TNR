@@ -16,14 +16,15 @@ from django.core.management import call_command
 from django.test import TestCase
 from django.utils import timezone
 
-from business.models import Material, MaterialTransaction, Treatment
+from business.models import Material, MaterialTransaction, TreatmentItem
 from business.services import expired_material_error, get_hospital_stock
 from business.tests.base import (
     BusinessTestBase, make_district, make_hospital_txn, make_material, make_pet,
 )
 from core.models import District
 
-TREATMENT_URL = '/api/business/treatments/create/'
+TREATMENT_BASE = '/api/business/treatments/'
+OPEN_URL = TREATMENT_BASE + 'open/'
 PURCHASE_URL = '/api/business/materials/purchase/'
 ADJUST_URL = '/api/business/materials/adjustment/'
 
@@ -70,45 +71,72 @@ class ExpiredMaterialErrorUnitTest(TestCase):
 
 
 class TreatmentExpiredMaterialTest(BusinessTestBase):
-    """诊疗创建：过期物料必须被拒，且**不留任何副作用**。"""
+    """诊疗：过期物料必须被拒，且**不留任何副作用**。
+
+    第四十七轮起诊疗只有三步流程一条写路径（旧「快速登记」的
+    `treatments/create/` 已删），过期判据有**两道闸**，两道都要覆盖：
+
+    * `plan`（开方时）—— 文案「不能用于处方」，只问「本院还有没有未过期批次」；
+    * `items/<id>/execute`（执行时）—— 文案「不能用于诊疗」，此时才真正扣库存，
+      开方之后批次可能刚好过期，所以必须再判一次。
+
+    芯片走的不是处方那条路（用芯片号），它的物料判据在**执行**时。
+    """
 
     def _pet(self):
         return make_pet(district=self.district_a, hospital=self.hospital_a,
                         status='in_treatment')
 
-    def _create(self, pet, payload):
+    def _open(self, pet):
         self.login_as(self.hospital_user_a)
-        body = {'pet_id': pet.id}
-        body.update(payload)
-        return self.post_json(TREATMENT_URL, body)
+        return self.ok(self.post_json(OPEN_URL, {'pet_id': pet.id}))['data']['id']
 
-    def test_expired_vaccine_rejected(self):
+    def _plan(self, tid, items):
+        return self.post_json(f'{TREATMENT_BASE}{tid}/plan/',
+                              {'items': items})
+
+    def _rx(self, tid, key, material, date='2026-03-01'):
+        return self._plan(tid, [{'key': key, 'planned_date': date,
+                                 'rx': [material.id]}])
+
+    def _execute_first(self, tid):
+        # 「诊断完成」要求检查单已提交（`mark_diagnosed` 的前置），先过第一步。
+        self.ok(self.post_json(f'{TREATMENT_BASE}{tid}/check/',
+                               {'temperature': 38.5,
+                                'temperature_flag': 'normal'}))
+        detail = self.ok(self.post_json(f'{TREATMENT_BASE}{tid}/diagnose/', {}))['data']
+        item_id = detail['items'][0]['id']
+        return self.post_json(f'{TREATMENT_BASE}{tid}/items/{item_id}/execute/', {})
+
+    def _items(self, tid):
+        return TreatmentItem.objects.filter(treatment_id=tid)
+
+    # ---------- 第一道闸：开方 ----------
+
+    def test_expired_vaccine_rejected_at_plan(self):
         pet = self._pet()
         material = make_material(category='vaccine', district=self.district_a,
                                  name='过期狂犬疫苗',
                                  expiry_date=days_from_today(-264))
         make_hospital_txn(material, self.hospital_a, 'receive', 10)
 
-        resp = self._create(pet, {
-            'items': {'vaccine': True},
-            'vaccine': {'material_id': material.id, 'quantity': 1},
-        })
-        self.expect_fail(resp, message='不能用于诊疗')
+        tid = self._open(pet)
+        resp = self._rx(tid, 'vaccine', material)
+        self.expect_fail(resp, message='不能用于处方')
         self.assertIn('过期狂犬疫苗', resp.json()['message'])
 
     def test_expired_vaccine_leaves_no_side_effect(self):
-        """被拒时不能留下诊疗记录、消耗流水，也不能扣库存。"""
+        """被拒时不能留下处置项目、消耗流水，也不能扣库存。"""
         pet = self._pet()
         material = make_material(category='vaccine', district=self.district_a,
                                  expiry_date=days_from_today(-264))
         make_hospital_txn(material, self.hospital_a, 'receive', 10)
 
-        self.expect_fail(self._create(pet, {
-            'items': {'vaccine': True},
-            'vaccine': {'material_id': material.id, 'quantity': 2},
-        }), message='不能用于诊疗')
+        tid = self._open(pet)
+        self.expect_fail(self._rx(tid, 'vaccine', material),
+                         message='不能用于处方')
 
-        self.assertEqual(Treatment.objects.filter(pet=pet).count(), 0)
+        self.assertFalse(self._items(tid).exists())
         self.assertFalse(MaterialTransaction.objects.filter(type='consume').exists())
         self.assertEqual(get_hospital_stock(material, self.hospital_a), 10)
 
@@ -118,31 +146,9 @@ class TreatmentExpiredMaterialTest(BusinessTestBase):
                                  expiry_date=days_from_today(-83))
         make_hospital_txn(material, self.hospital_a, 'receive', 5)
 
-        self.expect_fail(self._create(pet, {
-            'items': {'deworming': True},
-            'deworming': {'material_id': material.id, 'quantity': 1},
-        }), message='不能用于诊疗')
-
-    def test_expired_chip_material_rejected(self):
-        """芯片物料理论上也可以设有效期，判据同样要覆盖这条路径。
-
-        原先 `chip_material` 是在**事务块内**才查询的 —— 那次查询可能失败，
-        却落在落库之后，等于把一次校验放在了副作用之后。
-        """
-        from business.tests.base import make_chip
-        pet = self._pet()
-        chip = make_chip()
-        chip_material = make_material(category='chip', district=self.district_a,
-                                      expiry_date=days_from_today(-10))
-        make_hospital_txn(chip_material, self.hospital_a, 'receive', 5)
-
-        self.expect_fail(self._create(pet, {
-            'items': {'chip': True},
-            'chip': {'chip_no': chip.number},
-        }), message='不能用于诊疗')
-
-        chip.refresh_from_db()
-        self.assertEqual(chip.status, 'available', '被拒时芯片不应被标记为已使用')
+        tid = self._open(pet)
+        self.expect_fail(self._rx(tid, 'deworming', material),
+                         message='不能用于处方')
 
     def test_partial_rejection_does_not_deduct_earlier_item(self):
         """疫苗正常、驱虫药过期 —— 整单拒绝，疫苗库存也不许被扣。"""
@@ -154,15 +160,63 @@ class TreatmentExpiredMaterialTest(BusinessTestBase):
         make_hospital_txn(vaccine, self.hospital_a, 'receive', 10)
         make_hospital_txn(dewormer, self.hospital_a, 'receive', 5)
 
-        self.expect_fail(self._create(pet, {
-            'items': {'vaccine': True, 'deworming': True},
-            'vaccine': {'material_id': vaccine.id, 'quantity': 2},
-            'deworming': {'material_id': dewormer.id, 'quantity': 1},
-        }), message='不能用于诊疗')
+        tid = self._open(pet)
+        self.expect_fail(self._plan(tid, [
+            {'key': 'vaccine', 'planned_date': '2026-03-01',
+             'rx': [vaccine.id]},
+            {'key': 'deworming', 'planned_date': '2026-03-01',
+             'rx': [dewormer.id]},
+        ]), message='不能用于处方')
 
         self.assertEqual(get_hospital_stock(vaccine, self.hospital_a), 10,
                          '整单被拒时不应扣减前一项的库存')
-        self.assertEqual(Treatment.objects.filter(pet=pet).count(), 0)
+        self.assertFalse(self._items(tid).exists(),
+                         '整单被拒时不能留下半截子表')
+
+    # ---------- 第二道闸：执行（芯片物料走这条） ----------
+
+    def test_expired_chip_material_rejected_at_execute(self):
+        """芯片物料的有效期判据在**执行**时 —— 开方时还看不到芯片物料。
+
+        旧「快速登记」在落库前一次性查 `find_hospital_chip_material()`；
+        新流程按芯片号在执行时取 `chip.material`，判据必须跟着落到那里，
+        否则「过期芯片物料照植」在新路径上复活。
+        """
+        from business.tests.base import make_chip
+        pet = self._pet()
+        chip_material = make_material(category='chip', district=self.district_a,
+                                      expiry_date=days_from_today(-10))
+        make_hospital_txn(chip_material, self.hospital_a, 'receive', 5)
+        chip = make_chip(institution=self.hospital_a, material=chip_material)
+
+        tid = self._open(pet)
+        self.ok(self._plan(tid, [{'key': 'chip', 'planned_date': '2026-03-01',
+                                  'chip_no': chip.number}]))
+        resp = self._execute_first(tid)
+        self.expect_fail(resp, message='不能用于诊疗')
+
+        chip.refresh_from_db()
+        self.assertEqual(chip.status, 'available', '被拒时芯片不应被标记为已使用')
+        self.assertEqual(get_hospital_stock(chip_material, self.hospital_a), 5)
+
+    def test_expired_batch_after_plan_is_rejected_at_execute(self):
+        """开方时有效、执行时过期 —— 第二道闸必须真的拦住并**不扣库存**。"""
+        pet = self._pet()
+        material = make_material(category='vaccine', district=self.district_a,
+                                 expiry_date=days_from_today(180))
+        make_hospital_txn(material, self.hospital_a, 'receive', 10)
+
+        tid = self._open(pet)
+        self.ok(self._rx(tid, 'vaccine', material))
+
+        # 开完方之后效期被改成昨天（模拟批次刚好过期）
+        material.expiry_date = days_from_today(-1)
+        material.save(update_fields=['expiry_date'])
+
+        resp = self._execute_first(tid)
+        self.expect_fail(resp, message='不能用于诊疗')
+        self.assertEqual(get_hospital_stock(material, self.hospital_a), 10,
+                         '被拒时不应扣库存')
 
     # ---------- 正向对照：不能做成「一律禁止」 ----------
 
@@ -172,12 +226,13 @@ class TreatmentExpiredMaterialTest(BusinessTestBase):
                                  expiry_date=days_from_today(180))
         make_hospital_txn(material, self.hospital_a, 'receive', 10)
 
-        body = self.ok(self._create(pet, {
-            'items': {'vaccine': True},
-            'vaccine': {'material_id': material.id, 'quantity': 2},
-        }))
-        self.assertEqual(get_hospital_stock(material, self.hospital_a), 8)
-        self.assertTrue(Treatment.objects.filter(id=body['data']['id']).exists())
+        tid = self._open(pet)
+        self.ok(self._rx(tid, 'vaccine', material))
+        self.assertTrue(self._items(tid).exists(), '有效物料必须能开进处方')
+
+        # 执行那一刻才扣库存（这是三步流程与旧口径的核心差别）
+        self.ok(self._execute_first(tid))
+        self.assertEqual(get_hospital_stock(material, self.hospital_a), 9)
 
     def test_material_without_expiry_still_accepted(self):
         """`expiry_date=None` 是最常见的形态（芯片、未登记有效期的物料）。"""
@@ -185,10 +240,11 @@ class TreatmentExpiredMaterialTest(BusinessTestBase):
         material = make_material(category='vaccine', district=self.district_a,
                                  expiry_date=None)
         make_hospital_txn(material, self.hospital_a, 'receive', 10)
-        self.ok(self._create(pet, {
-            'items': {'vaccine': True},
-            'vaccine': {'material_id': material.id, 'quantity': 1},
-        }))
+
+        tid = self._open(pet)
+        self.ok(self._rx(tid, 'vaccine', material))
+        self.ok(self._execute_first(tid))
+        self.assertEqual(get_hospital_stock(material, self.hospital_a), 9)
 
     def test_expiring_today_still_accepted(self):
         """边界：有效期就是今天的物料，仍然能用。"""
@@ -196,10 +252,10 @@ class TreatmentExpiredMaterialTest(BusinessTestBase):
         material = make_material(category='vaccine', district=self.district_a,
                                  expiry_date=TODAY())
         make_hospital_txn(material, self.hospital_a, 'receive', 10)
-        self.ok(self._create(pet, {
-            'items': {'vaccine': True},
-            'vaccine': {'material_id': material.id, 'quantity': 1},
-        }))
+
+        tid = self._open(pet)
+        self.ok(self._rx(tid, 'vaccine', material))
+        self.ok(self._execute_first(tid))
 
 
 class ExpiredMaterialIsNotBlanketBanTest(BusinessTestBase):
