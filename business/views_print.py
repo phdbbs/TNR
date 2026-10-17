@@ -405,9 +405,26 @@ def print_doc(request, doc, pk):
         return render(request, 'print/doc_missing.html', {'doc': doc}, status=404)
 
     title = spec['title'] or _mt_title(obj)
+    # ⚠ 字段清单有**两条路**，混成一条出过两次事故（都是磊哥现场报「打印报错」）：
+    #   静态 `spec['fields']` 存**取值函数**，要在这里才 `getter(obj)`；
+    #   `fields_fn` 是「自己算好整张表」的函数，返回值形态由它自己定。
     fields_fn = spec.get('fields_fn')
-    fields = fields_fn(obj) if fields_fn else spec['fields']
-    rows = [(label, getter(obj)) for label, getter in fields]
+    if fields_fn:
+        raw = fields_fn(obj)
+        # ⚠ `fields_fn` 的返回值**两种形态都出现过**，而且两种错都不报错：
+        #   ① 返回**已求值的值**：直接 `rows = raw` 时正确；若被当成取值函数
+        #      统一调一遍，就是 `TypeError: 'str' object is not callable`，
+        #      **诊疗单一打开就 500**（这正是磊哥报的「点打印都报错」）。
+        #   ② 返回**取值函数**：不调它的话 `{{ value }}` 印出来是空，
+        #      **物料单整列空白**，纸面上什么都没印，同样不报错。
+        #   事故 ② 的隐蔽之处：capture/transfer/adoption 走静态 `fields`、
+        #   一直正常，所以「点打印都报错」里其实只有一半类型炸，
+        #   更容易被当成「网络问题」而不去查代码。
+        #   这里按 callable 兜底让两种都印得出来，但**新代码请统一返回
+        #   已求值的值** —— 兜底是止血，不是范式。
+        rows = [(label, v(obj) if callable(v) else v) for label, v in raw]
+    else:
+        rows = [(label, getter(obj)) for label, getter in spec['fields']]
     related = spec['related'](obj)
     print_url = request.build_absolute_uri()
     org = getattr(getattr(request.user, 'institution', None), 'name', '') or '襄阳市流浪动物 TNR 管理平台'

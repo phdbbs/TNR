@@ -13,8 +13,8 @@ from datetime import datetime
 from business.models import MaterialTransaction, DocumentSequence
 from business.services import generate_doc_no
 from business.tests.base import (
-    BusinessTestBase, assert_doc_no, make_capture, make_district, make_institution,
-    make_material, make_pet, make_user,
+    BusinessTestBase, assert_doc_no, make_capture, make_district, make_hospital_txn,
+    make_institution, make_material, make_pet, make_user,
 )
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -265,3 +265,78 @@ class PrintViewTest(BusinessTestBase):
         self.client.force_login(self.user)
         resp = self.client.get('/print/nothing/1/')
         self.assertEqual(resp.status_code, 404)
+
+
+class PrintFieldsFnTest(BusinessTestBase):
+    """走 `fields_fn` 的单据（诊疗单 / 物料单）打印 —— 它们曾 **100% 500**。
+
+    `print_doc` 里有两类字段清单，混在一条路径上正是这次事故的根源：
+
+    * 静态 `fields`：存的是**取值函数**，要在这里才 `getter(obj)`；
+    * `fields_fn`：**直接返回已求值的 `(标签, 值)`**。
+
+    上一版写成 `fields = fields_fn(obj) if fields_fn else spec['fields']`
+    再统一走 `getter(obj)`，于是 `fields_fn` 这条路把**字符串当函数调** ——
+    `TypeError: 'str' object is not callable`。凡是走 `fields_fn` 的单据
+    （诊疗单、物料单）一打开就 500。
+
+    存量用例只测了 capture / transfer / adoption（全走静态 `fields`），
+    所以 `DOC_SPECS` 里一半的类型炸了也没人发现。这里把两类都覆盖到，
+    并且断言**业务字段值真的出现在页面上**（不停在状态码）。
+    """
+
+    def setUp(self):
+        self.district = make_district()
+        self.hospital = make_institution(type='hospital', district=self.district)
+        self.user = make_user('printfn_user', role='gov_district',
+                              district=self.district)
+
+    def _treatment(self):
+        from business.models import Treatment
+        pet = make_pet(code='TP001', district=self.district,
+                       shelter=make_institution(district=self.district))
+        return Treatment.objects.create(
+            ledger_no=generate_doc_no('TRE'),
+            pet=pet, pet_code='TP001', hospital_name=self.hospital.name,
+            district=self.district, operator_name='测试员',
+        )
+
+    def test_treatment_print_renders_values(self):
+        """诊疗单（`fields_fn`）必须 200，且业务值真的印在页面上。"""
+        tx = self._treatment()
+        self.client.force_login(self.user)
+        resp = self.client.get(f'/print/treatment/{tx.id}/')
+        self.assertEqual(resp.status_code, 200,
+                         '诊疗单打印炸了 —— `fields_fn` 的返回值被当成取值函数再调了一遍？')
+        html = resp.content.decode()
+        self.assertIn(tx.ledger_no, html, '打印页必须含诊疗单号')
+        self.assertIn('体温', html, '打印页必须含三代字段（v5.1 体检）')
+        self.assertIn('处置项目', html, '打印页必须含子表汇总行')
+        self.assertNotIn('Traceback', html, '打印页不得泄漏堆栈')
+
+    def test_material_print_renders_values(self):
+        """物料单（`fields_fn` + `title=None`）也要 200 并带单号。"""
+        material = make_material(district=self.district)
+        txn = make_hospital_txn(material, self.hospital, type='receive', quantity=5)
+        self.client.force_login(self.user)
+        resp = self.client.get(f'/print/material/{txn.id}/')
+        self.assertEqual(resp.status_code, 200, '物料单打印炸了')
+        html = resp.content.decode()
+        self.assertIn('物料接收单', html, '`title=None` 时标题应按 type 动态算')
+        self.assertIn(txn.ledger_no, html, '打印页必须含物料单号')
+        self.assertIn(material.name, html, '打印页必须含物料名称')
+
+    def test_both_field_kinds_are_covered(self):
+        """反向对照：`DOC_SPECS` 里必须两类清单都有，且各有一个用例在跑。
+
+        只断言「static 也能打」是抓不到这次的（老用例本来就在测它）。
+        这里钉住 `fields_fn` 类型的数量 > 0 —— 否则哪天有人把
+        `fields_fn` 全删了，这个测试类会一起消失，而事故仍在。
+        """
+        from business import views_print
+        with_fn = [k for k, v in views_print.DOC_SPECS.items() if v.get('fields_fn')]
+        without = [k for k, v in views_print.DOC_SPECS.items() if v.get('fields')]
+        self.assertGreater(len(with_fn), 0, '没有 fields_fn 类单据了，本测试类失效')
+        self.assertGreater(len(without), 0, '没有静态 fields 类单据了')
+        self.assertEqual(len(with_fn) + len(without), len(views_print.DOC_SPECS),
+                         '每个 doc 必须且只能声明一种字段清单')
