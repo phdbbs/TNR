@@ -268,6 +268,13 @@ const TNR_API = {
     const qs = status ? `?status=${encodeURIComponent(status)}` : '';
     return this._get('/api/business/adoptions/applications/' + qs);
   },
+  /* 撤回自己的领养申请（`pending` → `cancelled`）。
+     走 `_post`：返回**完整信封**（非 2xx 不抛错），调用方必须用
+     `TNR_UI.assertOk(res)` 把 `success:false` 转成异常，否则失败会被
+     当成成功。**不能**用 `_get` 系的静默读 —— 那连 HTTP 状态都忽略。 */
+  async cancelAdoptionApplication(id) {
+    return this._post(`/api/business/adoptions/applications/${id}/cancel/`, {});
+  },
   async registerAdoption(data) { return this._post('/api/business/adoptions/register/', data); },
   async confirmAdoptionClaim(id, data) { return this._post(`/api/business/adoptions/${id}/confirm-claim/`, data || {}); },
   async reclaimAdoption(id, data) { return this._post(`/api/business/adoptions/${id}/reclaim/`, data || {}); },

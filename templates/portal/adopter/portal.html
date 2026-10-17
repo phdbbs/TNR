@@ -699,7 +699,7 @@
 {% endblock %}
 
 {% block extra_js %}
-<script src="{% static 'js/tnr-api.js' %}?v=20261013a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20261017a"></script>
 <script>
 /* ============================================
    领养人端 H5 门户 - 应用逻辑（对接 Django API）
@@ -1258,6 +1258,34 @@ async function submitApply() {
   }
 }
 
+/* 撤回自己的领养申请（`pending` → `cancelled`）。
+ *
+ * 走 `TNR_API.cancelAdoptionApplication()`（`_post` 系：**返回完整信封、
+ * 非 2xx 也不抛错**），所以必须用 `TNR_UI.assertOk()` 把 `success:false`
+ * 转成异常，catch 里的失败提示才可能出现。**不能**用 `_get` 系的静默读 ——
+ * 那连 HTTP 状态都忽略，撤回失败会被渲染成「没反应」，用户以为撤回了、
+ * 实际还在等审核（「没报错」的地方最危险）。
+ *
+ * 撤回成功后必须 `renderMyAdoption()` 重渲染：不重渲染的话卡片上还是
+ * 「待审核」+ 撤回按钮，用户会反复点，第二次开始 400（已处理）。
+ */
+async function cancelApply(id) {
+  const ok = await TNR_UI.confirm(
+    '确定撤回这条领养申请吗？<br>撤回后可以重新提交申请。', '撤回申请');
+  if (!ok) return;
+  try {
+    // ⚠ `cancelAdoptionApplication` 走 `_post`：返回的是**完整信封**，非 2xx
+    // 也**不抛错**。必须用 `assertOk` 把 `success:false` 变成异常，否则
+    // 会把「撤回失败」当成成功弹绿条（这正是死 catch 判据报出来的问题）。
+    const json = TNR_UI.assertOk(
+      await TNR_API.cancelAdoptionApplication(id), '撤回失败');
+    TNR_UI.toast(json.message || '申请已撤回', 'success');
+    renderMyAdoption();
+  } catch (e) {
+    TNR_UI.toast(e.message || '撤回失败', 'danger');
+  }
+}
+
 async function renderMyAdoption() {
   if (PUBLIC_MODE || !getCurrentUser()) {
     document.getElementById('myAdoptionList').innerHTML = loginRequiredHtml('前往登录后查看您的领养记录');
@@ -1328,7 +1356,9 @@ async function renderMyAdoption() {
             </div>
             <div class="adoption-card-footer">
               <span>状态：${statusBadge}</span>
-              <span style="margin-left:auto;color:var(--ink-light);font-size:12px;">${TNR_UI.escape(getApplyStatusText(app.status))}</span>
+              ${app.status === 'pending'
+                ? `<button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="event.stopPropagation();cancelApply('${app.id}')">撤回申请</button>`
+                : `<span style="margin-left:auto;color:var(--ink-light);font-size:12px;">${TNR_UI.escape(getApplyStatusText(app.status))}</span>`}
             </div>
           </div>`;
       });

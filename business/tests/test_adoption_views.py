@@ -8,6 +8,7 @@ from business.tests.base import (
     assert_doc_no,
     BusinessTestBase, make_institution, make_pet,
 )
+from business.services import pet_has_active_adoption
 
 HALL_URL = '/api/business/adoptions/hall/'
 
@@ -209,6 +210,38 @@ class AdoptionApplyTest(BusinessTestBase):
         self.assertTrue(body2.json()['success'],
                         '被拒后可再次申请: ' + body2.content.decode())
 
+    def test_apply_cancelled_then_can_reapply(self):
+        """撤回（`cancelled`）与「被拒」（`rejected`）必须**同一口径**。
+
+        重复校验原先只 `.exclude(status='rejected')`。第四十六轮补上「撤回」
+        这条路径后，若不同步放行 `cancelled`，领养人一撤回就**永久无法再申请
+        同一只动物** —— 而提示语还是「请勿重复提交」，看起来像正常防重复，
+        实际是死锁。这条用例与 `test_apply_rejected_then_can_reapply` 成对，
+        缺了它，「撤回」这个新功能就是个陷阱。
+        """
+        pet = self._pet()
+        self.login_as(self.adopter)
+        first = self.ok(self.post_json(self.URL, self._payload(pet)))['data']['id']
+        self.ok(self.post_json(
+            f'/api/business/adoptions/applications/{first}/cancel/', {}))
+        self.assertEqual(
+            AdoptionApplication.objects.get(id=first).status, 'cancelled')
+        body2 = self.post_json(self.URL, self._payload(pet))
+        self.assertTrue(body2.json()['success'],
+                        '撤回后可再次申请: ' + body2.content.decode())
+
+    def test_apply_pending_still_blocks_reapply(self):
+        """反向对照：不能为了放行 `cancelled` 把整个重复校验拆掉。
+
+        `test_apply_cancelled_then_can_reapply` 只证明「撤回后能再申请」；
+        若判据被写成「一律放行」，那条也会绿。这里断言 `pending` 仍然拦。
+        """
+        pet = self._pet()
+        self.login_as(self.adopter)
+        self.ok(self.post_json(self.URL, self._payload(pet)))
+        self.expect_fail(self.post_json(self.URL, self._payload(pet)),
+                         message='请勿重复提交')
+
     def test_apply_blacklist_blocked(self):
         from business.models import Blacklist
         Blacklist.objects.create(name='李申请', phone='13755556666', reason='虚假信息',
@@ -312,6 +345,98 @@ class AdoptionApplicationReviewTest(BusinessTestBase):
         data = self.ok(self.get_json('/api/business/adoptions/my-applications/'))['data']
         self.assertEqual([a['id'] for a in data], [application.id])
         self.assertEqual(data[0]['pet']['id'], application.pet_id)
+
+
+class AdoptionApplicationCancelTest(BusinessTestBase):
+    """领养人撤回自己的申请（`pending` → `cancelled`）。
+
+    第四十六轮新增：`AdoptionApplication.status` 里的 `cancelled` 此前
+    **没有任何产生端**（模型声明了、领养人端也映射了标签与徽章，却没有
+    接口也没有按钮），属于「枚举值存在、写入路径缺失」。
+    """
+
+    def _application(self, status='pending', applicant=None):
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='pending_adopt')
+        applicant = applicant or User.objects.create_user(
+            username='cancel_user', password='x', role='adopter')
+        return AdoptionApplication.objects.create(
+            pet=pet, pet_code=pet.code, applicant=applicant,
+            applicant_name='撤回者', applicant_phone='13922223333',
+            hospital=self.hospital_a, status=status)
+
+    @staticmethod
+    def _url(pk):
+        return f'/api/business/adoptions/applications/{pk}/cancel/'
+
+    def test_owner_can_cancel_pending(self):
+        application = self._application()
+        self.login_as(application.applicant)
+        body = self.ok(self.post_json(self._url(application.id), {}))
+        self.assertEqual(body['data']['status'], 'cancelled')
+        application.refresh_from_db()
+        self.assertEqual(application.status, 'cancelled')
+
+    def test_cannot_cancel_approved(self):
+        """已通过的申请要走机构侧「撤销领养」，领养人自己不该有这个权力。"""
+        application = self._application(status='approved')
+        self.login_as(application.applicant)
+        self.expect_fail(self.post_json(self._url(application.id), {}),
+                         message='无法撤回')
+        application.refresh_from_db()
+        self.assertEqual(application.status, 'approved')
+
+    def test_cannot_cancel_twice(self):
+        application = self._application()
+        self.login_as(application.applicant)
+        self.ok(self.post_json(self._url(application.id), {}))
+        self.expect_fail(self.post_json(self._url(application.id), {}),
+                         message='无法撤回')
+
+    def test_cannot_cancel_someone_elses_application(self):
+        """归属必须从**申请单**推导，不能从「操作者是领养人」推导。
+
+        否则领养人 A 能撤回 B 的申请（同族缺陷本项目已踩过四次）。
+        """
+        application = self._application()
+        other = User.objects.create_user(username='other_adopter', password='x',
+                                         role='adopter')
+        self.login_as(other)
+        self.expect_fail(self.post_json(self._url(application.id), {}),
+                         status=404, message='无权访问')
+        application.refresh_from_db()
+        self.assertEqual(application.status, 'pending')
+
+    def test_others_and_missing_are_indistinguishable(self):
+        """存在性预言机：「别人的申请」与「不存在」必须完全不可区分。"""
+        application = self._application()
+        other = User.objects.create_user(username='other_adopter2', password='x',
+                                         role='adopter')
+        self.login_as(other)
+        body_other = self.post_json(self._url(application.id), {})
+        body_missing = self.post_json(self._url(99999999), {})
+        self.assertEqual(body_other.status_code, body_missing.status_code)
+        self.assertEqual(body_other.json().get('message'),
+                         body_missing.json().get('message'))
+
+    def test_hospital_cannot_cancel(self):
+        application = self._application()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(self._url(application.id), {}), status=403)
+        application.refresh_from_db()
+        self.assertEqual(application.status, 'pending')
+
+    def test_cancel_does_not_touch_pet_or_listing(self):
+        """撤回只是申请单作废：待审核申请并不占用动物，所以动物状态与
+        大厅上架状态都不该被改动。"""
+        application = self._application()
+        pet = application.pet
+        before_status = pet.status
+        self.login_as(application.applicant)
+        self.ok(self.post_json(self._url(application.id), {}))
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, before_status)
+        self.assertFalse(pet_has_active_adoption(pet))
 
 
 class AdoptionInfoEditTest(BusinessTestBase):

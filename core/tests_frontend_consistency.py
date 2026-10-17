@@ -1554,6 +1554,10 @@ FLOW_ENTRY_POINTS = {
     '领养资料编辑/上下架': 'editAdoptionInfo(',
     '领养确认领出': 'confirmAdoptionClaim(',
     '领养撤销': 'reclaimAdoption(',
+    # 第四十六轮新增。`AdoptionApplication.status` 里的 `cancelled` 此前
+    # **没有任何产生端**（模型声明了、领养人端也映射了标签与徽章，但没有
+    # 接口也没有按钮），属于「枚举值存在、写入路径缺失」。
+    '领养申请撤回': 'cancelApply(',
     '死亡登记': 'createEuthanasia(',
     '遗体移交（捕捉点领取）': 'receiveBody(',
     '黑名单登记': 'createBlacklist(',

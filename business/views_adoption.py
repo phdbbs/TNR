@@ -525,9 +525,14 @@ def adoption_apply(request):
         return json_fail(f'您已被列入领养黑名单，无法申请：{bl.reason}')
 
     # 检查是否已对该宠物提交处理中的申请
+    #
+    # ⚠ 只排除 `rejected` 会把「自己撤回的申请」也算成「处理中」—— 领养人
+    # 撤回（`cancelled`）之后就**永久无法再申请同一只动物**，而提示语写的是
+    # 「请勿重复提交」，看起来像正常的防重复，实际是死锁。
+    # `rejected` 与 `cancelled` 都是「这条申请已经不作数了」，必须同一口径。
     if AdoptionApplication.objects.filter(
         applicant=request.user, pet=pet,
-    ).exclude(status='rejected').exists():
+    ).exclude(status__in=('rejected', 'cancelled')).exists():
         return json_fail('您已提交过该宠物的领养申请，请勿重复提交')
 
     applicant_name = body_str(data, 'applicant_name').strip()
@@ -673,6 +678,58 @@ def adoption_application_review(request, pk):
     request.audit_district = application.pet.district if application.pet_id else None
 
     return json_ok(serialize_instance(application), message='审核完成')
+
+
+@csrf_exempt
+@role_required('adopter')
+@login_required
+def adoption_application_cancel(request, pk):
+    """领养人撤回**自己**的领养申请（`pending` → `cancelled`）。
+
+    ⚠ 这个状态从第四十六轮起才有产生端。此前 `AdoptionApplication.STATUS_CHOICES`
+    里声明了 `('cancelled', '已取消')`，领养人端的 `getApplyStatusText()` /
+    `getApplyStatusBadge()` 也都映射了它 —— 但**没有任何接口或按钮能写出它**。
+    典型的「枚举值存在、写入路径缺失」：界面上永远看不到「已取消」，而代码里
+    到处都假设它可能存在（前端两处映射就是证据）。走查时正是从这两处映射
+    反查到「产生端缺失」。
+
+    ## 只允许撤回 `pending`
+
+    * `approved` 的撤回要走机构侧的「撤销领养」（`adoption_revoke`）——
+      那会连带把动物退回待领养、重新上架，**领养人自己不该有这个权力**；
+    * `rejected` / `cancelled` 已是终态，重复撤回没有意义（且会让「已取消」
+      覆盖掉「已拒绝」这个更有信息量的结论）。
+
+    ## 归属从申请单本身推导
+
+    判据是 `applicant_id == request.user.id`，**不是**「操作者角色是领养人」——
+    否则领养人 A 能撤回 B 的申请（同族缺陷本项目已踩过四次：归属不能从
+    操作者推导）。「不是我的」与「不存在」必须**完全不可区分**（同一个 404、
+    同一句文案），否则就成了存在性预言机。
+
+    ## 撤回后必须能重新申请
+
+    创建接口（`adoption_application_create`）的重复校验原先只
+    `.exclude(status='rejected')`。若不同步放行 `cancelled`，领养人一撤回就
+    **永久无法再申请同一只动物**，而且界面只提示「您已提交过…请勿重复提交」——
+    看起来像防重复，实际是把人锁死。所以两处判据必须同一口径。
+    """
+    application = AdoptionApplication.objects.filter(id=pk).first()
+    # 存在性预言机：「别人的申请」与「不存在」回同一个 404、同一句文案。
+    if application is None or application.applicant_id != request.user.id:
+        return json_fail('申请不存在或无权访问', status=404)
+
+    if application.status != 'pending':
+        return json_fail(
+            f'该申请已处理（{application.get_status_display()}），无法撤回')
+
+    application.status = 'cancelled'
+    application.save(update_fields=['status'])
+
+    # 审计用上下文：`AdoptionApplication` 没有 district 字段（沿 pet 派生）。
+    request.audit_district = application.pet.district if application.pet_id else None
+
+    return json_ok(serialize_instance(application), message='申请已撤回，可重新提交')
 
 
 # ============================================

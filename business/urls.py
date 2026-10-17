@@ -118,6 +118,9 @@ urlpatterns = [
     path('adoptions/my-applications/', views_adoption.my_applications, name='my_applications'),
     path('adoptions/applications/', views_adoption.adoption_application_list, name='adoption_application_list'),
     path('adoptions/applications/<int:pk>/review/', views_adoption.adoption_application_review, name='adoption_application_review'),
+    # 领养人撤回自己的申请（`pending` → `cancelled`）。第四十六轮新增：
+    # `AdoptionApplication.status` 里的 `cancelled` 此前没有任何产生端。
+    path('adoptions/applications/<int:pk>/cancel/', views_adoption.adoption_application_cancel, name='adoption_application_cancel'),
 
     # ============================================
     # Task 10: 回访打卡与黑名单
