@@ -237,6 +237,7 @@ def _treatment_fields(obj):
 MT_TYPE_TITLE = {
     'purchase': '物料采购入库单', 'dispatch': '物料下发单',
     'receive': '物料接收单', 'adjustment': '物料异动单', 'consume': '物料消耗记录',
+    'outbound': '物料出库单',
 }
 
 
@@ -249,10 +250,15 @@ def _mt_fields(obj):
         ('单据号', _v('ledger_no')), ('所属区县', _district_name),
         ('物料名称', _v('material_name')), ('类别/规格', _v('unit')),
         ('数量', _v('quantity')), ('批次号', _v('batch_no')),
+        ('出库原因', _choice('reason')),
         ('供应商', _v('supplier')), ('往来单位', _v('from_to')),
         ('操作员', _v('operator_name')), ('日期', _v('date', 'date')),
         ('备注', _v('note')),
     ]
+    # 出库原因**只对出库单有意义**：其它类型这一列恒为 '—'，
+    # 印在纸上只是一排废话，所以按类型决定要不要这一行。
+    if obj.type != 'outbound':
+        base = [row for row in base if row[0] != '出库原因']
     if obj.type == 'receive':
         base.insert(1, ('关联下发单号', _v('ref_no')))
     return base
@@ -348,7 +354,7 @@ def _transfer_related(obj):
 
 
 def _mt_related(obj):
-    """物料单据链：接收 ↔ 下发；下发 → 同批签收；采购/异动 → 无。"""
+    """物料单据链：接收 ↔ 下发；下发 → 同批签收；采购/异动/出库 → 无。"""
     from business.models import MaterialTransaction as MT
     chain = []
     if obj.type == 'receive' and obj.ref_no:

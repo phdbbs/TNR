@@ -38,6 +38,7 @@ from business.services_stock import (  # noqa: E402,F401
     get_hospital_stock, get_institution_ledger_total, get_institution_stock,
     get_material_batches, get_shelter_stock, is_city_shelter,
     materialize_initial_batches, plan_fefo_deduction, stock_delta,
+    validate_outbound_reason,
 )
 
 
@@ -167,6 +168,43 @@ def parse_int_param(raw, label='参数', minimum=1, maximum=MAX_SQLITE_INT):
             return None, f'{label}超出有效范围'
         return None, f'{label}不能超过 {maximum}'
     return value, None
+
+
+def parse_signed_int_param(raw, label='参数', maximum=MAX_SQLITE_INT):
+    """把**可为负**的数量参数解析成整数。返回 ``(值, 错误消息)``。
+
+    与 `parse_int_param` 的差别只在「允许一个前导 `-`」—— 出库单的
+    负数量表示**盘盈 / 退回入库**（磊哥原话：「出库数量可以为负，
+    表示实际入库或者盘盈」），而 `_INT_RE` 是 `^[0-9]+$`，负数会被判成
+    「必须是数字」：用户明明填了个数字，却被告知「不是数字」，
+    真正想说的话（方向对、但它不被支持）一个字都没说出来。
+
+    其余判据与 `parse_int_param` **逐条对齐**（位数 19 / 上限 / 空值三态），
+    这样才能共用同一批回归判据 —— 两份实现各写一半就是孪生漂移。
+
+    三态语义：``(None, None)`` 未提供 / ``(None, 消息)`` 非法 / ``(值, None)`` 合法。
+    0 是合法数字，「业务上必须非 0」由调用方判（与 `stock_adjustment` 同款）。
+    """
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if not text:
+        return None, None
+    negative = text.startswith('-')
+    digits = text[1:] if negative else text
+    if negative and not digits:
+        # 单独的 '-'：不是数字
+        return None, f'{label}必须是数字'
+    if not _INT_RE.match(digits):
+        return None, f'{label}必须是数字'
+    if len(digits) > 19:
+        return None, f'{label}超出有效范围'
+    value = int(digits)
+    if value > maximum:
+        if maximum >= MAX_SQLITE_INT:
+            return None, f'{label}超出有效范围'
+        return None, f'{label}不能超过 {maximum}'
+    return (-value if negative else value), None
 
 
 def parse_date_param(raw, label='日期'):
@@ -591,6 +629,7 @@ DOC_PREFIXES = {
     'RCV': '物料接收单',
     'ADJ': '物料异动单',
     'CON': '物料消耗记录',
+    'OUT': '物料出库单',
 }
 
 # 类型码 → 平台端「编号规则」配置键（`supervision.SYSTEM_CONFIG_DEFAULTS` 同源）。
@@ -608,6 +647,7 @@ DOC_CONFIG_KEY = {
     'RCV': 'receive_prefix',
     'ADJ': 'adjustment_prefix',
     'CON': 'consume_prefix',
+    'OUT': 'outbound_prefix',
 }
 
 

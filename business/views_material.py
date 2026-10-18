@@ -19,13 +19,15 @@ from business.services import (
     body_str, body_int,
     generate_doc_no, get_district_filtered_queryset,
     adjust_stock, get_hospital_stock,
-    get_own_institution_object, parse_int_param,
+    get_own_institution_object, parse_int_param, parse_signed_int_param,
     # 第四十五轮：市级捕捉点 + 机构库存
     can_dispatch_across_districts, get_institution_stock, get_shelter_stock,
     inactive_institution_error, is_city_shelter,
     # B5：物料批次
     batch_expiry_state, fefo_sorted, get_material_batches,
     plan_fefo_deduction, NEAR_EXPIRY_DAYS,
+    # 出库（报废 / 退回 / 调拨 / 盘点）
+    validate_outbound_reason,
 )
 from business.services_chip import (
     chip_batch_create, chip_batch_dispatch, chip_batch_precheck,
@@ -758,6 +760,138 @@ def stock_adjustment(request):
                    message=f'异动登记成功，扣减 {quantity}{chip_note}')
 
 
+@csrf_exempt
+@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@login_required
+def material_outbound(request):
+    """物料出库（报废 / 退回 / 调拨 / 盘点；**数量可负**）。
+
+    请求体示例::
+
+        {
+            "material_id": 1,
+            "quantity": 5,
+            "batch_no": "B2",        # 可选，定向扣减；不填走 FEFO
+            "reason": "scrap",       # 必填：scrap/return/transfer/inventory
+            "note": "外包装破损报废"
+        }
+
+    **为什么不能复用 `stock_adjustment`**
+    -----------------------------------
+    库存异动是「纠正账实差异」：数量只能正、原因是一句自由文本、
+    不选批号。出库是「货物真的离开仓库」：磊哥要求选批号、原因必须
+    是报废/退回/调拨/盘点四个枚举之一、而且**数量可以为负**
+    （负 = 实际入库或盘盈）。把三件事塞进异动接口 = 同一个接口四种语义，
+    改一处牵全身；单独一类流水（`outbound`）才能让台账按原因汇总。
+
+    **负数量的语义**：`-3` = 盘盈 / 退回，**加**库存。此时：
+    - 不判余额（`adjust_stock` 里 `quantity > 0` 才判，见那里的注释）；
+    - 批次方向反过来，记入 `batch_no` 指定的那一批（没有指定则退 FEFO 最前排）；
+    - `reason` 仍记申报的那一个 —— 「为什么这一笔是往回流」靠它回答。
+
+    **芯片**同样走 `chip_batch_void`（号码是真源），且**不认批号**：
+    芯片逐号管理，出库凭的是「首号 + 数量」，批号只是流水上的快照字段。
+
+    判据分两道，缺一不可：
+    - 余额判据：捕捉点侧在 `adjust_stock` 内部前置；医院侧**自己把关**
+      （与 `stock_adjustment` 同口径，理由见那边的长注释）；
+    - 批号判据：给了 `batch_no` 就只扣那一批，余量不足直接 400，
+      **不改扣别的批次**（扣错批 = 台账批号与实际出库的货对不上，
+      而这个错不会报任何警）。
+    """
+    data = parse_json_body(request)
+    user = request.user
+
+    # 只用 POST。没有这道闸时 GET 会走到「解析请求体 → 拿到空 dict →
+    # 缺物料ID」= 400，虽然也没写库，但错误文案说的是参数问题，
+    # 而真正的问题是「你用错方法了」—— 两件事不能混。
+    if request.method != 'POST':
+        return json_fail('仅支持 POST', status=405)
+
+    material_id, err = parse_int_param(data.get('material_id'), '物料ID')
+    if err:
+        return json_fail(err)
+    if not material_id:
+        return json_fail('缺少物料ID')
+
+    material = get_operable_material(material_id, user)
+    if material is None:
+        return json_fail('物料不存在或无权访问', status=404)
+
+    # 数量：**可负**，所以不能走 `parse_int_param`（`_INT_RE` 不允许前导 '-'）。
+    # 0 必须拒 —— 出 0 件既不改变库存也不改变批次，却会生成一条
+    # 看得见摸不着的流水和一张单据号。
+    quantity, err = parse_signed_int_param(data.get('quantity'), '出库数量')
+    if err:
+        return json_fail(err)
+    if quantity is None:
+        return json_fail('缺少出库数量')
+    if quantity == 0:
+        return json_fail('出库数量不能为0')
+
+    # 出库原因：四选一，**必填**。自由文本会让「报废 / 退回」这类
+    # 汇总统计永远对不上（同一个原因 N 种写法）。
+    reason, err = validate_outbound_reason(data.get('reason'))
+    if err:
+        return json_fail(err)
+
+    # 定向批号（可选）。**芯片不认**：芯片凭号码出库，批号只是快照，
+    # 拿批号去扣批次行会让「Σ批次 == 库存」这个等式在芯片上失效。
+    batch_no = (body_str(data, 'batch_no') or '').strip()
+    if material.category == 'chip':
+        batch_no = ''
+
+    institution = getattr(user, 'institution', None)
+    hospital = None
+    if user.role == 'hospital':
+        hospital = institution
+        if not hospital:
+            return json_fail('缺少医院机构信息')
+        # 与 `stock_adjustment` 同一道闸：`adjust_stock` 对医院侧不做余额校验。
+        # 只在**正数**（真的出库）时判；负数是盘盈入库，天然不该被拦。
+        if quantity > 0:
+            current = get_hospital_stock(material, hospital)
+            if current < quantity:
+                return json_fail(f'医院库存不足（当前 {current}，需 {quantity}）')
+
+    chip_first_number = ''
+    if material.category == 'chip':
+        chip_first_number = body_str(data, 'chip_start')
+
+    from_to = hospital.name if hospital else (
+        institution.name if institution else '')
+    try:
+        with transaction.atomic():
+            txns = adjust_stock(
+                material=material,
+                hospital=hospital,
+                quantity=quantity,
+                institution=institution,
+                txn_type='outbound',
+                operator=user,
+                operator_name=user.get_full_name() or user.username,
+                from_to=from_to,
+                batch_no=batch_no,
+                reason=reason,
+                note=body_str(data, 'note') or '物料出库',
+                ledger_no=generate_doc_no('OUT'),
+                district_id=material.district_id,
+            )
+            txn = txns[0]
+            if material.category == 'chip':
+                chip_batch_void(material, institution, chip_first_number, quantity)
+    except ValueError as e:
+        return json_fail(str(e))
+
+    reason_label = dict(MaterialTransaction.OUTBOUND_REASON_CHOICES).get(reason, reason)
+    direction = '出库扣减' if quantity > 0 else '盘盈/退回归账'
+    chip_note = (f'，芯片 {quantity} 颗（{chip_first_number} 起）已作废'
+                 if material.category == 'chip' else '')
+    return json_ok(serialize_instance(txn),
+                   message=f'出库登记成功（{reason_label}），{direction} '
+                           f'{abs(quantity)}{chip_note}')
+
+
 def _scoped_txn_queryset(user):
     """物资流水的可见范围。
 
@@ -1021,14 +1155,19 @@ def material_batches(request, pk):
 def material_batch_preview(request, pk):
     """FEFO 扣减预览（POST，**只读不写库** —— 与芯片 `chip_preview` 同款）。
 
-    请求体：`{"quantity": 30, "txn_type": "consume|dispatch|adjustment"}`
+    请求体：`{"quantity": 30, "txn_type": "consume|dispatch|adjustment|outbound",
+    "batch_no": "B2（可选）"}`
     返回：`{"plan": [{batch_no, expiry_date, take}...], "available": N,
     "expired_skipped": N, "enough": true|false, "message": "..."}`
 
     为什么 txn_type 必传：consume 会**跳过已过期批次**（过期药品不能用于
-    诊疗），dispatch / adjustment 不跳（下发/报废正是过期物料的出口）——
-    不告诉服务端「这是哪类操作」，预览给出的批次顺序与实际落库就会错开，
-    预检就成了新的孪生漂移源。
+    诊疗），dispatch / adjustment / outbound 不跳（下发 / 报废 / 出库报废
+    正是过期物料的出口）—— 不告诉服务端「这是哪类操作」，预览给出的批次
+    顺序与实际落库就会错开，预检就成了新的孪生漂移源。
+
+    `batch_no` 可选：给了就只预览**那一个批次**（出库定向）。此时
+    `plan` 最多一项，且该批余量不足时 `enough=false` —— 与落库判据
+    `plan_fefo_deduction(batch_no=...)` 是同一份实现。
 
     判据与落库共用 `plan_fefo_deduction`（同一份实现）—— 预览说「这些批次
     会被扣」，提交时就扣这些批次；预览说不够，提交时就 400，不会两边各判。
@@ -1049,13 +1188,25 @@ def material_batch_preview(request, pk):
     if quantity is None:
         return json_fail('数量必须是正整数')
     txn_type = body_str(data, 'txn_type') or 'consume'
-    if txn_type not in ('consume', 'dispatch', 'adjustment'):
-        return json_fail('txn_type 仅支持 consume/dispatch/adjustment')
+    if txn_type not in ('consume', 'dispatch', 'adjustment', 'outbound'):
+        return json_fail('txn_type 仅支持 consume/dispatch/adjustment/outbound')
+    # 定向批号：只对**出库**有意义（消耗/下发仍走 FEFO，选批号会与既有
+    # 「近效期先出」的判据打架）。给了但填错批号由计划阶段报错。
+    batch_no = (body_str(data, 'batch_no') or '').strip()
 
     # 存量物料可能还没有批次行（shelter_stock 直写字段的形态）——
     # 预览里如实给「无批次台账」，别拿主表快照拼一个假计划出来。
     if not MaterialBatch.objects.filter(material=material, institution=inst).exists():
         current = get_institution_stock(material, inst)
+        # ⚠ 定向批号时**不能**走这条兜底：用户指定了批号，而这里
+        # 一行批次都没有，说明这个批号根本不存在 —— 必须如实说「没有」，
+        # 而不是给一个「扣减不区分批次」的假计划（提交时会崩在别处）。
+        if batch_no:
+            return json_ok({
+                'has_batches': False, 'plan': [], 'available': current,
+                'expired_skipped': 0, 'enough': False,
+                'message': f'该物料没有批号为「{batch_no}」的批次台账',
+            })
         return json_ok({
             'has_batches': False, 'plan': [], 'available': current,
             'expired_skipped': 0, 'enough': current >= quantity,
@@ -1067,7 +1218,8 @@ def material_batch_preview(request, pk):
     try:
         plan = plan_fefo_deduction(
             material, inst, quantity,
-            skip_expired=(txn_type == 'consume'), today=today)
+            skip_expired=(txn_type == 'consume'), today=today,
+            batch_no=batch_no or None)
         message = '、'.join(
             f'批次「{b.batch_no}」扣 {take}'
             f'（{b.expiry_date.isoformat() if b.expiry_date else "无效期"}）'

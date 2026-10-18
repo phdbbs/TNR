@@ -520,8 +520,24 @@ class MaterialTransaction(models.Model):
         ('receive', '签收'),
         ('consume', '消耗'),
         ('adjustment', '异动'),
+        ('outbound', '出库'),
+    ]
+    # 出库原因：只对 `outbound` 类型有意义，其他类型一律留空。
+    #   为什么不像 `adjustment` 那样自由文本：出库是**主动申报**的动作，
+    #   报废 / 退回 / 调拨 / 盘点 四种去向要能按类别汇总，
+    #   而「自由文本写原因」= 同一个原因有 N 种写法，统计必然对不上。
+    #   「出库数量可以为负」表示**盘盈 / 退回入库**，此时 reason 仍记申报的那一个。
+    OUTBOUND_REASON_CHOICES = [
+        ('scrap', '报废'),
+        ('return', '退回'),
+        ('transfer', '调拨'),
+        ('inventory', '盘点'),
     ]
     type = models.CharField('类型', max_length=20, choices=TYPE_CHOICES)
+    # 出库原因：只对 `outbound` 有意义。其余类型一律为 '' ——
+    # 判据见 `services_stock.validate_outbound_reason()`，双边（建单/查询）同口径。
+    reason = models.CharField(
+        '出库原因', max_length=20, choices=OUTBOUND_REASON_CHOICES, blank=True, default='')
     material = models.ForeignKey('business.Material', on_delete=models.PROTECT, related_name='transactions', verbose_name='物资')
     material_name = models.CharField('物资名称', max_length=100, blank=True, default='')
     quantity = models.IntegerField('数量')

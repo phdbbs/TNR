@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20261018a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20261018b"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -2029,6 +2029,7 @@ const Shelter = {
         <div class="tab-item" data-tab="pending">待签收</div>
         <div class="tab-item" data-tab="chip">芯片台账</div>
         <div class="tab-item" data-tab="adjustment">库存异动</div>
+        <div class="tab-item" data-tab="outboundDecl">出库报备</div>
         <div class="tab-item" data-tab="flow">流向查询</div>
       </div>
       <div id="matContent"></div>
@@ -2722,6 +2723,147 @@ const Shelter = {
       wrap.querySelector('#adjSubmitBtn')
         ?.addEventListener('click', () => this.saveStockAdjustment());
 
+    } else if (tab === 'outboundDecl') {
+      /* 物料出库（报废 / 退回 / 调拨 / 盘点）—— 与「库存异动」是两件事。
+       *
+       * ⚠ 页签叫「出库报备」而不是「出库」：本页已有一个「下发出库」页签，
+       *    那是把货发给别的机构（`dispatch`）。两者名字相近但字段完全不同
+       *    （一个选接收机构、一个选出库原因），点错就是一次废操作。
+       *
+       * 与异动的三处硬差异，前端照单呈现、判据全在服务端：
+       *   ① 出库原因四选一（枚举）；② 可选定向批号；③ 数量可负（盘盈）。
+       */
+      const txns = this._matTxns || [];
+      const outRows = txns.filter(t => t.type === 'outbound');
+      const REASON_TEXT = { scrap: '报废', return: '退回', transfer: '调拨', inventory: '盘点' };
+      const todayStr = (() => {
+        const d = new Date();
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+          + '-' + String(d.getDate()).padStart(2, '0');
+      })();
+      const matExpiry = m => m.expiryDate || m.expiry_date || '';
+      const isExpired = m => {
+        const d = TNR_UI.localDateStr(matExpiry(m));
+        return !!d && d < todayStr;
+      };
+      // 过期物料排在最前：出库报废正是把它们清出账的入口之一
+      const opts = materials.slice()
+        .sort((a, b) => (isExpired(b) ? 1 : 0) - (isExpired(a) ? 1 : 0))
+        .map(m => '<option value="' + m.id + '">' + TNR_UI.escape(m.name)
+          + (isExpired(m) ? '（已过期）' : '')
+          + ' (库存:' + stockOf(m) + (m.unit || '') + ')</option>')
+        .join('');
+      const listRows = outRows.map(t => ({
+        material_name: t.materialName || t.material_name || '',
+        batch_no: t.batchNo || t.batch_no || '—',
+        _reason: REASON_TEXT[t.reason] || '—',
+        // 负数量（盘盈）显式标 + 方向：只看数字会以为是出库
+        _qty: ((t.quantity > 0 ? '-' + t.quantity : '+' + Math.abs(t.quantity)))
+          + ' ' + (t.unit || ''),
+        note: t.note || '—',
+        date: t.date || '',
+        operator_name: t.operatorName || t.operator_name || ''
+      }));
+      let html = '';
+      html += '<div class="card"><div class="card-header"><div class="card-title">'
+        + '<span class="card-title-bar"></span>物料出库报备</div></div><div class="card-body">'
+        + '<div class="form-section"><div class="form-section-header">'
+        + '<div class="form-section-header-icon">📤</div>'
+        + '<div class="form-section-title">新增出库</div></div><div class="form-section-body">'
+        + '<div class="form-row"><div class="form-group"><label class="form-label">物料<span class="req">*</span></label>'
+        + '<select class="form-select" id="outMaterial"><option value="">请选择</option>' + opts + '</select></div>'
+        // 不钉 min：盘盈要能填负数（stepper 的 min 由 opts 控制，见下方调用）
+        + '<div class="form-group"><label class="form-label">出库数量<span class="req">*</span></label>'
+        + '<input type="number" class="form-input" id="outQty" value="1" />'
+        + '<div class="fs-sm text-muted mt-2">正数 = 出库扣减；<b>负数 = 盘盈 / 退回入库</b>（增加库存）</div></div></div>'
+        + '<div class="form-row"><div class="form-group" id="outBatchGroup"><label class="form-label">批号（可选）</label>'
+        + '<select class="form-select" id="outBatch"><option value="">不指定（按近效期先出）</option></select>'
+        + '<div class="fs-sm text-muted mt-2">指定后只扣这一批；该批余量不足会直接报错，不会改扣别的批次</div></div>'
+        + '<div class="form-group"><label class="form-label">出库原因<span class="req">*</span></label>'
+        + '<select class="form-select" id="outReason"><option value="">请选择</option>'
+        + '<option value="scrap">报废</option><option value="return">退回</option>'
+        + '<option value="transfer">调拨</option><option value="inventory">盘点</option></select></div></div>'
+        + '<div class="form-group" id="outChipGroup" style="display:none;"><label class="form-label">芯片起始号<span class="req">*</span></label>'
+        + '<input class="form-input" id="outChipStart" placeholder="如 042060107000177" inputmode="numeric">'
+        + '<div class="fs-sm text-muted mt-2">按「首号 + 数量」作废连续号码的芯片，作废后不可恢复</div>'
+        + '<div class="mt-2" id="outChipSegments"></div>'
+        + '<div class="fs-sm mt-2" id="outChipPreview"><span class="text-muted">填写起始号后，这里会预览将要作废的号码范围</span></div></div>'
+        + '<div class="form-group"><div class="fs-sm" id="outBatchHint"><span class="text-muted">填写数量后，这里会预览将要扣减的批次</span></div></div>'
+        + '<div class="form-group"><label class="form-label">备注</label>'
+        + '<textarea class="form-textarea" id="outNote" placeholder="补充说明（可选）"></textarea></div>'
+        + '<div style="display:flex;justify-content:flex-end;">'
+        + '<button class="btn btn-primary" id="outSubmitBtn">提交出库</button></div>'
+        + '</div></div></div></div>';
+      html += '<div class="card mt-5"><div class="card-body-flush">'
+        + (listRows.length ? '<div id="shelterOutboundTable"></div>'
+                           : '<div class="empty-state" style="padding:var(--sp-6);">'
+                             + '<div class="empty-state-icon">📤</div>'
+                             + '<div class="empty-state-text">暂无关库记录</div></div>')
+        + '</div></div>';
+      wrap.innerHTML = html;
+      if (listRows.length) {
+        TNR_UI.mountTable('shelterOutboundTable', {
+          id: 'shelter.material.outbound',
+          columns: [
+            { title: '物料', key: 'material_name' },
+            { title: '批号', key: 'batch_no' },
+            { title: '原因', key: '_reason' },
+            { title: '数量', key: '_qty', sortable: false },
+            { title: '备注', key: 'note' },
+            { title: '日期', key: 'date' },
+            { title: '操作人', key: 'operator_name' }
+          ],
+          data: listRows, emptyText: '暂无关库记录'
+        });
+      }
+      // 允许负数：`bindQtyStepper` 的 min 不传 → 默认 1 会把盘盈挡在 step 上，
+      // 手输也过不了它的 clamp。这里显式给个大负数下限。
+      TNR_UI.bindQtyStepper('outQty', { min: -99999 });
+      const outToggleChip = async () => {
+        const m = materials.find(x => String(x.id) === String(document.getElementById('outMaterial').value));
+        const isChip = !!(m && m.category === 'chip');
+        document.getElementById('outChipGroup').style.display = isChip ? '' : 'none';
+        // 芯片不认批号定向（号码才是真源）—— 藏掉下拉，
+        // 而不是留一个「填了也不生效」的输入框。
+        document.getElementById('outBatchGroup').style.display = isChip ? 'none' : '';
+        if (isChip) {
+          TNR_UI.renderChipSegments('outChipSegments', m.id, (start) => {
+            document.getElementById('outChipStart').value = start;
+            if (outPreview) outPreview.rerun();
+          });
+        } else {
+          document.getElementById('outChipSegments').innerHTML = '';
+        }
+        const batchEl = document.getElementById('outBatch');
+        batchEl.innerHTML = '<option value="">不指定（按近效期先出）</option>';
+        if (!isChip && m) {
+          try {
+            const res = await TNR_API.getMaterialBatches(m.id);
+            const rows = (res && res.batches) || [];
+            rows.filter(b => (b.quantity || 0) > 0).forEach(b => {
+              const opt = document.createElement('option');
+              opt.value = b.batch_no;
+              const exp = b.expiry_date ? ' 效期' + b.expiry_date : '';
+              opt.textContent = b.batch_no + '（余 ' + b.quantity + (m.unit || '') + exp + '）';
+              batchEl.appendChild(opt);
+            });
+          } catch (e) { /* 批次拉取失败不阻塞表单：留空 = 走 FEFO */ }
+        }
+        if (outBatchPreview) outBatchPreview.rerun();
+      };
+      const outPreview = TNR_UI.bindChipPreview('void', 'outChipStart', 'outQty', 'outChipPreview',
+        () => ({ material_id: document.getElementById('outMaterial').value }));
+      // outbound：报废正是过期物料的出口，预览**不跳过**过期批次
+      const outBatchPreview = TNR_UI.bindBatchPreview('outQty', 'outBatchHint',
+        () => document.getElementById('outMaterial')?.value || null, 'outbound',
+        () => document.getElementById('outBatch')?.value || '');
+      wrap.querySelector('#outMaterial')?.addEventListener('change', outToggleChip);
+      wrap.querySelector('#outBatch')?.addEventListener('change', () => {
+        if (outBatchPreview) outBatchPreview.rerun();
+      });
+      wrap.querySelector('#outSubmitBtn')
+        ?.addEventListener('click', () => this.saveMaterialOutbound(materials));
+
     } else if (tab === 'flow') {
       const txns = this._matTxns || [];
       const filters = [
@@ -2730,7 +2872,8 @@ const Shelter = {
           { value: 'dispatch', label: '下发出库' },
           { value: 'receive', label: '签收入库' },
           { value: 'consume', label: '诊疗消耗' },
-          { value: 'adjustment', label: '库存异动' }
+          { value: 'adjustment', label: '库存异动' },
+          { value: 'outbound', label: '物料出库' }
         ]},
         { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料/单号/供应商' }
       ];
@@ -2744,7 +2887,7 @@ const Shelter = {
           const kw = vals.keyword;
           list = list.filter(t => ((t.materialName || '') + (t.ledgerNo || '') + (t.supplier || '') + (t.fromTo || '')).toLowerCase().includes(kw));
         }
-        const typeMap = { purchase: ['采购入库', 'success'], dispatch: ['下发出库', 'info'], receive: ['签收入库', 'cinnabar'], consume: ['诊疗消耗', 'warning'], adjustment: ['库存异动', 'danger'] };
+        const typeMap = { purchase: ['采购入库', 'success'], dispatch: ['下发出库', 'info'], receive: ['签收入库', 'cinnabar'], consume: ['诊疗消耗', 'warning'], adjustment: ['库存异动', 'danger'], outbound: ['物料出库', 'cinnabar'] };
         const columns = [
           { title: '单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm">' + TNR_UI.escape(r.ledgerNo || '') + '</span>' },
           { title: '类型', render: r => TNR_UI.statusBadge(typeMap[r.type] ? typeMap[r.type][0] : r.type, typeMap[r.type] ? typeMap[r.type][1] : 'default') },
@@ -2911,6 +3054,58 @@ const Shelter = {
       TNR_UI.toast('异动已提交，但列表刷新失败：' + e.message, 'warning');
     }
     this.renderMatTab('adjustment');
+  },
+
+  /* 提交物料出库报备（报废 / 退回 / 调拨 / 盘点）。
+   *
+   * 与 `saveStockAdjustment` 的三处差异，前端各自校验、互不复用：
+   *   ① 原因是**四选一枚举**（服务端 `validate_outbound_reason` 复核）；
+   *   ② 可选定向批号；③ 数量**可为负**（盘盈 / 退回入库）。
+   * 服务端的拒因（余额不足 / 指定批号余量不足 / 批号不存在）必须原样 toast ——
+   * 那些正是用户在表单里能改的东西，吞掉就等于让他反复试。
+   */
+  async saveMaterialOutbound(materials) {
+    const mid = document.getElementById('outMaterial')?.value;
+    const qtyRaw = document.getElementById('outQty')?.value;
+    const qty = parseInt(qtyRaw, 10);
+    const reason = document.getElementById('outReason')?.value;
+    if (!mid) { TNR_UI.toast('请选择物料', 'warning'); return; }
+    if (isNaN(qty)) { TNR_UI.toast('请填写出库数量（可填负数表示盘盈）', 'warning'); return; }
+    if (qty === 0) { TNR_UI.toast('出库数量不能为0', 'warning'); return; }
+    if (!reason) { TNR_UI.toast('请选择出库原因', 'warning'); return; }
+    const mat = (materials || this._materials || [])
+      .find(x => String(x.id) === String(mid));
+    const isChip = !!(mat && mat.category === 'chip');
+    const chipStart = isChip ? (document.getElementById('outChipStart')?.value || '').trim() : '';
+    if (isChip && !chipStart) { TNR_UI.toast('请填写芯片起始号', 'warning'); return; }
+
+    let res;
+    try {
+      res = await TNR_API.outboundMaterial({
+        material_id: parseInt(mid, 10), quantity: qty, reason: reason,
+        // 芯片不传批号（服务端会忽略；传了只会污染台账上的批号快照）
+        ...(isChip ? {} : { batch_no: document.getElementById('outBatch')?.value || '' }),
+        note: (document.getElementById('outNote')?.value || '').trim(),
+        chip_start: chipStart,
+      });
+    } catch (e) {
+      TNR_UI.toast(e.message || '操作失败', 'danger');
+      return;
+    }
+    if (!res || !res.success) {
+      TNR_UI.toast((res && res.message) || '提交失败', 'danger');
+      return;
+    }
+    TNR_UI.toast(res.message || '出库登记成功', 'success');
+    /* 与 `saveStockAdjustment` 同一套理由：必须 Strict 读 + 刷新失败要
+     * 分开说「已提交但刷新失败」，否则用户会重复提交一次。 */
+    try {
+      this._materials = await TNR_API.getMaterialsStrict();
+      this._matTxns = await TNR_API.getMaterialTransactionsStrict();
+    } catch (e) {
+      TNR_UI.toast('出库已提交，但列表刷新失败：' + e.message, 'warning');
+    }
+    this.renderMatTab('outboundDecl');
   },
 
   /* ========== 7. 动物去向 ========== */
@@ -4187,7 +4382,7 @@ const Shelter = {
     } else if (tab === 'materials') {
       title = '物料台账';
       data = ld.materials || [];
-      const typeMap = { purchase: ['采购', 'success'], dispatch: ['下发', 'info'], receive: ['签收', 'cinnabar'], consume: ['消耗', 'warning'], adjustment: ['异动', 'danger'] };
+      const typeMap = { purchase: ['采购', 'success'], dispatch: ['下发', 'info'], receive: ['签收', 'cinnabar'], consume: ['消耗', 'warning'], adjustment: ['异动', 'danger'], outbound: ['出库', 'cinnabar'] };
       columns = [
         { title: '台账单号', key: 'ledgerNo', render: r => (r.ledgerNo ? '<span class="font-mono fs-sm" data-ledger-view="materials" data-id="' + r.id + '" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;">' + esc(r.ledgerNo) + '</span>' : '—') },
         { title: '类型', render: r => TNR_UI.statusBadge(typeMap[r.type] ? typeMap[r.type][0] : r.type, typeMap[r.type] ? typeMap[r.type][1] : 'default') },
@@ -4422,7 +4617,7 @@ const Shelter = {
         { label: '领养时间', value: TNR_UI.formatDateTime(rec.adoptedAt) }
       );
     } else if (tab === 'materials') {
-      const typeMap = { purchase: '采购', dispatch: '下发', receive: '签收', consume: '消耗', adjustment: '异动' };
+      const typeMap = { purchase: '采购', dispatch: '下发', receive: '签收', consume: '消耗', adjustment: '异动', outbound: '出库' };
       items.push(
         { label: '流水单号', value: esc(rec.ledgerNo || rec.id) },
         { label: '类型', value: typeMap[rec.type] || esc(rec.type) },

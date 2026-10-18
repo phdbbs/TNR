@@ -64,7 +64,7 @@
 {% block extra_js %}
 {{ block.super }}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20261018a"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20261018b"></script>
 <script>
 /* ============================================
    政府监管端 - SPA 应用逻辑
@@ -796,7 +796,8 @@ const GovPortal = {
     { value: 'dispatch', label: '下发出库' },
     { value: 'receive', label: '签收入库' },
     { value: 'consume', label: '消耗' },
-    { value: 'adjustment', label: '调整' }
+    { value: 'adjustment', label: '调整' },
+    { value: 'outbound', label: '出库' }
   ],
 
   async render_material() {
@@ -1063,7 +1064,8 @@ const GovPortal = {
         dispatch: { text: '下发出库', badge: 'badge-info' },
         receive: { text: '签收入库', badge: 'badge-cinnabar' },
         consume: { text: '消耗', badge: 'badge-cinnabar' },
-        adjustment: { text: '调整', badge: 'badge-default' }
+        adjustment: { text: '调整', badge: 'badge-default' },
+        outbound: { text: '出库', badge: 'badge-cinnabar' }
       };
       const rows = (d.txns || []).filter(t => {
         if (v.type && String(t.type) !== v.type) return false;

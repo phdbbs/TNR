@@ -326,6 +326,43 @@ class PrintFieldsFnTest(BusinessTestBase):
         self.assertIn(txn.ledger_no, html, '打印页必须含物料单号')
         self.assertIn(material.name, html, '打印页必须含物料名称')
 
+    def test_outbound_print_renders_title_and_reason(self):
+        """出库单必须 200，且**标题与出库原因**都真的印在页面上。
+
+        ⚠ 不停在状态码：`MT_TYPE_TITLE` 少一个 key 时打印页仍返回 200，
+        只是标题退回兜底的「物料单据」—— 归档时分不清这是哪种单。
+        这条判据盯住「标题按 type 动态算」这件事本身。
+        """
+        material = make_material(district=self.district)
+        txn = MaterialTransaction.objects.create(
+            material=material, material_name=material.name, quantity=5,
+            type='outbound', reason='scrap',
+            hospital=self.hospital, institution=self.hospital,
+            operator_name='测试员', date=timezone.localdate(),
+            district=self.district, ledger_no=generate_doc_no('OUT'))
+        self.client.force_login(self.user)
+        resp = self.client.get(f'/print/material/{txn.id}/')
+        self.assertEqual(resp.status_code, 200, resp.content[:400])
+        html = resp.content.decode()
+        self.assertIn('物料出库单', html,
+                      '`MT_TYPE_TITLE` 少了 outbound —— 标题退回兜底文案')
+        self.assertIn('出库原因', html, '打印页必须给出库原因这一行')
+        self.assertIn('报废', html, '出库原因要显示中文，而不是裸枚举值 scrap')
+        self.assertNotIn('Traceback', html)
+
+    def test_mt_type_title_covers_every_transaction_type(self):
+        """**漂移判据**：`MT_TYPE_TITLE` 必须覆盖 `TYPE_CHOICES` 的每一个类型。
+
+        新增流水类型时只有 choices 改了、这里忘了加 → 那一类单据打印出来
+        标题是「物料单据」，而页面照样 200。这是「枚举值存在、渲染路径缺失」
+        的同族缺陷，用源码级清单对比钉住。
+        """
+        from business import views_print
+        from business.models import MaterialTransaction as MT
+        missing = [t for t, _ in MT.TYPE_CHOICES if t not in views_print.MT_TYPE_TITLE]
+        self.assertEqual(missing, [],
+                         f'这些流水类型没有打印标题：{missing}')
+
     def test_both_field_kinds_are_covered(self):
         """反向对照：`DOC_SPECS` 里必须两类清单都有，且各有一个用例在跑。
 

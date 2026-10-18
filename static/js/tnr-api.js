@@ -245,6 +245,13 @@ const TNR_API = {
   async dispatchMaterial(data) { return this._post('/api/business/materials/dispatch/', data); },
   async receiveMaterial(id) { return this._post(`/api/business/materials/${id}/receive/`, {}); },
   async adjustStock(data) { return this._post('/api/business/materials/adjustment/', data); },
+  /* 物料出库（报废 / 退回 / 调拨 / 盘点）。与 `adjustStock` 是**两件事**：
+     异动 = 纠正账实差异（数量只能正、原因自由文本、不选批号）；
+     出库 = 货物真的离库（原因四选一枚举、可选定向批号、数量可负）。
+     `quantity` 为负表示盘盈 / 退回入库（**加**库存），此时不要传 `batch_no`
+     之外的任何方向假设 —— 服务端 `stock_delta('outbound', -n)` 返回正 delta。
+     `batch_no` 可选：给了就只扣那一批，余量不足会 400 而**不会**改扣别的批。 */
+  async outboundMaterial(data) { return this._post('/api/business/materials/outbound/', data); },
   async getMaterialTransactions() { return this._get('/api/business/materials/transactions/'); },
   async getShelterLedger() { return this._get('/api/business/materials/shelter-ledger/'); },
   async getHospitalLedger() { return this._get('/api/business/materials/hospital-ledger/'); },
@@ -262,10 +269,13 @@ const TNR_API = {
   async getMaterialBatches(materialId) {
     return this.getData(`/api/business/materials/${materialId}/batches/`);
   },
-  /* FEFO 扣减预览：提交消耗/下发/异动前告诉用户「会扣哪几批、各扣多少」。
+  /* FEFO 扣减预览：提交消耗/下发/异动/出库前告诉用户「会扣哪几批、各扣多少」。
      与芯片 preview 同款 —— POST 但服务端**不写库**，永远 200，
      预检结果在 `data.plan` 里。`txn_type` 必传：consume 跳过过期批次，
-     dispatch/adjustment 不跳，预览与落库共用同一份 FEFO 判据。 */
+     dispatch/adjustment/outbound 不跳（报废正是过期物料的出口），
+     预览与落库共用同一份 FEFO 判据。
+     `batch_no` 可选（**只对 outbound 有意义**）：定向扣减时只预览那一批，
+     余量不足 `enough=false` —— 与落库同一份判据，不会「预览能过、提交 400」。 */
   async previewMaterialBatches(materialId, data) {
     return this._post(`/api/business/materials/${materialId}/batch-preview/`, data);
   },

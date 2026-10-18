@@ -1488,6 +1488,7 @@ SYSTEM_CONFIG_DEFAULTS = {
     'receive_prefix': 'RCV',
     'adjustment_prefix': 'ADJ',
     'consume_prefix': 'CON',
+    'outbound_prefix': 'OUT',
 }
 
 #: 配置值的长度上限。配置值是编号前缀，会被拼进单据号；`SystemConfig.value`

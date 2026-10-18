@@ -2,6 +2,7 @@
 from django.db import IntegrityError, transaction
 from django.db.models import ProtectedError
 from django.test import TestCase
+from django.utils import timezone
 
 from business.models import (
     Adoption, AdoptionApplication, AdoptionHallListing, Blacklist, Capture,
@@ -77,8 +78,45 @@ class MaterialModelTest(TestCase):
 
 class TransactionModelTest(TestCase):
     def test_type_choices(self):
+        # `outbound`（出库）与 `adjustment`（异动）**分工不同**：
+        # 异动 = 纠正账实差异（数量只能正、原因自由文本、不选批号）；
+        # 出库 = 货物真的离库（原因四选一枚举、可选定向批号、数量可负
+        # 表示盘盈/退回入库）。合成一类就是「一个接口四种语义」。
         self.assertEqual({t for t, _ in MaterialTransaction.TYPE_CHOICES},
-                         {'purchase', 'dispatch', 'receive', 'consume', 'adjustment'})
+                         {'purchase', 'dispatch', 'receive', 'consume',
+                          'adjustment', 'outbound'})
+
+    def test_outbound_reason_choices(self):
+        """出库原因四选一：报废 / 退回 / 调拨 / 盘点。
+
+        必须是**枚举**而不是自由文本 —— 台账要按原因汇总，
+        自由文本会让同一个原因有 N 种写法，统计永远对不上。
+        """
+        self.assertEqual({r for r, _ in MaterialTransaction.OUTBOUND_REASON_CHOICES},
+                         {'scrap', 'return', 'transfer', 'inventory'})
+
+    def test_outbound_reason_defaults_empty(self):
+        """`reason` 只对 outbound 有意义，其它类型恒为空串。
+
+        ⚠ 默认值必须是 `''` 而不是「四者之一」：给个默认值等于
+        每一条非出库流水都带一个假原因，台账按原因统计时凭空多一批。
+        """
+        from business.tests.base import make_material
+        material = make_material()
+        txn = MaterialTransaction.objects.create(
+            material=material, quantity=1, type='purchase',
+            date=timezone.localdate(), district=material.district)
+        self.assertEqual(txn.reason, '')
+        self.assertEqual(txn.get_reason_display(), '')
+
+    def test_outbound_reason_display(self):
+        """正向对照：真的填了原因时要能显示出中文（打印/台账都要用）。"""
+        from business.tests.base import make_material
+        material = make_material()
+        txn = MaterialTransaction.objects.create(
+            material=material, quantity=1, type='outbound', reason='scrap',
+            date=timezone.localdate(), district=material.district)
+        self.assertEqual(txn.get_reason_display(), '报废')
 
 
 class TransferModelTest(TestCase):

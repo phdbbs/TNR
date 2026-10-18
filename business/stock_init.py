@@ -77,7 +77,22 @@ def backfill_txn_institution(MaterialTransaction, Institution):
 
 
 def ledger_total(MaterialTransaction, material_id, institution_id):
-    """按「库存归属机构」把流水加起来（与 `services.get_institution_ledger_total` 同口径）。"""
+    """按「库存归属机构」把流水加起来（与 `services.get_institution_ledger_total` 同口径）。
+
+    ⚠ 这里的入/出库类型清单是 `services_stock.INBOUND_TXN_TYPES` +
+       `OUTBOUND_TXN_TYPES` 的**手抄副本**，不是引用 —— 本模块被
+       `0020` / `0029` 迁移直接 import，按约定「不 import 任何 app 模块」
+       （迁移只依赖签名，不依赖实现随版本变化）。
+
+       副本必然有漂移风险，所以有两条判据盯着：
+       ① `test_stock_init_parity`（business/tests/test_material_batch.py）
+          逐项对比本函数命中的类型与常量表，新增类型漏抄即红；
+       ② 漏抄的后果是**新类型的流水不计入期初**，于是
+          `quantity != opening_quantity + 流水合计`，
+          `check_data_integrity` 的同一判据会报出来。
+
+    新增流水类型（如 `outbound` 出库）必须**同时**改这里。
+    """
     base = MaterialTransaction.objects.filter(
         material_id=material_id, institution_id=institution_id)
 
@@ -88,7 +103,8 @@ def ledger_total(MaterialTransaction, material_id, institution_id):
                 total=Sum('quantity'))['total'] or 0
         return total
 
-    return _sum('purchase', 'receive') - _sum('dispatch', 'consume', 'adjustment')
+    return (_sum('purchase', 'receive')
+            - _sum('dispatch', 'consume', 'adjustment', 'outbound'))
 
 
 def init_stock_rows(Material, MaterialStock, MaterialTransaction, Institution):
@@ -117,7 +133,8 @@ def init_stock_rows(Material, MaterialStock, MaterialTransaction, Institution):
         shelter_rows += 1
 
     pairs = (MaterialTransaction.objects
-             .filter(hospital__isnull=False, type__in=('receive', 'consume', 'adjustment'))
+             .filter(hospital__isnull=False,
+                     type__in=('receive', 'consume', 'adjustment', 'outbound'))
              .values_list('material_id', 'hospital_id').distinct())
     for material_id, hospital_id in pairs:
         if MaterialStock.objects.filter(

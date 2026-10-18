@@ -81,6 +81,11 @@ urlpatterns = [
     path('materials/dispatch/', views_material.dispatch_create, name='dispatch_create'),
     path('materials/<int:pk>/receive/', views_material.material_receive, name='material_receive'),
     path('materials/adjustment/', views_material.stock_adjustment, name='stock_adjustment'),
+    # 物料出库（报废/退回/调拨/盘点，数量可负 = 盘盈/退回归账）。
+    # 与 `adjustment` **分开两条路由**：语义不同（纠正账实差异 vs 货物离库）、
+    # 判据不同（必须选原因枚举、可选定向批号、可负），合成一个接口就是
+    # 「一个接口四种语义」，改一处牵全身。
+    path('materials/outbound/', views_material.material_outbound, name='material_outbound'),
     path('materials/transactions/', views_material.material_transactions, name='material_transactions'),
     # 可下发的接收机构（第四十五轮）——与 `dispatch_create` 共用同一份范围判据，
     # 前端照单渲染就不会再出现「下拉里选得到、一发就 400」。

@@ -55,13 +55,44 @@ def can_dispatch_across_districts(institution):
 # ============================================
 # 流水类型 → 对**库存归属机构**那一行的方向。
 # purchase（采购入库）与 receive（签收）让机构库存增加；
-# dispatch（下发）从**发起机构**出库、consume（消耗）、adjustment（异动）都是减少。
+# dispatch（下发）从**发起机构**出库、consume（消耗）、adjustment（异动）、
+# outbound（出库）都是减少。
 #
 # ⚠ `dispatch` 的方向容易写反：它对**发起方**是减，对**接收方**是加 ——
 # 而接收方的「加」是靠签收时另写一条 `receive` 实现的（见 `material_receive`）。
 # 所以单看 `dispatch` 这一行，方向恒为减。
+#
+# ⚠ `outbound` 的**方向由数量符号共同决定**：正数 = 出库（减），
+# 负数 = 盘盈 / 退回入库（加）。`stock_delta()` 的 `-quantity` 对负数
+# 天然给出正 delta，不需要特判 —— 但**余额判据只在正数时生效**，
+# 否则「盘盈必填负数」会被自己的下限拦住（见 `adjust_stock`）。
 INBOUND_TXN_TYPES = ('purchase', 'receive')
-OUTBOUND_TXN_TYPES = ('dispatch', 'consume', 'adjustment')
+OUTBOUND_TXN_TYPES = ('dispatch', 'consume', 'adjustment', 'outbound')
+# 允许**负数量**的流水类型 = 「撤销 / 盘盈退回」类。
+#   - `adjustment`：撤销诊疗消耗（`services_treatment` 撤回处方）；
+#   - `outbound`：盘盈 / 退回入库（磊哥：「出库数量可以为负，
+#     表示实际入库或者盘盈」）。
+# 这两个类型在 `delta > 0` 时走 `_credit_batch`，且**可能没有明确批号**
+# —— 那时退回 FEFO 最前排批次（近似还原）。别的类型走 `_credit_batch`
+# 一定是真的入库（采购 / 签收），批号取表单、空则「初始批次」。
+REVERSAL_TXN_TYPES = ('adjustment', 'outbound')
+# 出库原因白名单：与 `MaterialTransaction.OUTBOUND_REASON_CHOICES` 同源。
+# 为什么不能就地写在 choices 上就完事：`batch_preview`（预览）与
+# `material_outbound`（建单）**两处都要校验同一个枚举**，
+# 各写一份必然漂移（孪生接口的老问题）。
+OUTBOUND_REASON_CHOICES = MaterialTransaction.OUTBOUND_REASON_CHOICES
+OUTBOUND_REASONS = tuple(r for r, _ in OUTBOUND_REASON_CHOICES)
+
+
+def validate_outbound_reason(reason):
+    """出库原因三态语义：`(None, None)` 合法 / `(None, 消息)` 非法。
+
+    只接受**非空**的合法枚举值；空串与 None 都视为「没填」（非法）。
+    预览与建单共用，防止两边口径漂移。
+    """
+    if reason in OUTBOUND_REASONS:
+        return reason, None
+    return None, '出库原因必填，且只能是报废 / 退回 / 调拨 / 盘点之一'
 
 
 def stock_delta(txn_type, quantity):
@@ -176,11 +207,26 @@ def get_shelter_stock(material, district=None):
 def get_hospital_stock(material, hospital):
     """计算指定医院的物资库存（**现算**口径，逐笔累加）。
 
-    库存 = 采购入库 + 签收 - 诊疗消耗 - 异动调整
+    库存 = 采购入库 + 签收 - 诊疗消耗 - 异动调整 - 出库
     （以上均针对同一医院）
 
     注意：dispatch（下发）流水不直接增加医院库存，
     接收方签收后才创建 receive 流水增加库存。
+
+    ⚠⚠ **为什么这里没有 dispatch**（曾在这里栽过一次，回归当场抓住）：
+    本函数按 `hospital` 字段过滤，而 `hospital` 的语义是**对方机构** ——
+    下发的 `hospital` 正是**接收方**。于是一条「A 院 → B 院 下发 10 件」
+    在 B 院的这个函数里会被算成「本院出库 10 件」，库存扣成 -10，
+    而 B 院其实一件都还没收到（要靠签收才产生 receive 流水）。
+    `get_institution_ledger_total()` 按 `institution`（**归属机构**）过滤，
+    那条 dispatch 属于发起方那一侧，所以它看不见。
+    **两个函数的过滤维度不同，公式就不能照抄** —— 一统一就错，
+    而错的样子是「库存是负数」这种一眼能看出的假象，
+    更容易被当成「别的问题」放过去。
+
+    ⚠ **出库数量可以为负**（盘盈 / 退回入库）：`stock_delta()` 的 `-quantity`
+    对负数量天然给出正 delta，所以这个式子**不需要为负数特判** ——
+    一行 `outbound` 负数量在这里就是「加库存」。
 
     ⚠ 第四十五轮起医院侧**另有**一张已算好的 `MaterialStock` 行
     （`get_institution_stock()`），本函数保留为**对账基准**：
@@ -209,7 +255,12 @@ def get_hospital_stock(material, hospital):
         total=Sum('quantity')
     )['total'] or 0
 
-    return purchase_total + receive_total - consume_total - adjustment_total
+    outbound_total = base_qs.filter(type='outbound').aggregate(
+        total=Sum('quantity')
+    )['total'] or 0
+
+    return (purchase_total + receive_total
+            - consume_total - adjustment_total - outbound_total)
 
 
 def find_hospital_chip_material(hospital, district_id=None):
@@ -357,21 +408,47 @@ def materialize_initial_batches(material, institution):
         quantity=current)
 
 
-def plan_fefo_deduction(material, institution, quantity, skip_expired=False, today=None):
+def plan_fefo_deduction(material, institution, quantity, skip_expired=False,
+                        today=None, batch_no=None):
     """出库扣减计划（FEFO）：返回 [(批次, 扣减量), ...]。
 
     - 近效期先出、同效期按入库先后（`fefo_sorted`）；
     - `skip_expired=True`（consume）时跳过已过期批次 —— 过期药品不能用于
       诊疗，但**不是**扣它旁边的有效批次：扣错批次 = 台账上的批号与
       实际用在动物身上的药对不上，出了不良反应查不到源头；
-    - dispatch / adjustment **不**跳过：过期物料的正规出口就是
-      「下发退回供应商 / 异动报废」，再拦就把死库存焊死在账上。
+    - dispatch / adjustment / outbound **不**跳过：过期物料的正规出口就是
+      「下发退回供应商 / 异动报废 / 出库报废」，再拦就把死库存焊死在账上；
+    - `batch_no` 给定（出库定向）时**只扣这一个批次**，余量不足直接报错 ——
+      **绝不静默改扣别的批次**。用户在下拉里选的是「这一批」，扣了另一批
+      等于台账批号与实际出库的货对不上，而这个错不会报任何警；
+    - 定向批号也不跳过过期：报废的入口之一正是过期批次。
 
-    :raises ValueError: 可用量不足。文案区分两种成因（全过期 vs 普通不足），
-        「全部批次过期」要引导用户走异动报废，而不是让他反复减数量重试。
+    :raises ValueError: 可用量不足。文案区分三种成因（定向批次余量不足 /
+        全部过期 vs 普通不足），「全部批次过期」要引导用户走异动报废，
+        而不是让他反复减数量重试。
     """
     today = today or timezone.localdate()
     batches = [b for b in get_material_batches(material, institution) if b.quantity > 0]
+    if batch_no:
+        target = batch_no.strip()
+        usable = [b for b in batches if b.batch_no == target]
+        if not usable:
+            raise ValueError(
+                f'「{material.name}」没有批号为「{target}」的可用批次'
+                f'（该批号不存在或已无余量）')
+        plan, remaining = [], quantity
+        for b in usable:
+            take = min(b.quantity, remaining)
+            if take > 0:
+                plan.append((b, take))
+                remaining -= take
+            if remaining <= 0:
+                break
+        if remaining > 0:
+            raise ValueError(
+                f'「{material.name}」批号「{target}」余量不足'
+                f'（可用 {usable[0].quantity}，需 {quantity}）')
+        return plan
     usable = [b for b in batches
               if not (skip_expired and b.expiry_date and b.expiry_date < today)]
     plan, remaining = [], quantity
@@ -415,18 +492,32 @@ def _credit_batch(material, inst, txn_type, amount, extra):
 
     - purchase / receive：批号取 extra（表单/下发单），空则退「初始批次」；
       同批号再次入库 = 同一批货，**累加**并更新效期；
-    - 负数 adjustment（撤销退回）：没有明确批号 —— 退回 FEFO 最前排的
-      批次（撤销所退的量通常正是刚从前排扣走的，近似还原；
-      一行批次都没有时按主表快照批号建一条）。
+    - 负数 **撤销类**（`adjustment` 撤销诊疗消耗 / `outbound` 盘盈退回）：
+      有明确批号时**记回该批号**（用户申报的就是这一批，记到别的批次上
+      等于账实不符）；没有明确批号时退 FEFO 最前排的批次
+      （撤销所退的量通常正是刚从前排扣走的，近似还原）；
+      一行批次都没有时按主表快照批号建一条。
+
+    ⚠ 这里的「撤销类」清单必须与 `adjust_stock` 里
+      `delta = stock_delta(...) > 0 → _credit_batch` 的路径**正好对齐**：
+      只有「本类型允许负数量」才可能走到这里且没有明确批号。
+      把它们写死成两个常量表（见 `REVERSAL_TXN_TYPES`）而不是各判一遍，
+      否则新增一种可负类型时会漏 —— 漏了不报错，只会把退回记到一个
+      凭空多出来的「初始批次」行上，Σ批次 == 库存的等式看着还成立。
     """
     expiry = _parse_expiry(extra.get('expiry_date'))
-    if txn_type == 'adjustment':
+    explicit = (extra.get('batch_no') or '').strip()
+    if explicit:
+        # 任何入库方向都听调用方指定的批号（采购 / 签收原有行为，
+        # 盘盈/退回的定向记回复用它）
+        batch_no = explicit
+    elif txn_type in REVERSAL_TXN_TYPES:
         batches = list(MaterialBatch.objects.filter(material=material, institution=inst))
         if batches:
             return fefo_sorted(batches)[0], amount
         batch_no = _initial_batch_no(material)
     else:
-        batch_no = (extra.get('batch_no') or '').strip() or _initial_batch_no(material)
+        batch_no = _initial_batch_no(material)
     batch, _created = MaterialBatch.objects.get_or_create(
         material=material, institution=inst, batch_no=batch_no,
         defaults={'quantity': 0, 'expiry_date': expiry})
@@ -436,12 +527,22 @@ def _credit_batch(material, inst, txn_type, amount, extra):
     return batch, amount
 
 
-def _deduct_batches(material, inst, amount, txn_type):
+def _deduct_batches(material, inst, amount, txn_type, batch_no=None):
     """出库方向的 FEFO 扣减计划。没有任何批次行 → 返回 None（legacy 回退）。
 
     legacy 回退的场景：测试助手 / 历史调用直接造流水，机构还没有批次行 ——
     此时批次行数为 0，硬走 `plan_fefo_deduction` 会把「无批次」当成
-    「库存为 0」拦下来，旧行为回归全挂。"""
+    「库存为 0」拦下来，旧行为回归全挂。
+
+    ⚠ 定向批号（`batch_no`）**不走** legacy 回退：调用方明确指定了批号，
+    就必须真的扣那一行；批号不存在时报错，而不是「按主表快照写一行流水、
+    批次行一个没动」—— 那样 Σ批次 ≠ 库存，`check_data_integrity` 会报脏数据，
+    而界面上的批次余量完全不动。
+    """
+    if batch_no and str(batch_no).strip():
+        return plan_fefo_deduction(
+            material, inst, amount, skip_expired=(txn_type == 'consume'),
+            batch_no=batch_no)
     if not MaterialBatch.objects.filter(material=material, institution=inst).exists():
         return None
     return plan_fefo_deduction(
@@ -456,15 +557,16 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
 
     :param material: 物料对象
     :param hospital: **对方机构**（下发时的接收方）；None 表示无对方机构
-    :param quantity: 数量（正整数；负数仅用于 adjustment 的撤销退回）
-    :param txn_type: 流水类型 purchase/dispatch/receive/consume/adjustment
+    :param quantity: 数量（正数；`outbound` 的负数表示退回 / 盘盈入库，
+        负数仅用于 adjustment 的撤销退回与本类型）
+    :param txn_type: 流水类型 purchase/dispatch/receive/consume/adjustment/outbound
     :param institution: **库存归属机构** —— 本笔流水动的是谁的库存。
         捕捉点侧传发起捕捉点，医院侧传该医院。不传时退化为 `hospital`；
         两者都没有则走**兼容路径**（只动旧的 `shelter_stock` 字段，
         不写机构库存表、也不记批次）—— 那条路径只为历史调用与单元测试
         保留，生产代码一律显式传 `institution`。
     :param extra: 额外字段，如 operator/batch_no/expiry_date/supplier/
-        from_to/note/ledger_no/district/ref_no
+        from_to/note/ledger_no/district/ref_no/reason
     :return: 创建的 MaterialTransaction **列表**。B5 起出库跨批次会自动拆成
         多笔（同 ledger_no/note，每笔 batch_no = 所扣批次、quantity = 该批
         扣减量）——「一笔业务」在物理上就是 N 行，返回单条会让调用方
@@ -473,7 +575,11 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
     批次规则（只对 institution 明确的生产路径生效，legacy 路径行为不变）：
     - 入库（purchase/receive）：按批号 get_or_create 批次行并累加，效期随之
       更新；效期从 extra['expiry_date'] 传入（采购 = 表单，签收 = 发起方批次）；
-    - 出库（dispatch/consume/adjustment）：FEFO 扣减，consume 跳过已过期批次；
+    - 出库（dispatch/consume/adjustment/outbound）：FEFO 扣减，consume 跳过已过期批次；
+    - **定向批号**：`extra['batch_no']` 给定（outbound）时只扣那一行，
+      余量不足直接报错，不改扣别的批次；
+    - 负数 outbound（退回 / 盘盈）：有明确批号时记回该批号，
+      否则退 FEFO 最前排；
     - 负数 adjustment（撤销退回）：退回 FEFO 最前排批次。
 
     ⚠ 库存判据必须在**建流水之前**。
@@ -502,7 +608,9 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
     # 机构归属明确且是捕捉点时，按**该机构**的库存判：同一区县两个捕捉点
     # 各有各的余额，拿区县合计去卡会误放行（一个点空了、另一个点还满着）。
     # 没有机构归属时（历史调用 / 单元测试）沿用旧的区县合计字段。
-    if txn_type in OUTBOUND_TXN_TYPES and (inst is None or inst.type == 'shelter'):
+    #
+    if (txn_type in OUTBOUND_TXN_TYPES
+            and (inst is None or inst.type == 'shelter')):
         if inst is not None:
             current = get_institution_stock(material, inst)
             if current < quantity:
@@ -522,7 +630,8 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
         if delta > 0:
             batch_plan = [_credit_batch(material, inst, txn_type, delta, extra)]
         elif delta < 0:
-            batch_plan = _deduct_batches(material, inst, -delta, txn_type)
+            batch_plan = _deduct_batches(
+                material, inst, -delta, txn_type, batch_no=extra.get('batch_no'))
 
     # 芯片**不拆行**：号码才是芯片的真源（`Chip` 表逐号管理，全部挂在
     # 同一条 dispatch 流水下），拆行会让 `chip_batch_receive` 的
@@ -533,6 +642,7 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
 
     common_fields = dict(
         type=txn_type,
+        reason=extra.get('reason', ''),
         material=material,
         material_name=material.name,
         unit=material.unit,

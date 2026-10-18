@@ -395,7 +395,7 @@ const TNR_UI = {
   /* 消耗 / 下发 / 异动表单的「将扣批次预览」（C1 芯片预检同款）。
    * `getMaterialId()` 动态取当前选中的物料，`txnType` 固定传给服务端 ——
    * consume 跳过过期批次、dispatch/adjustment 不跳，预览与落库同判据。 */
-  bindBatchPreview(qtyId, hintId, getMaterialId, txnType) {
+  bindBatchPreview(qtyId, hintId, getMaterialId, txnType, getBatchNo) {
     const qtyEl = document.getElementById(qtyId);
     const hintEl = document.getElementById(hintId);
     if (!qtyEl || !hintEl) return null;
@@ -408,15 +408,26 @@ const TNR_UI = {
         hintEl.innerHTML = '<span class="fs-sm text-muted">选择物料后，这里会预览将要扣减的批次</span>';
         return;
       }
+      // ⚠ 出库的**负数量**是盘盈 / 退回入库，方向整个是反的 ——
+      // 它不会扣任何批次，反而会往批号里加。这里必须**明确说出来**，
+      // 不能让它掉进下面 qty<1 的「填写数量后…」分支：用户填了 -3，
+      // 界面却像没填，只会让人以为预览坏了。
+      if (qty < 0) {
+        hintEl.innerHTML = '<span class="fs-sm" style="color:var(--bamboo-green);">↺ 负数量 = 盘盈 / 退回入库，将**增加**库存 '
+          + Math.abs(qty) + '，不扣减任何批次</span>';
+        return;
+      }
       if (qty < 1) {
         hintEl.innerHTML = '<span class="fs-sm text-muted">填写数量后，这里会预览将要扣减的批次</span>';
         return;
       }
       const mySeq = ++seq;
+      const batchNo = getBatchNo ? (getBatchNo() || '') : '';
       let res;
       try {
         res = await TNR_API.previewMaterialBatches(materialId, {
           quantity: qty, txn_type: txnType,
+          ...(batchNo ? { batch_no: batchNo } : {}),
         });
       } catch (e) {
         if (mySeq !== seq) return;
