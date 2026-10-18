@@ -189,6 +189,8 @@ def open_treatment(pet, hospital, user, district_id):
         pet_code=pet.code,
         hospital=hospital,
         hospital_name=hospital.name,
+        # 归属机构 = 接诊医院（业务对象推导，不取操作员机构）
+        institution=hospital,
         status='in_progress',
         operator=user,
         operator_name=user.get_full_name() or user.username,
@@ -219,6 +221,16 @@ def apply_check(treatment, body, submit=False):
         raise ValueError('诊疗单不存在')
     if treatment.disposed_at:
         raise ValueError('本单已办结，不能再修改检查单')
+    # 第四十八轮：检查单一经提交（`checked_at` 落库）就**锁定**，
+    # 之后返回第 1 步只能查看。理由：检查结果是后续医嘱 / 诊断的依据，
+    # 允许事后静默改写会让「医嘱基于什么体检结论下的」失去凭据；
+    # 而且界面上「保存修改并下一步」与「提交并下一步」两个按钮只差两个字，
+    # 用户点完回来改一笔、单据号与打印件已经发出去的情况很难追溯。
+    #
+    # ⚠ 前端已经把这步整页置灰，但**服务端必须自己也拦** ——
+    #   「前端收窄选项而服务端不校验 = 洞」，直调 API 一样能改。
+    if treatment.checked_at:
+        raise ValueError('检查单已提交，不能再修改；如需修正请先撤回诊断')
 
     pet = treatment.pet
     updated = []
@@ -894,8 +906,14 @@ def mark_done(treatment):
     return treatment
 
 
-def dispose(treatment, disposal, user):
+def dispose(treatment, disposal, user, defer_pet_status=False):
     """办结 —— 记录去向并改动物状态。
+
+    :param defer_pet_status: 由**出院单据**接管动物状态时置 True。
+        放归是两段（转运回小区 → 放归回捕捉地），办结时动物还在本院待转运，
+        把 `Pet.status` 直接写成 `released` 会让「还在车上」的动物在台账上
+        已经「已放归」，而且出院单据的后续确认会找不到可操作的对象。
+        其余去向（领养 / 死亡 / 安乐死 / 领回）单据本身就是终态，不必 defer。
 
     :raises ValueError: 未诊疗完成 / 去向不合法
 
@@ -926,8 +944,9 @@ def dispose(treatment, disposal, user):
 
     # 去向的 key 与 `Pet.STATUS_CHOICES` 一一对齐（见 `Treatment.DISPOSAL_CHOICES`），
     # 所以直接赋值即可。用一张映射表反而多一处会漏改的地方。
-    pet.status = disposal
-    pet.save(update_fields=['status'])
+    if not defer_pet_status:
+        pet.status = disposal
+        pet.save(update_fields=['status'])
 
     # 「领养」必须**当场**进领养大厅（第四十七轮）。
     # 旧口径靠 `auto_promote_to_adoptable()` 在 5 天后补这一步，而它的判据是

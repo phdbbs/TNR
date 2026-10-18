@@ -29,6 +29,10 @@ urlpatterns = [
     path('captures/<int:pk>/delete/', views_capture.capture_delete, name='capture_delete'),
     path('captures/<int:pk>/owner-return/', views_capture.owner_return_create, name='owner_return_create'),
     path('owner-returns/', views_capture.owner_return_list, name='owner_return_list'),
+    # 第四十八轮：出院模块的「领回」—— 不带 capture_id 的入口（医院端用）。
+    # 旧路由 `captures/<pk>/owner-return/` 的 pk 是捕捉单，医院没有捕捉单。
+    path('owner-returns/create/', views_capture.owner_return_create,
+         name='owner_return_create_plain'),
 
     # ============================================
     # Task 5: 转运拆分下发
@@ -106,6 +110,8 @@ urlpatterns = [
     path('releases/', views_release.release_list, name='release_list'),
     path('releases/create/', views_release.release_create, name='release_create'),
     path('releases/<int:pk>/confirm/', views_release.release_confirm, name='release_confirm'),
+    # 放归第一段：转运回原小区（第四十八轮）
+    path('releases/<int:pk>/transfer/', views_release.release_transfer, name='release_transfer'),
 
     # ============================================
     # Task 9: 领养业务

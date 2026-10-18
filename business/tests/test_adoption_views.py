@@ -113,10 +113,33 @@ class AdoptionRegisterTest(BusinessTestBase):
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(self.URL, self._payload(pet)), message='不可领养')
 
-    def test_hospital_cannot_register(self):
+    def test_hospital_can_register_own_pet(self):
+        """第四十八轮：医院端**也能直接开领养单**（出院模块的「领养」子模块）。
+
+        原先只有捕捉点 / 政府端能登记，医院只能等捕捉点开好单、再来
+        「确认领出」—— 但领养人往往就是到医院现场挑的，医院反而没有入口。
+        """
         pet = self._pet()
         self.login_as(self.hospital_user_a)
-        self.expect_fail(self.post_json(self.URL, self._payload(pet)), status=403)
+        body = self.ok(self.post_json(self.URL, self._payload(pet)))
+        adoption = Adoption.objects.get(id=body['data']['id'])
+        self.assertEqual(adoption.hospital_id, self.hospital_a.id)
+        self.assertEqual(adoption.institution_id, self.hospital_a.id)
+        self.assertEqual(adoption.status, 'pending_claim')
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'pending_claim')
+
+    def test_other_hospital_cannot_register(self):
+        """反向对照：别家医院对本院的动物必须 404。
+
+        没有这条的话，把医院分支写成「放开 403 就行」也能让上面那条通过 ——
+        那就是横向越权（A 院能替 B 院开领养单）。
+        """
+        pet = self._pet()
+        self.login_as(self.hospital_user_b)
+        self.expect_fail(self.post_json(self.URL, self._payload(pet)),
+                         status=404, message='无权访问')
+        self.assertFalse(Adoption.objects.filter(pet=pet).exists())
 
 
 class AdoptionConfirmClaimTest(BusinessTestBase):

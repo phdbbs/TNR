@@ -22,6 +22,8 @@ from business.services import (
     body_str, body_int,
     generate_doc_no, get_district_filtered_queryset,
     check_blacklist, get_active_pet, get_scoped_object,
+    get_hospital_scoped_pet,
+    hospital_pet_write_error,
     pet_has_pending_release, pet_has_active_adoption,
     validate_uploaded_images,
 )
@@ -170,10 +172,17 @@ def adoption_info_edit(request, pk):
 # 线下领养登记（捕捉点）
 # ============================================
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
 @login_required
 def adoption_register(request):
     """线下领养登记（创建领养人账号 + 领养记录）
+
+    第四十八轮：**医院端也能直接开领养单**（出院模块的「领养」子模块）。
+    原先只有捕捉点 / 政府端能登记，医院端只能等捕捉点开好单、再来
+    「确认领出」—— 但领养人往往就是到医院现场挑的，医院反而没有入口。
+
+    取单口径按角色分叉：医院走 `get_hospital_scoped_pet`（本院在治 ∪ 本院
+    诊疗过），其余角色仍走 `get_active_pet`（按区县）。
 
     请求体示例:
     {
@@ -195,10 +204,20 @@ def adoption_register(request):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    # 按区县范围取宠物，并排除已逻辑删除的档案
-    pet = get_active_pet(pet_id, user)
+    # 按区县范围取宠物，并排除已逻辑删除的档案；
+    # 医院端改按「本院」收口（跨区县送医时按区县会取不到本院动物）。
+    if user.role == 'hospital':
+        pet = get_hospital_scoped_pet(pet_id, user)
+    else:
+        pet = get_active_pet(pet_id, user)
     if pet is None:
         return json_fail('宠物不存在或无权访问', status=404)
+
+    # 写单据前校一次「动物当前是否挂在本院」（读口径含「本院诊疗过」，
+    # 不能直接拿来做写权限 —— 否则能给别院在治的动物开领养单）。
+    err = hospital_pet_write_error(pet, user)
+    if err:
+        return json_fail(err)
 
     if pet.status not in ('pending_adopt', 'in_treatment'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可领养')
@@ -259,6 +278,8 @@ def adoption_register(request):
         adoption_agreement=body_str(data, 'adoption_agreement'),
         hospital=hospital,
         hospital_name=hospital.name if hospital else '',
+        # 归属机构 = 受理医院（业务对象推导）
+        institution=hospital,
         status='pending_claim',
         adopted_at=adopted_at,
         operator=user,

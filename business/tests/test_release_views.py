@@ -138,3 +138,95 @@ class ReleaseConfirmTest(BusinessTestBase):
         _, release = self._pending()
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json(f'{URL}{release.id}/confirm/'), status=403)
+
+
+class ReleaseStageTest(BusinessTestBase):
+    """放归两段流程（第四十八轮）：`pending → transferred → released`。
+
+    原先只有一步（`pending → released`）—— 小区接收人还没签字、动物还在车上，
+    台账上已经写「已放归」了。这里把两段各自的入口、幂等、越权都钉住。
+
+    ⚠ 判据落在**业务结果**（状态真变了、动物状态**没**提前变），不停在状态码。
+    """
+
+    def _release(self, status='pending', pet=None):
+        pet = pet or make_pet(district=self.district_a, shelter=self.shelter_a,
+                              hospital=self.hospital_a, status='in_treatment')
+        return Release.objects.create(
+            pet=pet, pet_code=pet.code, community=self.community_a,
+            community_name=self.community_a.name, status=status,
+            # 区县跟着**动物**走（与 `release_create` 的 `pet.district_id` 同口径）——
+            # 写死 district_a 的话，「跨区县取不到」这条用例会假绿。
+            ledger_no=f'REL-STG-{status}', district=pet.district)
+
+    def test_transfer_moves_pending_to_transferred(self):
+        release = self._release()
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.post_json(f'{URL}{release.id}/transfer/', {}))
+        self.assertEqual(body['data']['status'], 'transferred')
+        release.refresh_from_db()
+        self.assertEqual(release.status, 'transferred')
+        self.assertIsNotNone(release.transferred_at, '转运时间必须落库')
+        release.pet.refresh_from_db()
+        self.assertEqual(release.pet.status, 'in_treatment',
+                         '只是转运回小区、还没放归，动物状态不能提前变成已放归')
+
+    def test_transfer_twice_rejected(self):
+        release = self._release()
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{URL}{release.id}/transfer/', {}))
+        self.expect_fail(self.post_json(f'{URL}{release.id}/transfer/', {}),
+                         message='不可转运回小区')
+
+    def test_confirm_after_transfer_sets_released(self):
+        release = self._release(status='transferred')
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(f'{URL}{release.id}/confirm/', {'receiver_name': '张物业'}))
+        release.refresh_from_db()
+        self.assertEqual(release.status, 'released')
+        self.assertIsNotNone(release.released_at)
+        release.pet.refresh_from_db()
+        self.assertEqual(release.pet.status, 'released')
+
+    def test_confirm_pending_still_allowed_for_legacy(self):
+        """旧数据没有中间态 —— 新增 `transferred` 不能把它们卡死。
+
+        反向对照：只测「transferred 能确认」的话，把判据写成
+        「只认 transferred」也能通过，而生产上的历史放归单会全部办不了。
+        """
+        release = self._release(status='pending')
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(f'{URL}{release.id}/confirm/', {}))
+        release.refresh_from_db()
+        self.assertEqual(release.status, 'released')
+
+    def test_transfer_rejected_after_released(self):
+        release = self._release(status='released')
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}{release.id}/transfer/', {}),
+                         message='不可转运回小区')
+
+    def test_confirm_rejected_after_released(self):
+        release = self._release(status='released')
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}{release.id}/confirm/', {}),
+                         message='不可确认')
+
+    def test_hospital_can_transfer_but_not_confirm(self):
+        """医院端只做第一段。
+
+        这条同时是**前端契约**的依据：医院端「出院管理 → 放归」里
+        已转运的行不能渲染「确认放归」按钮 —— 那个按钮必然 403，
+        用户会以为系统坏了。
+        """
+        release = self._release(status='transferred')
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}{release.id}/confirm/', {}), status=403)
+
+    def test_transfer_cross_district_404(self):
+        pet = make_pet(district=self.district_b, hospital=self.hospital_b,
+                       status='in_treatment')
+        release = self._release(pet=pet)
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}{release.id}/transfer/', {}),
+                         status=404, message='无权访问')

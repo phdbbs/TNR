@@ -157,7 +157,7 @@
 
 {% block extra_js %}
 <script>window.TNR_USER = {{ user_data|safe }};</script>
-<script src="{% static 'js/tnr-api.js' %}?v=20261017b"></script>
+<script src="{% static 'js/tnr-api.js' %}?v=20261018a"></script>
 <script>
 /* ====================================================
    捕捉点端 SPA · 全部业务逻辑（已转换为 TNR_API 异步调用）
@@ -251,6 +251,9 @@ const Shelter = {
   statusBadge(status) {
     const map = {
       pending: ['待签收', 'warning'],
+      // 转运单的「部分签收」（第四十八轮）—— 与捕捉单的 `partial`
+      // （部分转运）同名字段语义不同，后者由 `captureStatusBadge` 单独映射。
+      partial: ['部分签收', 'info'],
       dispatched: ['已下发', 'info'],
       received: ['已签收', 'success'],
       rejected: ['已驳回', 'danger'],
@@ -1932,6 +1935,7 @@ const Shelter = {
         { key: 'pet_code', label: '宠物编号', type: 'search', placeholder: '如 TNR260917001' },
         { key: 'status', label: '状态', type: 'select', options: [
           { value: 'pending', label: '待签收' },
+          { value: 'partial', label: '部分签收' },
           { value: 'received', label: '已签收' },
           { value: 'rejected', label: '已驳回' },
           { value: 'void', label: '已撤回' }
@@ -1993,7 +1997,7 @@ const Shelter = {
   _availableTransferPets(pets, transfers) {
     const busy = new Set();
     (transfers || []).forEach(t => {
-      if (t.status === 'pending') (t.petCodes || []).forEach(c => busy.add(c));
+      if (t.status === 'pending' || t.status === 'partial') (t.petCodes || []).forEach(c => busy.add(c));
     });
     return (pets || []).filter(p => p.status === 'in_transit' && !busy.has(p.code));
   },

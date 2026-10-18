@@ -21,6 +21,7 @@ from business.services import (
     get_district_filtered_queryset, check_blacklist, amap_regeo,
     amap_ip_location, client_ip, capture_transfer_state, capture_states_bulk,
     recalc_capture_status, get_active_pet, validate_uploaded_images,
+    get_hospital_scoped_pet, hospital_pet_write_error,
     resolve_district_scope, resolve_community,
     inactive_district_error, inactive_institution_error,
     parse_int_param, parse_date_param, MAX_CAPTURE_BATCH,
@@ -553,6 +554,8 @@ def capture_create(request):
         capture = Capture.objects.create(
             district=district,
             shelter=shelter,
+            # 归属机构 = 捕捉点（业务对象推导，不取操作员机构）
+            institution=shelter,
             shelter_name=shelter.name,
             community=community,
             community_name=community_name,
@@ -820,7 +823,7 @@ def capture_delete(request, pk):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter', 'gov_city', 'gov_district', 'hospital')
 @login_required
 def owner_return_list(request):
     """主人领回记录列表（回收记录）。
@@ -828,8 +831,31 @@ def owner_return_list(request):
     支持筛选：keyword（综合）、start_date/end_date（回收时间）、
     owner_address（住址）、owner_name（回收人）、owner_phone（电话）、
     pet_breed（品种）。
+
+    第四十八轮：**医院端也能办领回**（出院模块的「领回」子模块），
+    所以列表也必须对医院开放 —— 否则「能办、能写库、但查不到自己办的单据」，
+    出院页永远显示「该去向暂无动物」。
+
+    ⚠ 医院分支**不能套区县口径**：跨区县送医时 `OwnerReturn.district` 是
+      **动物**的区县（与本院不同），套区县会让本院刚办的单据立刻查不到。
+      改成按冗余 `institution` 收口（领回单含主人姓名 / 电话 / 身份证，
+      跨机构读是横向越权，不是「口径宽松」）。
     """
-    qs = get_district_filtered_queryset(OwnerReturn, request.user)
+    user = request.user
+    if user.role == 'hospital':
+        if user.institution_id:
+            # 历史行（`institution` 由 0030 迁移回填，理论上非空）兜底到
+            # 「动物当前挂在本院」；`isnull=True` 这个附加条件不能省 ——
+            # 否则会把「归属别院、但动物后来转到本院」的记录也捞进来。
+            qs = OwnerReturn.objects.filter(
+                Q(institution_id=user.institution_id)
+                | Q(institution_id__isnull=True,
+                    pet__hospital_id=user.institution_id)
+            )
+        else:
+            qs = OwnerReturn.objects.none()
+    else:
+        qs = get_district_filtered_queryset(OwnerReturn, user)
     qs = qs.select_related('pet')
 
     # 时间范围（按 return_time，无值则退到 created_at）。
@@ -901,12 +927,21 @@ def owner_return_list(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter', 'gov_city', 'gov_district', 'hospital')
 @login_required
 def owner_return_create(request, pk=None):
     """主人领回登记
 
     URL 中的 pk 可以是 capture_id（兼容旧路由），实际 pet_id 从请求体获取。
+
+    第四十八轮：**医院端也能办领回**（出院模块的「领回」子模块）。
+    两条路径的准入条件不同，必须分开判：
+
+    * 捕捉点 / 政府端：动物刚捕捉、尚未转运（`in_transit` 且未挂医院）——
+      这是原有口径，不能放宽：一旦挂上医院，动物已经在诊疗流程里，
+      捕捉点单方面「领回」会让医院的诊疗单凭空指向一只已出院的动物。
+    * 医院端：动物**在本院**在治 / 待领养。取单走 `get_hospital_scoped_pet`
+      （本院在治 ∪ 本院诊疗过），与看板同口径。
     """
     data = parse_json_body(request)
 
@@ -914,21 +949,34 @@ def owner_return_create(request, pk=None):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    # 按区县范围取宠物，并排除已逻辑删除的档案
-    pet = get_active_pet(pet_id, request.user)
-    if pet is None:
-        return json_fail('宠物不存在或无权访问', status=404)
+    is_hospital = request.user.role == 'hospital'
+    if is_hospital:
+        pet = get_hospital_scoped_pet(pet_id, request.user)
+        if pet is None:
+            return json_fail('宠物不存在或无权访问', status=404)
+        err = hospital_pet_write_error(pet, request.user)
+        if err:
+            return json_fail(err)
+        if pet.status not in ('in_treatment', 'pending_adopt'):
+            return json_fail(
+                f'宠物当前状态({pet.get_status_display()})不可领回，'
+                '仅诊疗中/待领养宠物可在医院办理领回')
+    else:
+        # 按区县范围取宠物，并排除已逻辑删除的档案
+        pet = get_active_pet(pet_id, request.user)
+        if pet is None:
+            return json_fail('宠物不存在或无权访问', status=404)
 
-    # 状态限制：只有刚捕捉（未提交转运单）的宠物可领回
-    # 即：宠物未关联医院（pet.hospital 为空），表示尚未提交转运单
-    if pet.hospital_id is not None:
-        return json_fail('该宠物已提交转运单，不可领回。领回仅限捕捉后、转运前的宠物')
+        # 状态限制：只有刚捕捉（未提交转运单）的宠物可领回
+        # 即：宠物未关联医院（pet.hospital 为空），表示尚未提交转运单
+        if pet.hospital_id is not None:
+            return json_fail('该宠物已提交转运单，不可领回。领回仅限捕捉后、转运前的宠物')
 
-    # 防止重复领回登记（同一宠物只能领回一次）
-    if pet.status == 'owner_returned':
-        return json_fail('该宠物已办理过主人领回，不可重复登记')
-    if pet.status != 'in_transit':
-        return json_fail(f'宠物当前状态({pet.get_status_display()})不可领回')
+        # 防止重复领回登记（同一宠物只能领回一次）
+        if pet.status == 'owner_returned':
+            return json_fail('该宠物已办理过主人领回，不可重复登记')
+        if pet.status != 'in_transit':
+            return json_fail(f'宠物当前状态({pet.get_status_display()})不可领回')
 
     owner_name = body_str(data, 'owner_name').strip()
     if not owner_name:
@@ -944,9 +992,16 @@ def owner_return_create(request, pk=None):
 
     # 主人领回记录的区县以宠物档案的区县为准（动物就是从那个区县捕捉来的），
     # 而不是操作员所属区县——操作员可能挂在「全市（市级）」下。
-    district, err = _resolve_district_scope(request.user, pet, body_int(data, 'district_id'))
-    if err:
-        return json_fail(err)
+    # 医院端跨区县送医时同理：动物区县与本院区县不同，单据归属靠冗余
+    # `institution`，不靠 district。
+    if is_hospital:
+        if not pet.district_id:
+            return json_fail('缺少区县信息')
+        district = pet.district
+    else:
+        district, err = _resolve_district_scope(request.user, pet, body_int(data, 'district_id'))
+        if err:
+            return json_fail(err)
 
     record = OwnerReturn.objects.create(
         pet=pet,
@@ -962,6 +1017,8 @@ def owner_return_create(request, pk=None):
         operator_name=request.user.get_full_name() or request.user.username,
         ledger_no=generate_doc_no('RET'),
         district=district,
+        # 归属机构 = 动物当时所在的机构（业务对象推导，不取操作员机构）
+        institution_id=pet.hospital_id or pet.shelter_id,
     )
 
     # 更新宠物状态

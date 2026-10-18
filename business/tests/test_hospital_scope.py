@@ -27,7 +27,9 @@
 
 判据共用 ``business.services.hospital_pet_scope()``，实现只留一份。
 """
-from business.models import Adoption, AdoptionApplication, Treatment
+from business.models import (
+    Adoption, AdoptionApplication, Euthanasia, OwnerReturn, Release, Treatment,
+)
 from business.tests.base import (
     BusinessTestBase, make_institution, make_pet, make_user,
 )
@@ -285,3 +287,155 @@ class HospitalScopeContractTest(HospitalScopeBase):
         src = self._read('business/views_adoption.py')
         self.assertIn("if user.role == 'hospital':", src)
         self.assertIn('qs.filter(hospital_id=user.institution_id)', src)
+
+
+class HospitalCrossDistrictDischargeTest(BusinessTestBase):
+    """医院端能给自己在治的**跨区县**动物办出院单据（第四十八轮）。
+
+    转运允许跨区县送医（`Transfer.to_hospital` 可以是别的区县的医院），
+    所以「本院在治、但动物不在本区县」是常态。出院单据原先走
+    `get_active_pet`（按区县取单）—— 这类动物会「看板看得见、点开 404」，
+    而且不报错，页面上只是「该动物不存在」。
+
+    取单口径必须与看板一致：`get_hospital_scoped_pet`（本院在治 ∪ 本院诊疗过）。
+    写操作另外要求 `pet.hospital_id == user.institution_id`。
+    """
+
+    def setUp(self):
+        # 乙区捕捉的动物，转运到甲区医院治疗
+        self.pet = make_pet(district=self.district_b, shelter=self.shelter_b,
+                            hospital=self.hospital_a, status='in_treatment')
+
+    def test_owner_return_across_district(self):
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.post_json('/api/business/owner-returns/create/', {
+            'pet_id': self.pet.id, 'owner_name': '王主人',
+            'reason': '主人到院认领'}))
+        rec = OwnerReturn.objects.get(id=body['data']['id'])
+        self.assertEqual(rec.pet_id, self.pet.id)
+        self.assertEqual(rec.district_id, self.district_b.id,
+                         '归属区县跟着**动物**走，不跟操作员')
+        self.assertEqual(rec.institution_id, self.hospital_a.id,
+                         '归属机构从业务对象推导，不取操作员机构')
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'owner_returned')
+
+    def test_adoption_register_across_district(self):
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.post_json('/api/business/adoptions/register/', {
+            'pet_id': self.pet.id, 'adopter_name': '李领养',
+            'adopter_phone': '13800001111'}))
+        rec = Adoption.objects.get(id=body['data']['id'])
+        self.assertEqual(rec.hospital_id, self.hospital_a.id)
+        self.assertEqual(rec.institution_id, self.hospital_a.id)
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'pending_claim')
+
+    def test_other_hospital_cannot_register_across_district(self):
+        """反向对照：别家医院对同一只动物必须 404。
+
+        没有这条的话，把医院分支写成「只校验状态、不校验本院」
+        也能让上面两条通过 —— 那就是横向越权。
+        """
+        self.login_as(self.hospital_user_b)
+        self.expect_fail(self.post_json('/api/business/adoptions/register/', {
+            'pet_id': self.pet.id, 'adopter_name': '李领养',
+            'adopter_phone': '13800001111'}), status=404, message='无权访问')
+        self.assertFalse(Adoption.objects.filter(pet=self.pet).exists())
+
+    def test_other_hospital_cannot_owner_return_across_district(self):
+        self.login_as(self.hospital_user_b)
+        self.expect_fail(self.post_json('/api/business/owner-returns/create/', {
+            'pet_id': self.pet.id, 'owner_name': '王主人'}),
+            status=404, message='无权访问')
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'in_treatment', '被拒时不能有副作用')
+
+
+class HospitalDischargeListScopeTest(BusinessTestBase):
+    """出院四类单据的**列表**口径：医院只看本院，且不能套区县。
+
+    「能办、能写库、但查不到自己办的单据」是最难发现的一类缺陷：
+    接口返回 200 + 空数组，出院页显示「该去向暂无动物」，看起来只是
+    「还没人办过」。第四十八轮实测就栽在这里 —— `owner_return_create`
+    放开了医院，`owner_return_list` 的角色白名单没跟着放开，
+    医院点「出院管理」直接看到「无权访问该接口」。
+
+    另一半是区县：跨区县送医时单据的 `district` 是**动物**的区县
+    （与本院不同），先按区县过滤再按机构过滤，本院刚办的单据立刻消失。
+    """
+
+    def setUp(self):
+        # 同区县第二家医院：横向越权的必要前提
+        self.hospital_a2 = make_institution(type='hospital',
+                                            district=self.district_a,
+                                            name='甲区第二医院')
+        # 本院在治、但动物属于**另一个区县**（跨区县送医）
+        self.pet_a = make_pet(district=self.district_b, shelter=self.shelter_b,
+                              hospital=self.hospital_a, status='in_treatment')
+        # 同区县另一家医院在治的动物
+        self.pet_a2 = make_pet(district=self.district_a, shelter=self.shelter_a,
+                               hospital=self.hospital_a2, status='in_treatment')
+
+    def _make_docs(self, pet, institution, suffix):
+        OwnerReturn.objects.create(
+            pet=pet, pet_code=pet.code, owner_name='主人' + suffix, reason='认领',
+            district=pet.district, institution=institution,
+            ledger_no='RET-' + suffix)
+        Euthanasia.objects.create(
+            pet=pet, pet_code=pet.code, reason='病重', district=pet.district,
+            hospital=institution, institution=institution,
+            ledger_no='EUT-' + suffix)
+        Release.objects.create(
+            pet=pet, pet_code=pet.code, community_name='小区' + suffix,
+            status='pending', district=pet.district, institution=institution,
+            ledger_no='REL-' + suffix)
+
+    def _ledgers(self, url):
+        self.login_as(self.hospital_user_a)
+        return {row['ledger_no'] for row in self.ok(self.get_json(url))['data']}
+
+    def test_owner_return_list_includes_own_cross_district(self):
+        self._make_docs(self.pet_a, self.hospital_a, 'A')
+        self._make_docs(self.pet_a2, self.hospital_a2, 'B')
+        got = self._ledgers('/api/business/owner-returns/')
+        self.assertIn('RET-A', got,
+                      '本院在跨区县动物上办的领回单必须查得到（不能套区县口径）')
+        self.assertNotIn('RET-B', got,
+                         '别院的领回单含主人姓名 / 身份证，不能横向读')
+
+    def test_euthanasia_list_includes_own_cross_district(self):
+        self._make_docs(self.pet_a, self.hospital_a, 'A')
+        self._make_docs(self.pet_a2, self.hospital_a2, 'B')
+        got = self._ledgers('/api/business/euthanasia/')
+        self.assertIn('EUT-A', got)
+        self.assertNotIn('EUT-B', got)
+
+    def test_release_list_includes_own_cross_district(self):
+        self._make_docs(self.pet_a, self.hospital_a, 'A')
+        self._make_docs(self.pet_a2, self.hospital_a2, 'B')
+        got = self._ledgers('/api/business/releases/')
+        self.assertIn('REL-A', got)
+        self.assertNotIn('REL-B', got)
+
+    def test_other_hospital_sees_only_its_own(self):
+        """反向对照：B 院看到的必须是自己的，而不是 A 院的。"""
+        self._make_docs(self.pet_a, self.hospital_a, 'A')
+        self._make_docs(self.pet_a2, self.hospital_a2, 'B')
+        self.login_as(self.hospital_user_b)
+        got = {row['ledger_no'] for row in self.ok(
+            self.get_json('/api/business/owner-returns/'))['data']}
+        self.assertNotIn('RET-A', got)
+        self.assertEqual(got, set(), '乙区医院不该看到甲区的任何领回单')
+
+    def test_hospital_without_institution_sees_nothing(self):
+        """没挂机构的医院账号必须是**空集**，而不是全部。"""
+        self._make_docs(self.pet_a, self.hospital_a, 'A')
+        orphan = make_user('hs_no_inst2', role='hospital',
+                           district=self.district_a, institution=None)
+        self.login_as(orphan)
+        for url in ('/api/business/owner-returns/',
+                    '/api/business/euthanasia/',
+                    '/api/business/releases/'):
+            self.assertEqual(self.ok(self.get_json(url))['data'], [],
+                             f'{url} 对未绑定机构的医院账号必须返回空集')

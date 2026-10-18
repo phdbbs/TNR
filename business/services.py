@@ -926,6 +926,28 @@ def get_hospital_scoped_pet(pk, user):
             .filter(pk=pk).distinct().first())
 
 
+def hospital_pet_write_error(pet, user):
+    """医院端**写单据前**的归属校验，返回错误文案或 None。
+
+    与取单口径（`get_hospital_scoped_pet`）是两件事，不能合并：
+    「本院诊疗过」是**读**口径（出院后还要能查历史），写单据时必须要求
+    动物**当前**挂在本院 —— 否则 A 院能给 B 院在治的动物开死亡单
+    （只要 A 院历史上诊疗过它）。
+
+    `hospital_id is None` 放行：那是已办完出院、医院字段被清空的动物，
+    本院当初诊疗过它，补开单据是正常业务。
+
+    ⚠ 四个出院单据（领养 / 死亡 / 领回 / 放归）**共用**这一个判据。
+      各写一份必然漂移 —— 第四十八轮就出现过「领回接口加了医院分支、
+      领回列表没加」，医院能办却查不到自己办的单据。
+    """
+    if getattr(user, 'role', None) != 'hospital':
+        return None
+    if pet is None or pet.hospital_id in (None, user.institution_id):
+        return None
+    return '该宠物当前不在本院，不能由本院办理'
+
+
 def pet_has_pending_release(pet):
     """宠物是否已有「待放归」记录。
 
@@ -1148,7 +1170,7 @@ def pet_archive_records(pets):
 # 捕捉单转运状态推导
 # ============================================
 # 已提交给医院、尚未被退回的转运单状态（含待签收与已签收）
-ACTIVE_TRANSFER_STATUSES = ('pending', 'received')
+ACTIVE_TRANSFER_STATUSES = ('pending', 'partial', 'received')
 
 
 def _split_codes(raw):
@@ -1225,49 +1247,20 @@ def capture_transfer_state(capture):
       rejected     被医院退回、已回到未转运状态的宠物数
       can_edit     是否允许编辑（未作废 且 无任何宠物处于已转运状态）
       can_delete   是否允许删除（同上；须医院全部退回）
+
+    ⚠ **只保留一份实现**：直接转调 `capture_states_bulk()`。
+      这两个函数原先各写一遍推导逻辑（一个按单、一个按编号），第四十八轮加
+      「部分签收」时只改了单张版，列表立刻与详情打架 —— 同一张捕捉单在列表里
+      显示「已完成」、点开详情却是「转运中」，而且不报错。
     """
-    pets = Pet.objects.filter(capture=capture, is_deleted=False)
-    total = pets.count()
-    codes = set(pets.values_list('code', flat=True))
-    # 「已离开本单流程」以宠物自身状态为准：签收后转 in_treatment、
-    # 主人领回转 owner_returned、死亡转 euthanized，都不会再是 in_transit。
-    settled = pets.exclude(status='in_transit').count() if total else 0
-
-    active_codes, received_codes, rejected_codes = set(), set(), set()
-    for t in capture_transfers(capture):
-        matched = set(_split_codes(t.pet_codes)) & codes
-        if not matched:
-            continue
-        if t.status in ACTIVE_TRANSFER_STATUSES:
-            active_codes |= matched
-            if t.status == 'received':
-                received_codes |= matched
-        elif t.status == 'rejected':
-            rejected_codes |= matched
-
-    # 同一宠物既被退回又重新下发时，以「当前仍在转运」为准
-    rejected_codes -= active_codes
-    received_codes &= active_codes
-    transferred = len(active_codes)
-
-    not_deleted = not capture.is_deleted
-    return {
-        'total': total,
-        'transferred': transferred,
-        'received': len(received_codes),
-        'settled': settled,
-        'rejected': len(rejected_codes),
-        'untouched': max(total - transferred - len(rejected_codes), 0),
-        'can_edit': not_deleted and transferred == 0,
-        'can_delete': not_deleted and transferred == 0,
-    }
+    return capture_states_bulk([capture])[capture.id]
 
 
 def capture_states_bulk(captures):
     """批量计算多张捕捉单的转运状态，避免列表接口 N+1 查询。
 
     :param captures: Capture 可迭代对象（或 QuerySet）
-    :return: {capture_id: 与 capture_transfer_state 同结构的 dict}
+    :return: {capture_id: 与 `capture_transfer_state` 同结构的 dict}
     """
     captures = list(captures)
     if not captures:
@@ -1285,28 +1278,46 @@ def capture_states_bulk(captures):
         if pet_status != 'in_transit':
             settled_by_capture[cap_id] = settled_by_capture.get(cap_id, 0) + 1
 
-    # 编号 → 转运状态标记。优先级 pending > received > rejected：
-    # 被驳回后重新下发的宠物必须算「转运中」，而不是停留在旧的 rejected。
-    code_flag = {}
-    _FLAG_RANK = {'pending': 3, 'received': 2, 'rejected': 1}
     all_codes = set(code_to_capture)
+    active_codes, received_codes, rejected_codes = set(), set(), set()
     if all_codes:
         probe = Q()
         for code in all_codes:
             probe |= Q(pet_codes__contains=code)
+        # contains 只是预筛（存在子串误命中），下面按编号集合精确取交集
         for t in Transfer.objects.filter(probe):
-            if t.status not in _FLAG_RANK:
+            matched = set(_split_codes(t.pet_codes)) & all_codes
+            if not matched:
                 continue
-            for code in _split_codes(t.pet_codes):
-                if code in all_codes and _FLAG_RANK[t.status] > _FLAG_RANK.get(code_flag.get(code), 0):
-                    code_flag[code] = t.status
+            # 已签收子集以 `received_codes` 为准 —— 不能只看 `status == 'received'`：
+            # 部分签收（partial）与「部分签收后又驳回剩余」（rejected + 非空
+            # received_codes）这两种单里，都有一部分动物**确实已经签收**。
+            rec = set(_split_codes(t.received_codes)) & matched
+            # 历史数据兜底：`received_codes` 是第四十八轮才加的列，老单子是
+            # `status='received'` 且这一列为空 —— 语义上等于「整单全部签收」。
+            # 不兜这一下，生产上所有历史转运单会从「已完成」退回「转运中」。
+            if not rec and t.status == 'received':
+                rec = matched
+            if t.status in ACTIVE_TRANSFER_STATUSES:
+                active_codes |= matched
+                received_codes |= rec
+            elif t.status == 'rejected':
+                # 部分签收后驳回剩余：已签收的那部分仍算「已转运、已签收」，
+                # 只有未签收的才是「被退回、可重新安排」。
+                received_codes |= rec
+                rejected_codes |= (matched - rec)
+                active_codes |= rec
+
+    # 同一宠物既被退回又重新下发时，以「当前仍在转运」为准
+    rejected_codes -= active_codes
+    received_codes &= active_codes
 
     result = {}
     for cap in captures:
         codes = codes_by_capture.get(cap.id, set())
-        transferred = sum(1 for c in codes if code_flag.get(c) in ('pending', 'received'))
-        received = sum(1 for c in codes if code_flag.get(c) == 'received')
-        rejected = sum(1 for c in codes if code_flag.get(c) == 'rejected')
+        transferred = len(codes & active_codes)
+        received = len(codes & received_codes)
+        rejected = len(codes & rejected_codes)
         total = len(codes)
         not_deleted = not cap.is_deleted
         result[cap.id] = {

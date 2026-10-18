@@ -242,6 +242,10 @@ class HospitalWriteOwnRecordsTest(HospitalWriteScopeBase):
 #   ① 直接比较 `...institution_id`；
 #   ② 调用共用取数函数 `get_own_institution_object(...)`（按机构外键收敛，取不到即 404）。
 INSTITUTION_HELPERS = {'get_own_institution_object'}
+# 「返回错误文案」型判据：本身不抛不跳，**必须使用返回值**才真的拦住什么。
+# `hospital_pet_write_error(pet, user)` 单写一行什么也不拦 ——
+# 那正是这类守卫最容易被糊弄的地方，所以它的调用节点要求「不是裸表达式语句」。
+GUARD_HELPERS = {'hospital_pet_write_error'}
 
 
 def has_institution_check(src):
@@ -257,6 +261,11 @@ def has_institution_check(src):
         tree = ast.parse(src)
     except SyntaxError as exc:          # 解析不了 = 判不了，按「缺失」处理（宁可误报）
         return False, f'源码无法解析：{exc}'
+    # 结果被丢弃的调用（`foo(...)` 单独成句）不算判据 —— 见 GUARD_HELPERS 的说明
+    discarded = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            discarded.add(id(node.value))
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == 'institution_id':
             return True, '读取 institution_id'
@@ -267,6 +276,8 @@ def has_institution_check(src):
             name = getattr(fn, 'id', None) or getattr(fn, 'attr', None)
             if name in INSTITUTION_HELPERS:
                 return True, f'调用 {name}()'
+            if name in GUARD_HELPERS and id(node) not in discarded:
+                return True, f'调用并使用了 {name}() 的返回值'
     return False, '未发现机构判据'
 
 
@@ -416,6 +427,32 @@ class InstitutionCheckContractSelfTest(SimpleTestCase):
         )
         ok, why = has_institution_check(src)
         self.assertTrue(ok, f'正向对照失败：共用函数调用没被识别（{why}）')
+
+    def test_guard_helper_counts_only_when_result_is_used(self):
+        """返回错误文案的判据：**用了返回值**才算，裸调用不算。
+
+        这一对必须成对存在 —— 只测「用了算」的话，把识别写成
+        「出现函数名就算」也能通过，而 `hospital_pet_write_error(pet, user)`
+        单写一行是什么都拦不住的。
+        """
+        used = (
+            "def view(request, pk):\n"
+            "    pet = Pet.objects.get(id=pk)\n"
+            "    err = hospital_pet_write_error(pet, request.user)\n"
+            "    if err:\n"
+            "        return None\n"
+        )
+        ok, why = has_institution_check(used)
+        self.assertTrue(ok, f'使用了返回值的判据没被识别（{why}）')
+
+        bare = (
+            "def view(request, pk):\n"
+            "    pet = Pet.objects.get(id=pk)\n"
+            "    hospital_pet_write_error(pet, request.user)\n"
+            "    return pet\n"
+        )
+        ok, why = has_institution_check(bare)
+        self.assertFalse(ok, f'裸调用（结果被丢弃）被当成了判据（命中：{why}）')
 
     def test_real_views_are_detected_by_both_forms(self):
         """把真接口拉进来：三个已改写的接口必须被判为「有判据」。

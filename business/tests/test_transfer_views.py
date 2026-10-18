@@ -219,6 +219,136 @@ class TransferReceiveTest(BusinessTestBase):
         self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/'), status=403)
 
 
+class PartialReceiveTest(BusinessTestBase):
+    """部分签收（第四十八轮）：一车 3 只、只到了 2 只。
+
+    旧实现只有「整单签收 / 整单驳回」两个动作，两种情况都在制造与实际
+    不符的台账：整签 = 对没到的动物也认了账；整驳 = 把已经到了的也退回去。
+    """
+
+    def _make_pending(self, count=3):
+        pets = [make_pet(district=self.district_a, shelter=self.shelter_a)
+                for _ in range(count)]
+        transfer = Transfer.objects.create(
+            from_shelter=self.shelter_a, to_hospital=self.hospital_a,
+            pet_codes=','.join(p.code for p in pets), pet_count=count,
+            district=self.district_a)
+        return pets, transfer
+
+    def test_partial_receive_keeps_rest_pending(self):
+        pets, transfer = self._make_pending(3)
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.post_json(
+            f'{TRANSFER_URL}{transfer.id}/receive/',
+            {'pet_codes': [pets[0].code, pets[1].code]}))
+
+        self.assertEqual(body['data']['status'], 'partial')
+        transfer.refresh_from_db()
+        self.assertEqual(set(transfer.received_codes.split(',')),
+                         {pets[0].code, pets[1].code})
+        for p in pets[:2]:
+            p.refresh_from_db()
+            self.assertEqual(p.status, 'in_treatment', '已签收的应进入待诊疗')
+        pets[2].refresh_from_db()
+        self.assertEqual(pets[2].status, 'in_transit',
+                         '未签收的不能被一起改成待诊疗')
+
+    def test_receive_remaining_finishes_the_slip(self):
+        pets, transfer = self._make_pending(3)
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                               {'pet_codes': [pets[0].code]}))
+        body = self.ok(self.post_json(
+            f'{TRANSFER_URL}{transfer.id}/receive/',
+            {'pet_codes': [pets[1].code, pets[2].code]}))
+        self.assertEqual(body['data']['status'], 'received')
+        for p in pets:
+            p.refresh_from_db()
+            self.assertEqual(p.status, 'in_treatment')
+
+    def test_code_not_in_slip_is_rejected_without_side_effect(self):
+        """伪造 / 别单的编号必须 400，且**不能**留下半截签收。"""
+        pets, transfer = self._make_pending(2)
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(
+            f'{TRANSFER_URL}{transfer.id}/receive/',
+            {'pet_codes': [pets[0].code, 'TNR-FAKE-CODE']}),
+            message='不在本单待签收范围内')
+
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'pending', '被拒后单据状态被改了')
+        self.assertEqual(transfer.received_codes, '')
+        pets[0].refresh_from_db()
+        self.assertEqual(pets[0].status, 'in_transit', '被拒后动物状态被改了')
+
+    def test_receiving_same_pet_twice_is_rejected(self):
+        pets, transfer = self._make_pending(2)
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                               {'pet_codes': [pets[0].code]}))
+        self.expect_fail(self.post_json(
+            f'{TRANSFER_URL}{transfer.id}/receive/',
+            {'pet_codes': [pets[0].code]}), message='不在本单待签收范围内')
+
+    def test_reject_after_partial_only_returns_unsigned(self):
+        """部分签收后驳回剩余：已签收的留在医院，未签收的退回在途。"""
+        pets, transfer = self._make_pending(3)
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                               {'pet_codes': [pets[0].code]}))
+        body = self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/reject/',
+                                      {'reason': '剩余未到货'}))
+        self.assertEqual(body['data']['status'], 'rejected')
+
+        pets[0].refresh_from_db()
+        self.assertEqual(pets[0].status, 'in_treatment',
+                         '已签收的动物不能因为「驳回剩余」被退回')
+        for p in pets[1:]:
+            p.refresh_from_db()
+            self.assertEqual(p.status, 'in_transit')
+            self.assertIsNone(p.hospital_id, '退回的动物要解除医院归属')
+
+    def test_empty_selection_is_rejected(self):
+        _, transfer = self._make_pending(2)
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(
+            f'{TRANSFER_URL}{transfer.id}/receive/', {'pet_codes': []}),
+            message='请至少选择一只动物签收')
+
+    def test_whole_slip_receive_still_works(self):
+        """反向对照：不传 `pet_codes` = 整单签收（旧前端 / 旧调用方）。"""
+        pets, transfer = self._make_pending(2)
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/'))
+        self.assertEqual(body['data']['status'], 'received')
+        for p in pets:
+            p.refresh_from_db()
+            self.assertEqual(p.status, 'in_treatment')
+
+    def test_capture_state_counts_partial_receipts(self):
+        """服务层口径：部分签收也要如实计入 `received`。
+
+        `capture_transfer_state` 原先只看 `status == 'received'`，
+        加了 partial 之后如果不改，捕捉单会显示「已转运 3 / 已签收 0」——
+        而实际上 2 只已经躺在医院里了。
+        """
+        pets, transfer = self._make_pending(3)
+        capture = make_capture(district=self.district_a, shelter=self.shelter_a,
+                               pet_codes=[p.code for p in pets])
+        for p in pets:
+            p.capture = capture
+            p.save(update_fields=['capture'])
+        transfer.capture = capture
+        transfer.save(update_fields=['capture'])
+
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                               {'pet_codes': [pets[0].code, pets[1].code]}))
+        state = capture_transfer_state(capture)
+        self.assertEqual(state['transferred'], 3)
+        self.assertEqual(state['received'], 2, '部分签收的 2 只没被算作已签收')
+
+
 class TransferRejectAndReassignGuardTest(BusinessTestBase):
     """驳回回退 + 「不可重复下发 / 不可跨区下发」守卫。"""
     def _make_pending(self):

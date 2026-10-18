@@ -116,3 +116,59 @@ class BodyReceiveTest(BusinessTestBase):
         self.login_as(self.shelter_user_b)
         self.expect_fail(self.post_json(f'{URL}{record.id}/body-receive/', {}),
                          status=404, message='无权访问')
+
+
+class EuthanasiaKindTest(BusinessTestBase):
+    """死亡与安乐死共用一张表，靠 `kind` 区分（第四十八轮）。
+
+    两者是**分开报**的两张表：`euthanized`（安乐死）与 `dead`（死亡/无害化）。
+    合并成一个状态的话，死亡报表会把安乐死的数量算进去，而且打印出来的
+    单据标题也会错（安乐死单被印成「死亡 / 无害化处理单」）。
+    """
+
+    def _pet(self, status='in_treatment'):
+        return make_pet(district=self.district_a, hospital=self.hospital_a,
+                        status=status)
+
+    def test_default_kind_is_euthanasia(self):
+        """不传 `kind` 的旧调用必须仍然走安乐死（向后兼容）。"""
+        pet = self._pet()
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.post_json(f'{URL}create/',
+                                      {'pet_id': pet.id, 'reason': '病重'}))
+        self.assertEqual(body['data']['kind'], 'euthanasia')
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'euthanized')
+
+    def test_kind_dead_sets_pet_dead(self):
+        pet = self._pet()
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.post_json(f'{URL}create/', {
+            'pet_id': pet.id, 'reason': '送医途中死亡', 'kind': 'dead'}))
+        self.assertEqual(body['data']['kind'], 'dead')
+        self.assertEqual(Euthanasia.objects.get(id=body['data']['id']).kind, 'dead')
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'dead',
+                         '死亡与安乐死必须是两个状态，否则两张报表分不开')
+
+    def test_invalid_kind_rejected_without_side_effect(self):
+        pet = self._pet()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {
+            'pet_id': pet.id, 'reason': 'x', 'kind': 'cremated'}), message='不合法')
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_treatment', '被拒时不能有副作用')
+        self.assertFalse(Euthanasia.objects.filter(pet=pet).exists())
+
+    def test_institution_derived_from_pet_hospital(self):
+        """归属机构从**业务对象**推导，不取操作员机构。
+
+        平台 / 市级账号没有 `institution`，取操作员机构会写成空；
+        跨区县送医时也会写成错的医院。
+        """
+        pet = self._pet()
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.post_json(f'{URL}create/',
+                                      {'pet_id': pet.id, 'reason': 'x'}))
+        record = Euthanasia.objects.get(id=body['data']['id'])
+        self.assertEqual(record.institution_id, self.hospital_a.id)

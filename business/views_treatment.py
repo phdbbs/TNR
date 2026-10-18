@@ -73,16 +73,25 @@ def _code_in_csv(code):
 
 
 def _intake_info(pet):
-    """该动物的入院信息（最近一张**已签收**的转运单）。"""
-    transfer = (Transfer.objects.filter(_code_in_csv(pet.code), status='received')
-                .order_by('-id').first())
-    if transfer is None:
-        return {'transfer_no': '', 'receive_date': '', 'shelter': ''}
-    return {
-        'transfer_no': transfer.ledger_no or '',
-        'receive_date': transfer.received_at.isoformat() if transfer.received_at else '',
-        'shelter': transfer.from_shelter_name or '',
-    }
+    """该动物的入院信息（最近一张**已签收**的转运单）。
+
+    ⚠ 第四十八轮起转运单可以「部分签收」（`status='partial'`）——
+    这类单里已经签收的动物同样要带出转运单号与来源捕捉点，否则医院
+    开了诊疗单、详情页的「转运单号 / 来源捕捉点」全是 `—`，看起来像
+    这只动物是凭空出现的。所以状态要认 `received` **和** `partial`，
+    并确认该动物确实在已签收集合里。
+    """
+    for t in (Transfer.objects
+              .filter(_code_in_csv(pet.code), status__in=('received', 'partial'))
+              .order_by('-id')):
+        if t.status == 'received' or pet.code in [
+                c.strip() for c in (t.received_codes or '').split(',') if c.strip()]:
+            return {
+                'transfer_no': t.ledger_no or '',
+                'receive_date': t.received_at.isoformat() if t.received_at else '',
+                'shelter': t.from_shelter_name or '',
+            }
+    return {'transfer_no': '', 'receive_date': '', 'shelter': ''}
 
 
 # ============================================
@@ -156,16 +165,31 @@ def _load_infectious(treatment):
 @role_required('hospital', 'shelter', 'gov_city', 'gov_district')
 @login_required
 def treatment_board(request):
-    """诊疗看板：待接诊 / 诊疗中 / 诊疗完毕。
+    """诊疗看板：待检 / 待诊 / 诊疗中 / 待出院 / 已出院（第四十八轮五态）。
 
-    「待接诊」= 本院待诊疗的动物（**不管有没有开单**）—— 原型里点动物
+    五态**全部由时间戳派生**，不存列（存列必然有一处写入路径忘了同步）：
+
+    | 状态 | 判据 |
+    |---|---|
+    | 待检 | `checked_at` 为空（还没提交检查单） |
+    | 待诊 | `checked_at` 有、`diagnosed_at` 为空 |
+    | 诊疗中 | `diagnosed_at` 有、`done_at` 为空 |
+    | 待出院 | `done_at` 有、`disposed_at` 为空 |
+    | 已出院 | `disposed_at` 有 |
+
+    原先只有三态（pending / treating / done），把「待诊」和「诊疗中」合并
+    成 treating、把「待出院」和「已出院」合并成 done —— 界面上看不出
+    「下一步该点哪个按钮」，也分不清「还在治」和「治完了等人接走」。
+
+    「待检」的主体是**本院待诊疗的动物**（不管有没有开单）—— 原型里点动物
     才进流程，所以「还没开单」是常态，不能只列已有诊疗单的动物，
     否则新收治的动物在看板上根本不出现（看不到 = 接不了诊）。
     """
     user = request.user
     if user.role == 'hospital':
         if not user.institution_id:
-            return json_ok({'pending': [], 'treating': [], 'done': [], 'counts': {}})
+            return json_ok({'checking': [], 'pending_diagnose': [], 'treating': [],
+                            'pending_discharge': [], 'discharged': [], 'counts': {}})
         treatments = Treatment.objects.filter(hospital_id=user.institution_id)
         pets = Pet.objects.filter(hospital_id=user.institution_id, is_deleted=False)
     else:
@@ -175,29 +199,38 @@ def treatment_board(request):
 
     treatments = treatments.select_related('pet').order_by('-id')
 
-    pending, treating, done = [], [], []
+    buckets = {'checking': [], 'pending_diagnose': [], 'treating': [],
+               'pending_discharge': [], 'discharged': []}
     seen_pet_ids = set()
 
     for t in treatments:
         row = _board_row(t)
         seen_pet_ids.add(t.pet_id)
-        if t.done_at is not None:
-            done.append(row)
-        elif t.checked_at is not None:
-            treating.append(row)
-        else:
-            pending.append(row)
+        buckets[_board_stage(t)].append(row)
 
-    # 还没开单、但已在院待诊疗的动物 —— 它们是「待接诊」的主体。
+    # 还没开单、但已在院待诊疗的动物 —— 它们是「待检」的主体。
     # ⚠ `status='in_treatment'` 是唯一口径：`pending_adopt` 的动物虽然也允许
-    #   开单（复查），但它们已经出院了，不该出现在待接诊列表里。
+    #   开单（复查），但它们已经出院了，不该出现在待检列表里。
     orphan_pets = pets.filter(status='in_treatment').exclude(id__in=seen_pet_ids)
     for pet in orphan_pets.order_by('-id'):
-        pending.append(_pet_board_row(pet))
+        buckets['checking'].append(_pet_board_row(pet))
 
-    counts = {'pending': len(pending), 'treating': len(treating), 'done': len(done)}
-    return json_ok({'pending': pending, 'treating': treating, 'done': done,
-                    'counts': counts})
+    counts = {k: len(v) for k, v in buckets.items()}
+    buckets['counts'] = counts
+    return json_ok(buckets)
+
+
+def _board_stage(treatment):
+    """五态判据（唯一真源）。前端只做展示，不在 JS 里重算一遍。"""
+    if treatment.disposed_at:
+        return 'discharged'
+    if treatment.done_at:
+        return 'pending_discharge'
+    if treatment.diagnosed_at:
+        return 'treating'
+    if treatment.checked_at:
+        return 'pending_diagnose'
+    return 'checking'
 
 
 def _board_row(treatment):
@@ -214,10 +247,16 @@ def _board_row(treatment):
         'color': pet.color if pet else '',
         'hospital_name': treatment.hospital_name,
         'stage': treatment.stage,
+        # 五态判据由后端给出（`_board_stage` 是唯一真源），前端只做展示
+        'board_stage': _board_stage(treatment),
         'is_disposed': treatment.is_disposed,
         'disposal': treatment.disposal,
+        'disposal_label': (dict(Treatment.DISPOSAL_CHOICES).get(treatment.disposal, '')
+                           if treatment.disposal else ''),
         'checked_at': treatment.checked_at.isoformat() if treatment.checked_at else '',
+        'diagnosed_at': treatment.diagnosed_at.isoformat() if treatment.diagnosed_at else '',
         'done_at': treatment.done_at.isoformat() if treatment.done_at else '',
+        'disposed_at': treatment.disposed_at.isoformat() if treatment.disposed_at else '',
         'transfer_no': info.get('transfer_no', ''),
         'receive_date': info.get('receive_date', ''),
         'shelter': info.get('shelter', ''),
@@ -237,10 +276,14 @@ def _pet_board_row(pet):
         'color': pet.color,
         'hospital_name': getattr(pet.hospital, 'name', ''),
         'stage': 'checking',
+        'board_stage': 'checking',
         'is_disposed': False,
         'disposal': '',
+        'disposal_label': '',
         'checked_at': '',
+        'diagnosed_at': '',
         'done_at': '',
+        'disposed_at': '',
         'transfer_no': info.get('transfer_no', ''),
         'receive_date': info.get('receive_date', ''),
         'shelter': info.get('shelter', ''),
@@ -455,7 +498,10 @@ def treatment_dispose(request, pk):
 
     try:
         with transaction.atomic():
-            st.dispose(treatment, disposal, request.user)
+            # `defer_pet_status`：出院模块已开好单据（如放归单）时，
+            # 动物状态由单据流程接管，办结只记去向、不改状态。
+            st.dispose(treatment, disposal, request.user,
+                       defer_pet_status=bool(data.get('defer_pet_status')))
     except ValueError as e:
         return json_fail(str(e))
     treatment.refresh_from_db()

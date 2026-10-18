@@ -186,6 +186,9 @@
       <a class="nav-item {% block nav_clinic %}{% endblock %}" data-nav="treatment" href="{% url 'hospital_home' %}">
         <span class="nav-item-icon">🩺</span><span class="nav-item-label">诊疗业务管理</span>
       </a>
+      <a class="nav-item {% block nav_discharge %}{% endblock %}" data-nav="discharge" href="{% url 'hospital_home' %}">
+        <span class="nav-item-icon">🚪</span><span class="nav-item-label">出院管理</span>
+      </a>
       <a class="nav-item {% block nav_inventory %}{% endblock %}" data-nav="material" href="{% url 'hospital_home' %}">
         <span class="nav-item-icon">📦</span><span class="nav-item-label">物料库存管理</span>
       </a>

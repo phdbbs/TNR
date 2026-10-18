@@ -169,9 +169,15 @@ const TNR_API = {
   async createCapture(data) { return this._post('/api/business/captures/create/', data); },
   async ownerReturn(captureId, data) { return this._post(`/api/business/captures/${captureId}/owner-return/`, data); },
   async getOwnerReturns() { return this._get('/api/business/owner-returns/'); },
+  // 出院模块「领回」：不带 capture_id 的入口（医院端用）
+  async createOwnerReturn(data) { return this._post('/api/business/owner-returns/create/', data); },
   async getTransfers() { return this._get('/api/business/transfers/'); },
   async createTransfer(data) { return this._post('/api/business/transfers/create/', data); },
-  async receiveTransfer(id) { return this._post(`/api/business/transfers/${id}/receive/`, {}); },
+  // 部分签收：传 petCodes = 本次实际收到的动物编号数组；不传 = 整单签收。
+  async receiveTransfer(id, petCodes) {
+    return this._post(`/api/business/transfers/${id}/receive/`,
+      petCodes ? { pet_codes: petCodes } : {});
+  },
   async rejectTransfer(id, reason) { return this._post(`/api/business/transfers/${id}/reject/`, {reason}); },
   async withdrawTransfer(id) { return this._post(`/api/business/transfers/${id}/withdraw/`, {}); },
   // 注：resendTransfer（重新下发）已移除 —— 被驳回的动物会自动回到「待转运」备选框，
@@ -194,7 +200,10 @@ const TNR_API = {
   async treatmentExecuteItem(id, itemId) { return this._post('/api/business/treatments/' + id + '/items/' + itemId + '/execute/', {}); },
   async treatmentUndoItem(id, itemId) { return this._post('/api/business/treatments/' + id + '/items/' + itemId + '/undo/', {}); },
   async treatmentDone(id) { return this._post('/api/business/treatments/' + id + '/done/', {}); },
-  async treatmentDispose(id, disposal) { return this._post('/api/business/treatments/' + id + '/dispose/', { disposal: disposal }); },
+  async treatmentDispose(id, disposal, opts) {
+    return this._post('/api/business/treatments/' + id + '/dispose/',
+      Object.assign({ disposal: disposal }, opts || {}));
+  },
   /* 诊疗后照片（B2）：multipart 走诊疗单独立接口。⚠ 不能复用
      `uploadPetPhoto()`（领养 edit-info）—— 它会顺带把动物挂进领养大厅，
      给「放归 / 无害化」动物传照片等于意外上架。 */
@@ -263,6 +272,8 @@ const TNR_API = {
   async getReleases() { return this._get('/api/business/releases/'); },
   async createRelease(data) { return this._post('/api/business/releases/create/', data); },
   async confirmRelease(id, data) { return this._post(`/api/business/releases/${id}/confirm/`, data); },
+  // 放归第一段：转运回原小区（第四十八轮）
+  async transferRelease(id) { return this._post(`/api/business/releases/${id}/transfer/`, {}); },
   async getAdoptions() { return this._get('/api/business/adoptions/'); },
   /* 领养人在线提交的申请单（待审核）。与 Adoption（线下领养登记）是两张表：
      Adoption.status 只有 pending_claim/completed/cancelled，没有 pending，
@@ -445,6 +456,7 @@ const TNR_API = {
   async getReleasesStrict() { return this.getData('/api/business/releases/'); },
   async getAdoptionsStrict() { return this.getData('/api/business/adoptions/'); },
   async getEuthanasiaStrict() { return this.getData('/api/business/euthanasia/'); },
+  async getOwnerReturnsStrict() { return this.getData('/api/business/owner-returns/'); },
   async getTransfersStrict() { return this.getData('/api/business/transfers/'); },
   async getMaterialsStrict() { return this.getData('/api/business/materials/'); },
   async getMaterialTransactionsStrict() { return this.getData('/api/business/materials/transactions/'); },

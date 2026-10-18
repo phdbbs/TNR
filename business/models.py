@@ -142,7 +142,7 @@ class OwnerReturn(models.Model):
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='owner_returns', verbose_name='所属区县')
-    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明。
     institution = models.ForeignKey(
         'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='+', verbose_name='归属机构')
@@ -163,6 +163,11 @@ class OwnerReturn(models.Model):
 class Transfer(models.Model):
     STATUS_CHOICES = [
         ('pending', '待签收'),
+        # 部分签收（第四十八轮）：医院只签收了本单的一部分动物。剩余动物
+        # 仍在待签收状态，可继续签收或整单驳回；`received_codes` 记录已签收
+        # 的子集。**不要**用「pending + received_codes 非空」表达同一件事 ——
+        # 那样列表筛选、看板统计、捕捉单推导都要各自再判一次，必然有一处漏。
+        ('partial', '部分签收'),
         ('received', '已签收'),
         ('rejected', '已驳回'),
         # 捕捉点主动撤回（医院尚未签收）。注意：void 既不计入
@@ -189,6 +194,11 @@ class Transfer(models.Model):
         'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='+', verbose_name='归属机构')
     pet_codes = models.TextField('动物编号', blank=True, default='', help_text='逗号分隔')
+    # 已签收的动物编号（逗号分隔）。空串 = 一个都没签收。
+    # 只有 `status in ('partial', 'received')` 时才有意义；驳回时保留下来，
+    # 用来区分「已签收的」与「被退回的」，重算捕捉单状态也依赖它。
+    received_codes = models.TextField('已签收动物编号', blank=True, default='',
+                                      help_text='逗号分隔，部分签收时记录已收子集')
     pet_count = models.IntegerField('动物数量', default=0)
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
     received_at = models.DateField('签收日期', null=True, blank=True)
@@ -272,7 +282,7 @@ class Treatment(models.Model):
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='treatments', verbose_name='医院')
     hospital_name = models.CharField('医院名称', max_length=100, blank=True, default='')
-    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明。
     institution = models.ForeignKey(
         'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='+', verbose_name='归属机构')
@@ -782,14 +792,19 @@ class Chip(models.Model):
 # ============================================
 class Release(models.Model):
     STATUS_CHOICES = [
-        ('pending', '待放归'),
+        ('pending', '待转运回小区'),
+        # 第四十八轮：放归拆成两段 —— 「转运回小区」与「放归回捕捉地」。
+        # 原先只有 pending → released 一步，等于把「送回小区」和「放归」
+        # 当成同一件事，小区接收人还没签字、动物还在车上，状态就已经
+        # 变成「已放归」了。`transferred` = 已回小区、等小区确认放归。
+        ('transferred', '已回小区待放归'),
         ('released', '已放归'),
     ]
     pet = models.ForeignKey('business.Pet', on_delete=models.CASCADE, related_name='releases', verbose_name='宠物')
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
     community = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='releases', verbose_name='小区')
     community_name = models.CharField('小区名称', max_length=100, blank=True, default='')
-    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明。
     institution = models.ForeignKey(
         'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='+', verbose_name='归属机构')
@@ -797,6 +812,7 @@ class Release(models.Model):
     receiver_phone = models.CharField('接收人电话', max_length=20, blank=True, default='')
     signature = models.TextField('签字', blank=True, default='')
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
+    transferred_at = models.DateTimeField('转运回小区时间', null=True, blank=True)
     released_at = models.DateField('放归日期', null=True, blank=True)
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='releases', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
@@ -834,7 +850,7 @@ class Adoption(models.Model):
     adoption_agreement = models.CharField('领养协议', max_length=200, blank=True, default='')
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='adoptions', verbose_name='医院')
     hospital_name = models.CharField('医院名称', max_length=100, blank=True, default='')
-    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明。
     institution = models.ForeignKey(
         'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='+', verbose_name='归属机构')
@@ -960,11 +976,22 @@ class Blacklist(models.Model):
 # 安乐死记录
 # ============================================
 class Euthanasia(models.Model):
+    # 处置方式（第四十八轮）：出院模块把「死亡」与「安乐死」合并成一个
+    # 子模块（「死亡（含安乐死）」），但台账必须分得开 —— 两者一个是
+    # 主动终止生命、一个是自然/伤重死亡后的无害化处理，监管口径完全不同。
+    # 合成一张表靠 `kind` 区分，而不是建两个模型：打印、关联链、统计
+    # 都已经按 Euthanasia 写好了，拆表会让这些地方各分叉一次。
+    KIND_CHOICES = [
+        ('euthanasia', '安乐死'),
+        ('dead', '死亡 / 无害化'),
+    ]
     pet = models.ForeignKey('business.Pet', on_delete=models.CASCADE, related_name='euthanasia_records', verbose_name='宠物')
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
+    kind = models.CharField('处置方式', max_length=20, choices=KIND_CHOICES,
+                            default='euthanasia')
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='euthanasia_records', verbose_name='医院')
     hospital_name = models.CharField('医院名称', max_length=100, blank=True, default='')
-    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明。
     institution = models.ForeignKey(
         'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='+', verbose_name='归属机构')

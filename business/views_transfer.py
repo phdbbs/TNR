@@ -257,6 +257,8 @@ def transfer_create(request):
             capture=capture,
             from_shelter=shelter,
             from_shelter_name=shelter.name,
+            # 归属机构 = 发出捕捉点（业务对象推导，不取操作员机构）
+            institution=shelter,
             to_hospital=hospital,
             to_hospital_name=hospital.name,
             pet_codes=','.join(pet_code_list),
@@ -292,11 +294,26 @@ def transfer_create(request):
     return json_ok(created, message=f'创建 {len(created)} 条转运记录')
 
 
+def _codes(raw):
+    """逗号分隔编号串 → 去空列表。"""
+    return [c.strip() for c in (raw or '').split(',') if c.strip()]
+
+
 @csrf_exempt
 @role_required('hospital')
 @login_required
 def transfer_receive(request, pk):
-    """医院签收转运"""
+    """医院签收转运 —— 支持**部分签收**（第四十八轮）。
+
+    请求体可选：
+    ``{"pet_codes": ["TNR...", ...]}`` —— 只签收这几只（必须是本单里
+    **尚未签收**的动物）。不传 = 全部签收，与旧行为一致。
+
+    为什么必须支持部分签收：一车送来 8 只，现场只清点了 6 只、另外 2 只
+    还在路上。旧实现只有「整单签收」一个动作，医院只能两种选择 ——
+    先整单签收（等于对没到的动物也认了账）或整单驳回（把已经到了的
+    6 只也退回去）。两种都在制造与实际不符的台账。
+    """
     user = request.user
 
     # 按「**本机构**」取单：不属于本院与不存在都返回同一个 404。
@@ -307,21 +324,50 @@ def transfer_receive(request, pk):
     if transfer is None:
         return json_fail('转运记录不存在或无权访问', status=404)
 
-    if transfer.status != 'pending':
+    if transfer.status not in ('pending', 'partial'):
         return json_fail(f'当前状态({transfer.status})不可签收')
 
-    transfer.status = 'received'
-    transfer.received_at = timezone.localdate()
-    transfer.save(update_fields=['status', 'received_at'])
+    all_codes = _codes(transfer.pet_codes)
+    done = _codes(transfer.received_codes)
+    remaining = [c for c in all_codes if c not in done]
 
-    # 更新宠物状态为待诊疗
-    pet_codes = [c.strip() for c in transfer.pet_codes.split(',') if c.strip()]
-    Pet.objects.filter(code__in=pet_codes).update(status='in_treatment')
+    data = parse_json_body(request)
+    raw = data.get('pet_codes')
+    if raw is None:
+        selected = remaining
+    else:
+        if isinstance(raw, str):
+            raw = [c.strip() for c in raw.split(',') if c.strip()]
+        if not isinstance(raw, list):
+            return json_fail('签收动物必须是数组')
+        selected = []
+        for c in raw:
+            code = str(c).strip()
+            if code and code not in selected:
+                selected.append(code)
+        if not selected:
+            return json_fail('请至少选择一只动物签收')
+        unknown = [c for c in selected if c not in remaining]
+        if unknown:
+            # 不在本单 / 已签收 / 伪造编号 —— 三种情况同一个文案，不做区分
+            return json_fail('以下动物不在本单待签收范围内：' + '、'.join(unknown))
+
+    new_done = done + [c for c in selected if c not in done]
+    all_received = len(new_done) >= len(all_codes)
+    transfer.received_codes = ','.join(new_done)
+    transfer.received_at = timezone.localdate()
+    transfer.status = 'received' if all_received else 'partial'
+    transfer.save(update_fields=['received_codes', 'received_at', 'status'])
+
+    # 只有本次签收的动物进入待诊疗；未签收的仍停在 in_transit
+    Pet.objects.filter(code__in=selected).update(status='in_treatment')
 
     # 本单可能装有多张捕捉单的动物，按宠物归属逐张重算
     recalc_captures_for_transfer(transfer)
 
-    return json_ok(serialize_instance(transfer), message='签收成功')
+    message = ('签收成功' if all_received
+               else f'已签收 {len(new_done)}/{len(all_codes)} 只，剩余 {len(all_codes) - len(new_done)} 只可继续签收')
+    return json_ok(serialize_instance(transfer), message=message)
 
 
 @csrf_exempt
@@ -337,8 +383,15 @@ def transfer_reject(request, pk):
     if transfer is None:
         return json_fail('转运记录不存在或无权访问', status=404)
 
-    if transfer.status != 'pending':
+    if transfer.status not in ('pending', 'partial'):
         return json_fail(f'当前状态({transfer.status})不可驳回')
+
+    all_codes = _codes(transfer.pet_codes)
+    done = _codes(transfer.received_codes)
+    # 只退回**尚未签收**的动物：已经签收并进入诊疗的不能因为「驳回剩余」
+    # 被一起退回 —— 那会让动物的状态从 in_treatment 倒回 in_transit，
+    # 而它明明已经躺在医院里了。
+    remaining = [c for c in all_codes if c not in done]
 
     transfer.status = 'rejected'
     transfer.reject_reason = body_str(data, 'reason')
@@ -346,8 +399,7 @@ def transfer_reject(request, pk):
 
     # 医院退回：宠物回退为在途，并解除医院归属，
     # 使其真正回到「未转运」状态（可被领回、可编辑/删除捕捉单）
-    pet_codes = [c.strip() for c in transfer.pet_codes.split(',') if c.strip()]
-    Pet.objects.filter(code__in=pet_codes).update(status='in_transit', hospital=None)
+    Pet.objects.filter(code__in=remaining).update(status='in_transit', hospital=None)
 
     # 若该捕捉单还存在其它未退回的转运单，则保持已转运，不重复回退
     # （本单可能装有多张捕捉单的动物，按宠物归属逐张重算）

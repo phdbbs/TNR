@@ -247,6 +247,50 @@ class CheckStepTest(FlowBase):
         self.assertEqual(body['temperature'], 40.2)
         self.assertEqual(body['temperature_flag'], 'fever')
 
+    # ---- 提交后锁定（第四十八轮）----
+    # 「点保存下一步，返回后是不能再修改记录」。前端把第 1 步整页置灰，
+    # 服务端 `apply_check()` 也必须拒绝 —— 否则直调 API 一样能改，
+    # 而「医嘱基于什么体检结论下的」就没有凭据了。
+
+    def test_check_cannot_be_modified_after_submit(self):
+        detail = self._open()
+        self.ok(self._check(detail['id']))
+        resp = self.post_json(f'{URL}{detail["id"]}/check/',
+                              {'temperature': 39.9, 'temperature_flag': 'fever'})
+        self.expect_fail(resp, 400, '已提交')
+
+    def test_check_cannot_be_drafted_after_submit(self):
+        """暂存同样被拒 —— 锁定不是「只拦提交」。"""
+        detail = self._open()
+        self.ok(self._check(detail['id']))
+        resp = self.post_json(f'{URL}{detail["id"]}/check/',
+                              {'check_note': '改一笔', 'draft': True})
+        self.expect_fail(resp, 400, '已提交')
+
+    def test_submitted_check_values_stay_untouched(self):
+        """被拒之后，库里的检查结论必须**一个字段都没变**。"""
+        detail = self._open()
+        self.ok(self._check(detail['id'], temperature=38.5,
+                            temperature_flag='normal'))
+        self.post_json(f'{URL}{detail["id"]}/check/',
+                       {'temperature': 41.0, 'temperature_flag': 'fever'})
+        from business.models import Treatment
+        tx = Treatment.objects.get(id=detail['id'])
+        self.assertEqual(tx.temperature, 38.5)
+        self.assertEqual(tx.temperature_flag, 'normal')
+
+    def test_draft_before_submit_can_be_saved_repeatedly(self):
+        """正向对照：提交**之前**暂存可以反复保存（不能做成「一次都不能改」）。"""
+        detail = self._open()
+        self.ok(self._check(detail['id'], submit=False, temperature=38.5,
+                            temperature_flag='normal'))
+        self.ok(self._check(detail['id'], submit=False, temperature=39.0,
+                            temperature_flag='normal'))
+        from business.models import Treatment
+        tx = Treatment.objects.get(id=detail['id'])
+        self.assertEqual(tx.temperature, 39.0)
+        self.assertIsNone(tx.checked_at, '暂存不应把检查单锁定')
+
     def test_threshold_boundary_is_fever(self):
         """边界值 39.5 恰好等于发烧线：≥ 判发烧（与前端自动判定同一条线）。"""
         self.assertEqual(st.fever_judge(39.5), 'fever')
@@ -848,12 +892,19 @@ class DoneAndDisposeTest(FlowBase):
 # 看板 / 列表
 # ============================================================
 class BoardTest(FlowBase):
-    def test_board_lists_unopened_pets_as_pending(self):
-        """还没开单的在院动物必须出现在「待接诊」—— 不出现 = 接不了诊。"""
+    """看板分组（第四十八轮：三态 → 五态）。
+
+    旧口径只有 pending / treating / done 三个桶，把「待诊」和「诊疗中」
+    合并成 treating、把「待出院」和「已出院」合并成 done —— 界面上看不出
+    「下一步该点哪个按钮」，也分不清「还在治」和「治完了等人接走」。
+    """
+
+    def test_board_lists_unopened_pets_as_checking(self):
+        """还没开单的在院动物必须出现在「待检」—— 不出现 = 接不了诊。"""
         body = self.ok(self.get_json(URL + 'board/'))['data']
-        codes = [r['petCode'] for r in body['pending']]
+        codes = [r['petCode'] for r in body['checking']]
         self.assertIn(self.pet.code, codes)
-        self.assertEqual(body['counts']['pending'], len(body['pending']))
+        self.assertEqual(body['counts']['checking'], len(body['checking']))
 
     def test_board_groups_by_stage(self):
         detail = self._open()
@@ -862,7 +913,7 @@ class BoardTest(FlowBase):
 
         body = self.ok(self.get_json(URL + 'board/'))['data']
         self.assertEqual([r['petCode'] for r in body['treating']], [self.pet.code])
-        self.assertNotIn(self.pet.code, [r['petCode'] for r in body['pending']])
+        self.assertNotIn(self.pet.code, [r['petCode'] for r in body['checking']])
 
     def test_board_marks_disposed(self):
         detail = self._open()
@@ -872,14 +923,17 @@ class BoardTest(FlowBase):
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
         body = self.ok(self.get_json(URL + 'board/'))['data']
-        row = [r for r in body['done'] if r['petCode'] == self.pet.code][0]
+        row = [r for r in body['pending_discharge'] if r['petCode'] == self.pet.code][0]
         self.assertFalse(row['isDisposed'])
 
         self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'released'}))
         body = self.ok(self.get_json(URL + 'board/'))['data']
-        row = [r for r in body['done'] if r['petCode'] == self.pet.code][0]
+        row = [r for r in body['discharged'] if r['petCode'] == self.pet.code][0]
         self.assertTrue(row['isDisposed'])
         self.assertEqual(row['disposal'], 'released')
+        # 办结后必须**离开**待出院桶，否则同一只动物同时挂在两个页签里
+        self.assertNotIn(self.pet.code,
+                         [r['petCode'] for r in body['pending_discharge']])
 
     def test_board_isolates_hospitals(self):
         """别院的动物不出现在本院看板上（双院同区县，靠机构隔离）。"""
@@ -887,7 +941,7 @@ class BoardTest(FlowBase):
                                  name='甲区第二医院')
         make_pet(status='in_treatment', district=self.district_a, hospital=other)
         body = self.ok(self.get_json(URL + 'board/'))['data']
-        codes = [r['petCode'] for r in body['pending']]
+        codes = [r['petCode'] for r in body['checking']]
         self.assertIn(self.pet.code, codes)
         self.assertEqual(len(codes), 1)
 
@@ -1072,3 +1126,92 @@ class ChipStockReconcileTest(FlowBase):
         self.assertEqual(after_chips, before_chips - 1)
         self.assertEqual(self._stock(chip_material), before_stock - 1)
         self.assertEqual(after_chips, self._stock(chip_material))
+
+
+# ============================================================
+# 五态看板 + 办结不改动物状态（第四十八轮）
+# ============================================================
+class BoardStageTest(FlowBase):
+    """诊疗五态：**全部由时间戳派生**，不存列。
+
+    存列必然有一处写入路径忘了同步（比如「撤回诊断」只改了 `diagnosed_at`、
+    忘了把状态列改回去），界面上的状态与真实进度脱节，而且不报错。
+    这里把五个分支和优先级都钉住。
+    """
+
+    def test_stage_derived_from_timestamps(self):
+        from django.utils import timezone
+        from business import views_treatment
+
+        now = timezone.now()
+        cases = [
+            ({}, 'checking', '无 checked_at → 待检'),
+            ({'checked_at': now}, 'pending_diagnose', '有检查无诊断 → 待诊'),
+            ({'checked_at': now, 'diagnosed_at': now},
+             'treating', '有诊断无完成 → 诊疗中'),
+            ({'checked_at': now, 'diagnosed_at': now, 'done_at': now},
+             'pending_discharge', '有完成无办结 → 待出院'),
+            ({'checked_at': now, 'diagnosed_at': now, 'done_at': now,
+              'disposed_at': now}, 'discharged', '有办结 → 已出院'),
+        ]
+        for ts, expect, why in cases:
+            with self.subTest(why=why):
+                self.assertEqual(
+                    views_treatment._board_stage(Treatment(**ts)), expect, why)
+
+    def test_board_buckets_follow_stage(self):
+        """看板分组必须与 `_board_stage` 同口径 —— 两处各算一遍必然漂移。"""
+        detail = self._open()
+        self.ok(self._check(detail['id']))
+        board = self.ok(self.get_json(URL + 'board/'))['data']
+        codes = {k: [r['pet_code'] for r in v]
+                 for k, v in board.items() if k != 'counts'}
+        self.assertIn(self.pet.code, codes['pending_diagnose'])
+        self.assertNotIn(self.pet.code, codes['checking'],
+                         '已提交检查单的动物不能还留在「待检」')
+        self.assertEqual(board['counts']['pending_diagnose'],
+                         len(codes['pending_diagnose']))
+        # 五个桶必须**同时存在**：少一个键，前端那个页签就永远空白
+        for k in ('checking', 'pending_diagnose', 'treating',
+                  'pending_discharge', 'discharged'):
+            self.assertIn(k, board, f'看板缺 {k} 桶')
+
+
+class DisposeDeferStatusTest(FlowBase):
+    """出院流程是「先开单据、再办结诊疗单」，动物状态必须由**单据**接管。
+
+    先办结会立刻把动物改成终态，后面所有单据接口都会 400
+    （它们都要求动物还在院）。所以办结时必须传 `defer_pet_status: true`。
+    """
+
+    def _to_done(self):
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/done/', {}))
+        return tid
+
+    def test_defer_keeps_pet_status(self):
+        tid = self._to_done()
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'in_treatment', '前置条件：还在院')
+        self.ok(self.post_json(f'{URL}{tid}/dispose/',
+                               {'disposal': 'pending_adopt',
+                                'defer_pet_status': True}))
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'in_treatment',
+                         'defer 时动物状态交给单据，办结不能改')
+
+    def test_without_defer_writes_pet_status(self):
+        """正向对照：不传 defer 时**确实**会改。
+
+        没有这条，把 `if not defer_pet_status:` 整段删掉（永不写状态）
+        也能让上面那条通过 —— 那就是假绿。
+        """
+        tid = self._to_done()
+        self.ok(self.post_json(f'{URL}{tid}/dispose/',
+                               {'disposal': 'pending_adopt'}))
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'pending_adopt')
