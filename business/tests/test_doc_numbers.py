@@ -340,3 +340,83 @@ class PrintFieldsFnTest(BusinessTestBase):
         self.assertGreater(len(without), 0, '没有静态 fields 类单据了')
         self.assertEqual(len(with_fn) + len(without), len(views_print.DOC_SPECS),
                          '每个 doc 必须且只能声明一种字段清单')
+
+
+class CrossDistrictPrintTest(BusinessTestBase):
+    """跨区县送医：医院必须能打印**自己开的单**（第四十八轮冗余机构字段）。
+
+    背景：`print_doc` 原先只按区县收敛，而诊疗单 / 安乐死单 / 领养单的
+    `district` 是**动物**的区县。甲区的动物送到乙区医院做手术，乙区医院
+    点「打印诊疗单」拿到 404「单据不存在或无权查看」——单据就在眼前却打不出来，
+    而且看起来像「这张单没保存」。
+
+    修法不是放宽隔离，而是给单据加冗余 `institution`（业务归属机构），
+    取单时「本机构 **或** 区县」放行。所以这里必须成对验证：
+    本院跨区县能打 / 别院仍然打不开。
+    """
+
+    def _treatment(self, pet_district, hospital, institution='auto'):
+        from business.models import Treatment
+        pet = make_pet(district=pet_district, hospital=hospital,
+                       status='in_treatment')
+        if institution == 'auto':
+            institution = hospital
+        return Treatment.objects.create(
+            pet=pet, pet_code=pet.code,
+            hospital=hospital, hospital_name=hospital.name,
+            institution=institution,
+            district=pet_district,
+            ledger_no=generate_doc_no('TRE'),
+        )
+
+    def test_hospital_prints_own_doc_across_district(self):
+        """甲区动物 + 乙区医院：乙区医院打印自己的诊疗单必须 200。"""
+        tx = self._treatment(self.district_a, self.hospital_b)
+        self.client.force_login(self.hospital_user_b)
+        resp = self.client.get(f'/print/treatment/{tx.id}/', HTTP_HOST='127.0.0.1')
+        self.assertEqual(resp.status_code, 200,
+                         '跨区县送医的单据打不开 —— 取单只按区县收敛了？')
+        html = resp.content.decode()
+        self.assertIn(tx.ledger_no, html, '打印页必须含诊疗单号')
+        self.assertIn('归属机构', html, '打印页必须显示冗余机构字段')
+        self.assertIn(self.hospital_b.name, html, '归属机构必须是开单医院')
+
+    def test_other_hospital_cannot_print(self):
+        """反向对照：别家医院的单仍然打不开（不能做成「一律放行」）。"""
+        tx = self._treatment(self.district_a, self.hospital_a)
+        self.client.force_login(self.hospital_user_b)
+        resp = self.client.get(f'/print/treatment/{tx.id}/', HTTP_HOST='127.0.0.1')
+        self.assertEqual(resp.status_code, 404,
+                         '别家医院的单据被打印出来了 —— 隔离被放宽过头了')
+
+    def test_legacy_doc_without_institution_falls_back_to_district(self):
+        """存量行 `institution` 为空 → 仍按区县放行。
+
+        回填迁移取不到机构的历史行（动物两边都没挂）会留空。空值不能变成
+        「原本能打的单现在打不开」—— 那是把修复变成了新的回归。
+        """
+        tx = self._treatment(self.district_b, self.hospital_b, institution=None)
+        self.client.force_login(self.hospital_user_b)
+        resp = self.client.get(f'/print/treatment/{tx.id}/', HTTP_HOST='127.0.0.1')
+        self.assertEqual(resp.status_code, 200,
+                         'institution 为空的历史单据必须退回按区县放行')
+
+    def test_receiving_hospital_prints_transfer(self):
+        """转运单：接收医院（`to_hospital`）跨区县也要能打印。
+
+        转运单的 `institution` 是**发出捕捉点**，只按它放行的话，接收医院
+        签收后照样打不出自己签的这张单。
+        """
+        from business.models import Transfer
+        tr = Transfer.objects.create(
+            from_shelter=self.shelter_a, from_shelter_name=self.shelter_a.name,
+            institution=self.shelter_a,
+            to_hospital=self.hospital_b, to_hospital_name=self.hospital_b.name,
+            pet_codes='X1', pet_count=1, district=self.district_a,
+            ledger_no=generate_doc_no('TRF'),
+        )
+        self.client.force_login(self.hospital_user_b)
+        resp = self.client.get(f'/print/transfer/{tr.id}/', HTTP_HOST='127.0.0.1')
+        self.assertEqual(resp.status_code, 200,
+                         '接收医院打不出自己签收的转运单')
+        self.assertIn(tr.ledger_no, resp.content.decode())

@@ -815,6 +815,35 @@ def get_scoped_object(model, pk, user, **extra):
     return qs.filter(pk=pk).first()
 
 
+def get_printable_object(model, pk, user, extra_own_fields=()):
+    """打印取单：**本机构归属 ∪ 区县范围**；越权或不存在一律返回 None。
+
+    与 `get_scoped_object` 只差一条：单据的冗余 `institution` 指向本机构时
+    也放行。为什么需要：打印页原先只按区县收敛，而诊疗单 / 安乐死单 /
+    领养单的 `district` 是**动物**的区县 —— 跨区县送医时，做手术的医院在
+    另一个区县，它点「打印诊疗单」拿到的是 404「单据不存在或无权查看」，
+    单据就在眼前却打不出来，且看起来像「这张单没保存」。
+
+    :param extra_own_fields: 额外的「也算本机构」外键名。转运单要用：
+        `institution` 是**发出捕捉点**（归属方），接收医院是 `to_hospital`，
+        医院签收后同样要能打印这张单。
+
+    ⚠ 「存在但不属于我」与「不存在」仍然**完全不可区分**：两条路径都返回
+      None，调用方回同一个 404 模板 —— 否则就成了存在性预言机。
+    ⚠ 先按机构判、再退回区县判（两次查询），**不要**把两个 QuerySet 用
+      `|` 拼起来：`get_district_filtered_queryset` 在「无区县」时返回
+      `none()`，`none() | qs` 的行为与直觉不同，而且并集还可能产生重复行。
+    """
+    if user.institution_id:
+        own_q = Q(institution_id=user.institution_id)
+        for field in extra_own_fields:
+            own_q |= Q(**{field: user.institution_id})
+        own = model.objects.filter(own_q, pk=pk).first()
+        if own is not None:
+            return own
+    return get_scoped_object(model, pk, user)
+
+
 def get_active_pet(pk, user):
     """取用户权限范围内、未被逻辑删除的宠物档案；不存在或越权返回 None。"""
     return get_scoped_object(Pet, pk, user, is_deleted=False)

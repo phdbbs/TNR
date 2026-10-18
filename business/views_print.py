@@ -31,13 +31,20 @@ from business.models import (
     Capture, Transfer, OwnerReturn, Release, Adoption, Euthanasia,
     Treatment, MaterialTransaction,
 )
-from business.services import get_scoped_object
+from business.services import get_printable_object
 from business import services_treatment as st
 from accounts.decorators import role_required
 
 # 纸张来源提示：统一 A4 竖版
 # ------------------------------------------------------------------
 # 字段清单：(标签, 取值函数)。取值函数收到单据对象，返回字符串。
+
+# 带冗余「归属机构」的单据（第四十八轮）。物料单不在内：它的
+# `MaterialTransaction.institution` 是「对方机构」，语义不同。
+DOC_INSTITUTION_MODELS = frozenset({
+    'Capture', 'Transfer', 'OwnerReturn', 'Release',
+    'Adoption', 'Euthanasia', 'Treatment',
+})
 
 
 def _v(attr, fmt=None):
@@ -120,6 +127,7 @@ ADOPTION_FIELDS = [
 EUTH_FIELDS = [
     ('单据号', _v('ledger_no')), ('所属区县', _district_name),
     ('动物编号', _v('pet_code')), ('医院', _v('hospital_name')),
+    ('处置方式', _choice('kind')),
     ('安乐死原因', _v('reason')), ('动物状况', _v('condition')),
     ('安乐死日期', _v('euthanized_at', 'date')),
     ('遗体领取', _v('body_received', 'bool')),
@@ -357,6 +365,10 @@ DOC_SPECS = {
     'capture': {'model': Capture, 'title': '捕捉单', 'fields': CAPTURE_FIELDS,
                 'related': _capture_related},
     'transfer': {'model': Transfer, 'title': '转运单', 'fields': TRANSFER_FIELDS,
+                 # 转运单的 `institution` 是**发出捕捉点**（归属方）；
+                 # 接收医院签收后也要能打印这张单，否则它只能看到「已签收」
+                 # 却打不出凭证。
+                 'own_fields': ('to_hospital_id',),
                  'related': _transfer_related},
     'owner_return': {'model': OwnerReturn, 'title': '领回单', 'fields': CLAIM_FIELDS,
                      'related': _get_pet_related},
@@ -392,19 +404,26 @@ def print_doc(request, doc, pk):
     if spec is None:
         return render(request, 'print/doc_missing.html', {'doc': doc}, status=404)
 
-    # 区县隔离内取单，走**真源** `get_scoped_object`。
+    # 取单：**本机构归属 ∪ 区县范围**（见 `get_printable_object`）。
     #
-    # ⚠ 这里原先自己写了一遍隔离判断（`gov_city` / `district.is_city` /
-    #   `district_id`），那是**第二份实现** —— 项目历史上正因为隔离口径
-    #   写了两遍、对「账号没挂区县」解释相反，出现过「列表全空、写接口却
-    #   全放行」的静默缺陷（详见 `core/scope.py` 开头）。一律改问真源。
+    # ⚠ 这里原先只按区县收敛（`get_scoped_object`），而诊疗单 / 安乐死单 /
+    #   领养单的 `district` 是**动物**的区县 —— 跨区县送医时，做手术的医院
+    #   在另一个区县，点打印会 404「单据不存在或无权查看」。第四十八轮给
+    #   这些单据加了冗余 `institution`，取单时按「区县 **或** 本机构」放行。
+    #
     # ⚠ 「存在但不属于我」与「不存在」必须**完全不可区分** ——
     #   同一个模板、同一个状态码，否则就成了存在性预言机。
-    obj = get_scoped_object(spec['model'], pk, request.user)
+    obj = get_printable_object(spec['model'], pk, request.user,
+                               extra_own_fields=spec.get('own_fields', ()))
     if obj is None:
         return render(request, 'print/doc_missing.html', {'doc': doc}, status=404)
 
     title = spec['title'] or _mt_title(obj)
+    # 死亡 / 安乐死共用一张表（`Euthanasia.kind` 区分），标题必须跟着变：
+    # 印着「安乐死单」而实际是「死亡/无害化」，家属与监管看到的是两份
+    # 性质完全不同的文书。
+    if type(obj).__name__ == 'Euthanasia' and getattr(obj, 'kind', '') == 'dead':
+        title = '死亡 / 无害化处理单'
     # ⚠ 字段清单有**两条路**，混成一条出过两次事故（都是磊哥现场报「打印报错」）：
     #   静态 `spec['fields']` 存**取值函数**，要在这里才 `getter(obj)`；
     #   `fields_fn` 是「自己算好整张表」的函数，返回值形态由它自己定。
@@ -425,6 +444,12 @@ def print_doc(request, doc, pk):
         rows = [(label, v(obj) if callable(v) else v) for label, v in raw]
     else:
         rows = [(label, getter(obj)) for label, getter in spec['fields']]
+    # 「归属机构」是第四十八轮新增的**冗余**字段，统一插在单据号之后。
+    # 只对真的加了该字段的 7 类单据生效；物料单的 `MaterialTransaction.institution`
+    # 语义是「对方机构」，不能当归属机构印出来（印错比不印更糟）。
+    if type(obj).__name__ in DOC_INSTITUTION_MODELS:
+        inst_name = getattr(getattr(obj, 'institution', None), 'name', '') or '—'
+        rows.insert(1, ('归属机构', inst_name))
     related = spec['related'](obj)
     print_url = request.build_absolute_uri()
     org = getattr(getattr(request.user, 'institution', None), 'name', '') or '襄阳市流浪动物 TNR 管理平台'

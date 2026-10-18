@@ -85,6 +85,10 @@ class Capture(models.Model):
     ]
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='captures', verbose_name='所属区县')
     shelter = models.ForeignKey('core.Institution', on_delete=models.PROTECT, related_name='captures', verbose_name='捕捉点')
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+', verbose_name='归属机构')
     shelter_name = models.CharField('捕捉点名称', max_length=100, blank=True, default='')
     community = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='community_captures', verbose_name='小区')
     community_name = models.CharField('小区名称', max_length=100, blank=True, default='')
@@ -138,6 +142,10 @@ class OwnerReturn(models.Model):
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='owner_returns', verbose_name='所属区县')
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+', verbose_name='归属机构')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     class Meta:
@@ -167,6 +175,19 @@ class Transfer(models.Model):
     from_shelter_name = models.CharField('发出捕捉点名称', max_length=100, blank=True, default='')
     to_hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='received_transfers', verbose_name='接收医院')
     to_hospital_name = models.CharField('接收医院名称', max_length=100, blank=True, default='')
+    # 冗余「归属机构」—— 这张单据**业务上归谁**（不是操作员归谁）。
+    #
+    # 为什么需要它：打印页原先只按 `district` 收敛，而诊疗单/安乐死单的
+    # `district` 是**动物**的区县。跨区县送医时，做手术的医院在另一个区县，
+    # 它点「打印诊疗单」→ 404「单据不存在或无权查看」——单据就在眼前却打不出来。
+    #
+    # ⚠ 写入时必须从**业务对象**推导（capture→shelter、treatment→hospital、
+    #   transfer→from_shelter…），**不能**取 `request.user.institution`：
+    #   平台/市级账号没有机构，取操作者会让单据归属漂移，而这条字段一旦
+    #   漂移就是「打印权限放错人」，不报错、只有对账才发现。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+', verbose_name='归属机构')
     pet_codes = models.TextField('动物编号', blank=True, default='', help_text='逗号分隔')
     pet_count = models.IntegerField('动物数量', default=0)
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
@@ -251,6 +272,10 @@ class Treatment(models.Model):
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='treatments', verbose_name='医院')
     hospital_name = models.CharField('医院名称', max_length=100, blank=True, default='')
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+', verbose_name='归属机构')
     items_sterilization = models.BooleanField('绝育', default=False)
     items_vaccine = models.BooleanField('疫苗', default=False)
     items_deworming = models.BooleanField('驱虫', default=False)
@@ -764,6 +789,10 @@ class Release(models.Model):
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
     community = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='releases', verbose_name='小区')
     community_name = models.CharField('小区名称', max_length=100, blank=True, default='')
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+', verbose_name='归属机构')
     receiver_name = models.CharField('接收人姓名', max_length=50, blank=True, default='')
     receiver_phone = models.CharField('接收人电话', max_length=20, blank=True, default='')
     signature = models.TextField('签字', blank=True, default='')
@@ -805,6 +834,10 @@ class Adoption(models.Model):
     adoption_agreement = models.CharField('领养协议', max_length=200, blank=True, default='')
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='adoptions', verbose_name='医院')
     hospital_name = models.CharField('医院名称', max_length=100, blank=True, default='')
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+', verbose_name='归属机构')
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='completed')
     adopted_at = models.DateField('领养日期', null=True, blank=True)
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='adoptions_operated', verbose_name='操作员')
@@ -931,6 +964,10 @@ class Euthanasia(models.Model):
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='euthanasia_records', verbose_name='医院')
     hospital_name = models.CharField('医院名称', max_length=100, blank=True, default='')
+    # 冗余「归属机构」—— 见 `Transfer.institution` 的说明（第四十八轮统一加）。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+', verbose_name='归属机构')
     reason = models.TextField('安乐死原因')
     condition = models.TextField('动物状况', blank=True, default='')
     euthanized_at = models.DateField('安乐死日期', null=True, blank=True)
