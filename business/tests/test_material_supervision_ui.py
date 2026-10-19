@@ -27,14 +27,16 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from jslex import blank_comments, match_brace  # noqa: E402
+from frontend_sources import read_portal  # noqa: E402
 
-GOV = ROOT / 'templates' / 'portal' / 'gov' / 'portal.html'
 TAB_IDS = ('stock', 'alert', 'ledger')
 TAB_LABELS = ('库存数据', '异常数据', '台账')
 
 
 def gov_code():
-    return blank_comments(GOV.read_text(encoding='utf-8'))
+    # 物料监管的三个页签是 JS 渲染的（`static/js/portals/gov.js`），
+    # 所以读「模板 + 本端 JS」的合并视图。
+    return blank_comments(read_portal('gov'))
 
 
 def block(code, start_pat, limit=6000):

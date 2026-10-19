@@ -179,6 +179,177 @@ class TreatmentFlowViewTest(BusinessTestBase):
         resp = self._plan(tid, [{'key': 'sterilization'}], sterilization=partial)
         self.expect_fail(resp, message='不能为空')
 
+    # ---------- 病历的填写时机（第五十一轮：挪到「执行绝育」那一刻） ----------
+    #
+    # 「医嘱与处方」阶段医生只是**排**手术：主刀、麻醉、手术过程、术后恢复
+    # 这四栏此刻在物理上还不存在。旧口径在那一步硬要求六栏齐全，医生的
+    # 唯一出路就是术前编一份假病历 —— 假病历会进归档、进政府端统计，
+    # 比空白更糟（空白一眼看得出没填）。这几条判据锁的是新口径：
+    # 计划阶段可留空，真正的「必须填全」在执行绝育那一刻，而术后必须有入口。
+
+    def _ster(self, tid, record):
+        return self.post_json(f'{URL}{tid}/sterilization/', record)
+
+    def _ster_item(self, tid):
+        return TreatmentItem.objects.get(treatment_id=tid,
+                                         item_key='sterilization')
+
+    def test_plan_accepts_sterilization_with_only_a_date(self):
+        """只排手术时间是合法输入：项目要落库、要算必执行，六栏保持空。
+        少了这条，「排了绝育」在库里等于什么都没排（绝育没有处方，
+        按 `has_rx` 判会被静默跳过）。"""
+        pet = self._pet()
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization',
+                                  'planned_date': '2026-03-05'}]))
+
+        item = self._ster_item(tid)
+        self.assertTrue(st.item_is_must(item), '排了手术的绝育必须算必执行')
+        self.assertEqual(str(item.planned_date), '2026-03-05')
+        treatment = Treatment.objects.get(id=tid)
+        self.assertEqual(treatment.sterilization_surgeon, '')
+        self.assertIsNone(treatment.sterilization_surgery_date)
+
+    def test_blank_plan_does_not_wipe_a_recorded_case(self):
+        """`allow_blank` 是「原样不动」，不是「清空」。
+        先落病历、再保存一次不带病历字段的计划（前端在术后补录后完全可能
+        撤回诊断重排别的处方），六栏必须还在 —— 否则就是「保存医嘱把手术
+        记录弄丢了」。清空只能走「撤掉绝育项目」那条路，见
+        `test_sterilization_record_cleared_when_record_removed`。"""
+        pet = self._pet()
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization',
+                                  'planned_date': '2026-03-05'}],
+                           sterilization=self.STER_RECORD))
+        self.ok(self._plan(tid, [{'key': 'sterilization',
+                                  'planned_date': '2026-03-06'}]))
+
+        treatment = Treatment.objects.get(id=tid)
+        self.assertEqual(treatment.sterilization_surgeon, '赵医生')
+        self.assertEqual(str(treatment.sterilization_surgery_date), '2026-03-01')
+        self.assertEqual(str(self._ster_item(tid).planned_date), '2026-03-06')
+
+    def test_execute_sterilization_needs_the_record_first(self):
+        """闸门落在执行绝育那一刻，且**点名缺哪几栏**（只说「不完整」的话，
+        医生不知道要补什么，只能瞎猜）。补齐后同一条路径必须能过 ——
+        反向对照：判据不是「绝育一律不许执行」。"""
+        pet = self._pet()
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization',
+                                  'planned_date': '2026-03-05'}]))
+        item_id = self._ster_item(tid).id
+
+        detail = self._diagnose(tid)
+        self.assertEqual([i['id'] for i in detail['items']], [item_id])
+        resp = self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {})
+        self.expect_fail(resp, message='绝育手术病历不完整')
+        self.expect_fail(resp, message='主刀医生')
+
+        self.ok(self._ster(tid, self.STER_RECORD))
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+        self.assertTrue(self._ster_item(tid).is_done)
+
+    def test_record_can_be_submitted_after_diagnosis(self):
+        """术后补录必须有自己的入口 —— `plan/` 在已诊断后一律拒绝。
+        没有这条路的话，界面上写着「补录手术病历」的按钮点完提交不了，
+        只能撤回诊断（会把已执行项目的库存扣动一起打乱）。"""
+        pet = self._pet()
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization',
+                                  'planned_date': '2026-03-05'}]))
+        detail = self._diagnose(tid)
+
+        self.expect_fail(
+            self._plan(tid, [{'key': 'sterilization',
+                              'planned_date': '2026-03-05'}],
+                       sterilization=self.STER_RECORD),
+            message='诊断已完成')
+        body = self.ok(self._ster(tid, self.STER_RECORD))['data']
+
+        treatment = Treatment.objects.get(id=tid)
+        self.assertEqual(treatment.sterilization_surgeon, '赵医生')
+        self.assertEqual(treatment.sterilization_anesthesia, '吸入麻醉')
+        # 返回值就是整张详情：前端拿它重建本地草稿，「治疗完成」按钮
+        # 的病历闸门读的正是这份数据，缺字段等于按钮永远点亮着补录。
+        self.assertEqual(body['sterilization_surgeon'], '赵医生')
+        self.assertEqual(body['sterilization_surgery_date'], '2026-03-01')
+
+    def test_sterilization_submit_rejects_partial_record(self):
+        """补录走的是同一份判据，不许出现「有手术日期、没主刀」的归档单。"""
+        pet = self._pet()
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization',
+                                  'planned_date': '2026-03-05'}]))
+        self._diagnose(tid)
+        partial = dict(self.STER_RECORD)
+        partial.pop('procedure')
+        self.expect_fail(self._ster(tid, partial), message='手术过程')
+        self.assertEqual(Treatment.objects.get(id=tid).sterilization_surgeon, '')
+
+    def test_sterilization_submit_rejects_bad_anesthesia(self):
+        """麻醉方式是枚举：空串/野值都不能进病历（旧口径只有下拉，
+        现在有了手写入口，判据得自己站住）。"""
+        pet = self._pet()
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization',
+                                  'planned_date': '2026-03-05'}]))
+        self._diagnose(tid)
+        bad = dict(self.STER_RECORD, anesthesia='')
+        self.expect_fail(self._ster(tid, bad), message='麻醉方式')
+        bad = dict(self.STER_RECORD, anesthesia='局麻')
+        self.expect_fail(self._ster(tid, bad), message='麻醉方式')
+
+    def test_sterilization_submit_needs_a_sterilization_item(self):
+        """没勾绝育的单子不该收病历 —— 收下就会印出「没做绝育却有手术日期」，
+        而政府端绝育数量统计读的正是这几列。"""
+        pet = self._pet()
+        material = make_material(category='medicine', name='驱虫药',
+                                 district=self.district_a)
+        make_hospital_txn(material, self.hospital_a, 'receive', 5)
+        tid = self._open(pet)['id']
+        self.ok(self._rx(tid, 'deworming', material))
+        self._diagnose(tid)
+        resp = self._ster(tid, self.STER_RECORD)
+        self.expect_fail(resp, message='没有「绝育」处置项目')
+        treatment = Treatment.objects.get(id=tid)
+        self.assertEqual(treatment.sterilization_surgeon, '')
+
+    def test_sterilization_submit_rejected_after_dispose(self):
+        """办结后的病历是归档事实，改不得（与检查单/医嘱同一口径）。"""
+        pet = self._pet()
+        material = make_material(category='medicine', name='头孢',
+                                 district=self.district_a)
+        make_hospital_txn(material, self.hospital_a, 'receive', 5)
+        tid = self._open(pet)['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization',
+                                  'planned_date': '2026-03-05'},
+                                 {'key': 'other', 'planned_date': '2026-03-05',
+                                  'rx': [material.id]}]))
+        detail = self._diagnose(tid)
+        self.ok(self._ster(tid, self.STER_RECORD))
+        for item in detail['items']:
+            self.ok(self.post_json(f'{URL}{tid}/items/{item["id"]}/execute/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/done/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/dispose/',
+                               {'disposal': 'pending_adopt'}))
+
+        self.expect_fail(self._ster(tid, dict(self.STER_RECORD, surgeon='李医生')),
+                         message='已办结')
+        self.assertEqual(Treatment.objects.get(id=tid).sterilization_surgeon,
+                         '赵医生')
+
+    def test_sterilization_submit_of_other_hospital_is_404(self):
+        """别家医院的单子既不能读也不能写病历（404，不能露出「存在」）。"""
+        pet = make_pet(district=self.district_b, hospital=self.hospital_b,
+                       status='in_treatment')
+        self.login_as(self.hospital_user_b)
+        tid = self.ok(self.post_json(f'{URL}open/', {'pet_id': pet.id}))['data']['id']
+        self.ok(self._plan(tid, [{'key': 'sterilization',
+                                  'planned_date': '2026-03-05'}]))
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self._ster(tid, self.STER_RECORD), status=404)
+        self.assertEqual(Treatment.objects.get(id=tid).sterilization_surgeon, '')
+
     # ---------- 库存联动 ----------
 
     def test_vaccine_consumes_hospital_stock(self):

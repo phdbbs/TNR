@@ -106,7 +106,11 @@ class Capture(models.Model):
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='captures', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
-    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    # 单号是单据的**业务键**：打印页按号反查、芯片追溯、监管台账对账都靠它，
+    # 因此本文件 8 张单据表的 `ledger_no` 一律建索引（此前只有外键自动索引，
+    # 按号查等于全表扫）。
+    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
+                                 db_index=True)
     # 逻辑删除：删除只做标记，数据库记录保留，便于追溯与监管核查
     is_deleted = models.BooleanField('已删除', default=False, db_index=True)
     deleted_at = models.DateTimeField('删除时间', null=True, blank=True)
@@ -140,7 +144,8 @@ class OwnerReturn(models.Model):
     signature = models.TextField('签字', blank=True, default='')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='owner_returns', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
-    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
+                                 db_index=True)
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='owner_returns', verbose_name='所属区县')
     # 冗余「归属机构」—— 见 `Transfer.institution` 的说明。
     institution = models.ForeignKey(
@@ -175,6 +180,14 @@ class Transfer(models.Model):
         # 也不影响捕捉单状态推导，宠物回退为 in_transit 可再次被选择转运。
         ('void', '已撤回'),
     ]
+    # 「还没签完」= 医院仍可继续签收或驳回 = `pending` ∪ `partial`。
+    # 这条口径此前在 `views_transfer.py` 的签收与驳回两处各写一遍字面量，
+    # 前端另有六处（待办计数、标签页、行内按钮、可选动物、看板、领养人时间线）。
+    # 少算 `partial` 的后果不是显示难看，而是**部分签收的单子从此没人再签**：
+    # 待办列表里没有它、行内没有「去签收」、捕捉点还会把这几只动物当成在途占用。
+    # 与 `ACTIVE_TRANSFER_STATUSES`（services.py）不同：那张表算的是「占用捕捉单」，
+    # 已签收也占；本表只问「本院还有没有要签的」。
+    OPEN_STATUSES = ('pending', 'partial')
     capture = models.ForeignKey('business.Capture', on_delete=models.SET_NULL, null=True, blank=True, related_name='transfers', verbose_name='捕捉记录')
     from_shelter = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='sent_transfers', verbose_name='发出捕捉点')
     from_shelter_name = models.CharField('发出捕捉点名称', max_length=100, blank=True, default='')
@@ -208,7 +221,8 @@ class Transfer(models.Model):
     note = models.TextField('备注', blank=True, default='')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='transfers', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
-    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
+                                 db_index=True)
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='transfers', verbose_name='所属区县')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
@@ -273,6 +287,21 @@ class Treatment(models.Model):
         (STAGE_TREATING, '诊疗中'),
         (STAGE_DONE, '诊疗完毕'),
     ]
+    # 三态的**筛选口径**：`?stage=` 与 `Treatment.stage` 属性必须读同一张表。
+    # 以前列表视图里手写 `checked_at__isnull=False, done_at__isnull=True`，
+    # 属性里再 `if self.done_at ...` 推一遍 —— 同一件事两份判据，
+    # 调属性判据（比如把 已办结 也算进 done）时筛选必然先漂。
+    STAGE_FILTERS = {
+        STAGE_CHECKING: (('checked_at__isnull', True),),
+        STAGE_TREATING: (('checked_at__isnull', False), ('done_at__isnull', True)),
+        STAGE_DONE: (('done_at__isnull', False),),
+    }
+    # 医院看板的**五态**（流程顺序）：比三态多看 `diagnosed_at`（下诊断）和
+    # `disposed_at`（办结出院），判据在 `views_treatment._board_stage()`。
+    # 分桶字典由它生成 —— 以前桶键在「空数据兜底」和「正常分桶」两处各写一遍字面量，
+    # 加一态要改两处，漏一处的表现是那一态的动物**整列消失**（页面看着像没数据）。
+    BOARD_STAGES = ('checking', 'pending_diagnose', 'treating',
+                    'pending_discharge', 'discharged')
     # 办结去向是**单选**，且只在「诊疗完成」之后才可选（原型：未诊断完成时
     # 办结去向整块显示「请先完成医嘱与处方」）。
     DISPOSED_STATUSES = ('pending_adopt', 'released', 'owner_returned',
@@ -318,10 +347,12 @@ class Treatment(models.Model):
     common_findings = models.TextField('常见病检查', blank=True, default='',
                                        help_text='多选，顿号分隔')
     common_other = models.CharField('常见病其他', max_length=200, blank=True, default='')
-    # 传染病检查三态（未检 / 阴性 / 阳性），按物种给不同的三项。
-    # 存 JSON 文本而不是三列布尔：物种不同则项不同（猫 FPV/FHV/FCV、
-    # 狗 CDV/CPV/CCV），加一个病种就要加一列，且「未检」与「阴性」
+    # 传染病检查三态（未检 / 阴性 / 阳性），按物种给不同的项。
+    # 存 JSON 文本而不是若干列布尔：物种不同则项不同（猫 FPV/FHV/FCV/狂犬/弓形虫、
+    # 狗 CDV/CPV/CCV/狂犬），加一个病种就要加一列，且「未检」与「阴性」
     # 必须能区分 —— 用 BooleanField 的话两者都是 False，分不开。
+    # 清单真源是 `services_treatment.INFECTIOUS_TESTS`（**允许全空**，
+    # 服务端不加「检完才能办结」的门禁，理由见那份表旁边的注释）。
     infectious_tests = models.TextField('传染病检查', blank=True, default='',
                                         help_text='JSON: {"fpv": "neg", ...}')
     skin_mucosa = models.CharField('皮肤黏膜检查', max_length=50, blank=True, default='')
@@ -340,6 +371,15 @@ class Treatment(models.Model):
 
     # ---------- 第三步：执行与办结 ----------
     done_at = models.DateTimeField('诊疗完成时间', null=True, blank=True)
+    # 「去向建议」在**诊疗完成的那一刻**就记下（`mark_done`），
+    # 动物此时还在院、所有出院单据都能开；「最终去向」`disposal` 是
+    # **办结**时才写（`dispose`），与 `disposed_at` 同时落。
+    #
+    # 为什么不复用 `disposal`：它所有消费点都以「已办结」为前提 ——
+    # 诊疗单上那一行就叫「办结去向」。把建议也塞进去，会印出
+    # 「办结去向：领养」而动物明明还在院（界面上承诺的事没发生）。
+    disposal_advised = models.CharField('去向建议', max_length=20, choices=DISPOSAL_CHOICES,
+                                        blank=True, default='')
     disposal = models.CharField('办结去向', max_length=20, choices=DISPOSAL_CHOICES,
                                 blank=True, default='')
     disposed_at = models.DateTimeField('办结时间', null=True, blank=True)
@@ -347,7 +387,8 @@ class Treatment(models.Model):
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='in_progress')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='treatments', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
-    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
+                                 db_index=True)
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='treatments', verbose_name='所属区县')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
@@ -562,7 +603,8 @@ class MaterialTransaction(models.Model):
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='material_txns', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     date = models.DateField('日期')
-    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
+                                 db_index=True)
     # 关联单据号：接收单指向其签收的下发单号；其他单据留空。
     # 旧实现「接收单复用下发单号」无法区分两张单，也无法单独打印归档。
     ref_no = models.CharField('关联单据号', max_length=50, blank=True, default='')
@@ -816,6 +858,11 @@ class Release(models.Model):
         ('transferred', '已回小区待放归'),
         ('released', '已放归'),
     ]
+    # 「待放归」= 放归流程**未办结**：两段（`release_transfer` → `release_confirm`）
+    # 里的第一段与第二段都算。判据只有一处定义，后端取单/互斥校验与前端
+    # `TNR_UI.OPEN_RELEASE_STATUS` 都引它（闸门逐条比对）。
+    # 漏掉 `transferred` 会让中间态的单子既查不到、又被当成「可以再开一张」。
+    OPEN_STATUSES = ('pending', 'transferred')
     pet = models.ForeignKey('business.Pet', on_delete=models.CASCADE, related_name='releases', verbose_name='宠物')
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
     community = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='releases', verbose_name='小区')
@@ -832,7 +879,8 @@ class Release(models.Model):
     released_at = models.DateField('放归日期', null=True, blank=True)
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='releases', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
-    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
+                                 db_index=True)
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='releases', verbose_name='所属区县')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
@@ -874,7 +922,8 @@ class Adoption(models.Model):
     adopted_at = models.DateField('领养日期', null=True, blank=True)
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='adoptions_operated', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
-    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
+                                 db_index=True)
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='adoptions', verbose_name='所属区县')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
@@ -1020,7 +1069,8 @@ class Euthanasia(models.Model):
     body_received_by_name = models.CharField('遗体领取人姓名', max_length=50, blank=True, default='')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='euthanasia_operated', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
-    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='')
+    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
+                                 db_index=True)
     district = models.ForeignKey('core.District', on_delete=models.PROTECT, related_name='euthanasia_records', verbose_name='所属区县')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 

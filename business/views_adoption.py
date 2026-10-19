@@ -22,7 +22,7 @@ from business.services import (
     body_str, body_int,
     generate_doc_no, get_district_filtered_queryset,
     check_blacklist, get_active_pet, get_scoped_object,
-    get_hospital_scoped_pet,
+    get_hospital_scoped_pet, get_own_institution_object,
     hospital_pet_write_error,
     pet_has_pending_release, pet_has_active_adoption,
     validate_uploaded_images,
@@ -69,7 +69,7 @@ def adoption_hall_detail(request, pk):
 # 领养信息编辑（医院）
 # ============================================
 @csrf_exempt
-@role_required('hospital', 'gov_city', 'gov_district')
+@role_required('hospital')
 @login_required
 def adoption_info_edit(request, pk):
     """编辑领养上架信息
@@ -172,7 +172,7 @@ def adoption_info_edit(request, pk):
 # 线下领养登记（捕捉点）
 # ============================================
 @csrf_exempt
-@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@role_required('shelter', 'hospital')
 @login_required
 def adoption_register(request):
     """线下领养登记（创建领养人账号 + 领养记录）
@@ -224,7 +224,8 @@ def adoption_register(request):
 
     # 互斥校验：同一只动物不能被放归流程与领养流程同时占用
     if pet_has_pending_release(pet):
-        return json_fail('该宠物已有待放归记录，请先完成或取消放归后再办理领养')
+        return json_fail('该宠物已有未办结的放归单（待转运回小区或待小区签字），'
+                         '请先走完放归两段确认后再办理领养')
     if pet_has_active_adoption(pet):
         return json_fail('该宠物已有未完结的领养记录，请勿重复登记')
 
@@ -321,19 +322,23 @@ def adoption_confirm_claim(request, pk):
         "note": "动物已领出"
     }
     """
-    data = parse_json_body(request)
+    parse_json_body(request)
     user = request.user
 
-    adoption = get_scoped_object(Adoption, pk, user)
+    # 本接口 `@role_required('hospital')`，取单必须按**本机构**。
+    # 不能沿用 `get_scoped_object`（按区县）：跨区县送医时 `Adoption.district`
+    # 是**动物**的区县，做手术的医院在另一个区县，出院流程里
+    # 「开领养单 → 当场确认领出」是连着调的（医院端 portal 同一函数），
+    # 按区县收敛会让第二步永远 404 —— 单据开出来了、动物却领不出去，
+    # 领养记录永久卡在 `pending_claim`。
+    # 账号没有机构时 `get_own_institution_object` 返回 None（不是跳过校验），
+    # 与「不存在」同一个 404，不形成存在性预言机。
+    adoption = get_own_institution_object(Adoption, pk, user, field='hospital_id')
     if adoption is None:
         return json_fail('领养记录不存在或无权访问', status=404)
 
     if adoption.status != 'pending_claim':
         return json_fail(f'当前领养状态({adoption.get_status_display()})不可确认领出')
-
-    # 医院仅能确认本机构受理的领养记录
-    if user.role == 'hospital' and adoption.hospital_id != user.institution_id:
-        return json_fail('无权确认此领养记录')
 
     if adoption.pet_id and adoption.pet.is_deleted:
         return json_fail('该宠物档案已作废，无法确认领出')
@@ -362,7 +367,7 @@ def adoption_confirm_claim(request, pk):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def adoption_reclaim(request, pk):
     """违规收回：撤销领养 + 收回动物 + 记入黑名单（一个事务内完成）。
@@ -501,7 +506,7 @@ def adoption_list(request):
 # 在线领养申请（领养人提交 / 机构审核）
 # ============================================
 @csrf_exempt
-@role_required('adopter', 'gov_city', 'gov_district')
+@role_required('adopter')
 @login_required
 def adoption_apply(request):
     """领养人在线提交领养申请。
@@ -633,7 +638,7 @@ def adoption_application_list(request):
 
 
 @csrf_exempt
-@role_required('hospital', 'shelter', 'gov_city', 'gov_district')
+@role_required('hospital', 'shelter')
 @login_required
 def adoption_application_review(request, pk):
     """机构审核领养申请（通过 / 拒绝）。
@@ -651,8 +656,6 @@ def adoption_application_review(request, pk):
     qs = AdoptionApplication.objects.all()
     if user.role == 'hospital':
         qs = qs.filter(hospital_id=user.institution_id) if user.institution_id else qs.none()
-    elif user.role == 'gov_district':
-        qs = qs.filter(pet__district_id=user.district_id)
     elif user.role == 'shelter':
         qs = qs.filter(pet__shelter_id=user.institution_id)
 

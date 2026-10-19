@@ -1,6 +1,8 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
+from core.models import STATUS_ACTIVE
+
 
 class User(AbstractUser):
     ROLE_CHOICES = [
@@ -19,7 +21,7 @@ class User(AbstractUser):
     district = models.ForeignKey('core.District', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='所属区县')
     institution = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='所属机构')
     phone = models.CharField('电话', max_length=20, blank=True, default='')
-    status = models.CharField('状态', max_length=10, default='active')  # active/inactive
+    status = models.CharField('状态', max_length=10, default=STATUS_ACTIVE)
     # R46 口径 2（**机制性口径，不随原型作废而失效**）：兽医签名 / 执业证号
     # **挂账号**，一次维护、每次自动带出。
     #

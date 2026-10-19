@@ -62,6 +62,32 @@ def iter_api_routes(pk='1'):
     yield from walk(get_resolver())
 
 
+def pin_outbound_amap(testcase):
+    """把地图服务的出网调用换成固定坐标，收口用 `addCleanup`。
+
+    ⚠ 枚举式契约闸门会 GET/POST **每一条** `/api/` 路由，其中
+    `/api/business/geocode/ip/` 的真实实现会请求高德。POST 闸门是
+    「路由 × 5 角色 × 几十种畸形体」的规模，只要这一条路由没钉住，
+    套件就会真的发出上百次外部请求 —— 实测被 DNS/TLS 拖到十几分钟
+    （进程卡在 `_ssl__SSLSocket_do_handshake_impl`），看起来像死锁。
+    闸门只断言响应契约，地图数据的真假与判据无关。
+
+    返回**新字典**而不是同一个对象：视图会 `pop`/写入经纬度，
+    复用同一个 dict 会让第二次调用 KeyError。
+    """
+    from business import views_capture
+
+    loc = {'province': '湖北省', 'city': '襄阳市', 'adcode': '420600',
+           'latitude': 32.0, 'longitude': 112.0, 'source': 'client_ip'}
+    regeo = {'address': '湖北省襄阳市襄城区', 'province': '湖北省',
+             'city': '襄阳市', 'district': '襄城区'}
+    for name, value in (('amap_ip_location', loc), ('amap_regeo', regeo)):
+        patcher = mock.patch.object(
+            views_capture, name, side_effect=lambda *a, _v=value, **k: dict(_v))
+        patcher.start()
+        testcase.addCleanup(patcher.stop)
+
+
 class DistrictModelTest(TestCase):
     def test_create_defaults(self):
         district = make_district(name='测试区', code='X001')
@@ -572,6 +598,7 @@ class AllApiRoutesContractTest(BusinessTestBase):
         self.assertGreater(
             len(self.routes), 20,
             '路由枚举结果太少，说明遍历逻辑坏了（会变成假绿）')
+        pin_outbound_amap(self)
 
     def _assert_all_json(self, problems, label):
         self.assertEqual(
@@ -780,6 +807,9 @@ class AllApiPostRoutesContractTest(BusinessTestBase):
         # ⚠ 500 默认会让测试客户端**重新抛出异常**，整个枚举在第一处就中断，
         # 拿不到完整清单。关掉它才能一次看到全部 offender。
         self.client.raise_request_exception = False
+        # ⚠ 本类要 POST 上万次，`geocode/ip` 对 shelter/政府角色放行且不判
+        # 方法 —— 不钉住出网调用，这一条路由就会贡献上千次真实请求。
+        pin_outbound_amap(self)
         # ⚠⚠ 审计写入必须在本类**整个执行期**patch 掉，否则进程被 OOM kill。
         #
         # 本闸门一次要打 20 万+ 请求（路由 × 角色 × 参数名 × 畸形值），而
@@ -1018,16 +1048,23 @@ class BodyValueGuardTest(SimpleTestCase):
 # 第三十六轮：响应体键契约（snake_case ↔ camelCase 双键完整性）
 # ============================================================
 #: 前端源码里会读取响应字段的文件。
-#: ⚠ 新增门户 / JS 时必须加进来，否则闸门看不见它读的键（覆盖面无声明地缩水）。
-FRONTEND_SOURCE_FILES = (
-    'templates/portal/gov/portal.html',
-    'templates/portal/platform/portal.html',
-    'templates/portal/shelter/portal.html',
-    'templates/portal/hospital/portal.html',
-    'templates/portal/adopter/portal.html',
-    'static/js/tnr-api.js',
-    'static/js/tnr-common.js',
-)
+#: 清单的唯一真源是 `scripts/frontend_sources.py`：模板 + 各端 JS + 共享运行时。
+#: ⚠ 第五十二轮 重构 B 之前这里手写 5 个模板路径，而 `collect_frontend_read_keys()`
+#: 里的 `if not exists: continue` 会让「文件改名/搬走」静默跳过。两者叠加的结果是
+#: 键契约闸门**只扫引导脚本**，而引导脚本里没有一行读接口的代码 —— 闸门照样全绿。
+def _frontend_rel():
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    scripts = os.path.join(base, 'scripts')
+    import sys
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from frontend_sources import all_templates, iter_js_paths
+    return tuple(os.path.relpath(str(p), base)
+                 for p in list(all_templates()) + iter_js_paths())
+
+
+FRONTEND_SOURCE_FILES = _frontend_rel()
+
 
 #: 前端读取字段的两种写法：`x.field` 与 `x['field']`。
 _FE_DOT_RE = re.compile(r"""\b[A-Za-z_$][\w$]*\.([a-zA-Z_][\w$]*)\b""")
@@ -1056,8 +1093,10 @@ def collect_frontend_read_keys():
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for rel in FRONTEND_SOURCE_FILES:
         path = os.path.join(base, rel)
+        # 缺文件必须炸，不能 `continue`：跳过 = 这一份源码从覆盖面里消失，
+        # 而闸门仍然全绿（第五十二轮核对时发现的就是这一类静默失焦）。
         if not os.path.exists(path):
-            continue
+            raise AssertionError(f'前端源码清单里的文件不存在：{rel}')
         with open(path, encoding='utf-8') as fh:
             text = fh.read()
         keys |= set(_FE_DOT_RE.findall(text))
@@ -1241,6 +1280,9 @@ class ResponseKeyContractTest(BusinessTestBase):
         make_material(category='vaccine', district=cls.district_a,
                       shelter_stock=50)
         make_chip(pet=cls.pet)
+
+    def setUp(self):
+        pin_outbound_amap(self)
 
     def _sweep(self):
         """枚举 路由 × 角色，返回 (违规字典, 出现过的键, 成功响应数)。"""

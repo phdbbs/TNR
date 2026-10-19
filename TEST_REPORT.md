@@ -7768,3 +7768,2482 @@ grep 全库：capture_prefix / consume_prefix / …_prefix
   **不要**去改服务器配置；`status` 加 `--no-optional-locks` 保证只读。
 * 验证 Django 模块要带 `django.setup()`，否则报 `apps aren't loaded yet`（**假红**）。
 * 抓生产实际下发内容：在服务器上跑 `curl -sL http://127.0.0.1/`（绕开本地代理问题）。
+
+---
+
+## 第四十九轮：政府端改为只读模式（2026-10-19）
+
+### 一、这条口径为什么第二次动，以及第一次为什么回滚
+
+`accounts/models.py` 的角色表注释里，政府端一直写着「只保留查看」，
+但**从来没有判据**。第四十二轮收口时摘掉过 24 个业务写接口的政府角色，
+全量跑出 27 个失败，其中三条把相反意图写得很明白
+（`test_gov_city_can_still_edit_anywhere`、`test_gov_district_can_still_edit_in_district`、
+`test_same_district_gov_can_withdraw`）—— 那轮据此判定「政府端能写业务数据」
+是**被测试钉住的既有设计（监管纠正）**，全部回滚。
+
+本轮的前提是**这个设计决定本身被推翻了**：用户明确要求
+「把政府端入口改为只读模式」。所以上面那批失败不是缺陷，是**旧口径的化石**，
+处置方式是逐条改判，而不是回滚实现。
+
+### 二、收口落在三层
+
+| 层 | 内容 | 数量 |
+|---|---|---|
+| 写接口装饰器 | `business/views_*.py` 里会改库的 view 摘掉 `gov_city` / `gov_district` | 25 条 |
+| 门户入口 | `shelter_portal` / `hospital_portal` / `adopter_portal` 不再对政府角色放行 | 3 个页面 |
+| 公开页分支 | `adoption_hall_public` 里「gov 也直接进完整门户」收窄为只有 `adopter` | 1 处 |
+
+摘角色前逐个核对过每个写接口都还剩一个非政府角色可用 ——
+本项目反复踩过「收口把唯一使用者一起带走」。收口后政府端还能打的 `/api/`
+只剩读：装饰器内省 37 条，按行为枚举 42 条（差额是 `@api_login_required`
+的公开读，见 §四）。`/gov/` 门户模板对写接口的调用点为 **0**，
+监管需要的现场数据由 `/gov/` 台账中心与 `/api/supervision/**` 同源提供。
+
+顺带删掉两处因此变成死代码的路径：`business/views_adoption.py` 里
+`adoption_application_review` 的政府分支（只读列表 `adoption_application_list`
+的 `gov_district` 分支保留），以及 `templates/portal/shelter/portal.html`
+里整套「监管代录」UI（`isGov`、执行机构下拉 `ca_shelterId` 及其联动）。
+现在的表单里执行机构恒等于操作员自己绑定的捕捉点。
+
+### 三、为什么不能按 HTTP 方法做只读
+
+全项目 **67 个**政府可达视图**没有一个**做 `request.method` 门禁
+（`mark_message_read` 是极少数例外），而且不少是 `@csrf_exempt` ——
+`checkin_review` 用 **GET** 也能把一条入住审核通过。
+所以「禁止 POST」这类闸门在本项目里本身就是漏的，只读必须按**角色**封，
+判据也必须**方法无关**：政府会话把 GET 和 POST 各打一遍，断言整库零变化。
+
+### 四、判据：`core/tests_gov_readonly.py`（13 例）
+
+| 判据 | 抓什么 |
+|---|---|
+| `GovReadOnlySweepTest.test_gov_get/post_changes_nothing` | 政府会话打遍可达路由 → 业务数据指纹零变化 |
+| `GovReadOnlySweepTest.test_gov_reachable_set_by_behavior` | 政府**实际打得通**（非 403）的路径集合必须等于显式清单 |
+| `GovReachableRoutePinTest` | 装饰器里被点名的政府角色也得和清单对齐；`GOV_CLOSED_WRITE_ROUTES` 里每个视图的角色集合都不含政府 |
+| `GovWriteRouteClosedTest` | 25 条已关闭写路径对两个政府角色统一 403；反向对照「合法角色仍写得动」 |
+| `GovPortalEntryTest` | 三个操作门户对政府账号 302 回 `/`；`/gov/` 仍 200；操作角色仍能开门 |
+| `FingerprintCanSeeARealWriteTest` | 反向对照：指纹必须抓得到一次真实写 |
+
+落地过程中修掉的四个判据本身的坑（每一个都会让闸门变成假绿）：
+
+1. **只比行数不够**。只读最典型的破坏是**原地改状态**（撤回转运单、办结诊疗），
+   行数一格不变。`fingerprint()` 因此把每张表的**全部行内容**一起哈希。
+2. **`core.AuditLog` 必须排除**，但不是因为它不重要：
+   `AuditLogMiddleware._should_log()` 只看方法，对**任意**已登录用户打向
+   `/api/` 的 POST 都落一行 —— 本判据要故意把 POST 打到只读接口上，
+   算进指纹等于让判据恒红。
+3. **装饰器内省不能当「政府可达全集」**。
+   `test_endpoint_role_scope.roles_of()` 只认那五个业务角色，
+   `@role_required('platform_admin')` 的闭包它读不出来（返回 None，整条路由从
+   枚举里消失）—— 拿它当全集等于把 `/api/supervision/**` 那批平台端接口当成不存在，
+   而「有人新加接口忘了写 `role_required`」恰恰是最危险的一种漂移。
+   所以清单用**行为**（真实响应码）枚举 URLconf，装饰器版只做补充。
+4. **403 也满足「不是 500」**。`test_top_level_non_dict_never_500` 那类断言如果把
+   操作者换成政府角色，会永远绿。同类问题还有 `ShelterStockAdjustmentEntryTest`
+   —— 它原先整段复制装饰器字符串，角色一改就被顺手改掉、闸门失去意义，
+   现在改成解析角色集合断言「含 shelter、含 hospital、不含 gov」。
+
+两处诚实标注的例外，写进清单而不是装作没看见：
+`GOV_SELF_SERVICE_WRITES = {'/api/me/password/'}`（改自己的口令确实是写，
+但封掉等于把监管账号永久锁死在初始口令上，账号自助不属于「监管代录业务数据」）；
+`OUTBOUND_HTTP_VIEWS`（高德逆地理 / IP 定位是真出网，与读写无关，由 mock 用例覆盖）。
+
+变异验证：给 `stock_adjustment` 的装饰器手工加回 `gov_city` → 4 条变红
+（可达清单、403 清单、两条装饰器判据），而**指纹扫描仍然绿** ——
+因为 `{}` 空体只拿到 400。这说明「零变化」判据单独用是不够的，
+四层必须都在。
+
+### 五、31 条失败用例的处置
+
+实现收口后全量跑出 31 条失败。没有一条是靠删测试解决的，分三类：
+
+* **换成合法角色承载**（判据本身仍然有效，只是操作员要换一个真有写权限的角色）：
+  `test_capture_views` 的「操作员可选归属区县」改用**市级捕捉点**操作员 ——
+  这是 `_shelter_district_conflict` 现实中唯一可达的入口，用普通区县操作员
+  提交他区区县会先被 `resolve_district_scope` 拦掉，那就变成拿另一个错误原因
+  冒充本判据生效；同类还有 `test_blacklist_views`、`test_inactive_entity_guard`、
+  `test_transfer_views`、`test_param_contract`、`core/tests_audit.test_checkin_review`。
+* **翻转为「政府被拒」断言**（把旧意图显式改写成新意图）：
+  `test_gov_cannot_withdraw_same_district` / `..._other_district`（403 而不是 404，
+  顺带说明角色闸门在归属判断之前、不泄露存在性）、`test_gov_cannot_adjust_stock`、
+  `test_gov_cannot_outbound`、`test_gov_cannot_review_even_own_district`。
+* **删掉重复判据**（同一判断已被别的角色版覆盖）：政府版跨区县物料 404
+  一条 —— 同区县的 shelter 版已在测同一件事。
+
+`business/tests/test_endpoint_role_scope.py` 的 `EXPECTED` 快照与
+`core/tests_frontend_consistency.InactiveEntityContractTest`（捕捉点端
+「排除停用机构」的下拉计数 2→1）跟着改口径，并各带一条反向对照。
+
+### 六、结果
+
+| 项 | 结果 |
+|---|---|
+| 全量 `manage.py test business supervision accounts core` | **1659 tests，OK**（8m33s） |
+| 本轮新增 | `core/tests_gov_readonly.py` 13 例 |
+| 政府端可达 `/api/` | 43 条（42 读 + 1 账号自助改密），业务写接口 0 条 |
+| 政府端可打开的门户 | 仅 `/gov/`；`/shelter/`、`/hospital/`、`/adopter/` 一律 302 回 `/` |
+
+### 七、留给下一轮的两条观察（未擅自处理）
+
+1. `checkin_review` 对**挂在「全市」的 shelter 操作员完全不做区县过滤**
+   （`is_city → pass`）。现场两个捕捉点就挂在市级、服务全市，按区县过滤会
+   一条也审不了，所以这是有意为之 —— 但它意味着市级捕捉点账号能审核**任何区县**
+   的入住。要不要收紧，属于业务口径，不是本轮范围。
+2. `mark_message_read` 之外的 `portal/messages/`、`portal/adoptions/` 等仍给政府角色
+   读权限，而它们唯一的界面调用方 `adopter_portal` 本轮已经对政府关闭 —— 即
+   「政府拿得到、但没有任何界面会去拿」的残留读权限。只读口径下它们不违规，
+   可以并进「代码合理精简」一起清。
+
+## 第五十轮：必检项允许全空 + 兽医执业证号的录入入口（2026-10-19）
+
+业务侧两条确认，都是「界面看起来更合规、实际把数据做脏」的反面：
+
+1. **传染病必检项可以全空**。`services_treatment.INFECTIOUS_TESTS` 补齐了法定
+   人畜共患项（猫狗都给狂犬，弓形虫只给猫 —— 终末宿主是猫，给狗列它等于让医生
+   面对一个临床上无意义的选择），但**服务端不加「检完才能办结」的门禁**。
+   TNR 是群体绝育、不做逐只隔离观察，加门禁的结果不会是「都检了」，
+   而是「都填阴性」—— 用假数据换一张合规外观的表，比空着更危险。
+   三态里的 `none`（未检）就是为此保留的诚实档位（`BooleanField` 分不开
+   「未检」与「阴性」，那正是完全不同的两个临床事实）。
+   判据：`test_other_required_checks_may_stay_empty`（全空能办结）+ 已有的
+   「未检≠阴性」存值用例，一放一拦成对。
+2. **执业证号靠平台端账号录入来验明兽医身份**。`accounts.User.vet_license`
+   此前只有模型字段、平台端没有填写与展示入口，等于签名可追溯但资质不可追溯。
+   现在账号列表有「执业证号」列、新建与编辑表单都能填，且**医院角色必填**
+   （前端拦一次给文案，真判据只有 `services.validate_vet_license` 一份，
+   直接 POST 照样拒）。诊疗单落库时把它**快照**进 `Treatment.vet_license` ——
+   实时读账号的话，证号一改，历史单据的签名就跟着变了。
+   判据：`core/tests_frontend_consistency.py` 的执业证号一族（列、两处表单、
+   必填、快照），其中「判据不得在视图里再写一遍」用源码扫描钉住。
+
+## 第五十一轮：读-判-写竞态收敛（CAS）+ 绝育病历填写时机后移（2026-10-19）
+
+### 一、四条「读出来判断、再写回去」的路径
+
+同一族形状，危害各不相同：
+
+| 路径 | 旧写法 | 两个请求同时进来的结果 |
+|---|---|---|
+| `use_chip()` 芯片植入 | 读 `status` → 判 → `save()` | **双双成功**：`chip.pet` 落到后写的那只，而两只动物档案上都写着同一个号 —— 芯片是动物的法定身份，追溯链当场断裂且不报错 |
+| `_release_chip()` 撤销执行 | 读芯片 → 改回 `available` → `save()` | 把别人**刚植进另一只动物**的号（或已随库存异动报废的 `void` 号）改回可用 → 「可用芯片数」与库存对不上 |
+| `transfer_receive()` 签收 | 读 `received_codes` → 并集 → 写 | 两次勾选各算各的，后写的覆盖先写的：**已签收的动物退回未签收**，捕捉单状态跟着算错 |
+| `material_receive()` 签收 | `exists()` 预检 → 建流水 | 预检双双通过 → **本院库存凭空翻倍**，且要到月末对账才暴露 |
+
+收口方式统一成**条件更新（CAS）**：把判据写进 `UPDATE ... WHERE`，
+「判断」与「写入」就是同一条语句，再用 rowcount 决定成败；转运/病历这类
+多表联动的一起包进 `transaction.atomic()`，失败的返回 409/400 并整体回滚。
+
+**为什么不用 `select_for_update()`**：本仓库开发/测试库是 sqlite（`.env:12`），
+生产是 MySQL（`deploy.sh:108`）。Django 的 SQLCompiler 用
+`features.has_select_for_update` 门控 FOR UPDATE 子句，sqlite 上是 `False`
+→ 子句被**静默丢弃**（连「事务外使用」的报错都不抛）。于是行锁只在生产生效、
+用例完全覆盖不到 —— 等于加了一道没人验证过的保险。CAS 在两种后端上都是原子的。
+
+变异验证（每条都真做过，不是推断）：
+* 把 `_release_chip` 的 CAS 改回盲 `save()` → 竞态用例变红，
+  且**顺序双击用例仍然全绿** —— 这正是「竞态必须把竞写注入到读与写之间」的原因
+  （`RacingQuerySet` 薄壳，注入点是那次 `.first()` 之后）。
+* 把 `material_receive` 的 `exclude(note__contains=marker)` 去掉 →
+  `AssertionError: 200 != 400`，返回体里写着「签收成功，库存已增加 25」，
+  危害直接印在断言输出上。
+
+物料签收这条刻意**不新增字段**：签收与否的唯一落点本来就是 `note` 里的
+`[已签收]` 标记（两端门户的「待签收 / 已办」过滤读的是它），
+闸门压在同一个标记上才不会出现「库里两个真源、各说各话」。
+`exists()` 预检保留，但降级为**只负责给重复点击一个好文案**。
+
+### 二、绝育手术病历的填写时机
+
+旧口径要求医生在**「医嘱与处方」这一步**就把六栏病历填全才能保存。
+但主刀、麻醉、手术过程、术后恢复这四栏在**手术做完之前根本不存在**，
+所以那条规则在临床上是做不到的 —— 现场结果只能是术前编一份假病历，
+而假病历会进归档、进政府端绝育统计，比空白更糟（空白一眼看得出没填）。
+
+新口径三条规则（真源只有 `services_treatment.save_sterilization()` 一份）：
+
+1. **填了就须填全**：0/6 放行、6/6 放行、3/6 整单拒绝（半途病历会印成
+   「绝育手术：是、手术日期：—」的归档单）。
+2. **没勾绝育就清空病历**（否则印得出「没做手术却有手术日期」）。
+3. `allow_blank`：计划阶段病历**整体为空**时六列**原样不动** —— 不是清空。
+   这条单独有判据（`test_blank_plan_does_not_wipe_a_recorded_case`），
+   因为「留空」与「清空」在实现上只差一行，而后果是「保存医嘱把手术记录弄丢了」。
+
+真正的「必须填全」闸门挪到**执行绝育项目**那一刻（`execute_item()` 的
+`needs_record` 判据，且**点名缺哪几栏**）：那时手术已完成、六栏都填得出来，
+而「诊疗完成」又必然要求该项目已执行 —— 链条闭合，不需要在别处再拦一遍。
+
+为此必须有**独立写入口** `POST /api/business/treatments/<pk>/sterilization/`：
+`save_plan()` 在已诊断后一律拒绝（防绕过前端改处方、而执行阶段按处方扣库存
+会账实不符），界面上那个「补录手术病历」按钮点完提交不了，就等于
+「手术做完了也没法把病历记进系统」，只能撤回诊断（会把已执行项目一起打乱）。
+请求体是**平铺的六栏**，不再套一层 `sterilization` —— 这条接口的整个包只可能是病历。
+
+前端（医院端三步流程）跟着改四处，且每处都有静态判据：
+* `txItemState()`：绝育的「要做」有两种表达 —— 排了预计执行时间（新口径）
+  或病历填了（旧口径，留给 admin/历史导入）。**「算不算填过」用服务端
+  `sterilization_draft_filled()` 的同一份键集**（麻醉方式是下拉默认值，
+  医生没动过它不算填过）；两边不一致 = 界面写「0 项必执行」、
+  点「诊疗完成」却被服务端拦住。
+* `txPlanProblem()`：计划阶段只拦**半份**病历，空白是合法输入。
+* `openSterilizationModal()`：按诊疗单走到哪一步分三条路（未诊断→只存草稿、
+  已诊断→直接落库、已办结→只读），并给「清空，术后补录」一个明确按钮 ——
+  手术日期默认带今天，让用户逐栏删才能清空是反直觉的。
+* `step3HTML()`：缺病历时不给「治疗完成」按钮，换成「补录病历」，
+  点了直接进弹窗；判据取**库里**六列而不是前端草稿
+  （「草稿说填了、库里没有」放行就等于放着一份空病历过去）。
+
+栏名契约（`STER_REC_FIELDS` / `STER_DRAFT_FIELDS` / `STER_REC_LABELS`）由
+`core/tests_frontend_consistency.py` 与后端 `STERILIZATION_FIELDS` /
+`STERILIZATION_REQUIRED` 逐字比对 —— 前端把 `surgeon` 写成 `doctor` 的表现是
+**保存成功但那一栏永远空**，打印页缺主刀医生，而两边都不报错。
+
+### 三、结果
+
+| 项 | 结果 |
+|---|---|
+| 全量 `manage.py test` | **1712 tests，OK**（约 8m30s） |
+| 本轮新增判据 | 病历时机 9 例（视图层）+ 前端契约 7 例 + 签收竞态 1 例 + 芯片 CAS 3 例 + 转运 CAS 若干 |
+| 新增接口 | `POST /api/business/treatments/<pk>/sterilization/`（hospital 角色，`_own_treatment` 收口，别家医院 404） |
+| 前端内联脚本语法检查 | `scripts/check_inline_js.py` 13 段全过 |
+
+---
+
+## 第五十二轮：四端外壳合并（重构 A）+ 执行/撤销抢占（评审落地）+ 内联 JS 抽取与枚举同源（重构 B）（2026-10-19）
+
+### 一、重构 A：四端角色 base 合并成一份外壳
+
+合并前的客观事实（不是我推测的，是量出来的）：`shelter_base.html` 286 行、
+`hospital_base.html` 270 行、`gov_base.html` 254 行、`platform_base.html` 250 行，
+合计 **1060 行**。其中 `<style>` 156 行与 `extra_js` 里的侧栏开关 25 行是
+**逐字节相同**（剥掉注释、把 `--grad-gold` / `--grad-cinnabar` 归一之后四份 md5 一致）；
+HTML 骨架只差品牌文案、导航项和一处角色兜底文本。也就是说 900 多行是同一份样板抄了四遍。
+
+抄四遍的代价不是「不好看」，而是**改一处要改四处，漏掉的那份静默生效**：
+第四十二轮给政府端加「点菜单项后自动收起侧栏」时只改了 `gov_base.html`，
+另外三端在手机上照旧遮挡内容 —— 不报错、不 500，只有拿手机点开才看得见。
+
+做法：新增 `templates/portal/_portal_shell.html`（273 行）只留一份 CSS + 一份开关脚本，
+角色差异全部走 block 钩子：
+
+| block | 作用 | 由谁覆写 |
+|---|---|---|
+| `seal_grad` / `seal_char` | 印章配色与印章字 | 各角色 base |
+| `brand_name` / `brand_sub` | 侧栏品牌文案 | 各角色 base |
+| `nav_items` | 本端导航（`nav_xxx` 高亮 block 嵌在里面） | 各角色 base |
+| `page_title` / `role_display` | 顶栏标题 / 侧栏角色兜底 | 各角色 base、页面模板 |
+
+`nav_xxx` 仍然嵌在 `nav_items` 内，与合并前「`nav_xxx` 嵌在 `body` 内」是同一机制：
+Django 的 `get_blocks()` 会**递归**收集嵌套 block，所以子模板（各端 `portal.html`）
+覆写高亮照旧生效 —— 这条有判据（见下文第 2 例），因为它是「合并后最容易悄悄失效」的一处。
+
+合并后各文件行数：
+
+| 文件 | 前 | 后 |
+|---|---|---|
+| `templates/portal/_portal_shell.html` | — | 273 |
+| `templates/portal/gov_base.html` | 254 | 29 |
+| `templates/portal/shelter_base.html` | 286 | 54 |
+| `templates/portal/hospital_base.html` | 270 | 45 |
+| `templates/portal/platform_base.html` | 250 | 26 |
+| 合计 | 1060 | **427** |
+
+**等价性不是「看起来一样」，是渲染出来一样**：写了 `/tmp/render_bases.py` +
+`/tmp/cmp_dom.py`，把 4 个角色 × 2 种登录态（命名用户 / 匿名）共 **8 份渲染**
+规范化（属性排序、空白折叠）后逐份比对 —— DOM **完全一致**，
+CSS 只差一条**有意新增**的内联样式 `style="--portal-seal: …"`。
+
+拿这套 diff 抓到一个真回归：`platform` 的印章色我第一版抄成了 `--grad-cinnabar`，
+而原版是 `--grad-gold`（`git show HEAD:templates/portal/platform_base.html` 复核）。
+「四份抄本里唯一不同的一处」正是纯看代码 diff 最容易漏的东西 —— 人眼看四遍
+「印章色」只会看成一样，是渲染对比把它逼出来的。
+
+合并引入的**两条静默风险**由 `core/tests_frontend_consistency.py::PortalShellTest`
+（5 例，`core/tests_frontend_consistency.py:4012`）钉住：
+1. 外壳资产重复注入 —— 以后有人在角色 base 里补一段 `<style>` 或再抄一份开关脚本，
+   判据是渲染结果里 `.portal-sidebar-overlay.show` 恰好出现 1 次、
+   `portalSidebarToggle` 恰好 2 次（按钮 + 脚本）、`translateX(-100%)` 规则存在。
+2. 嵌套 block 的高亮丢失 —— 覆写 `nav_dashboard` 后**只有**「数据总览大屏」那一项亮；
+   反向对照：覆写一个**不存在**的 block 名时必须**没有任何**一项亮
+   （否则判据就是恒真的，删掉 `nav_items` 也照样「通过」）。
+3. 按角色的印章配色（gov/platform = 金，shelter/hospital = 朱）。
+4. 角色 base 里不得再出现 `<style>` 与开关脚本，且每个文件 < 80 行 —— 这是防「合并又被抄回去」。
+
+两道全量门禁先红，都是这个新文件惹的，也都是**这一项目独有的坑**：
+* `TemplateCommentLeakTest`：外壳注释一开始用 `{# … #}` 写成**多行**，
+  Django 的 `{#` 是**单行**注释，多行会当成正文渲染进 `<body>` —— 四端一起长出一段裸文本。
+* `MarkdownLeakInUiCopyTest`：同一段注释里有 `**加粗**`，`**` 泄漏到界面文案。
+  两条合起来的教训：注释改 `{% comment %}…{% endcomment %}`，且不写 Markdown 记号。
+* 而 `{% comment %}` **不能放在 `{% extends %}` 之前**：
+  `TemplateSyntaxError: <ExtendsNode: extends 'base.html'> must be the first tag`。
+  外壳的说明块因此落在 `extends` / `load static` 之后。
+
+### 二、评审落地：执行 / 撤销 / 驳回 三处抢占
+
+CodeRabbit CLI（0.9.0）当前是未登录状态，`coderabbit auth login` 需要交互式 OAuth，
+人不在 10 小时内无法完成 → 这轮改用本地 `coderabbit:code-reviewer` agent 出结论。
+采纳的两条都是**并发抢占**类，且判据与前几轮同源：
+
+**开发/测试库是 sqlite，`connection.features.has_select_for_update` 为 False，
+Django 按这个开关决定是否拼 FOR UPDATE —— 所以 `select_for_update()` 在这里是
+静默失效的**（不报错、不加锁）。所有「读-判-写」只能走 CAS：谓词写进 `UPDATE … WHERE`
+再判 rowcount。生产 MySQL 侧语义一致：`django/db/backends/mysql/base.py:235`
+设了 `client_flag = CLIENT.FOUND_ROWS`，`update()` 的 rowcount 是**匹配**行数，
+不是「变更后」行数，所以抢不到位数为 0 的判据在两边同一个含义。
+
+1. `execute_item()` / `undo_item()` 抢「执行位」
+   （[business/services_treatment.py:858](file:///Users/wl/M4/TNR/business/services_treatment.py#L858)、
+   [business/services_treatment.py:936](file:///Users/wl/M4/TNR/business/services_treatment.py#L936)）：
+   两台终端同时点同一个项目 → 库存扣两遍（`undo` 则退两遍），
+   而 `is_done` 只有一格，事后从台账看不出「这一项被执行了两次」。
+   抢占放在扣库存**之前**、事务**之内**，失败抛 `ValueError` 让整笔回滚。
+2. `transfer_reject` 的 WHERE 除了 `status` 还要钉 `received_codes`
+   （[business/views_transfer.py:428](file:///Users/wl/M4/TNR/business/views_transfer.py#L428)）：
+   A 读到 `partial / p0` → B 签收 `p1`（状态仍是 `partial`，只有已收集合前进）→
+   A 拿**过期的** remaining 驳回，会把 `p1` 打回 `in_transit` 并清掉它的 `hospital`，
+   等于「医院已经收到的动物在系统里退回车上」。只钉状态抓不到这种情况。
+
+新增 5 例判据（`business.tests.test_treatment_flow` + `test_transfer_views`）：
+
+| 用例 | 钉住什么 |
+|---|---|
+| `test_second_execute_with_a_stale_row_consumes_once` | 两个独立加载的行：库存只降 1、`type='consume'` 流水只有 1 条 |
+| `test_second_undo_with_a_stale_row_returns_stock_once` | 库存只回到基线、带「撤销」的 `adjustment` 只有 1 条 |
+| `test_execute_failure_after_claim_rolls_the_claim_back` | 抢下执行位后炸掉 → `is_done` 回到 False、`done_at` 为空、库存没动，随后正常执行还能成功（正向对照） |
+| `test_reject_losing_to_a_newer_partial_receipt_is_refused` | 409，转运单两个编号都还在，`p1` 仍是 `in_treatment` 且 `hospital_id` 完好 |
+| `test_reject_on_unchanged_partial_still_works` | 反向对照：没有并发时驳回照常成功 |
+
+⚠ 这轮在测试写法上踩了一个会**造出假通过**的坑，已经写进用例文档：
+`assertRaises` 必须套在 `atomic()` **外面**。套在里面等于把异常吞在事务块内，
+块正常退出 → savepoint 提交 → 「回滚」判据恒假。第一版就是这么写的，
+于是它把「抢下项目后炸了、`is_done` 留着 True」判成通过。
+
+### 三、重构 B：门户内联 JS 抽成 `static/js/portals/<role>.js`
+
+抽取前的客观事实：五端门户模板共 **13,833 行**，其中 **12,749 行是内联 `<script>`**
+（shelter 4,812 行模板里装了 4,650 行 JS，hospital 4,274 里装 3,990）。
+也就是说模板不是「页面 + 一点逻辑」，而是**用 HTML 文件当 JS 容器**。
+
+抽完之后：
+
+| 端 | 模板（前 → 后） | 抽出的 JS |
+|---|---|---|
+| shelter | 4,812 → 163 | 4,619 行 |
+| hospital | 4,274 → 301 | 4,148 行 |
+| gov | 1,632 → 69 | 1,547 行 |
+| platform | 1,168 → 49 | 1,194 行 |
+| adopter | 1,947 → 710 | 1,241 行 |
+| 合计 | **13,833 → 1,292** | **12,749 行** |
+
+留在模板里的只有必须吃 Django 变量的引导片段。adopter 是唯一一个业务变量
+要注入的端，改成三个显式 `window.TNR_*`（`TNR_USER` / `TNR_ADOPTER_PUBLIC` /
+`TNR_LOGIN_URL`），JS 侧从这两个值读，而不是从 `TNR_USER !== null` 反推
+—— 第一版我就是反推的，那种「用另一个字段的形状猜语义」在下次改登录态时会
+静默错判，所以换成写死的公开模式标记。
+
+等价性不是「看起来一样」，是**逐字节比对 + 逐页渲染**（`/tmp/verify_extract.py`）：
+
+- 每个抽出文件 vs `git show HEAD:<模板>` 里对应那段内联脚本 diff，
+  差异只有三类，且每条都能指到它属于哪一轮的**业务**改动
+  （51 轮的五态看板 `board_stage`、去向建议回落；52 轮的平台端执业证号列、
+  账号编辑按钮；adopter 的引导改写）。除这三类外**零差异**。
+- `/portal/ /shelter/ /hospital/ /gov/ /adopter/ /platform/` 六页全部 200，
+  且都渲染出 `<script src="/static/js/portals/<role>.js">`、
+  都不再残留大段内联。
+
+抽取本身是机械的，**难的是判据跟着搬**。这一步做坏的方式非常隐蔽：
+断言的字符串在新文件里明明存在，但因为闸门还在读老地方，它「什么都没找到」
+—— 于是 `assertIn` 全红（还能发现），而 `assertNotIn`（「不得用静默读」
+这类**禁止式**判据）**全绿**。后者才是危险的一半：闸门看起来过了，其实没看。
+所以按「唯一真源」重接了 8 个文件，并把「读不到就抛错」写进共享模块：
+
+| 文件 | 接法 |
+|---|---|
+| `scripts/frontend_sources.py`（**新增**） | 五端 `ROLES` + 模板/JS 路径的唯一登记处；`_read()` 找不到文件**抛 AssertionError**，不返回空串 |
+| `core/tests.py` | `FRONTEND_SOURCE_FILES` 改为从它派生；`collect_frontend_read_keys()` 里原来的 `continue`（文件缺失就跳过）改成 `raise AssertionError` |
+| `core/tests_frontend_consistency.py` | `read()` 给门户模板时自动拼同端 JS（兼容层），另给新写判据留 `read_html()` / `read_js()` 两个窄口；新增「本端 JS 必须带版本号」判据 |
+| `scripts/check_inline_js.py` | 内联段之外**追加 5 个静态 JS** 的 `node --check`，缺文件计失败 |
+| `scripts/dead_catch_probe.py` | 新增 `_script_spans()`：纯 JS 文件里没有 `<script`，原来那段靠 `SCRIPT_RE` 定位的扫描会返回**零行 = 一处死 catch 都没有**（典型假绿） |
+| `business/tests/test_silent_read_contract.py` | 文件表改指 `static/js/portals/*`，并新增自检「门户 JS 里不得出现 `<script`」（出现即 `jslex` 的 HTML/JS 自动判别退化成整文件当 HTML 处理） |
+| `business/tests/test_param_contract.py`、`test_material_supervision_ui.py`、`core/tests_audit.py`、`supervision/tests.py` | 各自的 `*_PORTAL` 常量换成 `read_portal(role)` / `read_js(role)` |
+
+⚠ 顺带记一条**我这轮犯的错**，它比缺陷本身更有教学价值：
+`scripts/mutation_check.py` 的 M11/M12 把版本号写死成 `20260919c`，
+升到 `20261019a` 之后变异目标串命中 0 次 → 两条判据**静默 SKIP**，
+「全绿」了整整一轮。现在改成从 `templates/base.html` 现读（`_asset_version()`），
+读不到就 `SystemExit` —— 版本号这种东西不该出现在两处。
+
+重接线后的判据复核：`core.tests_frontend_consistency`（含 `PortalShellTest`）
++ `core.tests_audit` + 静默读契约 + 参数契约 + 粘性表头 + 公告用例 = 全绿；
+`node --check` 五份 JS 全过；死 catch 普查 96 处（静默吞 10 / 活 86），
+**待处理 0 处**。
+
+### 四、前端枚举单一来源：物料流水类型
+
+重构 B 把 JS 搬到一起之后，跨端重复才看得见 —— 同一个物料流水类型枚举，
+在三个端各抄一份，一共 **7 张表**：
+
+| 位置 | 形态 | 当时的写法 |
+|---|---|---|
+| `shelter.js:2690` | 筛选下拉 | 采购入库/下发出库/签收入库/诊疗消耗/库存异动/物料出库 |
+| `shelter.js:2709` | 表格徽章 | 同上 + `success/info/cinnabar/warning/danger/cinnabar` |
+| `shelter.js:4204`、`4439` | 紧凑列 / 抽屉 | 采购/下发/签收/消耗/异动/出库 |
+| `hospital.js:3487`、`4076` | 两份台账 | 采购入库/**捕捉点下发**/… + 一张单独的 `typeBadge` |
+| `gov.js:727`、`995` | 下拉 + 台账 | 采购入库/下发出库/签收入库/**消耗/调整/出库**（前三个全称、后三个短称） |
+
+漂移**已经发生**，不是假想：同一笔 `adjustment` 流水，捕捉点显示「库存异动」、
+监管台账显示「调整」；`consume` 的徽章在捕捉点是 `warning`、在监管端是
+`cinnabar`。监管端和业务端看同一张单据得出两种印象，正是这个项目最不能接受的错法。
+
+收成一份真源 `TNR_UI.MATERIAL_TXN_TYPES`（`static/js/tnr-common.js`，五端都加载），
+每个类型一条 `{long, short, badge}`：
+
+```js
+MATERIAL_TXN_TYPES: {
+  purchase: {long:'采购入库', short:'采购', badge:'success'}, … outbound: {…}
+},
+MATERIAL_TXN_VIEW_LABELS: { hospital: { dispatch: {long:'捕捉点下发', short:'捕捉点下发'} } },
+materialTxn(type, form, view) / materialTxnBadge(...) / materialTxnOptions(...)
+```
+
+`MATERIAL_TXN_VIEW_LABELS` 是**刻意保留的例外**：`dispatch` 在捕捉点/监管端是
+「我发出去」，在医院端是「别人发给我」，这不是抄漏，是同一笔流水的两端视角。
+把它显式登记成视角表，而不是让医院端再抄一张表 —— 抄一张表下次新增类型就漏一行，
+而登记视角只需要多写一个键，且**有判据管着它**（见下）。
+副作用是监管端三个短称并回全称、两个徽章配色统一 —— 这是**有意的界面口径变化**。
+
+判据从「每张表都要全」换成「只有一份，且它全」，共 5 条（`MaterialTypeMapCoverageTest`）：
+
+| 判据 | 钉住什么 |
+|---|---|
+| `test_single_source_covers_all_material_types` | 真源键 == 后端 choices，**双向**：少一个 = 界面漏英文码；多一个 = 下拉给出一个筛不到、提交即被拒的选项 |
+| `test_single_source_entries_are_fully_populated` | 每条都有 `long`/`short`/`badge` 且非空 —— 少 `short` 会在紧凑列渲染成 `undefined` |
+| `test_perspective_override_only_renames_known_types` | 视角表的键必须是真源已有类型：写成 `dispath` **不报错、只静默不生效**，这类「拼错一个字母就白改」的洞必须有判据 |
+| `test_no_portal_redeclares_material_type_map` | 反向对照：任何一端的应用 JS 里再出现本地类型表（对象表 / `value:` 下拉 / 硬编码文案三种历史形态）即红 |
+| `test_material_filter_uses_the_single_source` | 每端该走真源的哪几个出口是显式登记的（shelter 3 个、gov 2 个、hospital 1 个 —— 它没有类型下拉，用页签分门别类），少一个就是有人改回本地表 |
+
+真源**改名或搬走**时前三条会直接报「找不到 `MATERIAL_TXN_TYPES`」而不是静默通过 ——
+这是 `checked > 0` 那条自守在重构 B 里第一次发挥作用的地方：
+抽表之后它立刻红了，提醒判据自己已经失效。
+
+变异验证（`/tmp/mutation_enum.py`，6 条全部被指定判据抓到，跑完自动还原）：
+
+| 变异 | 结果 |
+|---|---|
+| E1 真源少一条 `receive` | PASS `…covers_all_material_types` FAILED (failures=2) |
+| E2 `purchase` 少 `short` 字段 | PASS `…entries_are_fully_populated` |
+| E3 视角表键名写错成 `dispath` | PASS `…only_renames_known_types` |
+| E4 在监管端再塞一张本地 `typeMap` | PASS `test_no_portal_redeclares_material_type_map` |
+| E5 捕捉点筛选退回硬编码下拉 | PASS（重declare + 同源出口两条同时红） |
+| E6 监管台账丢掉同源出口 | PASS `test_material_filter_uses_the_single_source` |
+
+⚠ E4 第一次跑成 **SKIP**：变异锚点 `if (tab === 'ledger') {` 在 gov.js 里命中 2 次。
+「命中数 ≠ 1 就 SKIP」这条自守（`scripts/mutation_check.py:774`）本来就是为这种情况
+写的 —— 它宁可跳过也不假装验过；换一个唯一锚点后才是真 PASS。
+
+顺手把 `StaticAssetCacheBustTest` 注释里写死的「6 个模板里的 7 处」改掉：
+重构 B 之后引入点是 **12 处**（`base.html` 2 + 每端 2），
+这种「数一下写进注释」的写法每次加门户都会过期，改成「以 `PORTALS` /
+`PORTAL_JS` 为准，判据本身不数个数」。版本号统一升 `20261019a` → `20261019b`。
+
+同源判据最终是 **6 条**，上表第五条之后又补了一条：
+`test_material_call_sites_pass_a_known_form_and_view` —— 用 node 跑真源时发现
+`form` 参数打错（`'short'` → `'shot'`）时函数返回 `{ text: undefined }`，
+表格会渲染出字面量 `undefined`，跟「漏了映射」在满屏数据里一样不显眼。
+真源因此改成**拼错就返回 `null`**（调用方退回显示枚举码：错得看得见），
+并补这条判据扫全部调用点的第一/第二实参。变异 M54 已验证它能抓到。
+
+E1–E6 六条变异连同 E7 已正式登记进 `scripts/mutation_check.py`
+（**M48–M54**），不再是 `/tmp` 里的一次性脚本。
+
+### 五、本轮收尾：全表预检揪出 12 条「打不准」的历史变异锚点
+
+登记 M48–M54 之前，先按夹具自己的规矩做了一次**锚点命中数预检**
+（`count(old) != 1` 就该 SKIP），结果是 **11 条历史变异的目标串命中 0 次**
+加上 M15 的附加改动 0 次 —— 共 **12 条**。
+
+它们的共同点是：**全部是「搬家」或「改写法」造成的**，而不是判据本身坏了。
+夹具对命中数 ≠ 1 的变异会打 ⚠️ SKIP 并让退出码变红（`mutation_check.py:main()`
+把 SKIP 和 WEAK 一样算不合格），所以这不是「静默绿」，而是
+**「上一轮压根没跑全表复扫」** —— 我只跑了新增判据的针对性用例和 `/tmp` 里那份
+一次性变异脚本。漏掉的 12 条要等下一次全表复扫才会现形，而那可能已经是几轮之后。
+
+**这是「禁止式闸门在输入缺失时永久变绿」的同族问题，只不过这次失灵的
+不是判据、而是用来验证判据的判据。** 判据本身没问题、套件全绿、
+报告里写着「变异验证全部捕获」—— 那句话只要**没重跑全表**就是过期结论，
+而过期结论读起来和有效结论一模一样。
+
+教训固化成两条动作：**登记新变异之前先对全表做一次命中数预检**（已并进
+`mutation_check.py` 的 `main()` 开头），以及**每轮收尾必须跑一次全表复扫**，
+而不是只跑新增判据相关的模块。
+
+| 变异 | 为什么失效 | 处置 |
+|---|---|---|
+| M14 / M37 / M38 / M39、M15 的附加改动 | 目标代码本轮从门户模板**搬进了** `static/js/portals/<role>.js`，变异还在打老文件 | 目标文件改指新位置（`read_portal()` 兼容层让**判据**没事，但**变异**是纯文本替换，绕过兼容层，只有它会失效） |
+| M16 / M17 | 第四十八轮「部分签收」把 `!= 'pending'` 改成 `not in ('pending', 'partial')`，且取单三行在 `transfer_receive`/`transfer_reject` 里变成同款、命中 2 次 | 目标串换成新写法，并带上**上一行注释**把变异钉到签收那一处 |
+| M24 | 台账那段结尾从 `if user.role == 'hospital':` 变成 `data = [serialize_instance(t) for t in qs]` | 换尾串 |
+| M26 | 监管台账日期过滤从 `qs = qs.filter(...)` 重写成 `q &= Q(...)` | 换成新写法 |
+| M30 | 库存判据搬进 `business/services_stock.py`，且判据本身升级为「机构余额优先、区县合计兜底」 | 目标串与 `MOVE_AFTER` 一起迁到新文件 |
+| M35 | 采购里 `data.get('material_id')` 已换成 `body_int(data, 'material_id')` | 同步 |
+| M40 | `getData` 里新增了 401 分支，老目标串（`res.json()` 紧跟 `if (!res.ok…)`）不再连续 | 目标串带上 401 分支，变异**只删泛化抛错、保留 401 抛出**，保证一次只动一处语义 |
+
+夹具的自守（「命中数 ≠ 1 就 SKIP，绝不假装验过」）这次是**帮了忙**的：
+它没有把 12 条打偏的变异算成 PASS。真正的问题在它前面 —— 全表**没跑**。
+所以顺手把预检并进了 `main()`（见「遗留待办」第一条，已落地）。
+
+全表跑完另有 **2 条不是「搬家」造成的失效**，性质更值得记，因为它们**预检查不出来**：
+
+- **M35 是「位移型变异」失效**：原意是「数量校验排在建物料之后 → 留下没有流水的孤儿物料」。
+  后来采购把 `Material.objects.create()` 整体挪进了 `transaction.atomic()`，
+  而 `MOVE_AFTER` 的插入点还留在**事务之前** —— 物料没建、事务没开，孤儿无从产生，
+  判据全绿、变异空转。**锚点照样命中 1 次，预检看不见这种失效**：
+  它不是「打偏」，是「打准了一个已经无关痛痒的位置」。
+  现在把插入点改到**事务内、create 之后**：`return json_fail()` 从 `with atomic()` 里
+  正常退出**不回滚**，物料真的落库，`test_purchase_zero_quantity_creates_no_orphan_material` 才红。
+  同时把变异范围**收窄到只挪业务拒绝、`parse_int_param` 留在原位** ——
+  整段挪走会让芯片分支先 `NameError`，那抓的是「未定义变量」而不是「校验晚于落库」，
+  判据红了也说明不了原命题。
+- **M40 被 401 分支顶包**：`test_get_data_throws_with_server_message` 原来是在整个
+  `getData` 块上 `assertIn('throw new Error')` / `assertIn('data.message')`。
+  删掉泛化失败分支的抛错之后，这两个串**仍然都在**（401 分支里也写了一遍），
+  于是本条判据不红，只有隔壁 `test_get_data_is_status_aware` 偶然接住 → 报 WEAK。
+  现在改成先截出 `if (!res.ok || !data.success) {` **那一个分支**再断言，
+  并显式检查该分支还存在（整段被删时报「不能靠 401 分支顶包」）。
+  这是**断言打错粒度**的通用形态：块级 `assertIn` 在同名文案重复出现时必然顶包。
+
+**复扫跑完之后再补一条本轮自己发现的漂移**（不属于「搬家」，也不属于判据坏掉，
+而是**判据根本没写**）：
+
+重构 B 把物料枚举收成一份真源之后，我用同一把尺子回头量本轮新加的
+「去向建议」链路，发现出院弹窗里还留着**第二份手写清单** ——
+`static/js/portals/hospital.js` 的 `ADVISED_KIND`（后端去向 key → 四类出院单据）。
+它的失效形态比物料那次更隐蔽：后端 `Treatment.DISPOSAL_CHOICES` 加一个 key，
+前端**不报错**，只是走进 `suggested = ''` 分支，弹一句
+
+> 诊疗完成时没记去向建议，请人工选择。
+
+而医生在「诊疗完成」那一刻**明明选过**。界面把已经发生的事说成没发生，
+与本轮开头那条「印得出『办结去向：领养』而动物还在院」是同一族 ——
+都是**承诺与事实脱节**，只不过一个多说了、一个少说了。
+补了 `DischargeAdviceKeyCoverageTest`（3 条：key 双向覆盖、映射值必须是弹窗
+OPTS 里真的单据类型、看板行同时下发 key 与中文），
+并登记 **M55**（删掉一条映射）/ **M56**（值拼成不存在的 `died`）。
+
+顺带把本轮新写的绝育病历独立入口 `treatment_sterilization`
+登记进 `core/tests_gov_readonly.py` 的 `GOV_CLOSED_WRITE_ROUTES`（现 26 条），
+并把那份清单的注释从「本轮关闭的」改成「**此后新增的写接口也要登记**」——
+判据 1（可达清单）只会说「政府端多了一条」，这份名单才答得出「是哪一行的角色被改回去了」。
+
+### 六、本轮结果
+
+**规模变化**（重构 A + 重构 B 合并口径；`git diff --stat` 为整个未提交工作区）
+
+| 层 | 改前 | 改后 |
+|---|---|---|
+| 四端角色 base（shelter/hospital/gov/platform） | 1,060 行（4 份近乎相同） | 154 行（4 份薄壳）+ 273 行 `_portal_shell.html` = **427 行** |
+| 五端门户模板 | 13,833 行 | **1,292 行** |
+| 门户 JS（`static/js/portals/*.js`，新增） | 0（全内联） | **12,749 行**（5 份） |
+| 共享运行时 `static/js/tnr-common.js` | 1,920 行 | 1,971 行（+物料枚举真源） |
+| `git diff --stat`（已跟踪文件） | — | 62 文件 **+4,218 / −13,925** |
+| 新增未跟踪文件 | 0 | 门户 JS 12,750 + `_portal_shell.html` 273 + `frontend_sources.py` 97 + `tests_gov_readonly.py` 480 + 2 份迁移 71 |
+
+⚠ 上面两行**不能相加理解成「净减 10,094 行」**：模板里删掉的 1.2 万行
+有 12,750 行是**搬到未跟踪的 `static/js/portals/` 去了**，`git diff --stat` 看不见它们。
+真正的净减少只有重构 A 那 633 行（四份近乎相同的角色 base 合成一份外壳）。
+「删了多少行」这个指标在搬家类重构里天生带偏见，写报告时得把两条分开摆。
+
+
+**测试**：`manage.py test business core supervision` ——
+**Ran 1698 tests in 521.7s，OK**（本轮起点 1694 / 2 失败 → 修完两条「标记搬走」的门户用例后转绿，
+末尾又加了 3 条出院建议映射的判据）。
+`core/tests_frontend_consistency.py` 现 46 个类 / 145 条用例。
+
+**变异登记**：`scripts/mutation_check.py` 的 `MUTATIONS` 从 45 条增至 **54 条**
+（新增 M45–M47 外壳与版本号、M48–M54 物料枚举同源、M55–M56 出院建议映射）。
+
+**全表复扫结果**：52 条那一版跑到 **52/52 全部捕获、退出码 0**（上一版是
+「❌ M35 空转 + ⚠️ M40 WEAK」）。修复后的两条各自复验：
+
+```
+✅ M35 … PASS: 捕获=test_purchase_zero_quantity_creates_no_orphan_material
+✅ M40 … PASS: 捕获=test_get_data_is_status_aware; test_get_data_throws_with_server_message
+```
+
+M55–M56 是在复扫**之后**登记的，没有为它们重跑一遍三小时的全表 ——
+用 `mc.run_tests()` 把 `TEST_TARGETS` 收窄到 `core.tests_frontend_consistency`
+单跑这两条（两条锚点命中数先各数一遍 = 1），跑完立刻还原：
+
+```
+✅ PASS M55 去向映射漏一条 euthanized expect=test_advised_kind_covers_every_backend_disposal_key
+✅ PASS M56 去向映射的值拼成不存在的单据类型 died expect=test_advised_kind_targets_a_real_discharge_option
+已还原
+```
+
+**其余收尾复核**（都在全表跑完之后重跑，避免与夹具互踩）：
+`core.tests_gov_readonly` 13 条 OK、`check_inline_js.py` 11 段内联 + 5 份门户 JS 0 处失败、
+`dead_catch_probe.py` 「需要处理（死 + 半死）：0 处」。
+
+### 七、需人工确认（代码无法自证的口径题）
+
+1. **身份证脱敏只做了 1 处，另有 4 处原文出网** —— 现状自相矛盾：
+   - 唯一打码点：`supervision/views.py:906` 的 `_mask_id_card()`，
+     只在 `supervision/views.py:1467`（政府端领养详情）被调用；
+   - 原文下发：`business/views_capture.py:33`（`CAPTURE_LIST_EXCLUDE = ('signature',)`，
+     捕捉点列表把 `owner_id_card` 原样序列化）、`business/views_checkin.py:181`
+     （黑名单列表 `serialize_instance(b)` 含 `id_card`，**捕捉点/市/区三级都能拉**）、
+     `business/views_portal.py:527`（领回记录 `owner_id_card`）、
+     `business/views_print.py:108 / :122`（领回单、领养单**纸质**打全号）。
+   同一个号码在政府端详情页打码、在政府端列表页原文，两种解释都成立但不能并存。
+   请业务方二选一：**(A)** 列表与搜索一律打码，仅「打印归档」和「有权角色点开的详情」
+   给全号（`keyword` 搜索命中 `id_card` 不受影响，脱敏发生在出参上）；
+   **(B)** 全号保留给监管与归档，操作员端（捕捉点/医院）统一打码。
+   定了口径我按判据补齐 —— 这属于**政策**，代码不该替业务决定。
+
+2. **执业证号唯一性只在应用层**：`business/services.py:1661 validate_vet_license_unique()`
+   只比「启用中的医院账号」，`accounts/models.py:29 vet_license` **没有 DB 唯一约束**，
+   两个并发建号请求可同时通过校验。可选：加 DB 唯一索引（但「停用后复用证号」这条
+   口径就得改，MySQL 又没有部分唯一索引，需要额外列）；或者接受窗口，
+   在 `check_data_integrity.py` 补一条**重复证号巡检**（现只查「未登记证号」，
+   见 `core/management/commands/check_data_integrity.py:141`）。
+   **需先确认**：一名执业兽医师是否允许同时持有两个启用账号。
+
+3. **静态资源的最后一跳没有判据**：门户用例现在断言的是「渲染出的
+   `<script src="/static/js/portals/<role>.js?v=…">` 标签 + 磁盘上的源码文件」，
+   而浏览器真正拿到的字节要过 `collectstatic`（`staticfiles/`）与 Nginx/CDN 缓存 ——
+   这两层本轮**没有任何自动化覆盖**（测试客户端的 `/static/` 指向 `STATIC_ROOT`，
+   本地通常未 collect，靠它断言只会得到 404）。
+   上线后请手工核一次：`sha256sum static/js/portals/*.js static/js/tnr-common.js`
+   记进发布记录，并与现网 `curl '<url>?v=20261019b' | sha256sum` 比对。
+
+4. **界面口径的可见变化**（重构 B 的副作用，需向监管方打招呼）：
+   监管端物料台账/筛选的「消耗 / 调整 / 出库」三个短称并回全称
+   「诊疗消耗 / 库存异动 / 物料出库」，`consume`、`adjustment` 的徽章配色统一到
+   真源（`warning` / `danger`）。若监管侧拿既有截图做过验收基线，这是**看得见**的改动。
+
+5. **`deploy/OPERA_GUIDE.md` §12 的 15 条待确认项仍全部未闭合**（该文件按约定不改）：
+   监控接入（`monitoring-prometheus-grafana.md` 不存在）、gunicorn 实际 worker 数、
+   生产 DB 形态（1Panel MariaDB 容器 vs `deploy.sh` 假设，直接决定 `mysqldump`/`mariadb-dump`
+   与 online-DDL 语法是否可用）、备份是否定时化、异地副本/对象存储、`.env` 现网值、
+   `media/`+`staticfiles/` 属主、nginx 日志路径、logrotate、`0035` 迁移的执行记录、
+   病历缺失率 SQL 对历史行的解读、编号规则前缀现值、建号口令策略是否收紧到 Django 校验器、
+   `/health` 的需求方、「上线时手工删号重建 `admin`」是否已执行。
+
+6. **演示账号口令仍是 `123456`**（`DEMO_ACCOUNTS.md` / `seed_data`）。
+   口令一律由使用方自设，我不代设生产凭据；`seed_data` 只创建、**不重置**已存在账号的口令，
+   所以现网若跑过种子，必须逐号确认已改。
+
+### 八、遗留待办
+
+- ~~`scripts/mutation_check.py` 应在 `main()` 开头先做一遍全表锚点预检~~ —— **本轮已落地**：
+  `main()` 在任何测试启动之前先数一遍全表命中数（含附加改动与 `MOVE_AFTER` 锚点），
+  不符的一次性列成清单打在开头。以前它只在主循环里逐条查，
+  一条失效锚点要等前面每条变异都跑完测试才现形（本轮 52 条 ≈ 十几分钟）。
+  仍待办的是流程性的那条：**全表复扫要进每轮的收尾动作**，不能只跑新增判据所在模块。
+  本轮实测补充一条：全表跑一趟是**小时级**（52 条 × 每条跑 10 个模块），
+  所以「新登记的变异要不要立刻全表重跑」要分开答 ——
+  M55/M56 用**窄目标单跑**（`TEST_TARGETS = ['core.tests_frontend_consistency']`）
+  几秒就验完，全表留给下一轮收尾；但**还原必须是硬要求**，
+  单跑脚本用 `try/finally` 写回原文并逐文件 `read_text() == 原文` 复核。
+- 政府端只读接口白名单：`core/tests_gov_readonly.py:52 GOV_API_ALLOWLIST` 现 **42 条读 +
+  1 条自助改口令**，`GovReachableRoutePinTest` 已按 `get_resolver()` 枚举 URLConf
+  断言「可达 == 清单」（待办里原来写的「改用 `get_resolver()`」本轮核实**早已落地**，
+  `all_api_routes()` 就是这么写的；被正则扫装饰器坑的是 `api_routes()`，
+  它只用于「源码级复核」那条，不作可达全集）。
+  **剩下那半件（按 gov.js 实际调用再收一轮）本轮尝试过、结论是暂不做**：
+  按「方法名 → 方法体里的 `/api/` 字面量 → gov.js 是否调用」匹配，
+  把 `/api/supervision/dashboard/` 这类**明明在用**的端点也算成「从不调用」（64 条），
+  原因是 gov.js 走的是 `TNR_API.getXxx` 包装、路径拼在方法体之外。
+  这份清单**收紧等于关掉监管端的一块数据**，判据不准时宁可不动 ——
+  要做先把它改成「按 URL 反查调用点」的可信工具，而不是再抄一遍不可靠的映射。
+- CodeRabbit 评审（任务 #2）**卡在凭据**：CLI 已装（0.9.0）但 `auth status` 是
+  `signed out`，`coderabbit auth login` 要浏览器交互，不能代登。
+  本轮改用了自查 + 变异验证替代；需要外部评审时请先手工登录一次。
+- 门户 CSS 仍留在各门户模板的 `<style>` 块里（重构 B 只搬了 JS）。
+  本轮核实过出院弹窗那批 `.dsp-*` 样式确实存在（`templates/portal/hospital/portal.html:212`
+  起），不是「JS 搬走、样式没跟上」的空白 —— 但这是**差点当成缺陷**的那种空白：
+  只在 `static/css/` 里 grep 会得到「0 处定义」的错误结论。
+
+
+---
+
+## 第五十二轮 续 · 电脑端巡检（二）：宠物状态真源、放归两段盲区与变异脚手架复位
+
+### 九、变异脚手架的缓存闸门复位（先解决「判据已失效还跑得绿」）
+
+`scripts/mutation_check.py` 的模块级预检原来靠 `templates/base.html` 里**手写的 `?v=` 串**
+来确认缓存判据还在 —— 重构把 `?v=` 换成 `{% asset_url %}` 内容哈希之后，这条预检
+在 import 阶段就 `SystemExit`，整张变异表被卡在起跑线前。
+换成按**新不变量**检查（`_preflight_asset_gate()`：`base.html` 必须仍走
+`{% asset_url 'js/tnr-common.js' %}`，且 `core/templatetags/assets.py` 必须存在），
+并把因此失配的 **M11 / M12 / M47** 三条变异重写：
+锚点从「手写版本号串」改成 `{% asset_url %}` 与 `{% static %}?v=` 的**取舍本身**，
+预期判据落到 `test_no_manual_version_stamp_survives_in_templates` /
+`test_every_static_include_goes_through_asset_url`。
+窄目标重跑 **M11、M12、M47、M65、M66、M67 → 6/6 全部捕获**。
+
+> 这一处的意义不在那三条变异，而在于：**预检失效时整轮结论都可能不可信**。
+> 以前它只在主循环里逐条查锚点，一条失效判据要等前面每条都跑完测试才现形；
+> 而「⚠️ SKIP」与「✅ PASS」在收尾日志里长得几乎一样。
+
+### 十、宠物状态显示真源（`TNR_UI.PET_STATUS`）
+
+同一个 `Pet.status='in_treatment'` 在前端有三份表、三种叫法
+（监管端「待诊疗」、捕捉点端「诊疗中」、医院端「待诊疗/诊疗中」），配色也各挑各的；
+纸质单据用的是后端 choices 的第四种写法。收口成一个真源：
+
+| 处 | 改法 |
+|---|---|
+| `static/js/tnr-common.js:1444` | 新增 `PET_STATUS`（9 条，文案 = 后端 label，配色取覆盖面最广的旧表） |
+| `static/js/tnr-api.js:508` | 两张手写 `const map = {…}` 删除，改为查真源 |
+| `static/js/portals/gov.js` | 本地 `petStatus` 表删除，一宠一档状态列走 `TNR_API.getPetStatusText/Badge` |
+| `static/js/portals/shelter.js:95` | 通用 `statusBadge` 先查宠物状态真源，本地表里宠物那几条删掉 |
+
+新增 `PetStatusSingleSourceTest` 4 条判据（覆盖 / 文案 = label / 配色在 CSS 里真有规则 /
+别处不许再长一份，哨兵取 `in_treatment:` —— `released`、`owner_returned` 是**办结去向**表的合法键，
+拿来判会满屏误伤），并登记 **M68–M72**。
+
+### 十一、放归两段的界面盲区（本轮主要缺陷，M73–M84）
+
+第四十八轮把放归拆成 `pending`（待转运回小区）→ `transferred`（已回小区待放归）→ `released`，
+**后端拆完了，前端四处没跟上**，而且全部是静默失效：
+
+| 处 | 缺陷 | 后果 |
+|---|---|---|
+| `static/js/portals/shelter.js:3115` | 待放归页签 `filter(r => r.status === 'pending')` | `transferred` 的单既不进待放归也不进已放归，**整张单从界面消失**，物业签字没有入口，单据永远停在中间态 |
+| `static/js/portals/shelter.js:248` | 看板「待放归」统计同样只数 `pending` | 动物一登记转运，待办与统计卡同时归零 |
+| `static/js/portals/gov.js:457` | `released ? 已放归 : 待放归` 二值兜底 | 监管端看不出动物是还没送出还是已回小区只差签字；将来后端再加一段会被静默吞进「待放归」 |
+| 一宠一档时间线（`shelter.js:4563`、`adopter.js:781`） | 同一处二值兜底 | 领养人/捕捉点查档案时也只看到「待放归」 |
+| `business/services.py:1015` | `pet_has_pending_release()` 只认 `pending` | **重复放归单 + 双重承诺**：登记转运后同一只动物既能再开一张放归单，又能被领养流程接手，两张单据都办结后互相打架 |
+| `business/views_release.py:98` | 重复单判据另写一份内联查询 | 与上面同源，改一处漏一处 |
+| `hospital.js` 出院看板 | 自带一份三段表 + 一条**后端不存在的 `cancelled`** | 幽灵态；`Release` 没有撤销接口（`business/urls.py:117-121` 只有 list/create/confirm/transfer） |
+
+收口做法与宠物状态同一套：
+`Release.OPEN_STATUSES`（[business/models.py:842](file:///Users/wl/M4/TNR/business/models.py#L842)）
+是「未办结」的**唯一**口径，后端取单/互斥/确认三处都引它；
+前端 `TNR_UI.RELEASE_STATUS`（文案 = 后端 label）+ `TNR_UI.OPEN_RELEASE_STATUS`
+（[static/js/tnr-common.js:1469](file:///Users/wl/M4/TNR/static/js/tnr-common.js#L1469)）
++ `releaseStatusText/Badge` 是显示的唯一口径。
+捕捉点端待放归表加**阶段列**（已登记转运时把转运时间挂进徽章 `title`，不加第九列以免电脑端横向滚），
+操作列按阶段给按钮：`pending` → 「转运回小区」，`transferred` → 「确认放归」。
+
+顺带修掉两处同类静默：
+- 放归详情抽屉原先**根本没有状态行**（只有登记时间与放归时间），未办结那张看不出走到哪段
+  ——补「状态 / 转运回小区 / 放归日期」；
+- 纸质放归单 `RELEASE_FIELDS` 只印放归日期，未办结打出来两个时间都空
+  ——补 `('转运回小区', _v('transferred_at'))`（[business/views_print.py:112](file:///Users/wl/M4/TNR/business/views_print.py#L112)）。
+
+**还发现并修了一条跨层口径分叉**：监管台账的筛选侧早就有 `created_at` 兜底
+（`_date_filter`，圈「全部」区间不会把这些行藏起来），但行里的 `date` 仍写
+「业务时间有值才给」—— 于是**筛得出来、日期一栏空白、按日期排序全部沉底**。
+补 `_row_date()`（[supervision/views.py:1268](file:///Users/wl/M4/TNR/supervision/views.py#L1268)）
+让放归 / 领养 / 安乐死三张可空业务时间的表与筛选口径一致，并加
+`supervision.tests.SupervisionDataTest.test_ledger_unfinished_rows_have_dates` 钉住。
+
+新增判据 **7 条**（`ReleaseStatusSingleSourceTest`，
+[core/tests_frontend_consistency.py:535](file:///Users/wl/M4/TNR/core/tests_frontend_consistency.py#L535)）：
+覆盖 / 文案 = label / 配色在 CSS / **前端「未办结」数组 == 后端 `Release.OPEN_STATUSES`**（跨语言一致性）/
+别处不许再长一份（哨兵 `transferred:`，全仓库唯一）/
+列表必须引 `OPEN_RELEASE_STATUS`（禁止 `releases.filter(x => x.status === '…')`，
+`=== 'released'` 放行因为那正是已放归表要的终态）/
+禁止 `status === 'released' ?` 二值兜底。
+行为用例 **3 条**：`transferred` 期间不得再开放归单、不得领养登记（含 subTest 两段）+
+反向对照「`released` 之后不得继续拒绝」（否则判据写成「有放归记录就拒绝」也能绿，
+而放归后转领养会全堵死）+ 台账未办结行日期非空。
+变异 **M73–M84**（12 条）全部捕获。
+
+### 十二、浏览器实测（同一张单，改前改后）
+
+夹具：放归单 `REL2600001` / `TNR261018002`，`status='transferred'`，`transferred_at=2026-10-18 03:18`。
+改前捕捉点端「动物去向 → 放归」显示「暂无待放归记录」。改后实读 DOM：
+
+```
+待放归表  REL2600001 | TNR261018002 | 狗 · 母 | 纯翠江南 | 已回小区待放归 | 张物业 | — | 确认放归
+  徽章    class="badge badge-info"，title="转运回小区：2026-10-18 03:18"
+  发起放归下拉  只剩 TNR261016005（在途那只不再被重复 offering）
+统计卡    「1 待放归（含待转运、待小区签字）」
+待办      「1 笔放归待小区签字确认」
+放归详情  … | 状态 已回小区待放归 | … | 转运回小区 2026-10-18 03:18 | 放归日期 — | …
+政府端    放归监管列表 `badge badge-info:已回小区待放归`（改前是笼统的「待放归」）
+```
+
+### 十三、本轮结果（续）
+
+| 项 | 值 |
+|---|---|
+| 全量套件 `business core supervision` | 1708 → **1722 tests OK**（+14：宠物状态闸门 4、放归闸门 7、行为用例 3） |
+| 前端一致性闸门 `core.tests_frontend_consistency` | 156 → **163** OK |
+| `supervision` + 放归/领养 | 222 OK；`SupervisionDataTest` 16 OK |
+| `check_inline_js.py` | 11 段内联 + 5 份门户 JS，0 处失败 |
+| 变异表 | **82 条**（编号至 M84），本轮新增 M68–M84 共 17 条，**逐条捕获** |
+
+⚠ 两条方法论收获，都是本轮踩出来的：
+1. **窄目标重跑要连判据所在模块一起带上**。M61/M62（处置日期必填 / 解析失败不吞）
+   第一次跑报「空转」，实际是我把 `business.tests.test_euthanasia_views` 漏在了
+   `TEST_TARGETS` 外面 —— 换正确目标后 2/2 捕获。**「变异没被抓到」与
+   「你没跑到那条判据」在日志里长得一模一样**，必须先排除后者。
+2. **后台任务通知不可信**：本轮多次在套件仍在跑时就收到「completed exit 0」，
+   且管道尾部命令的退出码永远是 0。判据只能是
+   `ps -eo pid,etime,command | grep "[m]anage.py test"` + 日志里的 `Ran N tests / OK`；
+   同一时间**只允许一个** `manage.py test`（共用 sqlite 测试库），
+   且变异扫描期间不得改任何被变异/被测试读取的源文件。
+
+### 十四、新增需人工确认
+
+1. **放归两段期间的档案口径**（未改，属业务口径题）：动物已登记转运、尚未签字时，
+   一宠一档的「去向 / 出库时间 / 送达单位」仍为空（`_pet_outbound()` 只从**终态**
+   `Pet.status` 推导，[business/services.py:1107](file:///Users/wl/M4/TNR/business/services.py#L1107)），
+   于是它同时显示「在库 / 在站」+「待诊疗」。两种口径都成立：
+   **(A)** 认「字没签就不算出库」—— 现状即正确；
+   **(B)** 监管要看出库在途 —— 需给 `Pet` 加 `pending_release` 态，或由后端在**一处**
+   统一推导流转状态。选 B 会改动月度出库统计与放归率的分子分母，请业务方拍板。
+2. **放归单没有撤销 / 作废入口**：`business/urls.py:117-121` 只有 list/create/confirm/transfer，
+   登记错了（小区填错、动物其实没病愈）目前只能把两段走完。医院端旧代码里那条
+   `cancelled: ['已撤销']` 映射就是从这个不存在的动作抄来的，本轮已删。
+   要不要补「撤销放归单」（并回退 `Pet.status`），属流程设计题。
+3. 领养侧拒绝文案已改为「该宠物已有未办结的放归单（待转运回小区或待小区签字）…
+   请先走完放归两段确认后再办理领养」，不再引导用户去做一个**不存在的「取消放归」**操作。
+4. **本机 8099 端口有一个改造前的旧 dev server 仍在跑**（PID 40320），
+   它没有 `core/templatetags/`，打开任何门户页面都是 `TemplateSyntaxError: 'asset_url' is not a registered tag`。
+   本轮所有实测都改在 8000 端口的新 server 上做。**没有替你杀掉它**（不确定是否你自己在用），
+   需要的话 `kill 40320`。
+
+---
+
+## 第五十二轮 续 · 电脑端巡检（三）：回访打卡「恒为 0 次」与领养单的四五种叫法
+
+### 十五、打卡状态第三份抄本（`TNR_UI.CHECKIN_STATUS`，M85–M92）
+
+`CheckIn.status` 三档（待审核 / 已通过 / 已驳回）在前端被抄了四处，其中监管端
+[static/js/portals/gov.js:729](file:///Users/wl/M4/TNR/static/js/portals/gov.js#L729)
+的打卡时间线写的是 `c.status === 'approved' ? '已审核' : '待审核'` ——
+**已驳回（rejected）在监管端显示成「待审核」**。这不是文案难看，而是监管读数反向：
+一条已经判不合格的回访，在政府端看起来跟「还没审」一样，
+驳回理由也就永远不会有人去点开看。机构端另外还自创了一个「未通过」（后端没这个词）。
+
+做法与 PET_STATUS / RELEASE_STATUS 一致：`TNR_UI.CHECKIN_STATUS`
+[static/js/tnr-common.js:1510](file:///Users/wl/M4/TNR/static/js/tnr-common.js#L1510)
+成为唯一显示真源（`text` 必须逐字等于后端 `choices` 的 label，`badge` 只存 CSS 后缀），
+`checkinStatusText/Badge` 供三端调用；机构端筛选下拉改为
+`Object.keys(TNR_UI.CHECKIN_STATUS).map(...)`
+[static/js/portals/shelter.js:3767](file:///Users/wl/M4/TNR/static/js/portals/shelter.js#L3767)，
+「未通过」随之消失。
+
+判据 `CheckInStatusSingleSourceTest`（[core/tests_frontend_consistency.py:720](file:///Users/wl/M4/TNR/core/tests_frontend_consistency.py#L720)，7 例）：
+真源↔后端双向对齐（缺档 / 幽灵档 / 文案漂移 / 配色名在 CSS 里不存在）、
+三端渲染器必须取真源、全仓库禁止 `=== 'approved' ? '<中文>'` 的二值兜底。
+
+### 十六、真正的重缺陷不在前端：监管载荷根本没带 `checkins`
+
+把打卡列改成「3 次（待审核1 / 已通过1 / 已驳回1）」之后上浏览器实测，页面仍然显示 **0 次**。
+根因不在 JS：`/api/supervision/business/?business_type=adoption` 的返回体里**没有 `checkins` 键**
+（[supervision/views.py:1059](file:///Users/wl/M4/TNR/supervision/views.py#L1059) 原来只认 `'checkin'` 与 `None`），
+而前端写的是 `sup.checkins || []` —— 空值静默兜底，于是：
+
+- 「领养回访监管」这一页的**回访打卡列恒为 0 次**，不论真实有几条；
+- 详情抽屉里的打卡时间线**永不出现**，机构驳回过的回访在监管端完全看不见；
+- 不报错、不告警，页面长得跟「这个领养确实没人回访」一模一样。
+
+这一条只有真点一次浏览器才会发现，静态判据永远绿灯。修法是让 `adoption` 这一格也下发 `checkins`
+（打卡本来就是「领养回访监管」的附属数据），并补两条行为判据
+`supervision/tests.py::test_business_adoption_payload_carries_checkins`（键存在 + 三档状态都下发 +
+按 `pet_id` 关联得上）与 `test_business_checkin_scope_follows_district`（区县账号只看本区动物的打卡）。
+
+### 十七、领养单状态的四种叫法（`ADOPTION_STATUS` / `APPLY_STATUS`，M93–M102）
+
+后端 `Adoption.STATUS_CHOICES` 是 待领出 / 已完成 / 已取消，前端却有四份实现：
+
+| 位置 | 原来怎么写 | 后果 |
+| --- | --- | --- |
+| 机构端筛选下拉 | 与后端一致（唯一对的一处） | — |
+| 机构端徽章兜底表 | `cancelled` → 「已撤销」 | 同一张单，机构自己两种说法 |
+| 医院端出院看板 | `completed` → 「已领出」、`cancelled` → 「已撤销」 | 与动物状态「已领养」混成一件事 |
+| **领养人端「我的领养」卡片** | **不看 `status`，写死绿色「已领养」** | `pending_claim`（医院还没确认领出）与 `cancelled`（已取消）都显示成已办完，**领养人据此白跑一趟医院** |
+
+最后一条是这一格里最伤人的：单据状态字段就在 payload 里，渲染时压根没读。
+现在两处徽章都走 `TNR_UI.adoptionStatusBadge`
+[static/js/tnr-common.js:1538](file:///Users/wl/M4/TNR/static/js/tnr-common.js#L1538)，
+医院端看板改为从真源生成 map，机构端六处领养展示（动物去向页签、领养详情、领养登记表列 + 抽屉、
+全量台账、一宠一档）逐点接线。`AdoptionApplication.status` 同理收进 `APPLY_STATUS`
+（多一档 `cancelled` = 领养人自己撤回，[static/js/tnr-common.js:1560](file:///Users/wl/M4/TNR/static/js/tnr-common.js#L1560)）。
+
+判据 `AdoptionStatusSingleSourceTest`（[core/tests_frontend_consistency.py:837](file:///Users/wl/M4/TNR/core/tests_frontend_consistency.py#L837)，7 例）里两条是针对性的：
+`test_no_hardcoded_adoption_badge` 全仓库扫 `badge-\w+">…已领养`（写死徽章直接红），
+`test_no_legacy_adoption_wording` 禁止「已撤销 / 已领出」回来；
+筛选下拉虽然不走真源（它是手写字面量），也用
+`test_shelter_adoption_filter_still_covers_backend` 逐条比对后端 label，
+免得「下拉写已完成、列表显示已领出」。
+
+### 十八、顺带清掉的三处显示盲区
+
+- 机构端全量台账的**放归列写死 `statusBadge('已放归', 'success')`**：待转运、待小区签字的单子
+  在台账里也是一片绿色「已放归」，与放归两段流程的实际情况相反；
+- 一宠一档的放归明细只有「放归时间」，而 `released_at` 办结前是空的，
+  于是未办结的单子看着跟「没填」一样 —— 补 状态 + 转运回小区 两行；
+- 新增 `TNR_UI.joinInfo(parts)` [static/js/tnr-common.js:1582](file:///Users/wl/M4/TNR/static/js/tnr-common.js#L1582)：
+  「猫 · 」「 · 中华田园犬」这类半截分隔符（字段为空仍照拼 ` · `）在领养人端卡片与医院端
+  待办/交接列表里都有，现统一为空值跳过、全空给 `—`；函数内部已转义，调用方不再叠 `escape`。
+
+### 十九、删掉两条历史判据（避免「判据本身在维护旧缺陷」）
+
+- `CheckInStatusMappingTest`：锚点正是本轮删掉的二值兜底，且强制要求机构端保留「未通过」——
+  它把真源迁移判成失败；
+- `FilterBarOptionCoverageTest.test_shelter_checkin_status_filter_covers_all`：
+  该判据靠匹配字面量 `{ value: …, label: … }` 定位下拉，对生成式选项必然误报。
+
+两处的原位都留了注释指明由哪个新判据接管（「覆盖全部取值」现在等价于「真源覆盖全部 choices」，
+已由 `CheckInStatusSingleSourceTest` 双向钉住）。**判据失效时代码跟着改，不改判据的口径**。
+
+### 二十、浏览器实测（127.0.0.1:8000，同一批演示数据）
+
+| 端 | 页面 | 改前 | 改后 |
+| --- | --- | --- | --- |
+| 政府 | 领养回访监管 · 回访打卡 | `0 次`（载荷没有 checkins） | `3 次`，悬停 `待审核1 / 已通过1 / 已驳回1`，全通过才绿 |
+| 领养人 | 我的领养 · `pending_claim` 卡片 | 绿色「已领养」 | 朱色「待领出」 |
+| 领养人 | 我的领养申请 | 自带表文案 | 已通过 / 已拒绝 / 已取消（后端 label） |
+| 机构 | 全量台账 · 领养台账 | 「已领养」/ 兜底表叫法 | 已完成 / 待领出 |
+| 机构 | 全量台账 · 放归台账 | 一律绿色「已放归」 | `已回小区待放归`（badge-info） |
+| 医院 | 出院管理 · 领养 | 「已领出 / 已撤销」 | 已完成 / 待领出（与动物状态「已领养」分列） |
+
+### 廿一、结果
+
+- `core.tests_frontend_consistency` 177 例通过（本轮新增 14 例判据、删 2 例失效判据）；
+- `supervision` 18 例通过（新增 2 例载荷行为判据）；
+- **全量套件 1773 例通过，508.343s**（上一基线 1764）；
+- 变异 **M85–M102 全部被捕获**，且每条都只由登记的判据抓到（M89/M101 的预期名已加类名限定，
+  避免两个同名 `test_renderers_use_the_source` 互相顶包）；
+- `scripts/check_inline_js.py`：11 段内联脚本 + 5 个门户 JS，0 处失败；
+- 变异跑完后 `git status` 与跑前一致，工作区没有留下被删掉的判据。
+
+### 廿二、新增需人工确认（文案已按后端 label 统一，属对外口径改动）
+
+1. **回访口径**：监管端与机构端现在都叫「已驳回」（原机构端写「未通过」）。
+   若业务/公文习惯用「回访不合格」，改一处 `TNR_UI.CHECKIN_STATUS.rejected.text` 即可，
+   但必须同步后端 `CheckIn.STATUS_CHOICES` 的 label —— 判据不允许两边各叫各的。
+2. **领养单口径**：「已完成」取代医院端的「已领出」、「已取消」取代「已撤销」，
+   领养人端卡片不再出现「已领养」字样（那是**动物**的状态 `Pet.status=adopted`）。
+   已打印的历史领养单上仍是旧文案，若要统一需要重排打印模板。
+3. **`pending_claim` 单据在领养人端显示「待领出」**（旧版显示绿色「已领养」）。
+   新读法更准确，但领养人会第一次在自己的卡片上看到「还没办完」——
+   要不要再加一句引导（「请到 X 医院办理，联系电话…」），属界面取舍。
+
+## 第五十二轮 续 · 电脑端巡检（四）：捕捉/转运/诊疗的三份私有状态表与「还没签完」的七份副本
+
+电脑端从政府监管页逐签往下点，捕捉、转运、诊疗三条链路上的状态显示**没有一个真源**：
+同一个 `status` 在四个门户里各写各的表，后端加了一个值，四个界面各自漏。本轮把这三套枚举
+一并收进 `TNR_UI`，并把「转运单还没签完」这个业务口径从 7 份字面量副本收成 1 份。
+
+### 廿三、漏 `partial` 是**静默**的：三种漏法，没有一种会报错
+
+第四十八轮把转运拆成 `pending / partial / received / rejected / void` 五态（部分签收），
+捕捉同步引入 `partial`（部分转运）。后端改完了，前端三份私有表一张也没跟上，而且**漏的方式各不相同**：
+
+| 位置 | 表 | 漏法 | 界面表现 |
+| --- | --- | --- | --- |
+| `gov.js` 全业务监管 · 转运列 | `{pending:'待接收', received:'已接收'}` | 没有 `partial` 键 | 单元格**直接打印枚举码 `partial`** —— 监管台账里出现英文码 |
+| `gov.js` 全量台账 · 转运列 | 同上（另写一份） | 没有 `partial` 键 | 同上 |
+| `gov.js` 捕捉抽屉 | 局部表 | 没有 `partial` 键 | 部分转运的捕捉单显示兜底文案，看不出走到哪一段 |
+| `hospital.js` 交接看板 5 个页签 + 待办 | `pendRecv` 等局部表 | 只判 `=== 'pending'` | **部分签收的单子从「待签收」页签消失**，医院再也点不到「去签收」，剩余动物永远签不完 |
+| `shelter.js` 可选动物池 `_availableTransferPets` | 无表，逐条 `===` | 只判 `pending`/`partial` 两个字面量 | 与后端「未办结」口径靠字面量对齐，后端加态即错 |
+| `adopter.js` 领养生命周期时间线 | `{received:'已签收'}[ev.status] \|\| '待签收'` | 二值兜底 | 医院已签收一半，领养人仍看到「待签收」，**看不出流程动过** |
+| `shelter.js` 通用 `statusBadge(status)` | 一张表混装领养+诊疗+转运 | 三套枚举挤在一张表 | 漏态时落到兜底，同 code 不同叫法 |
+
+其中「部分签收的转运单从医院待办里消失」是**会卡住业务**的：单据停在 `partial`，
+剩余动物既不能继续签收，也不会出现在任何页签，只能靠后端接口硬推。
+
+另有两处纯粹的命名漂移：
+
+- 政府端把转运写成**「待接收 / 已接收」**，后端 label 与医院、机构、领养人三端全是**「待签收 / 已签收」**
+  —— 同一张单，监管台账和办理端两种说法，对不上公文；
+- 政府端把诊疗单状态 `in_progress` 标成**「诊疗中」**，还**在同一个文件里给同一个 code 配了两种颜色**
+  （一处 info 一处 primary）。`Treatment.status` 只有 `in_progress/completed`（进行中/已完成），
+  「诊疗中」是另一个字段 `STAGE_CHOICES`（待接诊/诊疗中/诊疗完毕）里的**阶段**名，
+  拿阶段名当状态名，看板上「诊疗中」和「诊疗完毕」会同时出现，读者以为是同一维度。
+
+### 廿四、真源：三套枚举 + 一个「未办结」数组
+
+`static/js/tnr-common.js` 新增（紧接 `CHECKIN_STATUS` 之后，沿用既有 `{text, badge}` + `xxxText()/xxxBadge()` 形状）：
+
+| 真源 | 行 | 覆盖 | 备注 |
+| --- | --- | --- | --- |
+| `TNR_UI.CAPTURE_STATUS` | :1533 | 待转运 / 部分转运 / 已完成 / 已作废 | 文案逐字等于 `Capture.STATUS_CHOICES` 的 label |
+| `TNR_UI.TRANSFER_STATUS` | :1560 | 待签收 / 部分签收 / 已签收 / 已驳回 / 已撤回 | 五态齐全，`void` 单独有配色，不再混进 `rejected` |
+| `TNR_UI.OPEN_TRANSFER_STATUS` | :1573 | `['pending','partial']` | 注释点名「口径唯一定义处 = `Transfer.OPEN_STATUSES`」 |
+| `TNR_UI.isOpenTransferStatus(s)` | :1587 | — | 前端唯一允许的「还没签完」判据 |
+| `TNR_UI.TREATMENT_STATUS` | :1595 | 进行中 / 已完成 | 只装 `status`；`STAGE_CHOICES` 的阶段名**没有**塞进来，避免再造一张混装表 |
+
+改掉的调用点（共 14 处显示 + 6 处前端判据）：
+
+- `gov.js`：捕捉列、两张转运列、两张诊疗列、捕捉/转运抽屉明细，全部改为 `TNR_UI.*Badge/Text(r.status)`；
+- `shelter.js`：删掉整张通用 `statusBadge()`，7 个调用点分流到 `transferStatusBadge`（抽屉、两张表、台账、一宠一档）
+  与 `treatmentStatusBadge`（台账、一宠一档）；`captureStatusBadge()` 保留但只剩一行委派；
+  `_availableTransferPets` 的占用判据 → `TNR_UI.isOpenTransferStatus(t.status)`；
+- `hospital.js`：`transferStatusBadge/treatmentStatusBadge` 改为委派；`pendRecv`、待办筛选、`renderReceiveTab`
+  筛选、「去签收」按钮条件、`canSign` 五处判据全部走 `isOpenTransferStatus`；5 个页签标题与空态文案
+  改用 `transferStatusText()`（本地 `labels` 表删除）；待办标题改为
+  `TNR_UI.transferStatusText(t.status) + '转运单 ' + ledger_no`，两条描述用 `TNR_UI.joinInfo()` 拼接
+  （顺带消掉 2 处悬空的 ` · `）；
+- `adopter.js`：生命周期时间线的转运行、诊疗行分别取 `transferStatusText/treatmentStatusText`，
+  兜底字面量删除。
+
+**代码精简**：`Shelter.statusBadge` 属典型「一张表服务三种枚举」的偷懒结构，缺态时静默落兜底，
+是本轮 3 处漏 `partial` 的共同成因，直接删除而非迁移。
+
+### 廿五、后端口径：`Transfer.OPEN_STATUSES`
+
+「医院还没签完 = 仍可继续签收或驳回」这句判断，此前在 `views_transfer.py` 里写了两遍字面量
+`('pending','partial')`，前端又散着 5 遍。现在：
+
+```python
+OPEN_STATUSES = ('pending', 'partial')   # business/models.py:190
+```
+
+签收门禁 [:328](file:///Users/wl/M4/TNR/business/views_transfer.py#L328) 与驳回门禁
+[:408](file:///Users/wl/M4/TNR/business/views_transfer.py#L408) 都改为 `not in Transfer.OPEN_STATUSES`。
+
+注意它和 `services.ACTIVE_TRANSFER_STATUSES = ('pending','partial','received')` **故意不同**：
+后者回答「这张捕捉单还被转运单占着吗」（已签收也占用），前者回答「这张转运单还能改吗」。
+两个问题一个数组，混用会直接把已签收单据再打开。放归那边已有同形状的 `Release.OPEN_STATUSES`（:850）。
+
+### 廿六、判据：新增 10 例、删 3 例失效、改写 1 例
+
+`core/tests_frontend_consistency.py:441` 新增 `CaptureTransferTreatmentSingleSourceTest`：
+
+1. `test_sources_cover_backend_choices` —— 三套真源双向覆盖各自 `STATUS_CHOICES`（缺态、幽灵态都算失败）；
+2. `test_source_texts_equal_backend_labels` —— 文案逐字等于后端 label，钉死「待接收/诊疗中」这类自创叫法；
+3. `test_source_badges_exist_in_css` —— badge 后缀必须在 `tnr-traditional.css` 里真存在，防 `infoo` 这类手滑；
+4. `test_open_transfer_status_matches_backend` —— `OPEN_TRANSFER_STATUS` 与 `Transfer.OPEN_STATUSES` 集合相等；
+5. `test_no_frontend_reimplements_open_transfer` —— 正则抓 `status === 'pending' || status === 'partial'`
+   这类**重新实现口径**的写法（跨 40 字符窗口，允许换行）；
+6. `test_renderers_use_the_sources` —— 按门户逐一要求出现真源调用（gov 5 个、shelter 4 个、hospital 3 个、adopter 2 个）；
+7. `test_no_legacy_transfer_wording_in_status_maps` —— 全前端禁止 `pending/received` 映射到「待接收/已接收」；
+8. `test_treatment_status_not_labelled_by_stage` —— 禁止 `in_progress` 被标成「诊疗中」；
+9. `test_no_status_fallback_invents_a_state` —— 禁止 `|| '待签收'` 这类兜底造态（领养人时间线原病灶）；
+10. `test_backend_open_statuses_is_the_only_predicate` —— `views_transfer.py` 里 `Transfer.OPEN_STATUSES`
+    恰好 2 次，且字面量 `in ('pending', 'partial')` 归零。
+
+删除 3 例失效判据（都在原位留了注释说明由哪例接管）：`StatusEnumMappingTest` 的
+`test_shelter_status_badge_covers_adoption_and_treatment`、`test_shelter_capture_status_badge_covers_capture`、
+`test_hospital_status_maps_cover_transfer_and_treatment` —— 前两例锚定已删除的 `Shelter.statusBadge`，
+第三例强制要求医院端**保留本地表**，与新真源直接冲突；`test_shelter_pet_status_badge_covers_pet`
+改写为只断言 `tnr-api.js` 的读取器走 `TNR_UI.PET_STATUS`。
+
+### 廿七、变异：M103–M114 十二例，全部被捕获
+
+`scripts/mutation_check.py` 本轮登记 12 例，每条都改回「原病灶」的形状：
+M103/M104 政府端两张转运列退回待接收/已接收；M105 政府端诊疗列退回「诊疗中」；
+M106 捕捉抽屉退回本地表；M107 领养人时间线退回 `|| '待签收'`；M108 真源删 `partial`；
+M109 捕捉文案改「待送医」；M110 badge 改 `infoo`；M111 `OPEN_TRANSFER_STATUS` 删 `partial`；
+M112/M113 医院页签与机构可选动物池退回 `=== 'pending' || === 'partial'`；
+M114 驳回门禁退回字面量 `in ('pending','partial')`。
+
+跑完输出「全部变异均被捕获」，且每条只由登记的那例抓到；
+M112/M113 的锚点在登记前先 `grep -c` 确认唯一（此前一次探针用 6 空格缩进失配，文件实为 4 空格）。
+
+### 廿八、浏览器实测（127.0.0.1:8000，同一批演示数据）
+
+为了看到 `partial`，临时把转运单 51 置为 `partial` + `received_codes='TNR261018001'`（签一尾、留一尾），
+**验证完已原样还原**（当前 `partial` 计数回到 0）。
+
+| 端 | 位置 | 改前 | 改后 |
+| --- | --- | --- | --- |
+| 政府 | 全业务监管 · 转运状态列 | 单元格显示 `partial` | 「部分签收」（badge-info） |
+| 政府 | 全量台账 · 转运状态列 | `partial` | 「部分签收」 |
+| 政府 | 两张表的 `pending/received` | 待接收 / 已接收 | 待签收 / 已签收（= 后端 label） |
+| 政府 | 诊疗状态列 | 诊疗中（且同码两色） | 进行中 / 已完成，配色统一 |
+| 医院 | 动物交接 · 待签收页签 | **0 张**（单子不见了） | 「待签收 (1)」，「去签收」按钮可点 |
+| 医院 | 签收抽屉 | 无进度 | 「已签收 1/2」，剩余 1 尾待签 |
+| 医院 | 待办卡片标题/描述 | 「待签收 转运单…」+ 悬空 ` · ` | 「部分签收 转运单 TNR…」，`joinInfo` 正常分隔 |
+| 领养人 | 我的领养 · 生命周期时间线 | 一律「待签收」 | 「部分签收」 |
+| 机构 | 全量台账 · 捕捉/转运/诊疗 | 混装兜底表 | 三套真源分别出词，`void` 显示「已撤回」而非「已驳回」 |
+
+### 廿九、结果
+
+- `core.tests_frontend_consistency` 184 例通过（本轮 +10 例判据、−3 例失效、改写 1 例）；
+- `business` + `supervision` 相关 219 例通过（签收/驳回门禁改判据后行为不变）；
+- **全量套件 1780 例通过，967.926s**（上一基线 1773 例；本轮 −3 例失效判据 + 10 例新判据 = 1780，耗时高于基线是 -v 0 下 Django 日志写满 19MB 落盘，不是用例变慢）；
+- 变异 **M103–M114 全部被捕获**；
+- `scripts/check_inline_js.py`：11 段内联脚本 + 5 个门户 JS，0 处失败；
+- 变异跑完 `git status` 与跑前一致，工作区没有被删掉的判据。
+
+### 三十、新增需人工确认（对外文案口径改动）
+
+1. **政府端「待接收/已接收」→「待签收/已签收」**：这是把监管台账改成与办理端、后端 label 一致。
+   若监管侧公文确实要求用「接收」，正确做法是**后端 `STATUS_CHOICES` 的 label 一起改**，
+   判据不允许前端单独保留另一套叫法。
+2. **政府端诊疗单状态列「诊疗中」→「进行中」**：状态只剩 进行中/已完成；「诊疗中」仍是**阶段**名，
+   只应出现在三步流程的进度条上，不再出现在状态列。若监管看板想看阶段，应新增一列
+   显示 `Treatment.stage`，而不是复用状态位。
+3. **医院端部分签收的单子重新回到「待签收」页签**：改前它会消失，办理人只能走接口硬推；
+   现在页签计数、待办、按钮三处都会显示「部分签收」，属**新增可见操作入口**，
+   需要告知医院端操作人：签一半不影响继续签剩余动物。
+
+## 第五十二轮 续 · 电脑端巡检（五）：诊疗阶段的三张表与「同一个 code 两个名字」
+
+看板页签、状态列、详情抽屉各写一份阶段表，`checking` 这个 code 在看板叫「待检」、
+在详情叫「待接诊」；后端侧，五态桶名与 `?stage=` 筛选判据也各有两份手写副本。本轮一并收成
+「后端一张表 + 前端两张表」。
+
+### 卅一、两套「阶段」不是重复，是两个粒度——但每套只许有一处文案
+
+| 取值 | 来源 | 用在 |
+| --- | --- | --- |
+| `Treatment.stage`（三态） | 由 `checked_at/done_at` 派生，`STAGE_CHOICES`：待接诊 / 诊疗中 / 诊疗完毕 | 详情抽屉「当前阶段」、三步流程的步骤定位 |
+| `board_stage`（五态） | 后端 `_board_stage()` 再看 `diagnosed_at/disposed_at`：待接诊 / 待诊断 / 诊疗中 / 待出院 / 已出院 | 医院看板页签、状态列、操作按钮 |
+
+三态是五态的粗化，两者共享 `checking`/`treating` 两个 code。**共享 code 就必须共享文案**，
+否则同一只动物、同一时刻在同一个页面有两种说法——本轮之前正是如此：
+`hospital.js` 里有三张互不相干的表（`txStageBadge()` 的 `[文案, badge]`、
+`renderBoard()` 的页签 `FILTERS`、`txStageText()` 的三态 map），
+改一个页签名要翻三个方法，`checking` 就漂成了「待检 / 待接诊」。
+
+顺带把「待诊」改成「待诊断」：与「待接诊」只差一个字，扫一眼分不清下一步是做检查还是下诊断。
+
+### 卅二、新增真源与后端表
+
+- `static/js/tnr-common.js:1623` `TNR_UI.TREATMENT_STAGE`（三态，文案 = `STAGE_CHOICES` label）+ `treatmentStageText()`；
+- `:1636` `TNR_UI.BOARD_STAGE_ORDER`（五态**流程顺序**，逐位等于 `Treatment.BOARD_STAGES`）；
+- `:1639` `TNR_UI.BOARD_STAGE` + `boardStageText()/boardStageBadge()`；
+- `business/models.py` `Treatment.BOARD_STAGES`（五态桶名与顺序）、`Treatment.STAGE_FILTERS`
+  （三态的时间戳判据，与 `stage` 属性同源）；
+- `business/views_treatment.py` `_board_buckets()`：空桶由 `BOARD_STAGES` 生成，
+  「账号未绑机构」兜底与正常分桶**不再各写一份五键字面量**；
+- `business/views_treatment.py` `?stage=` 筛选改读 `STAGE_FILTERS`，删掉手写的 `isnull` 组合。
+
+调用点收敛：`hospital.js` 的 `txStageBadge()`（改 `TNR_UI.boardStageBadge`）、
+`renderBoard()` 页签（`BOARD_STAGE_ORDER.map` + `boardStageText`，提示语留在医院端）、
+`txStageText()`（改 `TNR_UI.treatmentStageText`）。
+
+### 卅三、为什么桶名重复会「整列消失」
+
+空桶字面量在两处（兜底 / 正常分桶），加一态只改一处时，另一处少一个键；
+前端按 `BOARD_STAGE_ORDER` 迭代页签去取 `board[k]`，取不到就是 `undefined`，
+`txBoardRows()` 返回 `[]`——那一态的动物在看板上**不出现、不报错**。
+`?stage=` 的手写判据同理：属性与筛选两处推导一漂，
+表现是「按『诊疗中』筛出 3 条，点开其中一条写着诊疗完毕」。
+
+### 卅四、判据：新增 7 例静态 + 1 例行为
+
+`core/tests_frontend_consistency.py` 新增 `TreatmentStageSingleSourceTest`：
+
+1. `test_treatment_stage_matches_backend_labels` —— 三态双向覆盖 `STAGE_CHOICES` 且文案逐字相等；
+2. `test_board_stage_order_matches_backend_stages` —— **列表逐位相等**（页签顺序就是流程顺序，用集合比较会放过顺序错乱）；
+3. `test_board_stage_keys_and_badges_are_complete` —— 五态表键与顺序一一对应 + 配色名在 CSS 里真存在；
+4. `test_shared_stage_code_has_one_name` —— 两张表里同名 code 必须同名（本轮病灶那条）；
+5. `test_no_portal_restates_stage_labels` —— 除真源外，任何前端文件把阶段码映射到**某条真源文案**即失败；
+   判据按真源文案动态取集合，所以医院端的悬停提示（『已交接、尚未提交检查单』）与按钮名（『检查』『诊断』）
+   不算冒名——它们是医院自己的操作语；
+6. `test_hospital_board_reads_the_stage_source` —— 医院端必须出现 5 个真源调用；
+7. `test_backend_buckets_and_filter_read_the_tables` —— 后端不许再写五键字面量与手写 `isnull` 组合。
+
+行为判据 `business/tests/test_treatment_flow.ListStageFilterTest.test_stage_filter_and_property_agree`：
+用四种时间戳组合各造一张单，逐个阶段码比对「`stage` 属性说的」与「`?stage=` 接口筛出的」，
+两边必须同一批 id。`BoardStageTest` 另加一条：五态用例的取值集合必须等于 `BOARD_STAGES`
+（防「判据与桶名各长各的」）。
+
+### 卅五、变异：M115–M126 十二例，全部被捕获
+
+M115 看板把 `checking` 改回「待检」；M116 页签顺序把 `treating` 排到 `pending_diagnose` 前；
+M117 五态表删 `pending_diagnose`；M118 `done` 文案改「已办结」；M119 配色名拼成 `warningg`；
+M120/M121 医院端页签与详情各自回退一份本地文案表；M122 页签改回硬编码五态列表；
+M123 空桶退回五键字面量；M124 `?stage=` 退回手写时间戳判据；
+M125 `STAGE_FILTERS.treating` 少算 `done_at`（真漂移，由行为判据抓到 `stage='treating'`）；
+M126 后端 `BOARD_STAGES` 漏 `pending_discharge`。
+
+跑完「全部变异均被捕获」，`git status` 与跑前一致。
+
+### 卅六、浏览器实测（127.0.0.1:8000，医院端 爱心宠物医院）
+
+| 位置 | 改前 | 改后 |
+| --- | --- | --- |
+| 诊疗看板五个页签 | 待检 / 待诊 / 诊疗中 / 待出院 / 已出院 | **待接诊 / 待诊断 / 诊疗中 / 待出院 / 已出院**（计数照常） |
+| 看板状态列徽章 | 本地表拼 `badge badge-warning` | `TNR_UI.boardStageBadge()`，已出院 7 行仍 `badge-success` |
+| 详情抽屉「当前阶段」 | 另一张本地表 | 取 `STAGE_CHOICES` label（待接诊/诊疗中/诊疗完毕） |
+| 未知取值 | — | `boardStageBadge('whatever')` → `badge-default` + 原样英文码（**不编造状态**） |
+| `?stage=checking/treating/done` | 200 | 200；`?stage=whatever` → 400「未知的诊疗阶段」 |
+| `board/` 载荷桶名 | 5 桶 + counts | 同一套 5 桶（改由 `BOARD_STAGES` 生成） |
+
+本轮没有改动任何演示数据（看板只有 7 张已出院单，未新增中间态数据）。
+
+### 卅七、结果
+
+- `core.tests_frontend_consistency` + `business.tests.test_treatment_flow` 294 例通过；
+- **全量套件 1788 例通过，494.510s**（上一基线 1780）；
+- 变异 M115–M126 全部被捕获；
+- `scripts/check_inline_js.py`：11 段内联脚本 + 5 个门户 JS，0 处失败。
+
+### 卅八、新增需人工确认
+
+1. **看板页签文案改动**：「待检」→「待接诊」、「待诊」→「待诊断」。
+   这是为了让看板与详情抽屉、后端 label 同一口径；若医院端习惯说「待检」（指待做检查），
+   正确做法是改后端 `STAGE_CHOICES` 的 label 并同步真源，判据不允许两处各叫各的。
+2. **`?stage=` 接口参数目前没有界面调用点**（医院看板走 `board/`，出院管理也走 `board/`）。
+   本轮把它的判据收进 `STAGE_FILTERS` 并补了行为判据，没有删——它是被测的公开接口。
+   要不要连筛选 UI 一起做（诊疗记录列表加「阶段」下拉），属界面取舍。
+
+## 第五十二轮 续 · 电脑端巡检（六）：平台端「启用/停用」的八份抄本与角色名的五份副本
+
+### 卅九、盘点：四张枚举散成了二十处副本
+
+平台端是这一轮唯一没被「重构 B 前端枚举单一来源」覆盖到的门户 ——
+它的账号/机构页面是后来整体迁进 `platform.js` 的，枚举全部就地手写：
+
+| 枚举 | 副本数 | 位置 | 已出现/可预见的后果 |
+| --- | --- | --- | --- |
+| 实体状态（启用/停用） | **8** | 徽章表、3 个筛选下拉、3 行切换按钮、捕捉点端个人中心 | 徽章表里多一个后端**永远不会产出**的 `disabled` 幽灵态；个人中心把「启用」写死成绿色，账号被平台停用后仍显示启用 |
+| 角色名 | **5** | 名称表、徽章表、角色筛选、建号下拉、权限说明卡 | 同一账号在列表叫「市级管理员」，`role_display` 与打印单据叫「市级政府管理员」；授权说明与监管台账对不上 |
+| 机构类型 | **3** | 页面 tab、弹窗标题、账号表单机构提示 | 三处各写一份，新增机构类型（如小区）时 tab 里会整类消失 |
+| 芯片状态 | **4** | 捕捉点端列、医院端列、芯片追溯弹窗、共用徽章表 | 两份把顺序写反、把「已使用」叫「已植入」，与后端 choices 的 label 不一致 |
+
+共同点：**都不报错**。后端加了枚举值，前端只是少一列/漏一项；
+后端改了 label，界面上仍是一个旧叫法。只有把源码和 `choices` 对起来才看得见。
+
+### 四十、真源：前端一张表，后端一组常量
+
+`static/js/tnr-common.js` 新增（`TREATMENT_STAGE` / `BOARD_STAGE` 之后）：
+
+- `ENTITY_STATUS` / `entityStatusText` / `entityStatusBadge` /
+  `entityStatusOptions` / `entityToggleLabel` / `entityToggleBtnClass`；
+- `ROLE` 与 `ROLE_ORDER` / `roleText` / `roleBadge` / `roleOptions(exclude)`；
+- `INST_TYPE` / `instTypeText` / `instTypeBadge`；
+- `CHIP_STATUS` / `chipStatusText` / `chipStatusBadge`。
+
+`core/models.py` 新增模块级常量与唯一的文案函数：
+
+```python
+STATUS_ACTIVE = 'active'
+STATUS_INACTIVE = 'inactive'
+STATUS_VALUES = (STATUS_ACTIVE, STATUS_INACTIVE)
+STATUS_LABELS = {STATUS_ACTIVE: '启用', STATUS_INACTIVE: '停用'}
+def status_label(value): return STATUS_LABELS.get(value, value)
+```
+
+写侧全部改为引用常量：`supervision/views.py`（机构/区县/用户创建与启停）、
+`business/services.py`（停用机构/区县校验）、`business/views_material.py`
+（调拨目标与批次查询）、`seed_data`、`ensure_superuser`、
+`ensure_platform_admin`。`District` / `Institution` / `User` 的默认值改为
+`default=STATUS_ACTIVE`。
+
+`platform.js` 删掉了 `getRoleName` / `getRoleBadge` / `getStatusBadge` /
+`getInstTypeLabel` 四张本地表（其中 `getInstTypeLabel` 已无调用点，直接删除，
+没有为它保留兼容层）；tab 用 `INST_TABS` + `instTabLabel()`，下拉用
+`entityStatusOptions()` / `roleOptions(['adopter'])`，切换按钮用
+`entityToggleLabel()` + `entityToggleBtnClass()`。捕捉点端芯片列、医院端芯片列、
+芯片追溯弹窗统一走 `chipStatusBadge()`。
+
+### 四十一、浏览器实测先抓到一处真缺陷：门户 `user_data` 没有 `status`
+
+改完 `shelter.js` 后打开捕捉点端个人中心，账号状态渲染成
+`<span class="badge badge-default">—</span>` —— 不是枚举表错了，而是**载荷里没有这个键**。
+
+`/api/me/` 与门户的 `window.TNR_USER` 是两套数据：三端模板读的是
+`business/views_portal._portal_user_data()`，它此前不带 `status` 和
+`role_display`。于是：
+- 个人中心「角色」只能回退到英文码；
+- 「账号状态」显示「—」，而三端旧代码干脆写死绿色「启用」。
+
+修复：`_portal_user_data()` 补 `status` / `role_display`（注释写明是给徽章读的），
+`adopter_portal()` 里重复构造的字典一并收敛到该函数；`accounts.views.api_me`
+也补 `status`。判据里加了一条 `"'status': user.status"` 出现在
+`business/views_portal.py` —— 前端断言和后端载荷从此绑在一起。
+
+### 四十二、判据：`PlatformEnumSingleSourceTest` 7 例
+
+1. `test_entity_status_matches_backend_domain` —— 键**顺序**等于
+   `STATUS_VALUES`、文案等于 `STATUS_LABELS`、禁止 `disabled`、每个配色在 CSS 里有规则；
+2. `test_role_keys_and_labels_match_backend_choices` —— `ROLE` 的键/顺序/文案
+   逐项等于 `User.ROLE_CHOICES`，`ROLE_ORDER` 也等于 choices 顺序；
+3. `test_inst_type_matches_backend_choices` —— 文案等于 `Institution.TYPE_CHOICES`；
+4. `test_chip_status_matches_backend_choices` —— 键/顺序/文案等于 `Chip.STATUS_CHOICES`；
+5. `test_platform_portal_reads_the_enum_sources` —— `platform.js` 必须出现 8 个
+   `TNR_UI.*` 调用 token，禁止「市级管理员/区级管理员/disabled」以及三类自写字面量；
+6. `test_shelter_account_status_reads_the_source` —— 捕捉点端必须走
+   `entityStatusBadge(user?.status)` / `roleText(user?.role)`，且后端载荷带 `status`；
+7. `test_backend_status_writes_use_the_constants` —— 6 个后端文件用 **AST** 扫描
+   （排除注释与 docstring）不得再出现 `'active'` / `'inactive'` / `'disabled'`
+   代码字面量，两个模型的默认值必须写 `default=STATUS_ACTIVE`。
+
+用 AST 而不是正则的理由：本仓库大量注释在解释「以前写的是 `'active'`」，
+正则会把历史说明当成第二处真源，判据会逼着人删注释。
+
+### 四十三、变异：M127–M137 十一例，全部被捕获
+
+M127 实体状态「启用」改「启用中」；M128 幽灵态 `disabled` 重回表；
+M129 角色名退回「市级管理员」；M130 机构类型「捕捉点」改「收容点」；
+M131 芯片「已使用」退回「已植入」；M132 平台端状态筛选退回字面量选项；
+M133 角色列改回纯文本；M134 捕捉点端账号状态写死绿色「启用」；
+M135 机构创建写回裸 `status='active'`；M136 `STATUS_ACTIVE` 改成后端永不产出的
+`'enabled'`；M137 `ROLE_ORDER` 漏掉 `adopter`。跑完「全部变异均被捕获」，
+`git status` 与跑前一致。
+
+### 四十四、浏览器实测（127.0.0.1:8000，演示数据）
+
+| 位置 | 改前 | 改后 |
+| --- | --- | --- |
+| 平台端区县/机构筛选 | 三处各写「启用/停用」 | `ENTITY_STATUS` 生成，顺序与后端一致 |
+| 机构列表状态列 | 本地三目拼徽章 | `entityStatusBadge()`；`disabled` 不再存在 |
+| 启停按钮 | 本地三目换词 | `entityToggleLabel()` / `entityToggleBtnClass()` |
+| 新增机构弹窗标题 | 本地类型表 | `instTabLabel()` → 「新增捕捉点」 |
+| 账号角色筛选/列/权限卡 | 「市级管理员 / 区级管理员」 | 「市级政府管理员 / 区级政府管理员」（= 后端 label） |
+| 建号弹窗角色下拉 | 本地数组 | `roleOptions(['adopter'])`，顺序 = `ROLE_CHOICES` |
+| 捕捉点端个人中心 | 角色英文码回退、账号状态写死绿色「启用」 | 「捕捉点操作员」+ `entityStatusBadge(user.status)`（实测 `badge-success`「启用」） |
+| 捕捉点/医院芯片列 | 各自映射，「已植入」 | `chipStatusBadge()` → 可用/在途/已使用/已作废 |
+| 芯片追溯弹窗 | 第四份映射 | `chipStatusText()` |
+| 未知状态 | 静默兜底成某个业务状态 | `badge-default` + 原样英文码（不编造状态） |
+
+### 四十五、附：全量套件被真实出网拖死（测试卫生问题）
+
+本轮全量套件第二次运行时卡了 13 分钟以上。`sample` 显示主线程停在
+`_ssl__SSLSocket_do_handshake_impl` → `poll`，`lsof` 有一条到
+`59.82.43.66:443`（`restapi.amap.com`）的连接。定位结果：
+
+- `core/tests.py` 的 `AllApiPostRoutesContractTest` 会用「路由 × 5 角色 ×
+  几十种畸形体」POST **每一条** `/api/` 路由；
+- `/api/business/geocode/ip/` 对 shelter/政府角色放行且**不判请求方法**，
+  每次都会真的请求高德；
+- 该组闸门一次跑上万请求，于是外部请求从「几十次」放大到「上千次」，
+  被 DNS/TLS 握手拖成十几分钟——表现像死锁，实际是**测试在出网**。
+
+修复：新增 `pin_outbound_amap(testcase)`，在三个「枚举全部路由」的闸门
+（GET 信封、POST 请求体、响应体键名）里把 `views_capture.amap_ip_location`
+与 `amap_regeo` 钉成固定坐标（每次返回**新字典**，因为视图会 `pop`/写入经纬度），
+`addCleanup` 收口。闸门只断言响应契约，地图数据真假与判据无关；
+专测地图逻辑的 `test_ip_location` / `test_services` / `test_capture_views`
+仍各自显式 mock，不受影响。
+
+### 四十六、结果
+
+- `PlatformEnumSingleSourceTest` 7 例通过；
+- 变异 M127–M137 全部被捕获；
+- `scripts/check_inline_js.py`：11 段内联脚本 + 5 个门户 JS，0 处失败；
+- `manage.py check` 无告警；
+- **全量套件 1795 例通过，290.960s**（上一基线 1788 例 / 494.510s；
+  本轮新增 7 例判据；耗时下降主要来自上面那条「测试不再真实出网」）。
+
+### 四十七、新增需人工确认
+
+1. **角色称谓统一为后端 label**：界面上的「市级管理员 / 区级管理员」
+   改为「市级政府管理员 / 区级政府管理员」。这是为了与账号详情、
+   打印单据、监管台账同一口径；若业务上习惯简称，正确做法是改
+   `User.ROLE_CHOICES` 的 label 并同步真源，判据不允许两处各叫各的。
+2. **芯片状态「已植入」统一为「已使用」**：与 `Chip.STATUS_CHOICES` 的
+   label 一致。对操作员是可见文案改动（含义不变）。
+3. **门户载荷新增 `status` 键**：`_portal_user_data()` 与 `/api/me/` 都多返回
+   一个 `status`。属于**新增**字段，不改既有键；若有外部脚本按「键集合」
+   严格校验响应，需要同步。
+4. **未知状态不再兜底**：数据库里若存在取值域外的历史值（例如旧的
+   `disabled`），界面会显示原样英文码 + 默认徽章，而不是猜一个「停用」。
+   这是有意为之；上线前建议跑一次
+   `manage.py check_data_integrity` 确认没有域外值。
+5. **机构类型 tab 由后端 choices 生成**：本轮 UI 文案未变（捕捉点/医院），
+   但新增机构类型会自动出现在 tab；若「小区」不应作为平台端可建类型，
+   需要在下拉的数据源里显式排除，而不是再写一张本地表。
+
+## 第五十二轮 续 · 电脑端巡检（七）：捕捉点端最后三张手写筛选表与流转时间线的 `partial`
+
+### 四十八、盘点：显示收口之后，筛选条仍是「第四份副本」
+
+电脑端巡检（四）～（六）把状态**显示**逐项收进了 `TNR_UI.*_STATUS`，
+但捕捉点端的三个状态筛选下拉仍是逐条手写的字面量：
+
+| 筛选条 | 位置 | 手写选项 | 后果 |
+| --- | --- | --- | --- |
+| 捕捉记录 | `shelter.js:370` | pending / partial / completed / void | 本轮恰好写全；后端加一档时必定漏，且不会报错 |
+| 转运明细 | `shelter.js:1714` | pending / partial / received / rejected / void | 同上 |
+| 领养审核 | `shelter.js:3571` | pending_claim / completed / cancelled | 初版曾按「想当然的审批流」写成 pending / rejected，真实存在的 cancelled 反而选不到 |
+
+同一张单据的状态在「徽章 / 看板 / 打印 / 筛选」四处各写一份，
+审计时只能靠人眼对齐 —— 这正是本轮反复收口的那类静默漂移。
+
+流转全过程时间线（一宠一档）里还留着最后两张本地表：
+
+- 转运状态表只有 `pending / received / rejected`，**漏 `partial`**，兜底是
+  `|| ev.status` —— 医院只签收了一部分的单子，时间线直接印出英文 `partial`；
+- 诊疗状态写死 `status === 'completed' ? '已完成' : '进行中'`，
+  与 `Treatment.STATUS_CHOICES` 平行维护。
+
+两处都不报错、不标红，只是「看着不对」。
+
+### 四十九、改动：生成器 + 真源取值
+
+`static/js/tnr-common.js` 新增通用生成器（`tnr-common.js:1435`）：
+
+```js
+statusOptions(table) {
+  return Object.keys(TNR_UI[table]).map(value => ({
+    value, label: TNR_UI[table][value].text,
+  }));
+},
+```
+
+以及三个薄包装：`captureStatusOptions()` / `transferStatusOptions()` /
+`adoptionStatusOptions()`。顺序即真源定义顺序（也是后端 `choices` 的顺序），
+文案即后端 label，不再需要人工抄写。
+
+`shelter.js` 三处筛选改为调用生成器（`shelter.js:370`、`:1714`、`:3571`）；
+流转时间线的转运/诊疗状态改为 `TNR_UI.transferStatusText(ev.status)` /
+`TNR_UI.treatmentStatusText(ev.status)`（`shelter.js:4497`、`:4502`），
+删掉本地 `transferStatus` 与 `itemText` 两张表。
+
+本次**不改后端、不改接口**：`partial` 本来就该显示为后端 label「部分签收」，
+此前只是前端自己没取。
+
+### 五十、判据：从「比字面量」改成「比生成器」
+
+原来的 `FilterBarOptionCoverageTest` 用 `select_filters()` 解析每个下拉的
+`options: [{ value, label }]` 字面量，再与后端 choices 双向比对。
+生成式选项的 `options` 是函数调用，解析器看不到取值 —— 继续用它只会误报。
+
+替换为两条：
+
+1. `test_shelter_status_filters_use_generators`：三条筛选必须调用对应的
+   `TNR_UI.*StatusOptions()`，且文件里不得再出现
+   `value: 'partial' / 'pending_claim' / 'void' / 'received'` 这类手写项；
+2. `test_status_options_reads_text_in_key_order`：生成器必须
+   `Object.keys(TNR_UI[table])`（键序）并取 `TNR_UI[table][value].text`
+   （文案）—— 否则「有真源」也可能渲染出一列英文码。
+
+「生成器能筛到全部取值」已等价于「真源覆盖全部后端 choices」，后者由
+`CaptureTransferTreatmentSingleSourceTest` 与 `AdoptionStatusSingleSourceTest`
+对真源逐项钉住。因此原领养筛选的字面量判据改成
+`test_shelter_adoption_filter_uses_source`（只钉「走生成器」），
+不再复制一份「取值 + 文案」的期望值。
+
+新增 `test_shelter_lifecycle_timeline_uses_the_sources`
+（`core/tests_frontend_consistency.py:563`）：时间线必须调用
+`transferStatusText(ev.status)` / `treatmentStatusText(ev.status)`，
+且不得再出现 `const transferStatus = {` 或「已完成 / 进行中」二分。
+
+### 五十一、变异：新判据全部捕获，并修好 9 条早已失配的旧锚点
+
+新增 M138–M142，全部被捕获：
+
+| 变异 | 复现的缺陷 | 捕获用例 |
+| --- | --- | --- |
+| M138 | 时间线转运状态退回本地表（漏 partial） | `test_shelter_lifecycle_timeline_uses_the_sources` |
+| M139 | 时间线诊疗状态退回二分 | 同上 |
+| M140 | 捕捉筛选退回手写字面量（漏作废档） | `test_shelter_status_filters_use_generators` |
+| M141 | 领养筛选退回手写字面量 | `test_shelter_adoption_filter_uses_source` + 生成器判据 |
+| M142 | `statusOptions` 把英文码当文案 | `test_status_options_reads_text_in_key_order` |
+
+跑变异前的预检另外点名了 **8 条锚点失配**（命中 0 次或 2 次）。
+失配的变异会被 SKIP，而 SKIP 在收尾日志里与 PASS 几乎一样 ——
+等于对应判据的判别力本轮根本没被验证。逐条修复：
+
+- **M16 / M17**（转运签收存在性预言机、跨区县送医）：签收状态判据已从
+  `('pending', 'partial')` 改成 `Transfer.OPEN_STATUSES`，旧锚点失配；
+  按当前写法重写，`test_receive_does_not_leak_status` /
+  `test_cross_district_receive_succeeds` 仍能捕获。
+- **M71 / M72**（宠物状态本地表）：`Shelter.statusBadge` 的本地兜底表已在
+  巡检（续）删除，判据搬到 `tnr-api.js` 的取值函数与「别处不得再出现
+  `in_treatment:` 键」上，变异目标同步搬家。
+- **M86 / M88**（打卡状态文案/配色）：`pending: { text: '待审核' … }` 与
+  `APPLY_STATUS` 完全同款，锚点从「命中 1 次」变成 2 次；加上
+  `CHECKIN_STATUS: {` 前缀钉住唯一位置。
+- **M102**（领养筛选自创文案）：锚的是已删除的手写字面量选项，
+  与 M141 完全等价，直接删除并在原处注明。
+- **M141** 初次写入时漏了行尾逗号（该行最后一项没有逗号），预检命中 0 次；
+  已按实际源码修正。
+
+修完后全表 **139 条锚点预检通过**；重跑受影响的 11 条变异
+（M16/M17/M71/M72/M86/M88 + M138–M142）**全部被捕获**。
+
+### 五十二、浏览器复核：先复现英文码，再确认修复
+
+演示库中没有 `partial` 转运单。为验证时间线，临时创建了一张
+`TRF-TEST-PARTIAL`（宠物 `TNR261018002`，2 只中签收 1 只），验证后删除。
+
+- **修改前**（浏览器里还驻留着旧 JS）：时间线显示
+  `状态：partial` —— 正是本轮要修的缺陷，且页面不报错；
+- **刷新后**：同一位置显示 `状态：部分签收`；
+- 三个筛选下拉（刷新后逐项读取 DOM）：
+  - 捕捉记录：待转运 / 部分转运 / 已完成 / 已作废；
+  - 转运明细：待签收 / 部分签收 / 已签收 / 已驳回 / 已撤回；
+  - 领养审核：待领出 / 已完成 / 已取消。
+
+第一条同时说明了一个部署事实：门户 JS 是内容哈希 URL，
+**后端发版后用户必须刷新页面**才能拿到新的状态表；SPA 内部跳转不会重新加载脚本。
+
+### 五十三、结果
+
+- `core.tests_frontend_consistency`：198 例通过；
+- `scripts/check_inline_js.py`：11 段内联脚本 + 5 个门户 JS，0 处失败；
+- `manage.py check`：无告警；
+- **全量套件 1795 例通过，299.498s**；
+- 变异预检 139 条锚点全部唯一。
+
+### 五十四、新增需人工确认
+
+1. **转运单作废的中文叫法**：真源与后端 label 都是「已撤回」。
+   若业务上更习惯「已作废」，应改 `Transfer.STATUS_CHOICES` 的 label
+   并同步真源，而不是在筛选条里单独换一个词。
+2. **时间线不再出现「诊疗中」**：诊疗单状态只有「进行中 / 已完成」，
+   「诊疗中」是**阶段**（`TREATMENT_STAGE`）的文案，两者不能混用。
+   如果现场确实习惯把状态叫作「诊疗中」，需要先统一后端 choices。
+3. **筛选条文案从此完全跟随后端**：以后调整状态叫法只需改
+   `choices` 的 label + `TNR_UI` 真源各一处；前端任何地方再手写选项
+   都会被本轮判据打红。
+
+### 五十五、精简：宠物状态徽章收成一个出口（10 处手拼 → 1 个帮助函数）
+
+巡检（六）把宠物状态表合到 `TNR_UI.PET_STATUS` 后，**取值层仍有两条路**：
+`TNR_API.getPetStatusText/getPetStatusBadge` 各自读真源再返回文案/类名，
+四个门户再各自拼 `<span class="badge …">`。结果是同一个徽章有
+「取文案 + 拼标签」两种写法，领养人端甚至用
+`.replace('badge-', '')` 把类名剥掉再套外层样式 —— 等于把已经统一的东西
+又拆回两处维护。本轮把它收成一个出口：
+
+- 新增 `TNR_UI.petStatusText(status)` 与 `TNR_UI.petStatusBadge(status)`；
+  后者直接返回**完整的** `<span class="badge badge-…">文案</span>`，
+  文案经 `TNR_UI.escape` 转义，未知状态落 `badge-default` + 原始码；
+- 删除 `TNR_API.getPetStatusText` / `getPetStatusBadge` —— `TNR_API`
+  只管接口调用，不再兼做显示层；
+- 迁移全部 10 处手拼：捕捉点端 4 处、医院端 4 处（动物徽章、卡片、
+  描述列表、安乐死下拉的文案）、监管端 1 处、领养人端 1 处
+  （同时删掉 `.replace('badge-', '')`）。
+
+**判据与变异**
+
+- `PetStatusSingleSourceTest.test_portals_use_the_badge_helper`：
+  扫描全部前端文件，禁止旧取值函数名与 `.replace('badge-')` 复活，
+  并要求四个门户都调用 `TNR_UI.petStatusBadge(`；
+- `test_shelter_pet_status_badge_covers_pet` 改用 `brace_body`
+  精确截取函数体。原先的 300 字符窗口会漏进相邻的 `petStatusBadge`，
+  即使 `petStatusText` 被改成局部表也仍能看到 `TNR_UI.PET_STATUS`，
+  变异抓不住；
+- `test_gov_pet_status_map_covers_pet` 改成正则匹配真正的表声明
+  （`TNR_UI.petStatusBadge` 本身含 `petStatus` 子串，旧的 `assertNotIn`
+  会误报）；
+- M71 重指到 `tnr-common.js` 的 `petStatusText`（改成局部
+  `in_treatment` 表），新增 M143（领养人端退回手拼徽章 + `replace`）；
+  两条变异均被捕获。
+
+**浏览器复核**（四端逐一刷新后读取实际 DOM）
+
+- 捕捉点端台账：待诊疗（info）、已领养（success）、在途（warning）、
+  主人领回（default），无英文码；
+- 医院端领养信息：待领养（cinnabar）；安乐死下拉显示中文文案；
+- 监管端台账：待诊疗 / 已领养 / 在途 / 待领养 / 待领出；
+- 领养人端生命周期卡：待领出（cinnabar）；
+- 帮助函数直测：`petStatusBadge('in_treatment')` →
+  `<span class="badge badge-info">待诊疗</span>`；未知状态 →
+  `badge-default` + 原始码（与既有口径一致）。
+
+**结果**：全量套件 **1796 例通过，295.597s**；
+`check_inline_js.py` 11 段内联 + 5 个门户 JS 0 处失败；
+`manage.py check` 无告警。
+
+## 第五十三轮：电脑端巡检（八）：医院端物料页的静默失败与领养维护的失效筛选（2026-10-19）
+
+### 五十六、盘点：物料页把「整页唯一数据源」交给了静默读
+
+医院端物料页有六个页签（待接收 / 实时库存 / 芯片库存 / 异动 /
+出库报备 / 出入库台账），全部围绕同一组数据：物料流水
+（`MaterialTransaction`）与物料主数据（`Material`）。但入口原先是这样取的：
+
+```js
+let txns = [];
+try { txns = await TNR_API.getMaterialTransactions(); } catch(e) {}
+```
+
+`getMaterialTransactions()` 是**静默读**：服务端 403/500 时返回 `[]`，
+异常被空 `catch` 吞掉。页面随后照常渲染——六个页签的计数全是 0、
+台账「暂无记录」，与「本院真的没有物料」在界面上完全一样。操作员
+看到的是「库存被清空了」，而不是「加载失败了」。
+
+同一页里还有两处重复读取：
+
+- `renderMaterialStock()` 每次渲染都 `await getMaterialsStrict()`——
+  页签切换、筛选框每敲一个字都会重新请求一次；
+- `renderMaterialAdjustment()` / `renderMaterialOutbound()` 各自
+  `try { materials = await getMaterials(); } catch(e) {}`——又是静默读，
+  失败时两个表单的下拉只剩「请选择」，同样没有任何提示。
+
+### 五十七、物料页：一次严格读、本地过滤、可见错误与重试
+
+`render_material()` 改成整页只读一次：
+
+```js
+page.innerHTML = '<div class="loading-state">加载中...</div>';
+let txns;
+let materials;
+try {
+  [txns, materials] = await Promise.all([
+    TNR_API.getMaterialTransactionsStrict(),
+    TNR_API.getMaterialsStrict()
+  ]);
+} catch (e) {
+  page.innerHTML = /* ⚠️ 物料数据加载失败 + e.message + 「重新加载」按钮 */;
+  page.querySelector('#materialReloadBtn').onclick = () => this.render_material();
+  return;
+}
+this._matCache = txns;
+this._matMaterials = materials;
+this.renderMaterialTab(txns, materials);
+TNR_UI.bindFilter(() => this.renderMaterialTab(
+  this._matCache || [], this._matMaterials || []), page);
+```
+
+- 失败不再伪装成空数据：显示「物料数据加载失败」、服务端消息与
+  「重新加载」按钮，用户不必切页重进；
+- 物料主数据只拉一次，六页签共用；筛选与页签切换只做本地过滤，
+  搜索框不再每敲一个字发一次请求；
+- 异动 / 出库两个表单从缓存取物料，下拉在筛选后仍然完整。
+
+### 五十八、浏览器先抓到的真缺陷：页签点击漏传物料
+
+重构后静态检查全绿，但浏览器点「实时库存」显示「暂无物料」。原因在页签
+点击回调仍沿用旧签名：
+
+```js
+this.renderMaterialTab(txns);          // materials 丢失
+```
+
+`renderMaterialStock(c, materialsAll)` 收到 `undefined` 后落 `allMats = []`，
+于是走进「暂无物料」空态；异动/出库的下拉也同样只剩「请选择」。页面不报错，
+看起来像真的没数据。修正为 `this.renderMaterialTab(txns, materials);`，并把
+这条 8 空格缩进的调用写进判据——4 空格缩进的首次渲染调用会掩盖它
+（第一版判据就因此空转，见六十三）。
+
+### 五十九、领养维护：「暂无动物」的两条分支让筛选条变成摆设
+
+`render_adoption_info()` 有三条渲染分支（仅有申请 / 仅有待领出 /
+动物卡片），各自重设 `page.innerHTML`。完整分支在末尾调用了
+`bindFilter`，但前两条分支**提前 return**：既没有挂另一张待办表，
+也没有绑筛选——筛选条看得见，输入没反应。这正是最容易被漏掉的一类
+缺陷：页面不报错，只是「搜索框怎么敲都不动」。
+
+现在合并成一次渲染：
+
+```js
+page.innerHTML = infoBarHtml + claimsHtml + applHtml + (petCards || emptyHint);
+mountClaims();
+mountAppl();
+TNR_UI.bindFilter(() => { mountClaims(); mountAppl(); }, page);
+```
+
+两张表各自用正确的时间字段（申请单 `applied_at`、待领出 `created_at`）
+参与判定；无待领养动物时只有宠物卡片区显示引导文案，两张待办表与
+筛选条保留。起止日期由 `renderFilterBar` 全局自动追加，本条不需要
+（也不应）在调用点重复声明。
+
+### 六十、台账页签：按 DOM 序号映射，改成读 `data-ltab`
+
+台账页的 active 判定原先是：
+
+```js
+t.classList.toggle('active', ['transfer','treatment','material','euthanasia'][i] === this.state.ledgerTab);
+```
+
+依赖「页内 `.tab-item` 恰好是这四个、且顺序不变」。以后加一个页签或
+调整顺序，内容切了、高亮却留在别的标签上。改为与物料页/接收页一致的
+数据属性判定：
+
+```js
+t.classList.toggle('active', t.dataset.ltab === this.state.ledgerTab);
+```
+
+### 六十一、仪表盘：「待接收动物」数的是交接单
+
+`pendRecv` 的口径是「未关闭的交接单张数」（与交接台账的待签收过滤
+一致），标签却写「待接收动物」。一张交接单可以包含多只动物，数字与
+单位对不上；状态名也应跟随后端 `pending` 的「待签收」。改为
+**「待签收交接单」**。
+
+### 六十二、判据：两个测试类 4 例
+
+`HospitalMaterialLoadTest`（`core/tests_frontend_consistency.py`）：
+
+- `test_material_page_uses_strict_reads_only`：必须出现
+  `getMaterialTransactionsStrict()` / `getMaterialsStrict()`；禁止
+  `getMaterialTransactions()` / `getMaterials()` 复活；
+- `test_material_load_failure_has_visible_error_and_retry`：错误态文案、
+  `materialReloadBtn`、`this._matMaterials = materials` 三者在
+  `render_material` 函数体内；
+- `test_material_tab_switch_passes_the_cached_materials`：页签点击的
+  8 空格调用与筛选回调都必须带缓存参数。
+
+`HospitalAdoptionInfoFilterTest`：
+
+- `test_filters_are_bound_and_no_early_return_skips_them`：必须调用
+  `bindFilter(() => { mountClaims(); mountAppl(); }, page)`，且
+  `page.innerHTML = infoBarHtml` 只出现一次——再拆分支就会打红。
+
+同时更新 `test_no_legacy_transfer_wording_in_status_maps` 的说明：
+医院端「待接收物料」讲的是物料，不是转运单状态；转运单卡片已改称
+「待签收交接单」，因为数字是交接单张数，不是动物只数。
+
+### 六十三、变异：M144 / M146 全部捕获，并修掉两处空转
+
+- **M144** 把流水读回退成静默读 → `test_material_page_uses_strict_reads_only`；
+- **M146** 页签点击丢掉 `materials` → `test_material_tab_switch_passes_the_cached_materials`。
+
+首次运行有两次「假捕获 / 空转」：
+
+1. M144 先失败在 `test_deliberate_degradations_are_still_present`——因为
+   `EXPECTED_DELIBERATE` 仍把 `render_material`、`renderMaterialAdjustment`
+   列为「有意静默读」。它们是本轮改成严格读的，名单必须同步删除
+   （`renderReceiveTab` 仍保留），否则「静默读名单仍然存在」这条会拿旧
+   口径报错，掩盖真正的目标用例；
+2. M146 第一版判据用 `'this.renderMaterialTab(txns, materials);'` 做子串，
+   首次渲染的 4 空格调用也能匹配，删掉页签点击调用后仍然通过。判据改成
+   带前导 8 空格的精确调用后，M146 才真正被捕获。
+
+两处修正后两条变异全部命中预期用例。
+
+### 六十四、浏览器复核（127.0.0.1:8000，演示数据）
+
+- 物料页：实时库存 3 张卡、批次明细可展开；异动/出库下拉有物料；
+  人为让严格读返回 500 → 出现「物料数据加载失败」与「重新加载」，
+  恢复后点重试整页重新渲染成功；
+- 领养维护：开始/结束日期（全局自动追加）与关键词都能收窄两张表；
+  无匹配行时表内显示空文案而筛选条仍在；「暂无待领养动物」分支下
+  搜索框同样有反应；
+- 台账页：四个页签切换后内容与高亮一致；
+- 仪表盘：显示「待签收交接单」；
+- 全程控制台无报错。
+
+### 六十五、结果
+
+- `core.tests_frontend_consistency` + `business.tests.test_silent_read_contract`：
+  **222 例通过**；
+- `check_inline_js.py`：11 段内联 + 5 个门户 JS，0 处失败；
+- `manage.py check`：无告警；
+- 全量套件：**1801 例通过，295.539s**。
+
+### 六十六、新增需人工确认
+
+1. **物料页错误态**：现在直接显示服务端消息（`e.message`）。如果现场
+   不希望暴露接口细节，可改成固定文案 + 日志定位；
+2. **领养维护日期筛选**：沿用全局自动追加的起止日期（申请时间 /
+   领养登记时间），是否需要默认区间（如最近一个月），避免历史数据
+   一次性铺满；
+3. **「待签收交接单」口径**：数字是**交接单张数**（未签收 + 部分签收），
+   不是动物只数。若管理上要「待接收动物」，需要另算明细数量；
+4. `renderReceiveTab` 的宠物列表仍是静默读（失败显示「未知」），
+   目前留在 `EXPECTED_DELIBERATE` 名单里，后续可评估是否也改成
+   整页错误态。
+
+---
+
+## 第五十四轮：电脑端巡检（九）：平台端的静默失败与建号默认口令（2026-10-19）
+
+平台端是「建区县 / 建机构 / 建账号 / 改编号规则」的唯一入口。这一轮发现：
+读取失败在这几页会被渲染成「暂无数据」，管理员照着空列表重复新建；
+编辑弹窗在缓存丢失时静默退化成新增；新账号预填统一口令 `123456`，
+密码框还是 `text` 类型，后端也接受空口令。
+
+### 六十七、列表读失败不再伪装成「暂无数据」
+
+区县 / 医院 / 捕捉点三个页签与账号列表全部改为严格读：
+
+- `getDistrictsStrict()`、`getInstitutionsStrict(type)`、新增的
+  `TNR_API.getUsersStrict(role)`；平台端的 `getDistricts()` /
+  `getInstitutions()` / `getUsers()` 已清零（判据会禁止复活）。
+- 每页先渲染「加载中…」，失败时在表格位置显示
+  **「区县数据加载失败 / 机构数据加载失败 / 账号数据加载失败」**
+  + 服务端消息 + 「重新加载」按钮；筛选条与「新增」按钮保留，
+  不会因为一次读失败就断掉建号/建机构入口。
+- 三个列表在模态框生命周期内只取一次并缓存：
+  `_districts` / `_institutions` / `_users`。此前每次切页签、
+  每次打开编辑框都重新打接口，既慢又会在慢请求返回时覆盖新筛选。
+- 编辑区县/机构时缓存里找不到记录，先严格重读一次；仍找不到则
+  **中止并提示「……不存在或已被删除，请刷新列表」**，绝不把 `id`
+  当成新增——那会把一次编辑变成再建一条同名记录。
+- 新增/编辑/停用/删除成功后统一 `await` 重新渲染当前页，
+  避免页面停在旧列表上。
+
+### 六十八、按日期筛的列表终于有日期列
+
+区县表补「创建时间」（`formatDate`），账号表补「开户时间」
+（`formatDateTime`，口径是 `date_joined`）。`renderFilterBar` 会自动
+追加起止日期，之前这两张表能筛日期却看不到日期，用户无从判断
+「为什么这条不在结果里」。机构表上一轮已有「创建时间」，本轮保持。
+
+### 六十九、建号不再有统一默认口令
+
+`supervision/views.py::user_create`：
+
+- 删掉 `password or '123456'` 回退；
+- 空口令直接拒：**「请设置初始密码」**；
+- `len < 6` 的快判之外，调用 Django `validate_password()`，
+  与 `/api/me/password/` 共用 `AUTH_PASSWORD_VALIDATORS`
+  （最短 8 位、常见口令、纯数字、与用户名/姓名相似）；
+- 校验时传入一个未落库的 `User(username=..., first_name=...)`——
+  `UserAttributeSimilarityValidator` 只有拿到 user 才比对用户名，
+  不传会让「口令=用户名」在建号口放行、改密口拒绝。
+
+平台端「新增账号」：
+
+- 密码框改为 `type="password"`，不再预填 `123456`；
+- 提示改为「由管理员当面设置并转交本人，首次登录后请立即修改；
+  系统不再使用统一默认口令」；
+- 前端要求至少 8 位，空口令提交被 toast 挡下「请设置初始密码」；
+- 服务端仍是最终判据：直接 POST 空口令/弱口令都会被拒。
+
+⚠ **演示种子账号不受影响**：`seed_data` 里的 `platform` / `admin` /
+`aixin_hosp` 等仍是本地演示口令 `123456`（登录页提示的就是这批账号）。
+生产环境**没有默认口令**：首个平台管理员由
+`ensure_platform_admin` 命令创建，之后所有账号的初始口令由
+平台管理员在「账号权限管理 → 新增账号」当面设置并转交本人。
+一次性口令经手即应修改；本轮不代替任何生产环境设置口令。
+
+### 七十、读失败后筛选覆盖错误态（本轮自查发现）
+
+账号页的筛选框在 `refreshAccountsTable()` 之前就绑定了
+`renderAccountsTable()`。读失败后如果保留上一次的 `_users`，
+用户一敲搜索框就会把「账号数据加载失败」换成一份**过期名单**，
+看起来像加载成功。修正为：
+
+```js
+catch (e) {
+  this._users = null;   // 失败时不保留旧缓存
+  this.showLoadError(...);
+  return;
+}
+...
+renderAccountsTable() {
+  if (!this._users) return;   // 未加载成功不允许渲染
+  ...
+}
+```
+
+浏览器里已实测：失败态下输入关键词、点「搜索」，错误提示与
+「重新加载」按钮都仍在；恢复接口后点重试，表格正常出现。
+
+### 七十一、判据：平台端 6 例 + 建号口令 3 例
+
+`core/tests_frontend_consistency.py::PlatformAdminReadTest`（6 例）：
+
+1. `test_platform_lists_use_strict_reads_only`：三个严格读必须出现，
+   三个静默读必须绝迹，`getUsersStrict` 必须存在于 `tnr-api.js`；
+2. `test_list_failures_are_visible_and_retryable`：三句失败文案、
+   `showLoadError(`、`data-reload`；
+3. `test_edit_modals_abort_instead_of_falling_back_to_create`：两句
+   「不存在或已被删除」；
+4. `test_account_creation_has_no_default_password`：禁止
+   `value="123456"` 与 `password || '123456'`，密码框必须
+   `type="password"`，必须出现「请设置初始密码」；
+5. `test_tables_show_the_date_they_filter_on`：「创建时间」「开户时间」；
+6. `test_filter_after_load_error_does_not_overwrite_error_state`：
+   `this._users = null;` 与 `if (!this._users) return;`。
+
+`supervision/tests.py` 新增/固化 3 例：
+
+- `test_create_without_password_rejected`：空口令拒建，且不落库；
+- `test_create_weak_password_rejected`：`123456` 被校验器拒绝；
+- `test_create_password_similar_to_username_rejected`：口令等于用户名
+  同样拒建（证明校验器拿到了 probe user）。
+
+`core/tests_audit.py` 的建号口令同步改为 `TnrAudit!2026`
+（原 `123456` 会被新判据拒绝）。
+
+### 七十二、变异：M147–M151 全部捕获
+
+- **M147** 平台机构页退回 `getDistricts()` 静默读 →
+  `test_platform_lists_use_strict_reads_only`；
+- **M148** 删掉机构编辑的缺失中止 → `test_edit_modals_abort_instead_of_falling_back_to_create`；
+- **M149** 前端把空口令回退成 `'123456'` →
+  `test_account_creation_has_no_default_password`；
+- **M150** 删掉接口的空口令/强度校验块 →
+  `test_create_short_password`、`test_create_weak_password_rejected`、
+  `test_create_without_password_rejected` 三例同时红；
+- **M151** 读失败后保留旧账号缓存 →
+  `test_filter_after_load_error_does_not_overwrite_error_state`。
+
+### 七十三、浏览器复核（127.0.0.1:8010，演示数据，platform 登录）
+
+- 区县页：5 行，「创建时间」显示 `2026-10-14`，日期区间与关键词可筛；
+- 医院/捕捉点页签：分别 4 行 / 3 行，均带「创建时间」，新增按钮在；
+- 编辑医院：弹窗标题「编辑医院」，名称与所属区县正确回填；
+- 账号页：12 条，显示「开户时间」（`2026-10-14 02:59`，本地时区）；
+  医院账号未登记证号显示红色「未登记」；「当前账号」行无编辑/停用；
+- 新增账号：密码框 `type=password`、值为空；空口令提交出现
+  「请设置初始密码」，弹窗不关闭；
+- 编辑账号：只有姓名/电话（医院多一个证号），无密码/角色/区县输入；
+  电话填 `abc` 出现「联系电话格式不正确」；
+- 人为让 `getDistrictsStrict` / `getInstitutionsStrict` /
+  `getUsersStrict` 抛错：三处分别出现对应「……数据加载失败」+ 服务端
+  消息 + 「重新加载」；恢复后点重试全部恢复到正常行数；
+- 账号错误态下输入筛选词并点「搜索」，错误态不被空表覆盖；
+- 开户时间筛选设为 `2027-01-01` 起 → 「暂无账号」，重置后恢复；
+- 全程控制台无报错。
+
+### 七十四、结果
+
+- `supervision.tests` + `core.tests_audit` + `core.tests_frontend_consistency`：
+  **372 例通过**（口令相似用例补齐后 supervision 单跑 164 例通过）；
+- 变异 M147–M151：**5/5 捕获**；
+- `node --check`：`platform.js`、`tnr-api.js` 通过；
+- `manage.py check`：无告警；
+- 全量套件：**1809 例通过，302.341s**。
+
+### 七十五、新增需人工确认
+
+1. **口令策略**：现在建号最短 8 位，且拒绝常见口令、纯数字、与用户名/
+   姓名相似。现场若已有「6 位数字」的建号习惯，需要提前通知；
+   既有账号的口令不会被追溯校验，下次改密时才按新策略执行。
+2. **生产环境首个管理员**：由 `ensure_platform_admin` 创建；口令优先级
+   为 `--password` > `PLATFORM_ADMIN_PASSWORD` > **随机生成**，系统
+   **没有默认口令**。命令会把生成的口令以
+   `PLATFORM_ADMIN_CREDENTIALS=...` 打到 stdout，这是一次性暴露：
+   部署日志/终端回滚里可能留存，捕获后应转入密码管理器并清理日志，
+   首次登录后立即改密。
+3. **演示提示**：登录页仍写「演示账号 · 统一密码 123456」——它只适用于
+   种子演示账号；若这份提示会进入生产环境，应删除或改为「演示环境专用」。
+4. **账号页失败态无次数限制**：点「重新加载」会立即重打接口；弱网下
+   连续点击只会串行等待，不会堆积请求（按钮在渲染时被替换），但也
+   没有退避。若现场接口不稳定，可后续加 1–2 秒冷却。
+5. **日志页**仍只有失败文案、没有「重新加载」按钮（切页签可重试），
+   与本轮三张表的口径不一致，可下一批统一。
+
+## 第五十五轮：移动端巡检（390×844）：标签栏裁切、日志行撑高与小热区（2026-10-19）
+
+本轮以 390×844 视口（`deviceScaleFactor=2`，移动端媒体查询真实生效）
+作为验收基线，用无依赖的 Chrome DevTools Protocol 脚本逐端登录、
+读取 DOM 尺寸并截图。不改任何业务口径，只修「手机上点不到 /
+太占屏 / 难点准」这三类问题。
+
+### 七十六、实测缺陷（修复前 → 修复后）
+
+| 页面 | 指标 | 修复前 | 修复后 |
+|---|---|---|---|
+| 医院端 物料库存 | 标签栏内容宽 / 容器宽 | 707 / 342px，标签被裁 | 同宽，`overflow-x:auto`，末标签可达 |
+| 医院端 单据台账 | 同上 | 497 / 336px，标签被裁 | 可横滑，末标签可达 |
+| 平台端 操作日志 | 同上 | 418 / 336px，标签被裁 | 可横滑，末标签可达 |
+| 政府端 全业务监管 | 同上 | 628 / 336px，标签被裁 | 可横滑，末标签可达 |
+| 医院端 物料/台账、平台日志 | 筛选条高度 | 303px | 225px（日期成对，少一整行） |
+| 政府端 全业务监管 | 筛选条高度 | 380px | 303px（仍有区县+搜索两行） |
+| 平台端 日志单条 | 行高 | 255 / 217px | 89 / 89px（描述独占第二行） |
+| 政府端 数据总览 | 统计卡列宽 | 三列 111 / 111 / 111px | 两列 164 / 164px |
+| 全局 | 页面级横向溢出 | 0 | 0（横滑只发生在标签栏/表格内部） |
+
+另有两处触控热区不足：分页按钮原为 **32px**，领养人端日期条
+「清空」原为 **25px**，均低于 44px。
+
+### 七十七、修法
+
+- `TNR_UI.renderFilterBar()` 把**连续的日期控件**包进
+  `.filter-date-pair`：桌面端仍在一行，手机端筛选条纵向堆叠时
+  起止日期两列并排。CSS 增加配套 flex 规则。
+- 移动端 `.tabs` 改为 `overflow-x:auto`（隐藏滚动条、禁止纵向溢出），
+  标签项 `flex:0 0 auto`；仍保持 46px 钉住高度，表头冻结的偏移量不变。
+- 平台/政府端日志行在 768px 以下 `flex-wrap:wrap`，
+  描述 `flex:1 1 100%`，不再与时间、模块挤在同一行。
+- 移动端分页按钮抬到 44×44；领养人端「清空」按钮 44×44。
+- 删除 `gov.js` 统计卡的内联 `repeat(3,1fr)`，交回 `.stat-grid`
+  的移动端两列规则（原内联样式会覆盖媒体查询）。
+
+### 七十八、判据与变异
+
+`core/tests_frontend_consistency.py::MobileLayoutTest`（6 例）：
+
+1. `test_tabs_scroll_horizontally_on_mobile`：移动端标签栏必须有
+   `overflow-x:auto`，标签项不得被压缩；
+2. `test_date_filters_are_rendered_as_a_pair`：`renderFilterBar()`
+   必须识别「连续两个日期控件」并输出 `.filter-date-pair`；
+3. `test_pagination_targets_are_touch_sized_on_mobile`：分页按钮
+   44px 热区规则必须在 768px 媒体查询内；
+4. `test_mobile_log_rows_stack_detail`：平台端与政府端日志描述
+   必须 `flex:1 1 100%`；
+5. `test_adopter_date_clear_is_touch_sized`：领养人端「清空」
+   必须同时满足 44px 宽、高；
+6. `test_gov_stat_grid_does_not_pin_three_columns_inline`：统计卡
+   不得再出现内联三列覆盖。
+
+变异 M152–M157 全部捕获：去掉标签栏横向滚动 → 1；日志描述
+不换行 → 4；日期配对条件改成 `false` → 2；分页退回 32px → 3；
+「清空」热区归零 → 5；政府端恢复内联三列 → 6。
+
+⚠ 顺带修复一处**变异锚点腐烂**：M150 的 `old` 仍停留在
+`validate_password(password)`，而生产代码已改为
+`validate_password(password, probe)`（口令相似度校验），锚点 0 命中
+会静默 SKIP。已同步锚点，复跑后 M150 正常捕获
+（含 `test_create_password_similar_to_username_rejected`）。
+
+### 七十九、浏览器复核（CDP，390×844，演示数据）
+
+- 医院端物料页：6 个标签内容宽 707px、容器 342px，
+  程序化滚到最右后末标签完整可见；筛选条 303→225px；
+- 医院端单据台账：4 个标签 497/336px，可横滑；
+- 平台端操作日志：4 个标签 418/336px，可横滑；单条日志
+  255/217→89/89px；
+- 政府端全业务监管：6 个标签 628/336px，可横滑；筛选条 380→303px；
+- 政府端数据总览：三段统计卡由 3×111px 变为 2×164px；
+- 领养人端：日期条「清空」按钮实测 44px 高；
+- 各页 `docOverflow=0`，无页面级横向滚动，控制台无报错。
+
+### 八十、结果
+
+- `MobileLayoutTest` + `DateRangeFilterTest`：10 例通过；
+- 变异 M150–M157：**8/8 捕获**；
+- `manage.py check`：无告警；`node --check`：`gov.js`、`tnr-common.js` 通过；
+- 全量套件：**1815 例通过，305.621s**（较上轮 +6 例）。
+
+### 八十一、新增需人工确认
+
+1. **标签栏没有可见的滚动提示**：滚动条已隐藏，首屏看起来仍像
+   「只有 3 个标签」。若现场用户反馈找不到右侧页签，可加渐隐边缘
+   或「更多」提示；当前先保证滑动可达、不裁切。
+2. **政府端全业务监管筛选条仍占 303px**：区县、搜索各占一行，
+   加上成对日期与按钮共 4 行。若现场主要用手机做监管查询，
+   下一批可做成可折叠筛选条（默认收起，显示已选条件摘要）。
+3. **数据表仍会压缩列宽**：账号页「姓名」列在 390px 下只能排 3 行。
+   表格容器本身可横滑，但缺少「可横滑」提示；这是移动端后台表格的
+   通病，需产品确认是加最小列宽还是改卡片式行布局。
+4. **桌面端未改变**：`.filter-date-pair` 在桌面端仍是同一行内的两个
+   控件；本次浏览器复核只覆盖 390px 视口，桌面端以全量静态判据与
+   既有截图为准。
+
+## 第五十六轮：电脑端复核（十）：三处不可重试的失败态与两处桌面回归（2026-10-19）
+
+第五十五轮的移动端改动补做了 1366×900 桌面复核，发现两处**由移动端
+修法引入的桌面回归**；同一轮把平台端系统配置与医院端交接页剩余的三处
+失败态补齐。三处失败态的共同点不是「没提示」，而是**提示之后无路可走**：
+用户只能切页签、关弹窗或刷新整页碰运气。
+
+### 八十二、发现
+
+1. **平台端系统配置三个页签的失败态不可重试**（`platform.js`）：
+   - 编号规则：`<div class="table-empty">⚠️ 加载配置失败：…</div>`；
+   - 操作日志：`<div class="table-empty">…加载失败：…</div>`；
+   - 公告：`<div class="table-empty">…加载公告数据失败：…</div>`。
+   三处都是把内容区整块替换成红字，**没有重新加载按钮**；而且编号规则
+   与公告两处的 `return` 让用户只能切到别的页签再切回来。弱网或后端 5xx
+   时，这看起来就像「编号规则没配置」「没有操作日志」「还没发过公告」。
+2. **医院端交接页的动物档案读失败被静默成「未知」**（`hospital.js`）：
+   列表与详情都调用 `getHospitalPets()`，它经 `_get()` 在非 2xx 时
+   **静默返回 `[]`**，随后 `catch(e) { pets = []; }` 再兜一层。结果：
+   每只动物只剩编号 + 「未知」，详情显示「档案信息待补全」——与
+   「档案确实缺姓名/品种」的合法状态**完全无法区分**。
+3. **桌面回归一：成对日期被压到 121px**。第五十五轮把
+   `.filter-date-pair .filter-item .form-input { min-width: 0 }` 写进了
+   基础规则，1366px 下两个日期输入各只剩 121px（日期串显示不全）。
+   收缩只应发生在 768px 断点内。
+4. **桌面回归二：政府端物料统计掉成两列**。为修移动端三列 111px，
+   删掉了内联 `repeat(3,1fr)`，但 `.stat-grid` 的基础规则是
+   `auto-fit minmax(180px,1fr)`，1366px 下只剩 2×222px —— 桌面端
+   反而比修改前更差。
+
+### 八十三、修法
+
+- 平台端三处 catch 统一改走 `showLoadError(el, 标题, e, retry)`：
+  标题 + 服务端消息 + 「重新加载」按钮，重试回调重新执行
+  `renderSettingsContent()`；编号规则/公告保留 `return`（失败后不再渲染表单）。
+- 医院端交接列表与详情改用 `getHospitalPetsStrict()`：
+  - 列表：读失败时每只动物显示「档案加载失败」而不是「未知」，
+    表格上方插入红色提示「动物档案加载失败：…，列表仅显示编号」+
+    `data-reload-pets` 重新加载按钮；
+  - 详情：读失败时顶部提示「以下仅显示编号，请关闭弹窗后重试」，
+    档案字段回退文案改为「档案加载失败」。
+  - 签收动作本身不依赖档案内容（核对的是编号与实物），
+    因此失败只降级展示，不阻断签收。
+- CSS：基础规则恢复 `width:100%`（保留桌面 140px 最小宽度），
+  仅在 768px 断点内加 `min-width:0`；新增 `.stat-grid-3`
+  类（桌面三列 `minmax(0,1fr)`、移动端两列），`gov.js` 物料统计区
+  以类替代内联样式。
+- `scripts/dead_catch_probe.py` 的呈现判据从
+  `toast|alert|innerHTML|textContent` 扩展为包含 `show\w*Error`：
+  日志页改用 helper 后，原来的「植入静默读」自检会**假绿**
+  （catch 里调用了 helper，但判据不认），必须先修判据。
+
+### 八十四、判据与变异
+
+- `core/tests_frontend_consistency.py::PlatformAdminReadTest`
+  - `test_settings_failures_are_visible_and_retryable`：三个页签都必须
+    走 `showLoadError`（含重新加载入口）；
+  - `MobileLayoutTest::test_date_pair_inputs_keep_desktop_width`：
+    成对日期的基础规则**不得**出现 `min-width:0`；
+  - `MobileLayoutTest::test_gov_stat_grid_does_not_pin_three_columns_inline`
+    增补：`gov.js` 必须挂 `.stat-grid-3`，样式表必须同时具备
+    桌面三列与移动端两列回退。
+- `business/tests/test_silent_read_contract.py::SilentReadInventoryTest`
+  - `test_hospital_transfer_pages_surface_pet_read_failure`：
+    交接页不得再调用软读 `getHospitalPets()`，且必须包含
+    「档案加载失败」「列表仅显示编号」「以下仅显示编号」与
+    `data-reload-pets>重新加载</button>`。
+- `supervision/tests.py::SystemConfigPageContractTest` 的失败文案
+  断言同步为「编号规则加载失败」（页面标题口径）。
+- 变异 **M157–M162** 全部捕获：
+  - M157 政府端统计卡退回内联三列 → 6 号判据；
+  - M158 操作日志失败态退回不可重试空态 → 配置页判据；
+  - M159 公告失败态退回不可重试空态 → 配置页判据；
+  - M160 交接页去掉「重新加载」按钮 → 交接页判据；
+  - M161 基础规则重新加 `min-width:0` → 桌面宽度判据；
+  - M162 去掉 `.stat-grid-3` 的移动端两列回退 → 统计卡判据。
+
+### 八十五、浏览器复核（CDP）
+
+桌面 1366×900：
+
+| 页面 | 指标 | 修前 | 修后 |
+|---|---|---|---|
+| 医院端 物料 | 成对日期输入宽 | 121 / 121px | 140 / 140px |
+| 医院端 单据台账 | 成对日期输入宽 | 121 / 121px | 140 / 140px |
+| 政府端 数据总览 | 物料统计卡列宽 | 222 / 222px（两列） | 142.7 × 3（三列） |
+| 全局 | 页面级横向溢出 | 0 | 0 |
+
+移动端 390×844（复跑确认无回退）：
+
+| 页面 | 指标 | 修前（第五十五轮） | 修后 |
+|---|---|---|---|
+| 政府端 数据总览 | 统计卡 | 164 / 164px（两列） | 164 / 164px（两列） |
+| 医院端 物料 | 成对日期输入 | 两列并排 | 两列并排，筛选条 225px |
+| 平台端 操作日志 | 单条日志高 | 89px | 89px |
+| 全局 | `docOverflow` | 0 | 0 |
+
+标签栏横向滑动、44px 触控热区、日志描述独占一行均保持。
+
+### 八十六、结果
+
+- 全量套件：**1818 例通过，290.875s**（较上轮 +3 例：
+  交接页失败态、配置页重试、桌面日期宽度）；
+- `manage.py check`：无告警；
+- `node --check`：`platform.js`、`hospital.js`、`gov.js`、`tnr-common.js` 通过；
+- 变异 M157–M162：**6/6 捕获**（M157 锚点已随 `.stat-grid-3` 同步）；
+- 定向回归：`MobileLayoutTest` 7 例、`SystemConfigPageContractTest`
+  3 例、前端一致性 + 静默读 235 例全部通过。
+
+### 八十七、新增需人工确认
+
+1. **失败态只有手动重试**：`showLoadError` 不自动重试，也不会在后台
+   恢复后自动刷新。若现场网络抖动频繁，可考虑在按钮上给出
+   「最近一次尝试时间」或加一次自动重试。
+2. **交接页档案读失败仍允许签收**：这是有意为之（签收核对的是编号与
+   实物），但界面上只有编号和警示条。需确认现场是否要求
+   「档案不可见时禁止签收」。
+3. **桌面复核只覆盖 5 个页面**：医院端物料/台账、平台端操作日志、
+   政府端总览/监管。其余页面由静态判据覆盖，未逐页实测。
+4. **第五十五轮「桌面端未改变」一条已被本轮推翻**：桌面端现在有
+   成对日期与 `.stat-grid-3` 两条真实改动，均已在 1366×900 下复核。
+
+## 第五十七轮：生命周期时间线的 PII 按角色最小化（2026-10-19）
+
+### 八十八、发现
+
+`/api/business/pets/<id>/lifecycle/` 是四端共用的「一宠一档」时间线。
+它对 `adopter` 开放（只收敛到「自己领养/申请过的动物」），但**事件字段
+没有按角色收敛**：
+
+- `owner_return` 事件原样下发前任主人的 `owner_phone`、`owner_id_card`、
+  `owner_address` 与 `signature`（base64 签名图）；
+- 领养人端 `adopter.js` 不仅拿到了这些字段，还**逐项渲染**出来；
+- `capture` 事件同时下发物业交接人的 `contact_person` / `contact_phone`。
+
+领养人查看自己新领养动物的历史，只需要知道「它被捕捉、诊疗、放归/回收过」，
+不需要前任主人的身份证号、住址、电话和签名。把完整 PII 放进这个响应，
+等于任何领养人都能凭一次合法查看导出一份他人身份信息。
+
+`supervision/views.py` 的批量台账此前已对身份证号做脱敏，但实现是模块内
+私有函数 `_mask_id_card`，既没有单元判据，也无法给生命周期复用；再抄一份
+必然漂移。
+
+### 八十九、修法
+
+- 新增 `core/privacy.py`，作为脱敏的**唯一实现**：
+  - `mask_id_card()`：15/18 位保留前 6 后 4，其余长度整串打码；
+  - `mask_phone()`：保留前 3 后 4；短于 8 位整串打码（7 位按前后保留
+    会原样返回，等于没脱敏）。
+- `supervision/views.py` 改为导入 `mask_id_card`，删除本地 `_mask_id_card`。
+- `business/views_portal.py::pet_lifecycle()` 增加角色投影：
+  - **领养人**：`owner_phone` / `owner_id_card` / `owner_address` /
+    `signature` 一律空串；`capture.contact_person` / `contact_phone`
+    同样不下发；
+  - **政府监管**：电话、身份证脱敏；住址、签名保留（监管核查需要）；
+  - **捕捉点 / 医院**：保留完整联系方式（执行领回、回访需要）。
+- `adopter.js` 增加注释说明「空串是后端按角色最小化的结果」，
+  前端本就按空值条件渲染，无需新增隐藏逻辑。
+
+### 九十、判据与变异
+
+- `core/tests_privacy.py`（7 例）：15/18 位身份证、异常长度整串打码、
+  11 位手机、7 位座机整串打码、空值与空白。
+- `PetLifecycleTest`（3 例）：
+  - `test_adopter_gets_no_previous_owner_contact`
+  - `test_regulator_gets_masked_owner_contact`
+  - `test_shelter_keeps_full_owner_contact`
+- `SupervisionDataTest.test_ledger_masks_adopter_id_card`：批量台账中
+  身份证号为 `110101********1234`，且整个响应序列化后搜不到完整号码。
+- 变异 **M163–M165** 全部捕获：
+  - M163 领养人分支失效、退回完整 PII → 领养人判据；
+  - M164 `mask_phone` 返回原文 → 监管端判据；
+  - M165 监管台账退回明文身份证 → 台账判据。
+
+### 九十一、结果
+
+- 全量套件：**1829 例通过，295.681s**（较上轮 +11 例）；
+- `manage.py check`：无告警；`py_compile` 与 `node --check adopter.js` 通过；
+- 变异 M163–M165：**3/3 捕获**；
+- 本轮是 JSON 字段收敛，浏览器端无需交互改动；既有端点判据直接校验
+  三种角色拿到的字段。
+
+### 九十二、新增需人工确认
+
+1. **领养人仍能看到前任主人的姓名**：本轮只收敛电话、身份证、住址、
+   签名与物业联系人。若要求完全匿名，可把 `owner_name` 也置空并在
+   前端显示「原主人」。
+2. **监管端生命周期仍保留完整住址与签名**：批量台账已脱敏身份证，
+   但电话与住址仍是完整值（监管核查/回访需要）。是否进一步脱敏，
+   属于监管业务口径，需现场确认。
+3. **捕捉点/医院保留完整 PII**：这是执行领回与回访的必要信息，
+   访问同时受限角色与区县/机构范围；若后续做操作日志审查，应把这
+   两个角色对 `owner_id_card` 的读取也纳入审计。
+
+## 第五十八轮：移动端筛选条改为两列栅格（2026-10-19）
+
+### 九十三、发现
+
+移动端（≤768px）筛选条自第五十五轮起改为纵向单列堆叠。单个控件 44px
+触控高度 + 标签 + 间距约 66–70px，捕捉点端「捕捉记录」有区县 / 小区 /
+状态 / 搜索 / 起止日期 / 操作共 6 组，筛选条实测高 **303px**（两列后），
+单列时 4 个短条件各占一行，首屏列表被挤到屏幕下半部。
+
+起止日期已由 `.filter-date-pair` 两列并排，说明两列布局在 390px 下
+输入控件仍有 149px 宽，完全可用；短条件（下拉、搜索框）没有必要独占整行。
+
+### 九十四、修法
+
+`static/css/tnr-traditional.css` 的 768px 断点：
+
+- `.filter-bar` / `body .filter-bar` 由 `flex-direction: column` 改为
+  `display: grid; grid-template-columns: repeat(2, minmax(0, 1fr))`；
+- `.filter-item` 继续 `width: 100%; min-width: 0`；
+- `.filter-date-pair` 与 `.filter-actions` 显式 `grid-column: 1 / -1` ——
+  日期对若被拆进两格，「开始/结束」反而各占一行、比单列更高；
+- 断点之外（桌面）仍是 flex 单行，宽度与顺序不变。
+
+### 九十五、判据与变异
+
+- `MobileLayoutTest.test_mobile_filter_bar_uses_two_columns`：
+  - 断点内 `body .filter-bar` 必须是 `display:grid` 且两列
+    `repeat(2, minmax(0, 1fr))`；
+  - `.filter-date-pair, .filter-actions` 必须 `grid-column: 1 / -1`。
+- 变异 **M166–M167** 均捕获：
+  - M166 退回单列 → 两列判据；
+  - M167 日期对不跨列 → 跨列判据。
+
+### 九十六、浏览器复核（CDP，真实登录 cy_shelter）
+
+| 视口 / 页面 | 列宽 | 筛选条高 | 行数 | 横向溢出 |
+|---|---|---|---|---|
+| 390×844 捕捉记录 | 149 / 149px | 303px | 4 | 0 |
+| 390×844 物料供应链 | 152 / 152px | 303px | 4 | 0 |
+| 320×568 捕捉记录 | 114 / 114px | 303px | 4 | 0 |
+| 1366×900 物料供应链 | flex 单行 | 81px | 3 | 0 |
+
+- 捕捉记录 4 个短条件由 4 行并为 2 行，省 2×78px ≈ 156px；
+- 日期对在 390/320 下均保持同一行，开始/结束未被拆开；
+- 320px 下搜索框 placeholder 会截断，但输入框本身与触控热区完整。
+
+### 九十七、结果
+
+- 全量套件：**1830 例通过，295.094s**（较上轮 +1 例）；
+- 前端一致性 + 钉住表头契约：228 例通过；
+- 变异 M166–M167：**2/2 捕获**；
+- 静止页无横向溢出（390 / 320 / 1366 三档均 0）。
+
+### 九十八、新增需人工确认
+
+1. **超长标签**：两列后每格约 149px（390） / 114px（320）。若现场
+   出现 6 字以上筛选标签或超长下拉选项，标签会换行、选项会截断；
+   可优先缩短文案，不建议再退回单列（会重新吃掉首屏）。
+2. **政府端数据总览的手写筛选条**：结构与 `renderFilterBar` 一致
+   （两个 `.filter-item` + `.filter-actions`），本轮栅格同样生效；
+   未单独登录 gov 逐页复核，仅由静态结构与共享 CSS 覆盖。
+3. **表格仍横向滚动**：筛选条变矮后，表格首屏可见行数增加，但宽表
+   （捕捉记录 7 列）仍需左右滑动。是否按角色压缩低频列属于下一项
+   「移动端表格列压缩」，需确认哪些列可隐藏。
+
+## 第五十九轮：移动端宽表操作列吸附 + 后端未用导入清理（2026-10-19）
+
+### 九十九、发现
+
+第五十八轮把筛选条压到两列后，首屏行数增加，但「捕捉记录」7 列宽表
+在 390px 下 `scrollWidth=613`、可视宽仅 332px —— 用户要**一路滑到最右**
+才能点每行最先要用的「详情 / 编辑」。表格虽可横向滚动，操作列却不在
+视线内，这是移动端宽表最影响效率的一处。
+
+### 一百、修法
+
+`static/css/tnr-traditional.css` 的 768px 断点内，把 `TNR_UI.mountTable`
+生成的操作列（`.dt-actions-th` / `.dt-actions-td`）吸附在右侧：
+
+- 单元格 `position: sticky; right: 0; z-index: 2`；
+- 表头格用 `--rice-warm` 底色并抬到 `z-index: 4`，否则横向滚动内容会
+  从半透明表头下透出；
+- 行悬停时操作格跟随 `--rice-light`，与整行高亮一致；
+- 左侧加 `-8px` 阴影分隔，提示「此列不随内容滚动」。
+
+### 一百零一、判据与变异
+
+- `MobileLayoutTest.test_mobile_table_actions_stay_visible`：
+  - `th.dt-actions-th, td.dt-actions-td` 必须 `position: sticky` 且 `right: 0`；
+  - 表头操作格必须保持 `background: var(--rice-warm)`。
+- 变异 **M168**（`right: 0` → `right: auto`）已捕获。
+
+### 一百零二、浏览器复核（CDP，真实登录 cy_shelter）
+
+| 视口 | scrollWidth / clientWidth | scrollLeft | 操作列右缘 vs 容器右缘 | position |
+|---|---|---|---|---|
+| 390×844 | 613 / 332 | 0 → 281 | 358 → 355 / 359（差 1 → 4px） | sticky |
+| 1366×900 | 无横向溢出 | 0 | 1px | static / right auto |
+
+- 390px 下操作列宽 128px、2 个按钮，滑动前后始终完整可见；
+- 桌面端吸附规则未生效（媒体查询内），列宽与布局零变化。
+
+### 一百零三、代码精简（pyflakes）
+
+在 venv 内安装 pyflakes 4.0.3（仅开发期使用，未写入 requirements），
+清理 16 处未用导入 + 1 处未用局部变量，涉及 12 个文件：
+
+- `business/services.py`：`date`；
+- `business/management/commands/seed_data.py`：`datetime`；
+- `business/services_stock.py`：`timedelta`；
+- `business/services_treatment.py`：`transaction`、`MaterialStock`；
+- `business/tasks.py`：`Pet`；
+- `business/views_capture.py`：`get_district_scope`、`District`；
+- `business/views_euthanasia.py`：`Pet`；
+- `business/views_material.py`：`can_dispatch_across_districts`、`get_shelter_stock`；
+- `business/views_portal.py`：`Capture`、`parse_json_body`；
+- `business/views_release.py`：`Pet`、`Capture`；
+- `supervision/views.py`：`JsonResponse`；
+- `business/views_adoption.py`：未用变量 `data`（保留 `parse_json_body()`
+  调用 —— 它有写 `request.audit_payload` 的副作用）。
+
+`business/services.py` 中对 `core.http` 与 `services_stock` 的 re-export
+**有意保留**（旧导入路径兼容），pyflakes 仅剩这两处 `F401`，已由
+`# noqa: F401` 标注。
+
+### 一百零四、CodeRabbit 不可用的影响
+
+已确认 CLI 登录的本地回调始终收不到（多端口重试均 `signed out`），
+且仓库没有 CodeRabbit 的 CI / 运行时依赖，因此**对构建、部署、
+业务功能零影响**；唯一损失是第三方 AI 对本次改动的外部评审。
+
+替代评审已对原定范围（`disposal_advised` 链路）完成内部核查：
+
+- `mark_done()` 只写 `disposal_advised` 与 `done_at`，非法 key 抛
+  `ValueError` 且事务不推进状态；
+- `dispose()` 仍是唯一写 `disposal` / 动物终态的入口；
+- 看板待出院行同时下发 key 与中文 label，前端 `ADVISED_KIND`
+  与后端 `DISPOSAL_CHOICES` 有一致性测试（新增 key 漏映射会失败）；
+- 建议为空时弹窗显示「诊疗完成时没记去向建议，请人工选择」，
+  不预选、不阻塞；
+- 结论：**未发现需修改项**。
+
+### 一百零五、替代方案
+
+1. **内部多角色评审**（本轮已用）：后端状态机 / 前端契约 / 测试三方
+   对照，配合 `tests_frontend_consistency.py` 的枚举同源断言；
+2. **静态门禁**：pyflakes（现已清零）+ `manage.py check --deploy`
+   + 可选 `bandit` / `pip-audit`；
+3. **`open-code-review`（ocr）**：技能已具备，但 CLI 未安装且需用户
+   自备 LLM API key，故未启用；
+4. **CodeRabbit GitHub App / Web**：若日后接入 PR 流程，可用网页端
+   评审，不依赖本机 CLI 回调。
+
+### 一百零六、结果与需人工确认
+
+- 全量套件：**1831 例通过，296.386s**（较上轮 +1 例）；
+- 变异 M168：**捕获**；
+- pyflakes：除 2 处有意 re-export 外**零告警**；
+- 操作列吸附在 390px 实测有效，桌面端零回归。
+
+需人工确认：
+
+1. **320px 未单独复测吸附列**：该断点下操作列仍占 128px（可视宽约
+   262px），主内容区会更窄；若现场小屏占比高，下一步应做「按角色
+   压缩低频列」，而不是继续加宽吸附列。
+2. **吸附列遮挡**：滑动到最右时，操作列会覆盖同位置的其他列内容；
+   这是 sticky 列的预期行为，但若某页有 7 列以上且每列都需精读，
+   建议改为「行内展开详情」而非横向滑动。
+
+## 第六十轮：移动端宽表列压缩（账号表 / 捕捉记录）（2026-10-19）
+
+### 一百零七、发现
+
+第五十九轮把操作列吸附到右侧后，按钮始终点得到，但宽表仍要横滑才能
+看全一行：
+
+| 页面 | 列数 | 390px 表宽 | 可视宽 | 横滑 |
+|---|---|---|---|---|
+| 平台端账号权限 | 9 + 操作 | 996px | 332px | 664px |
+| 捕捉点端捕捉记录 | 6 + 操作 | 613px | 332px | 281px |
+
+现场主要用手机登记，账号表又是管理员低频但信息密集的页面。只吸附操作列
+解决「点得到」，没解决「来回滑着读」。
+
+### 一百零八、修法（通用能力）
+
+`TNR_UI.mountTable` 新增两个列选项：
+
+- `mobile: 'hide'` —— 该列在 ≤768px 隐藏（`th/td/col` 同时加
+  `.dt-col-mobile-hide`）；
+- `mobileRender(row)` —— 渲染在主列单元格里的手机端补充内容
+  （`.dt-mobile-only`，桌面端隐藏）。
+
+两半必须成对：只隐藏不补回 = 手机上信息消失；只补回不隐藏 = 桌面重复。
+行内补充统一由 `TNR_UI.mobileLine(label, val)` / `mobileMore(inner)`
+生成，避免各门户手写一套结构。`mobileMore` 用原生 `<details>` 折叠
+低频信息，控制手机端行高。
+
+同时手机端隐藏 `.dt-colresizer`：触屏没有拖列宽手势，7px 手柄还会从
+表格右缘探出 3px，让已收进可视宽的表格多出一条细横滑。
+
+### 一百零九、两页的列取舍
+
+**平台端账号（9 列）**：只保留「用户名 + 操作」。姓名 / 角色 / 状态
+常显在主列；区县 / 所属机构 / 执业证号 / 电话 / 开户时间收进「更多信息」。
+证号只在医院角色下出现（与桌面一致），空证号仍显示「未登记」红标。
+单元格渲染集中为 `cell.*`，桌面列与手机主列共用，防止两端口径漂移。
+
+**捕捉点端捕捉记录（6 列）**：只保留「单号 + 操作」。小区 / 数量 /
+转运状态常显；物业 / 时间收进「更多信息」。单号链接、编辑、删除的
+事件委托均未改动。
+
+### 一百一十、判据与变异
+
+- `MobileLayoutTest.test_mobile_wide_tables_collapse_low_priority_columns`：
+  - CSS 必须同时存在「隐藏 `.dt-col-mobile-hide`」与「显示
+    `.dt-mobile-only`」两段规则；
+  - `mountTable` 必须识别 `mobile:'hide'` 与 `mobileRender`；
+  - 账号表必须挂 `mobileRender: mobileCard` 且至少收起 8 列；
+  - 捕捉记录必须挂 `mobileRender: mobileCard` 且至少收起 5 列。
+- 变异 **M169–M171** 全部捕获：
+  - M169 低频列不再隐藏；
+  - M170 账号表主列不再补回；
+  - M171 捕捉记录主列不再补回。
+
+### 一百一十一、浏览器复核（CDP，真实登录）
+
+| 视口 / 页面 | 表宽 / 可视 | 横滑 | 可见列宽 | 更多信息 |
+|---|---|---|---|---|
+| 390 账号权限 | 332 / 332 | 0 | 204 + 128 | 展开后 332，横滑 0 |
+| 390 捕捉记录 | 332 / 332 | 0 | 204 + 128 | 展开后 332，横滑 0 |
+| 1366 账号权限 | 1023 / 1020 | 3（拖宽手柄，原有） | 9 列全显 | 桌面隐藏 |
+| 1366 捕捉记录 | 1029 / 1026 | 3（拖宽手柄，原有） | 6 列全显 | 桌面隐藏 |
+
+- 手机端「更多信息」默认折叠，点开后区县 / 机构 / 证号 / 电话 /
+  开户时间（账号）或物业 / 时间（捕捉）完整可读；
+- 页面级 `bodyOverflow=0`，无整页横滑。
+
+### 一百一十二、结果
+
+- 全量套件：**1832 例通过，303.045s**（较上轮 +1 例）；
+- 前端一致性：**220 例通过**；
+- 变异 M169–M171：**3/3 捕获**；
+- 两页手机端横滑由 664px / 281px 降为 **0**，桌面列宽与列数不变。
+
+### 一百一十三、需人工确认与已知取舍
+
+1. **「更多信息」默认折叠**：物业 / 时间 / 电话等需多点一次。若现场
+   反馈「时间必须一眼看到」，应把时间提升为常显行，而不是取消折叠。
+2. **手机端单行变高**：账号行约 145px、捕捉行约 100px（展开前）。
+   这是「不横滑」换来的纵向空间；每页 10 条仍可接受。
+3. **低频列仍是 DOM 节点**：`display:none` 只是视觉隐藏，屏幕阅读器
+   不会读隐藏列；手机端信息由主列补回，不存在双读。
+4. **桌面 3px 横滑仍在**：来自列宽拖拽手柄 `right:-3px`，是拖拽热区
+   的一部分，未改动；手机端已隐藏手柄，横滑为 0。
+5. **测试断言随重构同步**：`VetLicenseEntryContractTest` 原先用
+   「`key: 'vet_license'` 后 260 字符内出现未登记」的字符距离判据，
+   渲染器集中到 `cell.vetLicense` 后失配；已改为「列引用共用渲染器」+
+   「渲染器包含未登记标记」两段断言，判别力不变。

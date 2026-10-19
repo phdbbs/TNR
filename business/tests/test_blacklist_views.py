@@ -28,7 +28,9 @@ class BlacklistCreateTest(BusinessTestBase):
                   message='拉黑原因不能为空')
 
     def test_user_without_district_rejected(self):
-        user = make_user(role='gov_city')  # 无区县
+        # 无区县的操作员。第四十九轮起政府角色不再能写黑名单，改用捕捉点角色，
+        # 判据（归属推不出具体区县必须先报错，不能悄悄落库成无区县记录）不变。
+        user = make_user(role='shelter')  # 无区县、无机构
         self.login_as(user)
         self.expect_fail(self.post_json(f'{URL}create/', {'name': 'x', 'reason': 'y'}),
                   message='缺少区县信息')

@@ -1,0 +1,1553 @@
+/* ============================================
+   政府监管端 - SPA 应用逻辑
+   ============================================ */
+
+const GovPortal = {
+  supState: { tab: 'capture' },
+  ledgerState: { tab: 'pet' },
+  /* ⚠ 这里的键必须与 `gov_base.html` 侧边栏的标签文本一一对应。
+     第四十二轮把「机构基础管理 / 账号权限管理 / 系统配置」三个**全局设置**页
+     搬去了平台管理端（`/platform/`），政府端只留查看类页面。
+     标签与 render 方法一旦漂移，表现是「点了没反应」而不是报错。 */
+  titles: {
+    'dashboard': '数据总览大屏',
+    'supervision': '全业务监管',
+    'material': '物料全局监管',
+    'ledger': '全局台账中心'
+  },
+
+  /* ========== 初始化 ========== */
+  init() {
+    this.bindSidebarNav();
+    TNR_UI.initPortalShell();
+    this.startClock();
+    this.navigate('dashboard');
+  },
+
+  /* 绑定 gov_base 侧边栏导航 → SPA 路由 */
+  bindSidebarNav() {
+    const navMap = {
+      '数据总览大屏': 'dashboard',
+      '全业务监管': 'supervision',
+      '物料全局监管': 'material',
+      '全局台账中心': 'ledger'
+    };
+    document.querySelectorAll('.portal-sidebar-nav .nav-item').forEach(a => {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        const label = a.querySelector('.nav-item-label')?.textContent.trim();
+        const page = navMap[label];
+        if (page) {
+          document.querySelectorAll('.portal-sidebar-nav .nav-item').forEach(x => x.classList.remove('active'));
+          a.classList.add('active');
+          this.navigate(page);
+        }
+      });
+    });
+  },
+
+  navigate(pageId) {
+    document.querySelectorAll('.page-view').forEach(p => p.classList.remove('active'));
+    const page = document.getElementById('page-' + pageId);
+    if (page) page.classList.add('active');
+    const titleEl = document.querySelector('.portal-topbar-title');
+    if (titleEl) titleEl.textContent = this.titles[pageId] || '';
+    const renderer = this['render_' + pageId];
+    if (renderer) renderer.call(this);
+  },
+
+  startClock() {
+    const update = () => {
+      const el = document.getElementById('govTopbarTime');
+      if (el) {
+        const now = new Date();
+        el.textContent = now.getFullYear() + '-' +
+          String(now.getMonth() + 1).padStart(2, '0') + '-' +
+          String(now.getDate()).padStart(2, '0') + ' ' +
+          String(now.getHours()).padStart(2, '0') + ':' +
+          String(now.getMinutes()).padStart(2, '0') + ':' +
+          String(now.getSeconds()).padStart(2, '0');
+      }
+    };
+    update();
+    setInterval(update, 1000);
+  },
+
+  /* ========== 1. 数据总览大屏（时间维度 + 前端明细加总） ========== */
+  async render_dashboard() {
+    const el = document.getElementById('page-dashboard');
+    el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⏳</div><div class="table-empty-text">加载中...</div></div>';
+    try {
+      // 一次性拉取全部明细数据，汇总一律由前端按时间范围过滤后加总
+      const [districts, institutions, captures, treatments, releases, adoptions,
+             euthanasia, transfers, pets, materialSup] = await Promise.all([
+        TNR_API.getDistrictsStrict(),
+        TNR_API.getInstitutionsStrict(),
+        TNR_API.getCapturesStrict(),
+        TNR_API.getTreatmentsStrict(),
+        TNR_API.getReleasesStrict(),
+        TNR_API.getAdoptionsStrict(),
+        TNR_API.getEuthanasiaStrict(),
+        TNR_API.getTransfersStrict(),
+        TNR_API.getPetsStrict(),
+        TNR_API.getMaterialSupervisionStrict(),
+      ]);
+      this._dash = {
+        districts: districts || [], institutions: institutions || [],
+        captures: captures || [], treatments: treatments || [],
+        releases: releases || [], adoptions: adoptions || [],
+        euthanasia: euthanasia || [], transfers: transfers || [],
+        pets: pets || [],
+        materials: (materialSup && materialSup.materials) || [],
+        txns: (materialSup && materialSup.transactions) || [],
+      };
+      // 默认时间范围：全部
+      if (!this._dashRange) this._dashRange = { start: '', end: '' };
+      this._renderDashBody();
+    } catch (e) {
+      el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⚠️</div><div class="table-empty-text">加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
+    }
+  },
+
+  _dashInRange(dateStr) {
+    const { start, end } = this._dashRange || {};
+    if (!dateStr) return !start && !end ? true : false;
+    // `dateStr` 常来自 `x[dateKey] || x.created_at`，而 `created_at` 是
+    // DateTimeField（UTC 串）。裸截断得到 UTC 日期，跟本地日期比较会把
+    // 北京时间 00:00–08:00 的记录算到**前一天**。localDateStr 对纯日期串原样返回。
+    const d = TNR_UI.localDateStr(dateStr);
+    if (start && d < start) return false;
+    if (end && d > end) return false;
+    return true;
+  },
+
+  _dashSum(list, dateKey, countFn) {
+    return (list || []).filter(x => this._dashInRange(x[dateKey] || x.created_at))
+      .reduce((s, x) => s + (countFn ? countFn(x) : 1), 0);
+  },
+
+  _renderDashBody() {
+    const el = document.getElementById('page-dashboard');
+    const D = this._dash;
+    const { start, end } = this._dashRange || {};
+    const rangeText = (start || end)
+      ? `${start || '开始'} ~ ${end || '今天'}`
+      : '全部时间';
+
+    // ---- 汇总：全部由明细数据按时间范围加总 ----
+    const sumCapturePets = this._dashSum(D.captures, 'created_at', c => c.pet_count || 0);
+    const sumCaptureOrders = (D.captures || []).filter(c => this._dashInRange(c.created_at)).length;
+    const sumTreatments = this._dashSum(D.treatments, 'created_at');
+    const sumReleases = this._dashSum(D.releases, 'created_at');
+    const sumAdoptions = this._dashSum(D.adoptions, 'created_at');
+    const sumEuthanasia = this._dashSum(D.euthanasia, 'euthanized_at') ||
+                          this._dashSum(D.euthanasia, 'created_at');
+    const inRangeTxns = (D.txns || []).filter(t => this._dashInRange(t.date || t.created_at));
+    const sumPurchase = inRangeTxns.filter(t => t.type === 'purchase').reduce((s, t) => s + (t.quantity || 0), 0);
+    const sumDispatch = inRangeTxns.filter(t => t.type === 'dispatch').reduce((s, t) => s + (t.quantity || 0), 0);
+    const sumConsume = inRangeTxns.filter(t => t.type === 'consume').reduce((s, t) => s + (t.quantity || 0), 0);
+    // 当前值（不受时间过滤，卡片上标注「当前」）
+    const curInstitutions = (D.institutions || []).filter(i => i.status !== 'inactive').length;
+    const curInTransit = (D.pets || []).filter(p => p.status === 'in_transit').length;
+    const curPets = (D.pets || []).length;
+
+    // ---- 区县统计（按时间范围加总） ----
+    const districtStats = (D.districts || []).map(d => {
+      const dc = (D.captures || []).filter(c => c.district_id === d.id && this._dashInRange(c.created_at));
+      const dt = (D.treatments || []).filter(t => t.district_id === d.id && this._dashInRange(t.created_at));
+      const dr = (D.releases || []).filter(r => r.district_id === d.id && this._dashInRange(r.created_at));
+      const da = (D.adoptions || []).filter(a => a.district_id === d.id && this._dashInRange(a.created_at));
+      const de = (D.euthanasia || []).filter(e => e.district_id === d.id && (this._dashInRange(e.euthanized_at) || this._dashInRange(e.created_at)));
+      return {
+        d,
+        captures: dc.reduce((s, c) => s + (c.pet_count || 0), 0),
+        treatments: dt.length, releases: dr.length,
+        adoptions: da.length, euthanasia: de.length
+      };
+    }).filter(ds => ds.d.is_city ? true : true);
+
+    // ---- 物料消耗柱状图（按时间范围加总） ----
+    const matChart = (D.materials || []).map(m => {
+      const consumed = inRangeTxns.filter(t => t.material_id === m.id && t.type === 'consume')
+        .reduce((s, t) => s + (t.quantity || 0), 0);
+      return { label: m.name, value: consumed };
+    });
+    const matMax = Math.max(...matChart.map(m => m.value), 1);
+
+    // ---- 最近动态（按时间范围过滤） ----
+    const activities = [];
+    (D.captures || []).forEach(c => { if (this._dashInRange(c.created_at)) activities.push({ time: c.created_at, title: '捕捉登记', desc: (c.community_name || '') + ' · ' + (c.pet_count || 0) + '只', type: 'capture' }); });
+    (D.transfers || []).forEach(t => { if (this._dashInRange(t.created_at)) activities.push({ time: t.created_at, title: '转运交接', desc: (t.from_shelter_name || '') + ' → ' + (t.to_hospital_name || ''), type: 'transfer' }); });
+    (D.treatments || []).forEach(t => { if (this._dashInRange(t.created_at)) activities.push({ time: t.created_at, title: '诊疗记录', desc: (t.pet_code || '') + ' · ' + (t.hospital_name || ''), type: 'treatment' }); });
+    (D.releases || []).forEach(r => { if (this._dashInRange(r.created_at)) activities.push({ time: r.created_at, title: '放归登记', desc: (r.pet_code || '') + ' → ' + (r.community_name || ''), type: 'release' }); });
+    (D.adoptions || []).forEach(a => { if (this._dashInRange(a.created_at)) activities.push({ time: a.created_at, title: '领养登记', desc: (a.pet_code || '') + ' · ' + (a.adopter_name || ''), type: 'adoption' }); });
+    (D.euthanasia || []).forEach(e => { if (this._dashInRange(e.euthanized_at) || this._dashInRange(e.created_at)) activities.push({ time: e.euthanized_at || e.created_at, title: '安乐死处置', desc: (e.pet_code || '') + ' · ' + (e.hospital_name || ''), type: 'euthanasia' }); });
+    activities.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+    const recentActivities = activities.slice(0, 8);
+    const activityIcons = { capture: '🐾', transfer: '🚐', treatment: '🏥', release: '🌱', adoption: '🏠', euthanasia: '⚖️' };
+    const inRangeActive = (start || end) ? recentActivities.length > 0 : recentActivities.length > 0;
+
+    el.innerHTML = `
+      <div class="std-page-head">
+        <div>
+          <div class="std-page-title">数据总览大屏</div>
+          <div class="std-page-desc">统计口径：${rangeText} · 全部汇总数据由业务明细实时加总</div>
+        </div>
+        <div class="filter-bar" style="align-items:center;">
+          <div class="filter-item"><div class="filter-item-label">开始日期</div>
+            <input type="date" class="form-input" id="dashStart" value="${start || ''}"></div>
+          <div class="filter-item"><div class="filter-item-label">结束日期</div>
+            <input type="date" class="form-input" id="dashEnd" value="${end || ''}"></div>
+          <div class="filter-actions">
+            <button type="button" class="btn btn-primary btn-sm" id="dashBtnSearch">🔍 统计</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="dashBtnWeek">最近一周</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="dashBtnMonth">最近一月</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="dashBtnAll">全部</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-card-icon">🐾</div>
+          <div><div class="stat-card-value">${sumCapturePets}</div><div class="stat-card-label">捕捉动物（只 / ${sumCaptureOrders} 单）</div></div>
+        </div>
+        <div class="stat-card blue">
+          <div class="stat-card-icon">🏥</div>
+          <div><div class="stat-card-value">${sumTreatments}</div><div class="stat-card-label">诊疗（单）</div></div>
+        </div>
+        <div class="stat-card green">
+          <div class="stat-card-icon">🌱</div>
+          <div><div class="stat-card-value">${sumReleases}</div><div class="stat-card-label">放归（单）</div></div>
+        </div>
+        <div class="stat-card gold">
+          <div class="stat-card-icon">🏠</div>
+          <div><div class="stat-card-value">${sumAdoptions}</div><div class="stat-card-label">领养（单）</div></div>
+        </div>
+        <div class="stat-card rouge">
+          <div class="stat-card-icon">⚖️</div>
+          <div><div class="stat-card-value">${sumEuthanasia}</div><div class="stat-card-label">安乐死（单）</div></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-icon">📮</div>
+          <div><div class="stat-card-value">${curInTransit}</div><div class="stat-card-label">在途动物（当前）</div></div>
+        </div>
+        <div class="stat-card blue">
+          <div class="stat-card-icon">🐕</div>
+          <div><div class="stat-card-value">${curPets}</div><div class="stat-card-label">宠物档案（当前）</div></div>
+        </div>
+        <div class="stat-card gold">
+          <div class="stat-card-icon">🏢</div>
+          <div><div class="stat-card-value">${curInstitutions}</div><div class="stat-card-label">在营机构（当前）</div></div>
+        </div>
+      </div>
+
+      <div class="dashboard-grid">
+        <div class="card">
+          <div class="card-body card-body-flush">
+            <div class="table-wrapper" style="border:none;">
+              <table class="data-table district-compare-table">
+                <thead><tr>
+                  <th style="text-align:left;">区县</th>
+                  <th>捕捉(只)</th><th>诊疗</th><th>放归</th><th>领养</th><th>安乐死</th>
+                </tr></thead>
+                <tbody>
+                  ${districtStats.length ? districtStats.map(ds => `
+                    <tr>
+                      <td style="text-align:left;font-weight:600;">${TNR_UI.escape(ds.d.name)}${ds.d.is_city ? '<span class=\"badge badge-default\" style=\"margin-left:6px;\">市级</span>' : ''}</td>
+                      <td>${ds.captures}</td><td>${ds.treatments}</td><td>${ds.releases}</td>
+                      <td>${ds.adoptions}</td><td>${ds.euthanasia}</td>
+                    </tr>
+                  `).join('') : '<tr><td colspan="6" class="table-empty">暂无数据</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title"><span class="card-title-bar"></span>物料流转统计</div>
+          </div>
+          <div class="card-body">
+            <div class="stat-grid stat-grid-3" style="margin-bottom:var(--sp-5);">
+              <div><div class="fs-2xl font-bold font-display" style="color:var(--ink);">${sumPurchase}</div><div class="fs-sm text-muted">采购入库（份）</div></div>
+              <div><div class="fs-2xl font-bold font-display" style="color:var(--azurite);">${sumDispatch}</div><div class="fs-sm text-muted">下发医院（份）</div></div>
+              <div><div class="fs-2xl font-bold font-display" style="color:var(--cinnabar);">${sumConsume}</div><div class="fs-sm text-muted">诊疗消耗（份）</div></div>
+            </div>
+            ${matChart.length ? matChart.map(m => `
+              <div class="chart-bar-container">
+                <div class="chart-bar-label">${TNR_UI.escape(m.label)}</div>
+                <div class="chart-bar-track">
+                  <div class="chart-bar-fill" style="width:${(m.value / matMax * 100).toFixed(1)}%">${m.value}</div>
+                </div>
+              </div>
+            `).join('') : '<div class="table-empty">暂无物料数据</div>'}
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><span class="card-title-bar"></span>业务动态</div>
+        </div>
+        <div class="card-body">
+          <div class="timeline">
+            ${recentActivities.length ? recentActivities.map(a => `
+              <div class="timeline-item">
+                <div class="timeline-time">${TNR_UI.formatDateTime(a.time)}</div>
+                <div class="timeline-title">${activityIcons[a.type] || '📋'} ${TNR_UI.escape(a.title)}</div>
+                <div class="timeline-desc">${TNR_UI.escape(a.desc)}</div>
+              </div>
+            `).join('') : '<div class="table-empty">该时间范围内暂无业务动态</div>'}
+          </div>
+        </div>
+      </div>
+    `;
+
+    // ---- 时间筛选交互 ----
+    const applyRange = (s, e) => {
+      this._dashRange = { start: s, end: e };
+      document.getElementById('dashStart').value = s;
+      document.getElementById('dashEnd').value = e;
+      this._renderDashBody();
+    };
+    const doSearch = () => {
+      this._dashRange = {
+        start: document.getElementById('dashStart').value || '',
+        end: document.getElementById('dashEnd').value || '',
+      };
+      this._renderDashBody();
+    };
+    document.getElementById('dashBtnSearch').addEventListener('click', doSearch);
+    ['dashStart', 'dashEnd'].forEach(id => {
+      document.getElementById(id).addEventListener('change', doSearch);
+      document.getElementById(id).addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doSearch();
+      });
+    });
+    document.getElementById('dashBtnWeek').addEventListener('click', () => {
+      const fmt = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      const end = new Date();
+      const startD = new Date(end.getTime() - 6 * 86400000);
+      applyRange(fmt(startD), fmt(end));
+    });
+    document.getElementById('dashBtnMonth').addEventListener('click', () => {
+      const fmt = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      const end = new Date();
+      const startD = new Date(end.getTime() - 29 * 86400000);
+      applyRange(fmt(startD), fmt(end));
+    });
+    document.getElementById('dashBtnAll').addEventListener('click', () => applyRange('', ''));
+  },
+
+
+  /* ========== 4. 全业务监管 ========== */
+  async render_supervision() {
+    const el = document.getElementById('page-supervision');
+    const tabs = [
+      { id: 'capture', label: '捕捉监管' },
+      { id: 'transfer', label: '转运监管' },
+      { id: 'treatment', label: '诊疗监管' },
+      { id: 'release', label: '放归监管' },
+      { id: 'adoption', label: '领养回访监管' },
+      { id: 'euthanasia', label: '安乐死监管' }
+    ];
+    el.innerHTML = `
+      <div class="tabs">
+        ${tabs.map(t => `<div class="tab-item ${this.supState.tab === t.id ? 'active' : ''}" data-sup-tab="${t.id}">${t.label}</div>`).join('')}
+      </div>
+      <div id="supContent"></div>
+    `;
+    el.querySelectorAll('[data-sup-tab]').forEach(tab => {
+      tab.addEventListener('click', () => { this.supState.tab = tab.dataset.supTab; this.render_supervision(); });
+    });
+    await this.renderSupervisionContent();
+  },
+
+  async renderSupervisionContent() {
+    const districts = await TNR_API.getDistricts();
+    const activeDistricts = (districts || []).filter(d => d.status === 'active');
+    const contentEl = document.getElementById('supContent');
+    contentEl.innerHTML = TNR_UI.renderFilterBar([
+      // 排除「全市（市级）」：全业务监管里没有任何一条记录归属市级，
+      // 留着就是「选了必定 0 条」的死选项（区县管理页早已按 `!d.is_city` 处理）。
+      { key: 'district', label: '区县', type: 'select', options: activeDistricts.filter(d => !d.is_city).map(d => ({ value: d.id, label: d.name })) },
+      { key: 'search', label: '搜索', type: 'search', placeholder: '编号/单据号/名称' }
+    ]) + '<div class="table-wrapper" id="supTableWrapper"></div>';
+    await this.renderSupervisionTable();
+    TNR_UI.bindFilter(() => this.renderSupervisionTable(), contentEl);
+  },
+
+  async renderSupervisionTable() {
+    const filters = TNR_UI.getFilterValues(document.getElementById('supContent'));
+    const type = this.supState.tab;
+    const sup = await TNR_API.getBusinessSupervision(type);
+    const districts = await TNR_API.getDistricts();
+    const districtMap = {};
+    (districts || []).forEach(d => { districtMap[d.id] = d.name; });
+    const districtRender = r => TNR_UI.escape(districtMap[r.district_id] || r.district_name || '—');
+    let data, columns;
+
+    if (type === 'capture') {
+      data = sup.captures || [];
+      if (filters.district) data = data.filter(r => String(r.district_id) === String(filters.district));
+      if (filters.search) { const s = filters.search.toLowerCase(); data = data.filter(r => (r.ledger_no && r.ledger_no.toLowerCase().includes(s)) || (r.community_name && r.community_name.toLowerCase().includes(s)) || (r.shelter_name && r.shelter_name.toLowerCase().includes(s))); }
+      columns = [
+        { key: 'ledger_no', title: '单据号', width: '160px' },
+        { key: 'shelter_name', title: '捕捉点', render: r => TNR_UI.escape(r.shelter_name) },
+        { key: 'community_name', title: '来源地点', render: r => TNR_UI.escape(r.community_name || '—') },
+        { key: 'pet_count', title: '数量', width: '70px' },
+        { key: 'district_id', title: '区县', render: districtRender },
+        { key: 'created_at', title: '时间', width: '140px', render: r => TNR_UI.formatDateTime(r.created_at) },
+        /* 状态列一律取真源（以前这里自带一张捕捉单状态表，
+           与捕捉点端各排各的配色，后端加一档这里就漏一列） */
+        { key: 'status', title: '状态', render: r => TNR_UI.captureStatusBadge(r.status) }
+      ];
+    } else if (type === 'transfer') {
+      data = sup.transfers || [];
+      if (filters.district) data = data.filter(r => String(r.district_id) === String(filters.district));
+      if (filters.search) { const s = filters.search.toLowerCase(); data = data.filter(r => (r.ledger_no && r.ledger_no.toLowerCase().includes(s)) || (r.from_shelter_name && r.from_shelter_name.toLowerCase().includes(s)) || (r.to_hospital_name && r.to_hospital_name.toLowerCase().includes(s))); }
+      columns = [
+        { key: 'ledger_no', title: '单据号', width: '160px' },
+        { key: 'from_shelter_name', title: '出发捕捉点', render: r => TNR_UI.escape(r.from_shelter_name) },
+        { key: 'to_hospital_name', title: '接收医院', render: r => TNR_UI.escape(r.to_hospital_name) },
+        { key: 'pet_count', title: '数量', width: '70px' },
+        { key: 'district_id', title: '区县', render: districtRender },
+        { key: 'created_at', title: '时间', width: '140px', render: r => TNR_UI.formatDateTime(r.created_at) },
+        /* 本表原来自带一张转运状态表，写的是「待接收 / 已接收」（后端 label
+           待签收 / 已签收），而且**漏了 `partial`**：部分签收的单子在状态列
+           直接印出英文码 `partial`。取值一律走 `TNR_UI.TRANSFER_STATUS`。 */
+        { key: 'status', title: '状态', render: r => TNR_UI.transferStatusBadge(r.status) }
+      ];
+    } else if (type === 'treatment') {
+      data = sup.treatments || [];
+      if (filters.district) data = data.filter(r => String(r.district_id) === String(filters.district));
+      if (filters.search) { const s = filters.search.toLowerCase(); data = data.filter(r => (r.pet_code && r.pet_code.toLowerCase().includes(s)) || (r.hospital_name && r.hospital_name.toLowerCase().includes(s))); }
+      columns = [
+        { key: 'pet_code', title: '编号', width: '130px' },
+        { key: 'hospital_name', title: '诊疗医院', render: r => TNR_UI.escape(r.hospital_name) },
+        { key: 'treatment_items', title: '诊疗内容', render: r => {
+          const items = r.treatment_items || [];
+          return items.map(i => `<span class="badge badge-info" style="margin-right:4px;">${i}</span>`).join('') || '—';
+        } },
+        { key: 'district_id', title: '区县', render: districtRender },
+        { key: 'created_at', title: '时间', width: '140px', render: r => TNR_UI.formatDateTime(r.created_at) },
+        /* 「诊疗中」是**阶段**（STAGE_CHOICES）的文案，被这里抄成了状态名：
+           `Treatment.status` 只有进行中 / 已完成，同一张单在监管端两张表里
+           一黄一蓝、一个叫法。走真源。 */
+        { key: 'status', title: '状态', render: r => TNR_UI.treatmentStatusBadge(r.status) }
+      ];
+    } else if (type === 'release') {
+      data = sup.releases || [];
+      if (filters.district) data = data.filter(r => String(r.district_id) === String(filters.district));
+      if (filters.search) { const s = filters.search.toLowerCase(); data = data.filter(r => (r.pet_code && r.pet_code.toLowerCase().includes(s)) || (r.community_name && r.community_name.toLowerCase().includes(s))); }
+      columns = [
+        { key: 'ledger_no', title: '单据号', width: '160px' },
+        { key: 'pet_code', title: '编号', width: '130px' },
+        { key: 'community_name', title: '放归地点', render: r => TNR_UI.escape(r.community_name) },
+        { key: 'pet_count', title: '数量', width: '70px', render: () => '1' },
+        { key: 'receiver_name', title: '接收人', render: r => TNR_UI.escape(r.receiver_name || '—') },
+        { key: 'district_id', title: '区县', render: districtRender },
+        { key: 'released_at', title: '放归时间', width: '120px', render: r => TNR_UI.formatDateTime(r.released_at) },
+        { key: 'status', title: '状态', width: '120px', render: r => TNR_UI.releaseStatusBadge(r.status) }
+      ];
+    } else if (type === 'adoption') {
+      data = sup.adoptions || [];
+      const checkIns = sup.checkins || [];
+      if (filters.district) data = data.filter(r => String(r.district_id) === String(filters.district));
+      if (filters.search) { const s = filters.search.toLowerCase(); data = data.filter(r => (r.pet_code && r.pet_code.toLowerCase().includes(s)) || (r.adopter_name && r.adopter_name.toLowerCase().includes(s))); }
+      columns = [
+        { key: 'ledger_no', title: '单据号', width: '160px' },
+        { key: 'pet_code', title: '编号', width: '130px' },
+        { key: 'adopter_name', title: '领养人', render: r => TNR_UI.escape(r.adopter_name) },
+        { key: 'adopter_phone', title: '联系电话', render: r => TNR_UI.escape(r.adopter_phone || '—') },
+        { key: 'hospital_name', title: '所属医院', render: r => TNR_UI.escape(r.hospital_name) },
+        { key: 'checkin_count', title: '回访打卡', render: r => {
+          // 只报「几次」会把三条**全部驳回**的领养显示成绿色「3次」，
+          // 在监管看板上这跟「回访良好」完全是反的 —— 徽章底色跟着审核结果走。
+          const mine = checkIns.filter(c => c.pet_id === r.pet_id);
+          const cnt = {};
+          mine.forEach(c => { cnt[c.status] = (cnt[c.status] || 0) + 1; });
+          const detail = Object.keys(TNR_UI.CHECKIN_STATUS)
+            .filter(k => cnt[k])
+            .map(k => TNR_UI.CHECKIN_STATUS[k].text + cnt[k]);
+          const allApproved = mine.length > 0 && detail.length === 1 && cnt.approved === mine.length;
+          const cls = allApproved ? 'badge-success' : 'badge-warning';
+          const tip = detail.length ? detail.join(' / ') : '尚无回访打卡';
+          return `<span class="badge ${cls}" title="${TNR_UI.escape(tip)}">${mine.length}次</span>`;
+        } },
+        { key: 'district_id', title: '区县', render: districtRender },
+        { key: 'adopted_at', title: '领养时间', width: '120px', render: r => TNR_UI.formatDateTime(r.adopted_at) }
+      ];
+    } else if (type === 'euthanasia') {
+      data = sup.euthanasia || [];
+      if (filters.district) data = data.filter(r => String(r.district_id) === String(filters.district));
+      if (filters.search) { const s = filters.search.toLowerCase(); data = data.filter(r => (r.pet_code && r.pet_code.toLowerCase().includes(s)) || (r.hospital_name && r.hospital_name.toLowerCase().includes(s))); }
+      columns = [
+        { key: 'ledger_no', title: '单据号', width: '160px' },
+        { key: 'pet_code', title: '编号', width: '130px' },
+        { key: 'hospital_name', title: '处置医院', render: r => TNR_UI.escape(r.hospital_name) },
+        { key: 'reason', title: '处置原因', render: r => TNR_UI.escape(r.reason || '—') },
+        { key: 'district_id', title: '区县', render: districtRender },
+        { key: 'euthanized_at', title: '处置时间', width: '120px', render: r => TNR_UI.formatDateTime(r.euthanized_at) }
+      ];
+    }
+
+    /* 起止时间：6 个标签页的**时间字段不同**（放归看放归时间、领养看领养时间、
+       安乐死看处置时间，其余看创建时间）。统一在这里收口，而不是在 6 个分支里
+       各写一遍 —— 各写一遍必然漂移，且漂移只表现为「某一页筛出来的条数不对」，
+       接口照样 200、界面照样有数据。
+       
+       ⚠ 值是**字段列表**而不是单个字段名：`released_at` / `adopted_at` /
+       `euthanized_at` 都可空（事件还没发生，比如「待领出」的领养单），
+       只给一个名字的话，用户圈一个「全部」区间反而会把这类记录藏起来 ——
+       GUI 实测抓到过。按顺序取第一个有值的（见 `TNR_UI.firstDate`）。 */
+    const SUP_DATE_KEYS = {
+      capture: ['created_at', 'createdAt'],
+      transfer: ['created_at', 'createdAt'],
+      treatment: ['created_at', 'createdAt'],
+      release: ['released_at', 'releasedAt', 'created_at', 'createdAt'],
+      adoption: ['adopted_at', 'adoptedAt', 'created_at', 'createdAt'],
+      euthanasia: ['euthanized_at', 'euthanizedAt', 'created_at', 'createdAt']
+    };
+    const supDateKeys = SUP_DATE_KEYS[type] || ['created_at', 'createdAt'];
+    data = (data || []).filter(r =>
+      TNR_UI.inDateRange(TNR_UI.firstDate(...supDateKeys.map(k => r[k])),
+                         filters.start_date, filters.end_date));
+
+    const rowActions = r => `<button class="btn-link" data-detail="${r.id}">详情</button>`;
+    TNR_UI.mountTable('supTableWrapper', { id: 'gov.supervision.' + this.supState.tab, columns, data, rowActions, emptyText: '暂无监管数据' });
+    TNR_UI.delegateClick('supTableWrapper', {
+      'data-detail': (id) => this.showSupervisionDetail(type, id)
+    });
+  },
+
+  /* 渲染宠物照片网格 */
+  renderPetPhotos(pet, label) {
+    if (!pet) return '';
+    const photos = this.petPhotosOf(pet);
+    if (!photos.length) return '';
+    return `<div class="mt-4"><h4 class="font-display mb-3">${label || '动物照片'}（点击可放大）</h4><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:var(--sp-3);">` +
+      photos.map(p => `<div><img src="${p.url}" alt="${p.label}" data-zoom="${p.url}" style="width:100%;height:120px;object-fit:cover;border-radius:var(--r-md);border:1px solid var(--border-light);cursor:zoom-in;"><div class="fs-xs text-muted text-center mt-1">${p.label}</div></div>`).join('') +
+      `</div></div>`;
+  },
+
+  /* 单只动物的全部阶段照片（只返回确实有图的），标签与后端 PET_PHOTO_LABELS 一致 */
+  petPhotosOf(pet) {
+    if (!pet) return [];
+    const map = [
+      ['photo_capture', '捕捉'], ['photo_group', '合照'], ['photo_before', '术前'],
+      ['photo_after', '术后'], ['photo_treatment', '诊疗'],
+    ];
+    return map.filter(([f]) => pet[f]).map(([f, label]) => ({ url: pet[f], label }));
+  },
+
+  /* 逐只动物明细：编号/昵称/类别/品种/性别/芯片/状态 + 该只的全部照片。
+     政府端「台账中心」与「业务监管」的单据详情共用，避免两处字段口径漂移。 */
+  renderPetsList(pets) {
+    if (!pets || !pets.length) return '';
+    const esc = v => TNR_UI.escape(v || '');
+    const dash = v => (v === null || v === undefined || v === '') ? '—' : v;
+    return `<div class="mt-4"><h4 class="font-display mb-3">动物明细（${pets.length}只）</h4>` +
+      pets.map(p => {
+        const photos = this.petPhotosOf(p);
+        const attrs = [p.species, p.breed, p.gender, p.color]
+          .filter(Boolean).map(esc).join(' · ') || '—';
+        return `
+        <div style="padding:var(--sp-3);border:1px solid var(--border-light);border-radius:var(--r-md);margin-bottom:var(--sp-2);">
+          <div style="display:flex;gap:var(--sp-3);align-items:flex-start;">
+            ${photos.length
+              ? `<img src="${photos[0].url}" data-zoom="${photos[0].url}" style="width:80px;height:80px;object-fit:cover;border-radius:var(--r-sm);cursor:zoom-in;flex:0 0 auto;">`
+              : '<div style="width:80px;height:80px;background:var(--rice-warm);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;color:var(--ink-light);font-size:24px;flex:0 0 auto;">🐾</div>'}
+            <div style="flex:1;min-width:0;">
+              <div><strong>${esc(p.code)}</strong>${p.name ? ' · ' + esc(p.name) : ''}
+                ${p.status_display ? '<span class="badge badge-default" style="margin-left:6px;">' + esc(p.status_display) + '</span>' : ''}</div>
+              <div class="fs-sm text-muted">${attrs}</div>
+              <div class="fs-sm text-muted">芯片号：${esc(dash(p.chip_no))}${p.hospital_name ? ' · 所属医院：' + esc(p.hospital_name) : ''}</div>
+            </div>
+          </div>
+          ${photos.length > 1
+            ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:var(--sp-2);margin-top:var(--sp-2);">`
+              + photos.map(ph => `<div><img src="${ph.url}" data-zoom="${ph.url}" style="width:100%;height:72px;object-fit:cover;border-radius:var(--r-sm);border:1px solid var(--border-light);cursor:zoom-in;"><div class="fs-xs text-muted text-center mt-1">${ph.label}</div></div>`).join('')
+              + `</div>`
+            : ''}
+        </div>`;
+      }).join('') + `</div>`;
+  },
+
+  async showSupervisionDetail(type, id) {
+    const sup = await TNR_API.getBusinessSupervision(type);
+    let record, list;
+    if (type === 'capture') list = sup.captures || [];
+    else if (type === 'transfer') list = sup.transfers || [];
+    else if (type === 'treatment') list = sup.treatments || [];
+    else if (type === 'release') list = sup.releases || [];
+    else if (type === 'adoption') list = sup.adoptions || [];
+    else if (type === 'euthanasia') list = sup.euthanasia || [];
+    record = list.find(r => String(r.id) === String(id));
+    if (!record) { TNR_UI.toast('记录不存在', 'warning'); return; }
+
+    let items = [];
+    let extraHtml = '';
+    if (type === 'capture') {
+      items = [
+        { label: '单据号', value: record.ledger_no },
+        { label: '捕捉点', value: record.shelter_name },
+        { label: '来源地点', value: record.community_name || '—' },
+        { label: '详细地址', value: record.address || '—' },
+        { label: '物业交接人', value: record.contact_person || '—' },
+        { label: '联系电话', value: record.contact_phone || '—' },
+        { label: '动物数量', value: record.pet_count },
+        { label: '宠物编号', value: (record.pet_codes || []).join('、') || '—' },
+        { label: '操作人', value: record.operator_name || '—' },
+        { label: '区县', value: record.district_name || '—' },
+        { label: '创建时间', value: TNR_UI.formatDateTime(record.created_at) }
+      ];
+      if (record.group_photo) {
+        extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">合照</h4><img src="${record.group_photo}" style="max-width:100%;border-radius:var(--r-md);border:1px solid var(--border-light);"></div>`;
+      }
+      // 逐只动物明细 + 各自照片（此前只有合影，看不到单只信息与照片）
+      if (record.pets && record.pets.length) extraHtml += this.renderPetsList(record.pets);
+    } else if (type === 'transfer') {
+      items = [
+        { label: '单据号', value: record.ledger_no },
+        { label: '出发捕捉点', value: record.from_shelter_name },
+        { label: '接收医院', value: record.to_hospital_name },
+        { label: '动物数量', value: record.pet_count },
+        { label: '宠物编号', value: (record.pet_codes || []).join('、') || '—' },
+        { label: '操作人', value: record.operator_name || '—' },
+        { label: '区县', value: record.district_name || '—' },
+        { label: '创建时间', value: TNR_UI.formatDateTime(record.created_at) },
+        { label: '接收时间', value: TNR_UI.formatDateTime(record.received_at) },
+        { label: '驳回原因', value: record.reject_reason || '—' },
+        { label: '备注', value: record.note || '—', full: true }
+      ];
+      // 转运单同样要能看到逐只动物的信息与照片
+      if (record.pets && record.pets.length) extraHtml += this.renderPetsList(record.pets);
+    } else if (type === 'treatment') {
+      const ti = record.items || {};
+      const td = record.treatment_detail || {};
+      items = [
+        { label: '宠物编号', value: record.pet_code },
+        { label: '诊疗医院', value: record.hospital_name },
+        { label: '诊疗内容', value: (record.treatment_items || []).join('、') || '—' },
+        { label: '绝育', value: ti.sterilization ? '是' : '否' },
+        { label: '绝育日期', value: td.sterilization_surgery_date ? TNR_UI.formatDateTime(td.sterilization_surgery_date) : '—' },
+        { label: '主刀医生', value: td.sterilization_surgeon || '—' },
+        { label: '诊断', value: td.sterilization_diagnosis || '—' },
+        { label: '麻醉方式', value: td.sterilization_anesthesia || '—' },
+        { label: '手术过程', value: td.sterilization_procedure || '—' },
+        { label: '术后恢复', value: td.sterilization_recovery || '—' },
+        { label: '疫苗', value: ti.vaccine ? '是' : '否' },
+        { label: '疫苗类型', value: td.vaccine_type || '—' },
+        { label: '疫苗批号', value: td.vaccine_batch_no || '—' },
+        { label: '疫苗日期', value: td.vaccine_date ? TNR_UI.formatDateTime(td.vaccine_date) : '—' },
+        { label: '驱虫', value: ti.deworming ? '是' : '否' },
+        { label: '驱虫类型', value: td.deworming_type || '—' },
+        { label: '驱虫批号', value: td.deworming_batch_no || '—' },
+        { label: '芯片', value: ti.chip ? '是' : '否' },
+        { label: '芯片号', value: td.chip_no || '—' },
+        { label: '植入日期', value: td.chip_date ? TNR_UI.formatDateTime(td.chip_date) : '—' },
+        { label: '操作人', value: record.operator_name || '—' },
+        { label: '区县', value: record.district_name || '—' },
+        { label: '创建时间', value: TNR_UI.formatDateTime(record.created_at) }
+      ];
+      if (record.pet) extraHtml += this.renderPetPhotos(record.pet, '动物照片');
+    } else if (type === 'release') {
+      items = [
+        { label: '单据号', value: record.ledger_no },
+        { label: '宠物编号', value: record.pet_code },
+        { label: '动物数量', value: 1 },
+        { label: '放归地点', value: record.community_name || '—' },
+        /* 状态 + 两个时间点：放归拆成「转运回小区 → 小区签字」两段之后，
+           只看「放归时间」为空的单子分不清动物还没送出还是已经回小区。
+           文案取自 `TNR_UI.RELEASE_STATUS`（与列表列、其余两端同一份）。 */
+        { label: '状态', value: TNR_UI.releaseStatusBadge(record.status) },
+        { label: '接收人', value: record.receiver_name || '—' },
+        { label: '接收电话', value: record.receiver_phone || '—' },
+        { label: '操作人', value: record.operator_name || '—' },
+        { label: '区县', value: record.district_name || '—' },
+        { label: '转运回小区', value: TNR_UI.formatDateTime(record.transferred_at) },
+        { label: '放归时间', value: TNR_UI.formatDateTime(record.released_at) }
+      ];
+      if (record.pet) extraHtml += this.renderPetPhotos(record.pet, '放归动物照片');
+    } else if (type === 'adoption') {
+      const checkIns = (sup.checkins || []).filter(c => c.pet_id === record.pet_id);
+      items = [
+        { label: '单据号', value: record.ledger_no },
+        { label: '宠物编号', value: record.pet_code },
+        { label: '领养人', value: record.adopter_name },
+        { label: '联系电话', value: record.adopter_phone || '—' },
+        { label: '身份证号', value: record.adopter_id_card || '—' },
+        { label: '地址', value: record.adopter_address || '—' },
+        { label: '资质情况', value: record.qualification || '—' },
+        { label: '所属医院', value: record.hospital_name || '—' },
+        { label: '操作人', value: record.operator_name || '—' },
+        { label: '区县', value: record.district_name || '—' },
+        { label: '领养时间', value: TNR_UI.formatDateTime(record.adopted_at) },
+        // 次数之外必须带审核结果：只写「3次」看不出这三条回访是全过还是全驳。
+        { label: '回访打卡', value: checkIns.length + '次' + (() => {
+            const by = {};
+            checkIns.forEach(c => { by[c.status] = (by[c.status] || 0) + 1; });
+            const parts = Object.keys(TNR_UI.CHECKIN_STATUS)
+              .filter(k => by[k])
+              .map(k => TNR_UI.CHECKIN_STATUS[k].text + by[k]);
+            return parts.length ? '（' + parts.join(' / ') + '）' : '';
+          })(), full: true }
+      ];
+      if (record.pet) extraHtml += this.renderPetPhotos(record.pet, '领养动物照片');
+    } else if (type === 'euthanasia') {
+      items = [
+        { label: '单据号', value: record.ledger_no },
+        { label: '宠物编号', value: record.pet_code },
+        { label: '处置医院', value: record.hospital_name },
+        { label: '处置原因', value: record.reason },
+        { label: '动物状况', value: record.condition || '—' },
+        { label: '遗体已领取', value: record.body_received ? '是' : '否' },
+        { label: '遗体领取人', value: record.body_received_by_name || '—' },
+        { label: '操作人', value: record.operator_name || '—' },
+        { label: '区县', value: record.district_name || '—' },
+        { label: '处置时间', value: TNR_UI.formatDateTime(record.euthanized_at) }
+      ];
+      if (record.pet) extraHtml += this.renderPetPhotos(record.pet, '动物照片');
+    }
+
+    TNR_UI.drawer({
+      title: '业务详情',
+      body: bodyEl => {
+        bodyEl.innerHTML = TNR_UI.renderDescList(items) + extraHtml +
+          (type === 'adoption' && (sup.checkins || []).filter(c => c.pet_id === record.pet_id).length > 0 ?
+            '<div class="mt-5"><h4 class="font-display mb-3">回访打卡记录</h4><div class="timeline">' +
+            (sup.checkins || []).filter(c => c.pet_id === record.pet_id).map(c => `
+              <div class="timeline-item ${c.status === 'approved' ? 'done' : ''}">
+                <div class="timeline-time">${TNR_UI.formatDateTime(c.month || c.created_at)}</div>
+                <div class="timeline-title">${TNR_UI.escape(TNR_UI.checkinStatusText(c.status))}</div>
+                <div class="timeline-desc">${TNR_UI.escape(c.note || '')}</div>
+              </div>
+            `).join('') + '</div></div>' : '');
+      }
+    });
+  },
+
+  /* ========== 5. 物料全局监管 ========== */
+  /* 三个标签：库存数据 / 异常数据 / 台账 —— 与「全局台账中心」同一套
+     `.tabs` / `.tab-item` + `data-*-tab` + 状态字段的写法。
+     拆标签顺带修掉一个真实缺陷：原先「物料库存明细」与「物料流水追踪」两条筛选条
+     同屏，`position: sticky; top: 46px` 一模一样 —— 一旦都冻结就会**互相压住**。
+     现在同一时刻只有一个标签、一条筛选条。 */
+  materialState: { tab: 'stock' },
+  materialTabs: [
+    { id: 'stock', label: '库存数据' },
+    { id: 'alert', label: '异常数据' },
+    { id: 'ledger', label: '台账' }
+  ],
+  /* 类型筛选下拉：与表格里的徽章同源（`TNR_UI.MATERIAL_TXN_TYPES`），
+     这里以前自己抄了一份，`consume`/`adjustment`/`outbound` 三个叫法和
+     捕捉点/医院端不一致。 */
+  matTxnTypes: TNR_UI.materialTxnOptions('long', 'gov'),
+
+  async render_material() {
+    const el = document.getElementById('page-material');
+    /* ⚠ 本函数会**整页重建**（顶部「统计区间」的预设按钮与起止输入走这里，
+       切换标签也走这里），进门第一件事就是把 DOM 清成「加载中」。不先把列表筛选条的
+       值抄下来，用户填的条件会被**静默清空**、列表悄悄回到全量 ——
+       界面不报错、接口也 200，是最难发现的一类失效。
+       ⚠ 按**标签**分别记：切到别的标签再切回来，条件必须还在。 */
+    this._matFilters = this._matFilters || {};
+    const curBar = el.querySelector('.filter-bar');
+    if (curBar) {
+      const m = {};
+      curBar.querySelectorAll('[data-filter]').forEach(i => { m[i.dataset.filter] = i.value; });
+      this._matFilters[this.materialState.tab] = m;
+    }
+    el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⏳</div><div class="table-empty-text">加载中...</div></div>';
+    try {
+      const sup = await TNR_API.getMaterialSupervisionStrict();
+      const materials = sup.materials || [];
+      const txns = sup.transactions || [];
+      const stats = sup.stats || {};
+
+      /* 机构下拉：**捕捉点 + 医院**（需求明确要求两者都在）。
+         机构基础数据不在本接口里，单独取一次并缓存 —— 后面按机构换算库存还要用。 */
+      const allInst = (await TNR_API.getInstitutionsStrict() || []).filter(i => i.status === 'active');
+      this._matInstitutions = allInst;
+      const instOptions = allInst
+        .filter(i => i.type === 'shelter' || i.type === 'hospital')
+        .map(i => ({ value: String(i.id), label: i.name + '（' + (i.type_display || (i.type === 'shelter' ? '捕捉点' : '医院')) + '）' }));
+
+      /* 区县下拉：取**区县接口**并按 id 过滤，不要从业务数据里现推 `district_name`。
+         现推有两个毛病：
+           ① 「全市（市级）」会混进来。它排在第一位、很容易被当成「全部」，
+              而业务记录归属区县一律落到具体区县 —— 选中它只会得到一张空表
+              （`core/tests_frontend_consistency.py::DistrictFilterExcludesCityTest` 就是钉这个）；
+           ② 一旦某个区县暂时没有物料/流水，它就从这个下拉里消失，用户选不到。
+         与同页「全业务监管」「全局台账中心」的区县下拉保持同一写法。 */
+      const allDistricts = await TNR_API.getDistrictsStrict() || [];
+      const districts = allDistricts.filter(x => x.status === 'active')
+        .map(x => ({ value: x.id, label: x.name, is_city: x.is_city }));
+
+      this._matData = { materials, txns, instOptions, districts };
+
+      /* 顶部 4 张汇总卡取后端 `stats` 并按「统计区间」在内存里重算 ——
+         与其它端「数据概览」同一套口径（`TNR_UI.inDateRange`）。
+         库存预警是**当前值**，卡片标题明确标注「当前」，不与区间数字混为一谈。 */
+      const mr = this._matRange = this._matRange || { start: '', end: '' };
+      const matRangeText = (mr.start || mr.end)
+        ? ((mr.start || '最早') + ' ~ ' + (mr.end || '至今'))
+        : '全部时间';
+      const matInR = (v) => TNR_UI.inDateRange(v, mr.start, mr.end);
+      const inRangeTxns = txns.filter(t => matInR(t.date || t.created_at));
+      const sumOf = (type) => inRangeTxns.filter(t => t.type === type)
+        .reduce((s, t) => s + (t.quantity || 0), 0);
+
+      el.innerHTML = `
+        <div class="card mb-4">
+          <div class="card-header" style="flex-wrap:wrap;gap:var(--sp-2);">
+            <div class="card-title"><span class="card-title-bar"></span>数据概览</div>
+            <div class="flex gap-2" style="flex-wrap:wrap;align-items:center;">
+              <span class="fs-sm text-muted">开始日期</span>
+              <input type="date" class="form-input" id="govMatStart" style="width:auto;" value="${mr.start}">
+              <span class="fs-sm text-muted">结束日期</span>
+              <input type="date" class="form-input" id="govMatEnd" style="width:auto;" value="${mr.end}">
+              <button type="button" class="btn btn-secondary btn-sm" data-mat-range="week">最近一周</button>
+              <button type="button" class="btn btn-secondary btn-sm" data-mat-range="month">最近一月</button>
+              <button type="button" class="btn btn-secondary btn-sm" data-mat-range="all">全部</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="fs-sm text-muted mb-3">物料流水统计区间：${matRangeText}（库存预警为当前值，不受区间影响）</div>
+            <div class="stat-grid">
+              <div class="stat-card green"><div class="stat-card-icon">📦</div><div><div class="stat-card-value">${sumOf('purchase')}</div><div class="stat-card-label">采购总量（${matRangeText}）</div></div></div>
+              <div class="stat-card blue"><div class="stat-card-icon">📤</div><div><div class="stat-card-value">${sumOf('dispatch')}</div><div class="stat-card-label">下发总量（${matRangeText}）</div></div></div>
+              <div class="stat-card"><div class="stat-card-icon">🔬</div><div><div class="stat-card-value">${sumOf('consume')}</div><div class="stat-card-label">消耗总量（${matRangeText}）</div></div></div>
+              <div class="stat-card rouge"><div class="stat-card-icon">⚠️</div><div><div class="stat-card-value">${stats.alert_count || 0}</div><div class="stat-card-label">库存预警（当前·全局捕捉点）</div></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tabs">
+          ${this.materialTabs.map(t => `<div class="tab-item ${this.materialState.tab === t.id ? 'active' : ''}" data-material-tab="${t.id}">${t.label}</div>`).join('')}
+        </div>
+        <div id="materialContent"></div>
+      `;
+
+      el.querySelectorAll('[data-material-tab]').forEach(tab => {
+        tab.addEventListener('click', () => {
+          this.materialState.tab = tab.dataset.materialTab;
+          this.render_material();
+        });
+      });
+
+      // ---- 顶部「统计区间」交互（只影响上方 4 张汇总卡）----
+      const matFmt = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+        + '-' + String(d.getDate()).padStart(2, '0');
+      // direct-bind-ok：这些区间按钮在**卡片头部**，不在任何 mountTable 渲染的子树里
+      // （mountTable 重建的只有它自己的 tbody）。排序 / 翻页不会碰到它们，
+      // 所以直接绑定是安全的，不需要走事件委托。
+      document.querySelectorAll('#page-material [data-mat-range]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const today = new Date();
+          const kind = btn.dataset.matRange;
+          if (kind === 'all') {
+            this._matRange = { start: '', end: '' };
+          } else {
+            const days = kind === 'week' ? 6 : 29;
+            this._matRange = {
+              start: matFmt(new Date(today.getTime() - days * 86400000)),
+              end: matFmt(today)
+            };
+          }
+          this.render_material();
+        });
+      });
+      const matStartEl = document.getElementById('govMatStart');
+      const matEndEl = document.getElementById('govMatEnd');
+      const applyMatRange = () => {
+        this._matRange = {
+          start: (matStartEl.value || '').trim(),
+          end: (matEndEl.value || '').trim()
+        };
+        // 起止填反不静默变成 0 —— 明确提示一句，区间文字也会照原样显示出来。
+        if (this._matRange.start && this._matRange.end
+            && this._matRange.start > this._matRange.end) {
+          TNR_UI.toast('开始日期晚于结束日期，该区间内不会有记录', 'warning');
+        }
+        this.render_material();
+      };
+      [matStartEl, matEndEl].forEach(inp => {
+        if (!inp) return;
+        inp.addEventListener('change', applyMatRange);
+        inp.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') { ev.preventDefault(); applyMatRange(); }
+        });
+      });
+
+      this.renderMaterialTab();
+    } catch (e) {
+      el.innerHTML = '<div class="table-empty"><div class="table-empty-icon">⚠️</div><div class="table-empty-text">加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
+    }
+  },
+
+  /* 渲染当前标签的筛选条 + 列表。
+     ⚠ 筛选条的 id **直接写在 `.filter-bar` 上**（`renderFilterBar(..., { id })`），
+     **绝不**再套一层 `<div id="xxxFilterBar">` —— 那一层与筛选条同高，
+     `position: sticky` 的包含块就是它自己，筛选条**一点可移动空间都没有**、
+     冻结直接失效（跟随内容滚走）。本项目曾在 18 处这么写，是「冻结的筛选条漂移」
+     的根因；这里按新写法来。 */
+  renderMaterialTab() {
+    const tab = this.materialState.tab;
+    const d = this._matData || {};
+    const contentEl = document.getElementById('materialContent');
+    if (!contentEl) return;
+
+    const barId = 'mat' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'FilterBar';
+    const instField = { key: 'institution_id', label: '机构', type: 'select', options: d.instOptions || [] };
+    let filters;
+    let opts = { id: barId };
+    if (tab === 'ledger') {
+      filters = [
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '单据号 / 物料 / 批号 / 操作人' },
+        { key: 'type', label: '类型', type: 'select', options: this.matTxnTypes },
+        instField,
+        { key: 'start_date', label: '开始日期', type: 'date' },
+        { key: 'end_date', label: '结束日期', type: 'date' }
+      ];
+    } else {
+      filters = [
+        { key: 'keyword', label: '搜索', type: 'search', placeholder: '物料名称 / 分类 / 单位' },
+        { key: 'district', label: '区县', type: 'select',
+          options: (d.districts || []).filter(x => !x.is_city).map(x => ({ value: x.value, label: x.label })) },
+        instField
+      ];
+      /* 库存数据 / 异常数据都是**当前快照**，不挂时间条件 —— 时间条件只挂在
+         「台账」（时间序列）上，这是一条能一句话说清的规则。
+         原先「物料库存明细」上的起止日期是 `renderFilterBar` **自动追加**带出来的，
+         筛的是 `Material.created_at`（物料建档时间），对「当前库存」没有意义：
+         留着就是一个「能点、能填、但没人说得清它在筛什么」的控件。
+         注意异常数据必须关掉，否则就是一个**设了完全没反应**的假控件。 */
+      opts = Object.assign({}, opts, { noDateRange: true });
+    }
+
+    contentEl.innerHTML = TNR_UI.renderFilterBar(filters, '', opts)
+      + '<div class="card"><div class="card-body card-body-flush"><div id="matTableHost"></div></div></div>';
+
+    const bar = document.getElementById(barId);
+    // 回填该标签上次填的条件（重建后控件是全新的，不回填等于把用户刚填的抹掉）
+    const saved = (this._matFilters || {})[tab] || {};
+    if (bar) bar.querySelectorAll('[data-filter]').forEach(i => {
+      if (saved[i.dataset.filter] !== undefined) i.value = saved[i.dataset.filter];
+    });
+
+    const render = () => this.renderMaterialRows(bar);
+    render();
+    if (bar) TNR_UI.bindFilter(render, bar);
+  },
+
+  /* 「机构」视角 —— 下拉里同时有捕捉点与医院，两者的库存口径不同：
+       - 未选：全局视角，库存取 `shelter_stock`（各区县捕捉点库存**合计**）；
+       - 捕捉点 S：库存取 `shelter_stocks[S.id]`（第四十五轮新增）
+         —— 后端**直读** `MaterialStock` 里 S 那一行，不做累加。
+         顶层 `shelter_stock` 是**合计**：同一区县两个捕捉点时两者不相等，
+         选到具体捕捉点还用合计值，就是把别人的库存算到它头上。
+       - 医院 H：库存取 `hospital_stocks[H.id]`，后端按
+         `business.services.get_hospital_stock()` 的口径算好
+         （采购 + 签收 − 消耗 − 异动），与医院端「实时库存」是同一个数。
+     返回 { inst, name, districtId, isHospital, stock(m), matches(m) }。 */
+  materialView(instId) {
+    const all = this._matInstitutions || [];
+    const inst = instId ? all.find(i => String(i.id) === String(instId)) : null;
+    if (!inst) {
+      return { inst: null, name: '', districtId: '', isHospital: false,
+               stock: (m) => m.shelter_stock || 0, matches: () => true };
+    }
+    const isHospital = inst.type === 'hospital';
+    if (isHospital) {
+      return {
+        inst, name: inst.name, districtId: String(inst.district || ''), isHospital: true,
+        stock: (m) => ((m.hospital_stocks || {})[String(inst.id)] || 0),
+        matches: (m) => String(m.district || '') === String(inst.district || '')
+      };
+    }
+    /* 捕捉点的行范围**不能再只按「物料区县 == 捕捉点区县」收**（第四十五轮）。
+     *
+     * 捕捉点现在能持有**不属于本区县**的物料：市级下发给区县级捕捉点（Q4 二级下发），
+     * 这批物料的 `district` 是**发起方那一侧**的区县（市级采购时建的，多半是
+     * 「全市（市级）」）。只按区县收会把它们**整批漏掉** ——
+     * 于是「我确实收到过这批货」在监管页面上根本不存在，而列表看起来只是「少了点行」。
+     *
+     * 正确判据是「**该捕捉点在 `shelter_stocks` 里有这一行**」= 确实持有它，
+     * 这正是服务端 `MaterialStock` 的语义。
+     * ⚠ 用**并集**（持有 ∪ 本区县）而不是「换成持有」：升级库时若某物料还没建
+     * 机构库存行，只按持有判会让它从监管页面**消失**；并集只会多不会少，
+     * 此时 `stock` 退回顶层 `shelter_stock`，显示与升级前完全一致。 */
+    const stockMap = (m) => (m.shelter_stocks || {});
+    const hasRow = (m) => Object.prototype.hasOwnProperty.call(stockMap(m), String(inst.id));
+    return {
+      inst, name: inst.name, districtId: String(inst.district || ''), isHospital: false,
+      stock: (m) => (hasRow(m) ? (stockMap(m)[String(inst.id)] || 0) : (m.shelter_stock || 0)),
+      matches: (m) => hasRow(m) || String(m.district || '') === String(inst.district || '')
+    };
+  },
+
+  /* 该物料所属机构名：选了机构就是它；没选则显示该区县的捕捉点
+     （`shelter_stock` 本来就是那个捕捉点的库存）。 */
+  materialOwnerName(m, view) {
+    if (view.name) return view.name;
+    const s = (this._matInstitutions || []).find(i => i.type === 'shelter' && String(i.district) === String(m.district));
+    return s ? s.name : '';
+  },
+
+  renderMaterialRows(bar) {
+    const v = bar ? TNR_UI.getFilterValues(bar) : {};
+    const tab = this.materialState.tab;
+    const d = this._matData || {};
+    const view = this.materialView(v.institution_id);
+    const host = 'matTableHost';
+
+    if (tab === 'ledger') {
+      const rows = (d.txns || []).filter(t => {
+        if (v.type && String(t.type) !== v.type) return false;
+        // `t.date` 是 DateField（纯日期），`inDateRange` 内部对纯日期串原样返回。
+        if (!TNR_UI.inDateRange(t.date, v.start_date, v.end_date)) return false;
+        /* 机构口径分两种（下拉里同时有捕捉点和医院）：
+           - 医院：该笔流水就是这家医院的（`hospital` 外键）；
+           - 捕捉点：**捕捉点自己发起**的流水（采购 / 下发 / 异动都是 hospital 为空）
+             且属于该捕捉点所在区县。 */
+        if (view.inst) {
+          if (view.isHospital) {
+            if (String(t.hospital || '') !== String(view.inst.id)) return false;
+          } else if (t.hospital || String(t.district || '') !== view.districtId) {
+            return false;
+          }
+        }
+        if (!v.keyword) return true;
+        return [t.ledger_no, t.material_name, t.batch_no, t.from_to,
+          t.operator_name, t.district_name, t.hospital_name]
+          .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
+      });
+      // 机构列：医院流水显示医院名；捕捉点侧流水（`hospital` 为空）显示该区县捕捉点名。
+      // 先算好 district → 捕捉点名的映射，别在每行的 render 里现查（133 行 × 线性查找）。
+      const shelterByDistrict = {};
+      (this._matInstitutions || []).filter(i => i.type === 'shelter')
+        .forEach(i => { shelterByDistrict[String(i.district)] = i.name; });
+      const ownerName = (r) => r.hospital_name || shelterByDistrict[String(r.district)] || '';
+
+      TNR_UI.mountTable(host, {
+        id: 'gov.material.txn',
+        columns: [
+          { title: '单据号', render: r => TNR_UI.escape(r.ledger_no || '—') },
+          { title: '类型', render: r => TNR_UI.materialTxnBadge(r.type, 'long', 'gov') },
+          { title: '物料', render: r => TNR_UI.escape(r.material_name || '') },
+          { title: '数量', render: r => (r.quantity || 0) + ' ' + (r.unit || '') },
+          { title: '批号', render: r => TNR_UI.escape(r.batch_no || '—') },
+          { title: '机构', render: r => TNR_UI.escape(ownerName(r) || '—') },
+          { title: '来源/去向', render: r => TNR_UI.escape(r.from_to || '—') },
+          { title: '操作人', render: r => TNR_UI.escape(r.operator_name || '—') },
+          { title: '区县', render: r => TNR_UI.escape(r.district_name || '—') },
+          { title: '日期', render: r => TNR_UI.formatDate(r.date) }
+        ],
+        data: rows,
+        emptyText: '暂无物料流水'
+      });
+      return;
+    }
+
+    // 库存数据 / 异常数据 共用一套行构造，只是过滤条件与列不同
+    const build = (m) => {
+      const stock = view.stock(m);
+      const safety = m.safety_stock || 0;
+      return { m, stock, safety, shortage: safety - stock, low: stock < safety };
+    };
+    let rows = (d.materials || []).map(build).filter(r => {
+      const m = r.m;
+      // 区县按 **id** 比（下拉 value 是 id），不要再拿名称比 —— 名称会被人在界面上改。
+      if (v.district && String(m.district || '') !== String(v.district)) return false;
+      // 选机构时按该机构的「持有范围」收（未选机构则不限）。
+      // ⚠ 判据在 `materialView().matches()` 里 —— 医院按区县、捕捉点按
+      // `shelter_stocks` 是否持有该物料（第四十五轮：捕捉点可能持有外区县物料）。
+      // 别在这里写死区县比较，那会把「收到过市级下发的货」整批滤掉。
+      if (view.inst && !view.matches(m)) return false;
+      if (tab === 'alert' && !r.low) return false;
+      if (!v.keyword) return true;
+      return [m.name, m.category_display, m.category, m.unit, m.district_name]
+        .filter(Boolean).join(' ').toLowerCase().includes(v.keyword);
+    });
+
+    if (tab === 'alert') {
+      TNR_UI.mountTable(host, {
+        id: 'gov.material.alert',
+        columns: [
+          { title: '物料名称', render: r => '<strong>' + TNR_UI.escape(r.m.name || '') + '</strong>' },
+          { title: '分类', render: r => TNR_UI.escape(r.m.category_display || r.m.category || '—') },
+          { title: '机构', render: r => TNR_UI.escape(this.materialOwnerName(r.m, view) || '—') },
+          { title: '当前库存', render: r => '<span class="text-danger font-bold">' + r.stock + '</span>' },
+          { title: '安全库存', render: r => String(r.safety) },
+          { title: '缺口', render: r => '<span class="text-danger font-bold">' + r.shortage + '</span>' },
+          { title: '单位', render: r => TNR_UI.escape(r.m.unit || '—') },
+          { title: '区县', render: r => TNR_UI.escape(r.m.district_name || '—') }
+        ],
+        data: rows,
+        emptyText: view.name
+          ? '「' + view.name + '」暂无低于安全库存的物料'
+          : '暂无异常'
+      });
+      return;
+    }
+
+    TNR_UI.mountTable(host, {
+      id: 'gov.material.stock',
+      columns: [
+        { title: '物料名称', render: r => '<strong>' + TNR_UI.escape(r.m.name || '') + '</strong>' },
+        { title: '分类', render: r => TNR_UI.escape(r.m.category_display || r.m.category || '—') },
+        { title: '机构', render: r => TNR_UI.escape(this.materialOwnerName(r.m, view) || '—') },
+        // 列名随视角变：选医院时这是「该院库存」，否则是「捕捉点库存」
+        { title: view.isHospital ? '该院库存' : '捕捉点库存',
+          render: r => '<span class="' + (r.low ? 'text-danger font-bold' : '') + '">' + r.stock + '</span>' },
+        { title: '安全库存', render: r => String(r.safety) },
+        { title: '单位', render: r => TNR_UI.escape(r.m.unit || '—') },
+        { title: '区县', render: r => TNR_UI.escape(r.m.district_name || '—') }
+      ],
+      data: rows,
+      emptyText: '暂无物料数据'
+    });
+  },
+
+  /* ========== 6. 全局台账中心 ========== */
+  async render_ledger() {
+    const el = document.getElementById('page-ledger');
+    const tabs = [
+      { id: 'pet', label: '一宠一档' },
+      { id: 'capture', label: '捕捉台账' },
+      { id: 'transfer', label: '转运台账' },
+      { id: 'treatment', label: '诊疗台账' },
+      { id: 'release', label: '放归台账' },
+      { id: 'adoption', label: '领养台账' },
+      { id: 'material', label: '物料台账' },
+      { id: 'euthanasia', label: '安乐死台账' }
+    ];
+    el.innerHTML = `
+      <div class="tabs">
+        ${tabs.map(t => `<div class="tab-item ${this.ledgerState.tab === t.id ? 'active' : ''}" data-ledger-tab="${t.id}">${t.label}</div>`).join('')}
+      </div>
+      <div id="ledgerContent"></div>
+    `;
+    el.querySelectorAll('[data-ledger-tab]').forEach(tab => {
+      tab.addEventListener('click', () => { this.ledgerState.tab = tab.dataset.ledgerTab; this.render_ledger(); });
+    });
+    // 行内点击统一走事件委托（绑在稳定的页面容器上，只绑一次）。
+    // mountTable 在排序 / 改每页条数 / 翻页时会整体重建 tbody，直接绑在行元素上的
+    // 监听器会连同旧节点一起被丢掉——表现为「点单号打不开详情」，且不报任何错。
+    TNR_UI.delegateClick(el, {
+      'data-ledger-detail': (id) => this.showLedgerDetail(this._ledgerRecords || [], id)
+    }, 'LedgerRows');
+    await this.renderLedgerContent();
+  },
+
+  async renderLedgerContent() {
+    const districts = await TNR_API.getDistricts();
+    const activeDistricts = (districts || []).filter(d => d.status === 'active');
+    // 缓存下来供 renderLedgerTable 做「区县 id → 名称」换算。
+    // 台账接口返回的行里只有 `district_name`、没有 district id，而筛选条给出的是 id，
+    // 必须在这一层完成换算 —— **绝不能**在渲染函数里去 DOM 里找下拉读 textContent
+    // （见 renderLedgerTable 里的说明）。
+    this._ledgerDistricts = activeDistricts;
+    const institutions = await TNR_API.getInstitutions();
+    const contentEl = document.getElementById('ledgerContent');
+    contentEl.innerHTML = TNR_UI.renderFilterBar([
+      // 排除「全市（市级）」——台账行没有一条归属市级（死选项）。
+      { key: 'district', label: '区县', type: 'select', options: activeDistricts.filter(d => !d.is_city).map(d => ({ value: d.id, label: d.name })) },
+      { key: 'institution_id', label: '机构', type: 'select', options: institutions.map(i => ({ value: i.id, label: i.name })) },
+      { key: 'start_date', label: '开始日期', type: 'date' },
+      { key: 'end_date', label: '结束日期', type: 'date' }
+    ], `
+      <button class="btn btn-secondary btn-sm" id="btnExportLedger">📥 导出</button>
+      <button class="btn btn-secondary btn-sm" id="btnPrintLedger">🖨️ 打印</button>
+    `) + '<div class="table-wrapper" id="ledgerTableWrapper"></div>';
+    document.getElementById('btnExportLedger').addEventListener('click', () => {
+      const tabLabels = { capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放归', adoption: '领养', material: '物料', euthanasia: '安乐死' };
+      TNR_UI.toast(`${tabLabels[this.ledgerState.tab] || ''}台账导出成功（模拟）`, 'success');
+    });
+    document.getElementById('btnPrintLedger').addEventListener('click', () => window.print());
+    await this.renderLedgerTable();
+    TNR_UI.bindFilter(() => this.renderLedgerTable(), contentEl);
+  },
+
+  async renderLedgerTable() {
+    // 注意：getFilterValues 返回小写的值，但 ledger API 需要 institution_id 和 business_type
+    // 作用域必须限定在 #ledgerContent —— 各 .page-view 常驻 DOM，全局裸查会把别的
+    // 页面上残留的筛选值一起读进来（本页自己不做过滤，是直接透传给后端的）。
+    const rawFilters = {};
+    document.getElementById('ledgerContent').querySelectorAll('[data-filter]').forEach(input => {
+      const key = input.dataset.filter;
+      rawFilters[key] = input.value;
+    });
+
+    const params = {
+      business_type: this.ledgerState.tab,
+      start_date: rawFilters.start_date || '',
+      end_date: rawFilters.end_date || '',
+      institution_id: rawFilters.institution_id || ''
+    };
+
+    // ⚠ `getLedger` 失败时**抛异常**（第二十四轮改的：原先走 `_get()`，
+    // 非 2xx 静默返回 `[]`）。必须在这里接住并**显示出来** ——
+    // 否则「筛选条件被服务端拒了（400）」和「这个条件下真的没有记录」
+    // 在界面上长得一模一样，都是空表。
+    let records = [];
+    try {
+      const result = await TNR_API.getLedger(params);
+      records = (result && result.records) || [];
+    } catch (e) {
+      TNR_UI.toast(e.message || '台账加载失败', 'danger');
+      document.getElementById('ledgerTableWrapper').innerHTML =
+        '<div class="table-empty"><div class="table-empty-icon">⚠️</div>' +
+        '<div class="table-empty-text">台账加载失败：' + TNR_UI.escape(e.message) + '</div></div>';
+      return;
+    }
+    if (rawFilters.district) {
+      // ⚠ 这里曾经写成 `document.querySelector('[data-filter="district"]')` 再去读
+      // `selectedOptions[0].textContent` —— **全局裸查 + 拿 DOM 当数据源**，双重错误：
+      //   1. 各 `.page-view` 常驻 DOM，全局裸查命中的是**文档里第一个**区县下拉
+      //      （机构管理页那个），跟用户在台账页选的东西毫无关系；
+      //   2. 那个下拉此时是默认态，textContent 是占位项，于是过滤结果恒为 0 条。
+      // 症状极隐蔽：下拉能选、界面不报错，只是**选任何区县都是空表**。
+      // 正确做法是用已经拿到的 district id 去缓存里换算名称，不碰 DOM。
+      const d = (this._ledgerDistricts || []).find(x => String(x.id) === String(rawFilters.district));
+      const districtName = d ? d.name : '';
+      records = records.filter(r => r.district_name && r.district_name === districtName);
+    }
+
+    const tab = this.ledgerState.tab;
+    const typeLabelMap = { capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放归', adoption: '领养', material: '物料', euthanasia: '安乐死' };
+    const typeBadge = r => `<span class="badge badge-default">${typeLabelMap[r.business_type] || r.business_type}</span>`;
+    const dateRender = r => TNR_UI.formatDateTime(r.date);
+    const esc = v => TNR_UI.escape(v || '—');
+
+    // 按业务类型定义不同的列
+    let columns;
+    if (tab === 'pet') {
+      columns = [
+        { key: 'ledger_no', title: '档案编号', render: r => `<strong>${esc(r.ledger_no)}</strong>` },
+        { key: 'species', title: '分类', width: '70px' },
+        { key: 'breed', title: '品种', render: r => esc(r.breed) },
+        { key: 'gender', title: '性别', width: '70px', render: r => esc(r.gender) },
+        { key: 'age', title: '年龄', width: '90px', render: r => esc(r.age) },
+        { key: 'chip_no', title: '芯片号码', render: r => esc(r.chip_no || '—') },
+        { key: 'status_display', title: '当前状态', width: '100px', sortable: false, render: r => {
+          // 状态文案/配色取自 `TNR_UI.PET_STATUS`（与捕捉点端、医院端同一份），
+          // 不再在这里另写一张表 —— 以前监管端叫「待诊疗」、捕捉点端叫「诊疗中」、
+          // 医院端叫「待诊疗/诊疗中」，同一只动物在三端对账时像三个阶段。
+          return TNR_UI.petStatusBadge(r.status);
+        } },
+        { key: 'intake_at', title: '进站时间', width: '140px', render: dateRender },
+        { key: 'outbound_reason', title: '出库原因', width: '100px', render: r => esc(r.outbound_reason || '在库') },
+        { key: 'delivery_unit', title: '送达单位', render: r => esc(r.delivery_unit || '—') },
+        { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
+      ];
+    } else if (tab === 'capture') {
+      columns = [
+        { key: 'business_type', title: '类型', width: '80px', render: typeBadge },
+        { key: 'ledger_no', title: '单据号', render: r => esc(r.ledger_no) },
+        { key: 'date', title: '日期', width: '140px', render: dateRender },
+        { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
+        { key: 'shelter_name', title: '捕捉点', render: r => esc(r.shelter_name) },
+        { key: 'community_name', title: '来源地点', render: r => esc(r.community_name) },
+        { key: 'pet_count', title: '数量', width: '80px', render: r => `<strong>${r.pet_count || 0}</strong>` },
+        { key: 'operator_name', title: '操作人', render: r => esc(r.operator_name) },
+      ];
+    } else if (tab === 'transfer') {
+      columns = [
+        { key: 'business_type', title: '类型', width: '80px', render: typeBadge },
+        { key: 'ledger_no', title: '单据号', render: r => esc(r.ledger_no) },
+        { key: 'date', title: '日期', width: '140px', render: dateRender },
+        { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
+        { key: 'from_shelter_name', title: '出发捕捉点', render: r => esc(r.from_shelter_name) },
+        { key: 'to_hospital_name', title: '接收医院', render: r => esc(r.to_hospital_name) },
+        { key: 'pet_count', title: '数量', width: '80px', render: r => `<strong>${r.pet_count || 0}</strong>` },
+        { key: 'status', title: '状态', width: '90px', render: r => TNR_UI.transferStatusBadge(r.status) },
+        { key: 'operator_name', title: '操作人', render: r => esc(r.operator_name) },
+      ];
+    } else if (tab === 'treatment') {
+      columns = [
+        { key: 'business_type', title: '类型', width: '80px', render: typeBadge },
+        { key: 'ledger_no', title: '单据号', render: r => esc(r.ledger_no) },
+        { key: 'pet_code', title: '编号', render: r => `<strong>${esc(r.pet_code)}</strong>` },
+        { key: 'date', title: '日期', width: '140px', render: dateRender },
+        { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
+        { key: 'hospital_name', title: '接收医院', render: r => esc(r.hospital_name) },
+        { key: 'treatment_items', title: '诊疗内容', render: r => {
+          const items = r.treatment_items || [];
+          if (!items.length) return '—';
+          const colorMap = { '绝育': 'badge-cinnabar', '疫苗': 'badge-success', '驱虫': 'badge-info', '芯片': 'badge-warning' };
+          return items.map(i => `<span class="badge ${colorMap[i] || 'badge-default'}" style="margin-right:4px;">${TNR_UI.escape(i)}</span>`).join('');
+        } },
+        { key: 'status', title: '状态', width: '90px', render: r => TNR_UI.treatmentStatusBadge(r.status) },
+        { key: 'operator_name', title: '操作人', render: r => esc(r.operator_name) },
+      ];
+    } else if (tab === 'release') {
+      columns = [
+        { key: 'business_type', title: '类型', width: '80px', render: typeBadge },
+        { key: 'ledger_no', title: '单据号', render: r => esc(r.ledger_no) },
+        { key: 'pet_code', title: '编号', render: r => `<strong>${esc(r.pet_code)}</strong>` },
+        { key: 'date', title: '日期', width: '140px', render: dateRender },
+        { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
+        { key: 'community_name', title: '放归地点', render: r => esc(r.community_name) },
+        { key: 'pet_count', title: '数量', width: '80px', render: r => `<strong>${r.pet_count || 1}</strong>` },
+        { key: 'receiver_name', title: '接收人', render: r => esc(r.receiver_name) },
+        { key: 'operator_name', title: '操作人', render: r => esc(r.operator_name) },
+      ];
+    } else if (tab === 'adoption') {
+      columns = [
+        { key: 'business_type', title: '类型', width: '80px', render: typeBadge },
+        { key: 'ledger_no', title: '单据号', render: r => esc(r.ledger_no) },
+        { key: 'pet_code', title: '编号', render: r => `<strong>${esc(r.pet_code)}</strong>` },
+        { key: 'date', title: '日期', width: '140px', render: dateRender },
+        { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
+        { key: 'adopter_name', title: '领养人', render: r => esc(r.adopter_name) },
+        { key: 'adopter_phone', title: '联系电话', render: r => esc(r.adopter_phone) },
+        { key: 'hospital_name', title: '所属医院', render: r => esc(r.hospital_name) },
+        { key: 'operator_name', title: '操作人', render: r => esc(r.operator_name) },
+      ];
+    } else if (tab === 'material') {
+      columns = [
+        { key: 'business_type', title: '类型', width: '80px', render: typeBadge },
+        { key: 'ledger_no', title: '单据号', render: r => esc(r.ledger_no) },
+        { key: 'date', title: '日期', width: '140px', render: dateRender },
+        { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
+        { key: 'material_name', title: '物资种类名称', render: r => `<strong>${esc(r.material_name)}</strong>` },
+        { key: 'material_category_display', title: '分类', render: r => esc(r.material_category_display) },
+        { key: 'quantity', title: '数量', width: '90px', render: r => `<strong>${r.quantity || 0}</strong> ${TNR_UI.escape(r.unit || '')}` },
+        { key: 'batch_no', title: '批号', render: r => esc(r.batch_no) },
+        { key: 'from_to', title: '来源/去向', render: r => esc(r.from_to) },
+        { key: 'operator_name', title: '操作人', render: r => esc(r.operator_name) },
+      ];
+    } else { // euthanasia
+      columns = [
+        { key: 'business_type', title: '类型', width: '80px', render: typeBadge },
+        { key: 'ledger_no', title: '单据号', render: r => esc(r.ledger_no) },
+        { key: 'pet_code', title: '编号', render: r => `<strong>${esc(r.pet_code)}</strong>` },
+        { key: 'date', title: '日期', width: '140px', render: dateRender },
+        { key: 'district_name', title: '区县', render: r => esc(r.district_name) },
+        { key: 'hospital_name', title: '处置医院', render: r => esc(r.hospital_name) },
+        { key: 'reason', title: '处置原因', render: r => esc(r.reason) },
+        { key: 'operator_name', title: '操作人', render: r => esc(r.operator_name) },
+      ];
+    }
+
+    // 让单号列可点击弹详情（替代单独的「详情」按钮列）
+    // 一宠一档/各台账首列都是 ledger_no（档案编号/单据号），统一处理
+    const detailCol = columns.find(c => c.key === 'ledger_no');
+    if (detailCol) {
+      const origRender = detailCol.render;
+      detailCol.render = r => {
+        const val = origRender ? origRender(r) : (r.ledger_no || r.id || '');
+        return `<span data-ledger-detail="${r.id}" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;">${val}</span>`;
+      };
+    }
+
+    TNR_UI.mountTable('ledgerTableWrapper', { id: 'gov.ledger.' + tab, columns, data: records, emptyText: '暂无台账数据' });
+
+    // 当前页签的行数据，供「点单号弹详情」的事件委托取用（见 render_ledger）
+    this._ledgerRecords = records;
+  },
+
+  /* 台账详情抽屉 */
+  showLedgerDetail(records, id) {
+    const r = records.find(x => String(x.id) === String(id));
+    if (!r) { TNR_UI.toast('记录不存在', 'warning'); return; }
+    const tab = r.business_type;
+    const d = r.detail || {};
+    const esc = v => TNR_UI.escape(v || '—');
+    let items = [];
+    let extraHtml = '';
+
+    if (tab === 'pet') {
+      // 一宠一档：按《犬只收容档案》字段组织
+      const sterilText = r.sterilized
+        ? `是${r.sterilized_at ? '（' + TNR_UI.formatDate(r.sterilized_at) + '）' : ''}`
+        : '否';
+      items = [
+        { label: '档案编号', value: `<strong>${esc(r.ledger_no)}</strong>` },
+        { label: '分类', value: esc(r.species) },
+        { label: '品种', value: esc(r.breed) },
+        { label: '性别', value: esc(r.gender) },
+        { label: '年龄', value: esc(r.age) },
+        { label: '芯片号码', value: esc(r.chip_no) },
+        { label: '当前状态', value: esc(r.status_display) },
+        { label: '进站时间', value: r.intake_at ? TNR_UI.formatDateTime(r.intake_at) : '—' },
+        { label: '收容来源', value: esc(r.intake_from || '—') },
+        { label: '收容登记表档案号', value: esc(r.intake_ledger_no || '—') },
+        { label: '绝育情况', value: sterilText },
+        { label: '出库时间', value: r.outbound_at ? TNR_UI.formatDateTime(r.outbound_at) : '—' },
+        { label: '出库原因', value: esc(r.outbound_reason || '在库') },
+        { label: '送达单位', value: esc(r.delivery_unit || '—') },
+        { label: '区县', value: esc(r.district_name || '—') },
+        { label: '建档时间', value: TNR_UI.formatDateTime(r.date) },
+      ];
+      const recTable = (records, cols = [['药品名', x => esc(x.drug)], ['时间', x => esc(x.date)], ['医院', x => esc(x.hospital)], ['医师', x => esc(x.doctor)]]) =>
+        (!records || !records.length) ? '<div class="text-muted" style="font-size:13px;">暂无记录</div>' :
+        '<table class="data-table"><thead><tr>' + cols.map(([t]) => `<th>${t}</th>`).join('') + '</tr></thead><tbody>' +
+        records.map(x => '<tr>' + cols.map(([, fn]) => `<td>${fn(x)}</td>`).join('') + '</tr>').join('') + '</tbody></table>';
+      const trtTable = (records) => (!records || !records.length) ? '<div class="text-muted" style="font-size:13px;">暂无诊疗记录</div>' :
+        '<table class="data-table"><thead><tr><th>单号</th><th>医院</th><th>医师/操作人</th><th>项目</th><th>日期</th><th>状态</th></tr></thead><tbody>' +
+        records.map(x => `<tr><td>${esc(x.ledger_no)}</td><td>${esc(x.hospital)}</td><td>${esc(x.doctor)}</td><td>${esc(x.items)}</td><td>${esc(x.date)}</td><td>${esc(x.status)}</td></tr>`).join('') + '</tbody></table>';
+      extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">诊疗记录</h4>${trtTable(d.treatment_records)}</div>`;
+      extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">驱虫记录</h4>${recTable(d.deworm_records)}</div>`;
+      extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">免疫记录</h4>${recTable(d.vaccine_records)}</div>`;
+      if (d.pet) extraHtml += this.renderPetPhotos(d.pet, '动物照片');
+    } else if (tab === 'capture') {
+      items = [
+        { label: '单据号', value: r.ledger_no },
+        { label: '捕捉点', value: r.shelter_name },
+        { label: '来源地点', value: r.community_name || '—' },
+        { label: '物业名称', value: d.property_name || '—' },
+        { label: '详细地址', value: d.address || '—' },
+        { label: '定位地址', value: d.geo_address || '—' },
+        { label: '经纬度', value: (d.latitude != null && d.longitude != null) ? (d.latitude + ', ' + d.longitude) : '—' },
+        { label: '物业交接人', value: d.contact_person || '—' },
+        { label: '联系电话', value: d.contact_phone || '—' },
+        { label: '动物数量', value: r.pet_count },
+        { label: '宠物编号', value: (d.pet_codes || []).join('、') || '—' },
+        { label: '状态', value: TNR_UI.captureStatusText(r.status) },
+        { label: '操作人', value: r.operator_name || '—' },
+        { label: '区县', value: r.district_name || '—' },
+        { label: '日期', value: TNR_UI.formatDateTime(r.date) },
+      ];
+      if (d.group_photo) {
+        extraHtml += `<div class="mt-4"><h4 class="font-display mb-3">合照</h4><img src="${d.group_photo}" style="max-width:100%;border-radius:var(--r-md);border:1px solid var(--border-light);"></div>`;
+      }
+      if (d.pets && d.pets.length) extraHtml += this.renderPetsList(d.pets);
+    } else if (tab === 'transfer') {
+      items = [
+        { label: '单据号', value: r.ledger_no },
+        { label: '出发捕捉点', value: r.from_shelter_name },
+        { label: '接收医院', value: r.to_hospital_name },
+        { label: '动物数量', value: r.pet_count },
+        { label: '宠物编号', value: (d.pet_codes || []).join('、') || '—' },
+        { label: '状态', value: TNR_UI.transferStatusText(r.status) },
+        { label: '接收时间', value: d.received_at ? TNR_UI.formatDateTime(d.received_at) : '—' },
+        { label: '驳回原因', value: d.reject_reason || '—' },
+        { label: '备注', value: d.note || '—', full: true },
+        { label: '操作人', value: r.operator_name || '—' },
+        { label: '区县', value: r.district_name || '—' },
+        { label: '日期', value: TNR_UI.formatDateTime(r.date) },
+      ];
+      if (d.pets && d.pets.length) extraHtml += this.renderPetsList(d.pets);
+    } else if (tab === 'treatment') {
+      const ti = d.items || {};
+      items = [
+        { label: '单据号', value: r.ledger_no },
+        { label: '宠物编号', value: r.pet_code },
+        { label: '接收医院', value: r.hospital_name },
+        { label: '诊疗内容', value: (r.treatment_items || []).join('、') || '—' },
+        { label: '绝育', value: ti.sterilization ? '是' : '否' },
+        { label: '绝育日期', value: d.sterilization_surgery_date ? TNR_UI.formatDateTime(d.sterilization_surgery_date) : '—' },
+        { label: '主刀医生', value: d.sterilization_surgeon || '—' },
+        { label: '诊断', value: d.sterilization_diagnosis || '—' },
+        { label: '麻醉方式', value: d.sterilization_anesthesia || '—' },
+        { label: '手术过程', value: d.sterilization_procedure || '—' },
+        { label: '术后恢复', value: d.sterilization_recovery || '—' },
+        { label: '疫苗', value: ti.vaccine ? '是' : '否' },
+        { label: '疫苗类型', value: d.vaccine_type || '—' },
+        { label: '疫苗批号', value: d.vaccine_batch_no || '—' },
+        { label: '疫苗日期', value: d.vaccine_date ? TNR_UI.formatDateTime(d.vaccine_date) : '—' },
+        { label: '驱虫', value: ti.deworming ? '是' : '否' },
+        { label: '驱虫类型', value: d.deworming_type || '—' },
+        { label: '驱虫批号', value: d.deworming_batch_no || '—' },
+        { label: '芯片', value: ti.chip ? '是' : '否' },
+        { label: '芯片号', value: d.chip_no || '—' },
+        { label: '植入日期', value: d.chip_date ? TNR_UI.formatDateTime(d.chip_date) : '—' },
+        { label: '操作人', value: r.operator_name || '—' },
+        { label: '区县', value: r.district_name || '—' },
+        { label: '日期', value: TNR_UI.formatDateTime(r.date) },
+      ];
+      if (d.pet) extraHtml += this.renderPetPhotos(d.pet, '动物照片');
+    } else if (tab === 'release') {
+      items = [
+        { label: '单据号', value: r.ledger_no },
+        { label: '宠物编号', value: r.pet_code },
+        { label: '动物数量', value: r.pet_count || 1 },
+        { label: '放归地点', value: r.community_name || '—' },
+        { label: '状态', value: TNR_UI.releaseStatusBadge(r.status) },
+        { label: '接收人', value: r.receiver_name || '—' },
+        { label: '接收电话', value: d.receiver_phone || '—' },
+        { label: '操作人', value: r.operator_name || '—' },
+        { label: '区县', value: r.district_name || '—' },
+        { label: '转运回小区', value: TNR_UI.formatDateTime(d.transferred_at) },
+        { label: '放归时间', value: d.released_at ? TNR_UI.formatDateTime(d.released_at) : '—' },
+      ];
+      if (d.pet) extraHtml += this.renderPetPhotos(d.pet, '放归动物照片');
+    } else if (tab === 'adoption') {
+      items = [
+        { label: '单据号', value: r.ledger_no },
+        { label: '宠物编号', value: r.pet_code },
+        { label: '领养人', value: r.adopter_name },
+        { label: '联系电话', value: r.adopter_phone || '—' },
+        { label: '身份证号', value: d.adopter_id_card || '—' },
+        { label: '地址', value: d.adopter_address || '—' },
+        { label: '资质情况', value: d.qualification || '—' },
+        { label: '所属医院', value: r.hospital_name || '—' },
+        { label: '操作人', value: r.operator_name || '—' },
+        { label: '区县', value: r.district_name || '—' },
+        { label: '领养时间', value: TNR_UI.formatDateTime(r.date) },
+      ];
+      if (d.pet) extraHtml += this.renderPetPhotos(d.pet, '领养动物照片');
+    } else if (tab === 'material') {
+      items = [
+        { label: '单据号', value: r.ledger_no },
+        { label: '物资种类名称', value: r.material_name },
+        { label: '分类', value: r.material_category_display || '—' },
+        { label: '数量', value: (r.quantity || 0) + ' ' + (r.unit || '') },
+        { label: '批号', value: r.batch_no || '—' },
+        { label: '类型', value: r.type_display || '—' },
+        { label: '来源/去向', value: r.from_to || '—' },
+        { label: '供应商', value: d.supplier || '—' },
+        { label: '接收医院', value: d.hospital_name || '—' },
+        { label: '备注', value: d.note || '—' },
+        { label: '操作人', value: r.operator_name || '—' },
+        { label: '区县', value: r.district_name || '—' },
+        { label: '日期', value: TNR_UI.formatDateTime(r.date) },
+      ];
+    } else if (tab === 'euthanasia') {
+      items = [
+        { label: '单据号', value: r.ledger_no },
+        { label: '宠物编号', value: r.pet_code },
+        { label: '处置医院', value: r.hospital_name },
+        { label: '处置原因', value: r.reason },
+        { label: '动物状况', value: d.condition || '—' },
+        { label: '遗体已领取', value: d.body_received ? '是' : '否' },
+        { label: '遗体领取人', value: d.body_received_by_name || '—' },
+        { label: '领取时间', value: d.body_received_at ? TNR_UI.formatDateTime(d.body_received_at) : '—' },
+        { label: '操作人', value: r.operator_name || '—' },
+        { label: '区县', value: r.district_name || '—' },
+        { label: '处置时间', value: TNR_UI.formatDateTime(r.date) },
+      ];
+      if (d.pet) extraHtml += this.renderPetPhotos(d.pet, '动物照片');
+    }
+
+    TNR_UI.drawer({
+      title: '台账详情 · ' + ({ pet: '一宠一档', capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放归', adoption: '领养', material: '物料', euthanasia: '安乐死' }[tab] || tab),
+      body: bodyEl => {
+        bodyEl.innerHTML = TNR_UI.renderDescList(items) + extraHtml;
+        /* 「全局台账中心」是政府端**归档打印**的落点：`r.business_type` 与后端
+           `views_print.DOC_SPECS` 的键**同名**（capture / transfer / treatment /
+           release / adoption / material / euthanasia），所以直接透传即可。
+           `pet` 是一宠一档（档案，不是单据），后端没有这个 doc key —— 故意不挂按钮。 */
+        if (tab !== 'pet') {
+          bodyEl.insertAdjacentHTML('beforeend', TNR_UI.printDocBtn(tab, r.id));
+        }
+      }
+    });
+    // 各阶段照片点击放大（与捕捉端「一宠一档」档案同一套交互）
+    setTimeout(() => TNR_UI.bindPhotoZoom(document), 60);
+  },
+
+};
+
+/* ============================================
+   启动
+   ============================================ */
+document.addEventListener('DOMContentLoaded', () => {
+  GovPortal.init();
+});

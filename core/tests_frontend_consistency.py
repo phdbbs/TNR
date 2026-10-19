@@ -7,17 +7,26 @@
 
 新增后端枚举值 / 新增接口时，这些测试会失败并指向需要同步的前端文件。
 """
+import ast
 import glob
 import os
 import re
 import sys
 
-from django.test import SimpleTestCase, TestCase
+from django.template import Context, Engine
+from django.template.loader import render_to_string
+from django.test import RequestFactory, SimpleTestCase, TestCase
 from html.parser import HTMLParser
 
+from accounts.models import User
 from accounts.views import ROLE_PORTAL_MAP
-from business.models import Adoption, Capture, CheckIn, MaterialTransaction, Pet, Treatment, Transfer
+from business.models import (Adoption, AdoptionApplication, Capture, CheckIn, Chip,
+                             MaterialTransaction, Pet, Release, Treatment, Transfer)
 from business.services import MANAGEABLE_ROLES
+from business.services_treatment import (
+    STERILIZATION_FIELDS, STERILIZATION_REQUIRED,
+)
+from core.models import Institution, STATUS_ACTIVE, STATUS_LABELS, STATUS_VALUES
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -38,28 +47,60 @@ PORTALS = {
     'platform': 'templates/portal/platform/portal.html',
 }
 
-FRONTEND_FILES = list(PORTALS.values()) + [
+#: 各端**应用逻辑**的位置（第五十二轮 重构 B：从模板里的内联 `<script>` 抽出来）。
+PORTAL_JS = {
+    'shelter': 'static/js/portals/shelter.js',
+    'hospital': 'static/js/portals/hospital.js',
+    'gov': 'static/js/portals/gov.js',
+    'adopter': 'static/js/portals/adopter.js',
+    'platform': 'static/js/portals/platform.js',
+}
+
+FRONTEND_FILES = list(PORTALS.values()) + list(PORTAL_JS.values()) + [
     'static/js/tnr-api.js',
     'static/js/tnr-common.js',
 ]
 
+#: 模板路径 → 同端 JS 路径（`read()` 的兼容层用）
+_JS_SIBLING = {v: PORTAL_JS[k] for k, v in PORTALS.items()}
 
-def read(rel):
+
+def _read_raw(rel):
     with open(os.path.join(ROOT, rel), encoding='utf-8') as f:
         return f.read()
 
 
-def find_object_literal(source, var_name, occurrence=0):
-    """返回 `const/let/var <var_name> = { ... }` 里 `{...}` 的完整文本。
+def read(rel):
+    """读前端源码；给的是**门户模板**时自动拼上同端的 JS。
 
-    :param occurrence: 同名变量第几次出现（模板里 typeMap 会被多次声明）
+    兼容层的理由：本文件 25 处 `read(PORTALS[...])` 断言的是「这段代码必须存在」，
+    它不该关心代码住在模板还是 `static/` 里。JS 拼在**末尾**，
+    所以模板自身的行号与 `strip_js_comments` 的等长替换都不受影响。
+
+    ⚠ 只关心 HTML 的判据（例如「角色 base 里不得再有 `<style>`」）请改用
+    `read_html()`；只关心 JS 的请用 `read_js()`。新写的判据优先用这两个窄口，
+    别默认走 `read()` —— 合并视图会让「X 不得出现」这类断言跨文件生效。
     """
-    pattern = re.compile(
-        r'(?:const|let|var)\s+' + re.escape(var_name) + r'\s*=\s*\{')
-    matches = list(pattern.finditer(source))
-    if len(matches) <= occurrence:
-        return None
-    start = matches[occurrence].end() - 1
+    text = _read_raw(rel)
+    sibling = _JS_SIBLING.get(rel)
+    return text + '\n' + _read_raw(sibling) if sibling else text
+
+
+def read_html(role):
+    """只读门户模板（不含 JS）。"""
+    return _read_raw(PORTALS[role])
+
+
+def read_js(role):
+    """只读该端的应用逻辑（`static/js/portals/<role>.js`）。"""
+    return _read_raw(PORTAL_JS[role])
+
+
+def _close_brace(source, start):
+    """从 `source[start] == '{'` 找到配对的 `}` 下标；找不到返回 -1。
+
+    跳过字符串字面量里的括号（`'{'` 不算开、`'}'` 不算合）。
+    """
     depth, i, n = 0, start, len(source)
     while i < n:
         c = source[i]
@@ -75,9 +116,43 @@ def find_object_literal(source, var_name, occurrence=0):
         elif c == '}':
             depth -= 1
             if depth == 0:
-                return source[start:i + 1]
+                return i
         i += 1
-    return None
+    return -1
+
+
+def find_object_literal(source, var_name, occurrence=0):
+    """返回 `const/let/var <var_name> = { ... }` 里 `{...}` 的完整文本。
+
+    :param occurrence: 同名变量第几次出现（模板里 typeMap 会被多次声明）
+    """
+    pattern = re.compile(
+        r'(?:const|let|var)\s+' + re.escape(var_name) + r'\s*=\s*\{')
+    matches = list(pattern.finditer(source))
+    if len(matches) <= occurrence:
+        return None
+    end = _close_brace(source, matches[occurrence].end() - 1)
+    if end < 0:
+        return None
+    return source[matches[occurrence].end() - 1:end + 1]
+
+
+def find_property_literal(source, prop_name, occurrence=0):
+    """返回对象里 `<prop_name>: { ... }` 这条属性的字面量文本。
+
+    给「挂在 `TNR_UI` 上的枚举真源」用 —— 它不是 `const X = {`，
+    `find_object_literal` 那种写法匹配不到，而匹配不到 == 判据静默全绿。
+    """
+    pattern = re.compile(
+        r'(?:^|[{,\s])' + re.escape(prop_name) + r'\s*:\s*\{', re.M)
+    matches = list(pattern.finditer(source))
+    if len(matches) <= occurrence:
+        return None
+    start = matches[occurrence].end() - 1        # 正则已吃到那个 `{`
+    end = _close_brace(source, start)
+    if end < 0:
+        return None
+    return source[start:end + 1]
 
 
 def object_keys(body):
@@ -124,21 +199,136 @@ def object_keys(body):
 
 
 class MaterialTypeMapCoverageTest(SimpleTestCase):
-    """物料流水类型映射表必须覆盖 MaterialTransaction 的全部 choices。
+    """物料流水类型的显示口径必须**只有一份**，且覆盖后端全部 choices。
 
-    `receive`（医院签收下发物料时生成）曾被四张映射表同时漏掉，
-    导致捕捉点/医院/监管三端的物料台账里「签收入库」显示成英文 `receive`，
-    捕捉点端的类型筛选下拉里也选不到这一类流水。
+    原始缺陷：`receive`（医院签收下发物料时生成）曾被四张映射表同时漏掉，
+    捕捉点/医院/监管三端的物料台账把它显示成英文 `receive`，筛选下拉也选不到。
+    修法原本是「把四张表都补一遍」—— 但只要还是 N 份，下一次新增取值同样会漏。
+
+    第五十二轮 重构 B 把它收成一份真源（`TNR_UI.MATERIAL_TXN_TYPES`，
+    在 `static/js/tnr-common.js`），所以这里的判据也跟着换了方向：
+      - 正向：真源覆盖后端全部 choices（缺一个 = 界面漏英文码）；
+      - 反向：**各端不得再自己声明**一张物料类型表（出现即红，见
+        `test_no_portal_redeclares_material_type_map`）—— 没有这条，
+        「同源」会在下一次顺手写个局部 `typeMap` 时悄悄失效，
+        而三端叫法不一的老问题（`adjustment` 在监管端曾显示成「调整」）就回来了。
     """
 
-    def _material_type_maps(self, rel):
-        """找出文件里所有「物料类型映射表」及其键集合。"""
-        source = read(rel)
+    #: 唯一真源所在文件（共享运行时，五端都加载）
+    ENUMS_REL = 'static/js/tnr-common.js'
+    #: 真源里的表名
+    ENUMS_VAR = 'MATERIAL_TXN_TYPES'
+    #: 视角差异表：只有 `dispatch` 在医院端换说法，键必须 ⊂ 真源键
+    VIEW_VAR = 'MATERIAL_TXN_VIEW_LABELS'
+
+    def _literal(self, var, source=None):
+        """取真源里 `VAR: { … }` 这条属性字面量（不是 `const VAR = {`）。"""
+        src = self._enums_source() if source is None else source
+        return find_property_literal(src, var)
+
+    def _enums_source(self):
+        return _read_raw(self.ENUMS_REL)
+
+    def _backend_types(self):
+        return {c[0] for c in MaterialTransaction._meta.get_field('type').choices}
+
+    def test_single_source_covers_all_material_types(self):
+        body = self._literal(self.ENUMS_VAR)
+        self.assertIsNotNone(
+            body, f'{self.ENUMS_REL} 里找不到 `{self.ENUMS_VAR}: {{…}}` —— '
+                  '真源被改名或搬走时，所有同源判据都会变成「查不到所以全绿」，'
+                  '所以这里必须红')
+        keys = object_keys(body)
+        expected = self._backend_types()
+        self.assertTrue(expected, '后端未定义物料流水类型 choices')
+        missing = expected - keys
+        self.assertFalse(
+            missing,
+            f'物料流水类型真源缺 {sorted(missing)}；这些流水在界面上会直接显示'
+            f'英文枚举码。（后端全部取值：{sorted(expected)}）')
+        extra = keys - expected
+        self.assertFalse(
+            extra,
+            f'物料流水类型真源多出后端没有的取值 {sorted(extra)}：筛选下拉会给出'
+            '一个永远查不到、且提交即被拒的选项')
+
+    def test_single_source_entries_are_fully_populated(self):
+        """每条都要有 `long` / `short` / `badge` —— 缺一个就退回显示枚举码。
+
+        `long`/`short` 各自有用到（台账用全称、紧凑列与详情抽屉用短称），
+        只写一半会在另一个调用点渲染成 `undefined`。
+        """
+        body = self._literal(self.ENUMS_VAR)
+        self.assertIsNotNone(body, f'{self.ENUMS_VAR} 没找到，判据失效')
+        for typ in sorted(self._backend_types()):
+            m = re.search(r'\b' + re.escape(typ) + r'\s*:\s*\{', body)
+            self.assertIsNotNone(m, f'真源里没有 {typ} 这一条')
+            span = body[m.end() - 1:_close_brace(body, m.end() - 1) + 1]
+            for field in ('long', 'short', 'badge'):
+                self.assertRegex(
+                    span, r'\b' + field + r'\s*:\s*[\'"`][^\'"`]+[\'"`]',
+                    f'真源的 {typ} 缺 {field}（或写成了空串）：{span.strip()}')
+
+    def test_perspective_override_only_renames_known_types(self):
+        """视角表里的键必须是真源已有的类型。
+
+        写错一个字母（`dispath`）不会报错，只会**静默不生效** ——
+        医院端又显示成捕捉点视角的叫法，而没人会去查这张表。
+        """
+        view = self._literal(self.VIEW_VAR)
+        self.assertIsNotNone(
+            view, f'{self.ENUMS_REL} 里找不到 `{self.VIEW_VAR}` —— '
+                  '医院端的「捕捉点下发」视角差异必须有显式登记处')
+        known = object_keys(self._literal(self.ENUMS_VAR))
+        # 结构是 { hospital: { dispatch: {…} } }：object_keys 只取顶层（视角名），
+        # 再对每个视角内部取一层键。
+        for view_name in object_keys(view):
+            inner = re.search(view_name + r"?\s*:\s*\{", view)
+            self.assertIsNotNone(inner, f'视角 {view_name} 没有对象字面量')
+            span = view[inner.end() - 1:_close_brace(view, inner.end() - 1) + 1]
+            for typ in object_keys(span):
+                self.assertIn(
+                    typ, known,
+                    f'{self.VIEW_VAR}.{view_name}.{typ} 在真源里没有这个类型'
+                    '（多半是键名写错），它不会报错，只会静默不生效')
+
+    def test_no_portal_redeclares_material_type_map(self):
+        """反向对照：任何一端的应用 JS 里都不许再出现自己的物料类型表。
+
+        历史形态有三种（都在这条判据里堵住）：
+          - `const typeMap = { purchase: '采购入库', … }`
+          - `const typeMap = { purchase: ['采购入库', 'success'], … }`
+          - `const matTxnTypes = [ { value: 'purchase', label: '采购入库' }, … ]`
+        """
+        offenders = []
+        for role in PORTALS:
+            src = blank_comments(read_js(role))     # 注释里提旧写法不算抄
+            for var, idx, keys in self._material_type_maps(src):
+                offenders.append(f'{role}: {var}[{idx}] = {sorted(keys)}')
+            # 选项表形态：同一文件里出现 ≥3 个 `value: '<类型>'` 就是又抄了一份
+            values = set(re.findall(r"value:\s*'(purchase|dispatch|receive|"
+                                    r"consume|adjustment|outbound)'", src))
+            if len(values) >= 3:
+                offenders.append(f'{role}: 自带类型下拉 {sorted(values)}')
+            for label in ('采购入库', '捕捉点下发', '签收入库'):
+                if re.search(r"[\[{]\s*'?%s'?\s*[:,]" % label, src) or \
+                        re.search(r"label:\s*'%s'" % label, src):
+                    offenders.append(f'{role}: 硬编码类型文案「{label}」')
+        self.assertEqual(
+            offenders, [],
+            '物料流水类型又出现了第二份真源（应统一走 '
+            'TNR_UI.materialTxn / materialTxnBadge / materialTxnOptions）：\n  '
+            + '\n  '.join(offenders))
+
+    def _material_type_maps(self, source):
+        """找出**给定源码**里所有「物料类型映射表」及其键集合。"""
         found = []
-        for var in ('typeMap', 'txnTypeMap'):
+        for var in ('typeMap', 'txnTypeMap', 'matTxnTypes'):
             idx = 0
             while True:
                 body = find_object_literal(source, var, idx)
+                if body is None:
+                    body = find_property_literal(source, var)
                 if body is None:
                     break
                 keys = object_keys(body)
@@ -148,38 +338,53 @@ class MaterialTypeMapCoverageTest(SimpleTestCase):
                 idx += 1
         return found
 
-    def test_every_portal_map_covers_all_material_types(self):
-        expected = {c[0] for c in MaterialTransaction._meta.get_field('type').choices}
-        self.assertTrue(expected, '后端未定义物料流水类型 choices')
+    def test_material_call_sites_pass_a_known_form_and_view(self):
+        """调用真源时传的 `form` / `view` 必须是已登记的那几个值。
 
-        checked = 0
-        for name, rel in PORTALS.items():
-            for var, idx, keys in self._material_type_maps(rel):
-                checked += 1
-                missing = expected - keys
-                self.assertFalse(
-                    missing,
-                    f'{rel} 的 {var}[{idx}] 缺少物料流水类型映射 {sorted(missing)}；'
-                    f'这些流水在界面上会直接显示英文枚举码。'
-                    f'（后端全部取值：{sorted(expected)}）'
-                )
-        self.assertGreater(checked, 0, '没有找到任何物料类型映射表，检查测试本身是否失效')
+        判据管住了「真源里每条都有 long/short」，却管不住调用点写错：
+        `materialTxn(t, 'shot')` 以前会渲染成字面量 `undefined`
+        （node 里实跑出来的），现在退回显示枚举码 —— 但枚举码漏在界面上
+        同样是被禁止过的缺陷（`receive` 就漏过一次）。所以参数也得机器查。
+        """
+        known_forms = {'long', 'short'}
+        known_views = set(PORTALS)
+        bad = []
+        for role in PORTALS:
+            for call in re.finditer(
+                    r"materialTxn(?:Badge|Options)?\s*\(([^)]*)\)", read_js(role)):
+                args = re.findall(r"'([^']*)'", call.group(1))
+                # 第一个字面量参数按出口不同：Badge 是 type（变量，不在此列），
+                # Options 是 form。这里只看形如 long/short/视角名 的那几个。
+                for a in args:
+                    if a and a not in known_forms and a not in known_views:
+                        bad.append(f'{role}: {call.group(0).strip()} 里的 {a!r}')
+        self.assertEqual(
+            bad, [],
+            '物料类型真源的调用点传了未登记的 form/view（拼错的 form 会让整列'
+            '退回显示枚举码）：\n  ' + '\n  '.join(bad))
 
-    def test_shelter_material_type_filter_covers_all_types(self):
-        """捕捉点端「物资流向」的类型筛选下拉必须能选到全部流水类型。"""
-        source = read(PORTALS['shelter'])
-        anchor = re.search(r"key:\s*'type',\s*label:\s*'类型'", source)
-        self.assertIsNotNone(anchor, '未找到捕捉点端的物料类型筛选定义')
-        # 用「起点 + 结束标记」取块，避免依赖脆弱的括号转义
-        end = source.find('];', anchor.start())
-        self.assertGreater(end, anchor.start(), '物料类型筛选定义没有正常的结束标记')
-        block = source[anchor.start():end]
-        expected = {c[0] for c in MaterialTransaction._meta.get_field('type').choices}
-        missing = {v for v in expected if f"'{v}'" not in block}
-        self.assertFalse(
-            missing,
-            f'捕捉点端物料类型筛选下拉缺少 {sorted(missing)}，用户无法按这些类型过滤流水'
-        )
+    def test_material_filter_uses_the_single_source(self):
+        """用到这个枚举的端都必须走真源的三个出口之一。
+
+        筛选是用户唯一能主动枚举流水类型的入口：它和表格列不同源时，
+        「选得到却显示成英文码」或「显示得对却筛不到」都会出现。
+        每端该出现哪些出口是显式登记的 —— 少一个就是有人改回了本地表。
+        """
+        expected = {
+            # 捕捉点：物资流向有类型下拉 + 台账/抽屉两种列
+            'shelter': ('materialTxnOptions', 'materialTxnBadge', 'materialTxn('),
+            # 监管：类型下拉 + 台账徽章
+            'gov': ('materialTxnOptions', 'materialTxnBadge'),
+            # 医院：只有出入库台账的徽章（它的物料区用页签分门别类，没有类型下拉）
+            'hospital': ('materialTxnBadge',),
+        }
+        for role, names in expected.items():
+            src = read_js(role)
+            for n in names:
+                self.assertRegex(
+                    src, n.replace('(', r'\s*\('),
+                    f'{role}: 没有走 TNR_UI.{n}（真源）—— '
+                    '要么是被改回本地表，要么是判据登记的出口清单过期了')
 
 
 class StatusEnumMappingTest(SimpleTestCase):
@@ -198,40 +403,1066 @@ class StatusEnumMappingTest(SimpleTestCase):
             f'界面上会显示英文枚举码。后端取值：{sorted(expected)}'
         )
 
-    def test_shelter_status_badge_covers_adoption_and_treatment(self):
-        """捕捉点端通用状态徽章：领养「待领出/已撤销」、诊疗「进行中」。"""
-        adoption = {c[0] for c in Adoption._meta.get_field('status').choices}
-        treatment = {c[0] for c in Treatment._meta.get_field('status').choices}
-        transfer = {c[0] for c in Transfer._meta.get_field('status').choices}
-        self._assert_covers(
-            PORTALS['shelter'], 'map', adoption | treatment | transfer, occurrence=0)
-
-    def test_shelter_capture_status_badge_covers_capture(self):
-        expected = {c[0] for c in Capture._meta.get_field('status').choices}
-        self._assert_covers(PORTALS['shelter'], 'map', expected, occurrence=1)
+    # 捕捉点端「通用状态徽章」那张本地表已在第五十二轮巡检（续）逐字段拆光：
+    # 宠物 → `PET_STATUS`、领养单 → `ADOPTION_STATUS`、转运/诊疗/捕捉 →
+    # `TRANSFER_STATUS` / `TREATMENT_STATUS` / `CAPTURE_STATUS`（见
+    # `CaptureTransferTreatmentSingleSourceTest`），`Shelter.statusBadge` 本身也已删除。
+    # 本类原来那三条 `_assert_covers(..., 'map'/'m')` 判据锚的就是这些本地表，
+    # 故一并删除 —— 覆盖性判据搬到真源上，比在六份抄本里各查一遍更有效。
 
     def test_shelter_pet_status_badge_covers_pet(self):
-        """捕捉点端放归/回收页用 TNR_API 的宠物状态映射。"""
-        expected = {c[0] for c in Pet._meta.get_field('status').choices}
-        source = read('static/js/tnr-api.js')
-        self._assert_covers('static/js/tnr-api.js', 'map', expected, occurrence=0)
-        # 徽章样式映射同样要齐全
-        badges = re.findall(r"const map = \{(.*?)\};", source, re.S)
-        self.assertGreaterEqual(len(badges), 2, 'tnr-api.js 中未找到状态映射表')
-        for idx, body in enumerate(badges[:2]):
-            keys = set(re.findall(r"'([a-z_]+)':", body))
-            missing = expected - keys
-            self.assertFalse(missing, f'tnr-api.js 第 {idx + 1} 张状态映射表缺少 {sorted(missing)}')
+        """宠物状态徽章由真源给出：取值函数必须读 `TNR_UI.PET_STATUS`。
+
+        原先这里查的是 `tnr-api.js` 里那两张 `const map`（文案一张、配色一张）。
+        真源合并后那两张表已删除，取值函数随后也搬进了 `tnr-common.js`
+        （`petStatusText` / `petStatusBadge`）—— 判据跟着盯这两个函数：
+        读不到真源就等于徽章退回英文码，正是要防的那一类静默。
+
+        各端直接调 `TNR_UI.petStatusBadge`，「别处不许再自带宠物状态表」由
+        `PetStatusSingleSourceTest.test_no_other_frontend_file_maps_pet_status`
+        守住，手拼徽章的旧写法由 `test_portals_use_the_badge_helper` 守住。
+        """
+        common = strip_js_comments(_read_raw('static/js/tnr-common.js'))
+        for fn in ('petStatusText', 'petStatusBadge'):
+            m = re.search(r'\b' + fn + r'\(status\)\s*\{', common)
+            self.assertIsNotNone(m, f'{fn} 不在了 —— 各端取宠物状态的入口丢了')
+            body = brace_body(common, common.index('{', m.start()))
+            self.assertIsNotNone(body, f'{fn} 的花括号不配对')
+            self.assertIn(
+                'TNR_UI.PET_STATUS', body,
+                f'{fn} 不再读取 TNR_UI.PET_STATUS —— 状态显示又分叉成两份真源了')
 
     def test_gov_pet_status_map_covers_pet(self):
-        expected = {c[0] for c in Pet._meta.get_field('status').choices}
-        self._assert_covers(PORTALS['gov'], 'petStatus', expected)
+        """监管端不得再自带宠物状态表：同一只动物三端只能有一种叫法。"""
+        gov = strip_js_comments(read_js('gov'))
+        for pat in (r'\bconst\s+petStatus\s*=', r'\bpetStatus\s*:\s*\{'):
+            self.assertIsNone(
+                re.search(pat, gov),
+                'gov.js 里又出现本地宠物状态表 —— 第五十二轮合并的 TNR_UI.PET_STATUS '
+                '被绕过，监管端与捕捉点端会再次漂移（曾经：待诊疗 / 诊疗中 / 待诊疗·诊疗中）')
+        self.assertIn('TNR_UI.petStatusBadge(', gov,
+                      '监管端一宠一档的当前状态没有走共享徽章函数')
 
-    def test_hospital_status_maps_cover_transfer_and_treatment(self):
-        transfer = {c[0] for c in Transfer._meta.get_field('status').choices}
-        treatment = {c[0] for c in Treatment._meta.get_field('status').choices}
-        self._assert_covers(PORTALS['hospital'], 'm', transfer, occurrence=0)
-        self._assert_covers(PORTALS['hospital'], 'm', treatment, occurrence=1)
+
+class CaptureTransferTreatmentSingleSourceTest(SimpleTestCase):
+    """捕捉单 / 转运单 / 诊疗单状态：显示与「待签收」口径各只许有一处定义。
+
+    第五十二轮电脑端巡检（续）在监管端一格找到三处一起的漏：
+
+      1. **监管端三张转运表都漏了 `partial`（部分签收）**，兜底写的是
+         `m[r.status] || { t: r.status }` —— 医院签收了一部分动物的转运单，
+         状态列直接**印出英文枚举码 `partial`**；领养人端的生命周期时间线漏的是
+         同一档，但兜底写 `|| '待签收'`，于是显示成「还没签」，
+         看不出已经签收了一部分。两种错法都**不报错**。
+      2. **同一个词监管端与医院/捕捉点端对不上账**：后端 label 是
+         待签收 / 已签收，监管端三处都写「待接收 / 已接收」。
+      3. **同一份真源在同一个文件里还有两种写法**：`Treatment.status` 只有
+         进行中 / 已完成，监管端全业务列表写「诊疗中」（那是 `STAGE_CHOICES`
+         的**阶段**文案），台账列表写「进行中」，配色还一黄一蓝。
+
+    「待签收」口径此前散在六处（后端签收/驳回两道门禁、医院端待办计数、标签页、
+    行内按钮、详情可签判断、捕捉点可选动物），少算 `partial` 的那几处会让
+    部分签收的单子**从待办里消失**，剩余动物再没人去签。
+    """
+
+    CSS = 'static/css/tnr-traditional.css'
+    COMMON = 'static/js/tnr-common.js'
+
+    TABLES = {
+        'CAPTURE_STATUS': Capture,
+        'TRANSFER_STATUS': Transfer,
+        'TREATMENT_STATUS': Treatment,
+    }
+
+    def _entries(self, table):
+        body = find_property_literal(strip_js_comments(_read_raw(self.COMMON)), table)
+        self.assertIsNotNone(body, f'TNR_UI.{table} 真源不在了')
+        return {m.group(1): (m.group(2), m.group(3))
+                for m in re.finditer(
+                    r"(\w+):\s*\{\s*text:\s*'([^']*)'\s*,\s*badge:\s*'([^']*)'\s*,?\s*\}", body)}
+
+    def test_sources_cover_backend_choices(self):
+        """三张真源都必须与后端 choices 双向对齐（缺档=漏英文码，多档=幽灵态）。"""
+        for table, model in self.TABLES.items():
+            expected = {c[0] for c in model._meta.get_field('status').choices}
+            got = set(self._entries(table))
+            self.assertTrue(expected, f'{model.__name__}.status 没有 choices，本条判据会空转')
+            self.assertEqual(expected - got, set(),
+                             f'{table} 缺状态 {sorted(expected - got)}，界面会漏出英文枚举码')
+            self.assertEqual(got - expected, set(),
+                             f'{table} 里有后端不存在的状态 {sorted(set(got) - expected)}（幽灵态）')
+
+    def test_source_texts_equal_backend_labels(self):
+        """文案必须逐字等于后端 label：同一个 code 两端两种叫法就没法对账。"""
+        for table, model in self.TABLES.items():
+            labels = dict(model._meta.get_field('status').choices)
+            drift = [(code, text, labels[code])
+                     for code, (text, _) in self._entries(table).items()
+                     if code in labels and text != labels[code]]
+            self.assertFalse(
+                drift,
+                f'{table} 的显示文案与后端 label 不一致：\n  '
+                + '\n  '.join(f'{c}: 前端「{a}」 vs 后端「{b}」' for c, a, b in drift))
+
+    def test_source_badges_exist_in_css(self):
+        """配色名必须真存在：拼错的徽章**没有底色**，看着像普通文本而不显眼。"""
+        css = _read_raw(self.CSS)
+        for table in self.TABLES:
+            missing = [badge for _, badge in self._entries(table).values()
+                       if css_rule(css, '.badge-' + badge) is None]
+            self.assertFalse(
+                missing,
+                f'{table} 的配色名在 CSS 里没有对应规则，徽章会渲染成没有底色：{sorted(set(missing))}')
+
+    def test_open_transfer_status_matches_backend(self):
+        """`OPEN_TRANSFER_STATUS` 必须等于后端 `Transfer.OPEN_STATUSES`。
+
+        两边都只许有一处定义：后端那道「可签收 / 可驳回」门禁与前端六处
+        待办判定读同一个集合。少一档 = 部分签收的单子从待办消失。
+        """
+        m = re.search(r'OPEN_TRANSFER_STATUS:\s*\[([^\]]*)\]',
+                      strip_js_comments(_read_raw(self.COMMON)))
+        self.assertIsNotNone(m, 'TNR_UI.OPEN_TRANSFER_STATUS 不在了 —— 前端又开始各自判 pending')
+        got = {s.strip().strip("'\"") for s in m.group(1).split(',') if s.strip()}
+        self.assertEqual(got, set(Transfer.OPEN_STATUSES),
+                         f'前端「待签收」口径 {sorted(got)} 与后端 Transfer.OPEN_STATUSES '
+                         f'{sorted(Transfer.OPEN_STATUSES)} 不一致')
+
+    def test_no_frontend_reimplements_open_transfer(self):
+        """前端不许再手写 `status === 'pending' || status === 'partial'`。
+
+        这条判据盯的是**判定**而不是显示：字面量组合看着与真源等价，
+        但后端加一档（或某一处漏写 `|| partial`）时，只有真源会跟着变。
+        """
+        offenders = []
+        pattern = re.compile(r"status\s*===\s*'pending'\s*(\|\||&&)[\s\S]{0,40}?status\s*===\s*'partial'")
+        for rel in FRONTEND_FILES:
+            src = strip_js_comments(_read_raw(rel))
+            for m in pattern.finditer(src):
+                offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(
+            offenders,
+            '这些地方又开始各自拼「待签收 = pending + partial」了（应走 '
+            'TNR_UI.isOpenTransferStatus / OPEN_TRANSFER_STATUS）：\n  ' + '\n  '.join(offenders))
+
+    def test_renderers_use_the_sources(self):
+        """三端每一处展示点位都必须取真源，不再各写一份表。"""
+        required = {
+            'static/js/portals/gov.js': ('captureStatusBadge', 'transferStatusBadge',
+                                         'treatmentStatusBadge', 'captureStatusText',
+                                         'transferStatusText'),
+            'static/js/portals/shelter.js': ('captureStatusBadge', 'transferStatusBadge',
+                                             'treatmentStatusBadge', 'isOpenTransferStatus'),
+            'static/js/portals/hospital.js': ('transferStatusBadge', 'treatmentStatusBadge',
+                                              'isOpenTransferStatus'),
+            'static/js/portals/adopter.js': ('transferStatusText', 'treatmentStatusText'),
+        }
+        for rel, tokens in required.items():
+            src = strip_js_comments(_read_raw(rel))
+            for token in tokens:
+                self.assertIn(
+                    token, src,
+                    f'{rel} 不再取用 TNR_UI 的 {token} —— 状态显示/待办判定又分叉成本地表')
+
+    def test_shelter_lifecycle_timeline_uses_the_sources(self):
+        """捕捉点端「流转全过程」时间线的转运/诊疗状态必须取真源。
+
+        这里曾留着本轮最后一张本地转运表（只有 pending / received / rejected）：
+        `partial` 落到兜底直接印出英文码。诊疗则是写死二分
+        `completed ? '已完成' : '进行中'`，与后端 choices 平行维护。
+        两处都不报错 —— 状态错了只是「看着不对」。
+        """
+        src = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        self.assertIn('TNR_UI.transferStatusText(ev.status)', src,
+                      '流转时间线的转运状态不再取真源 —— 部分签收又会印出英文 partial')
+        self.assertIn('TNR_UI.treatmentStatusText(ev.status)', src,
+                      '流转时间线的诊疗状态不再取真源 —— 又会退回「已完成 / 进行中」二分')
+        for banned in ("const transferStatus = {", "? '已完成' : '进行中'"):
+            self.assertNotIn(
+                banned, src,
+                f'捕捉点端又出现了本地状态表（应走 TNR_UI.*StatusText）：{banned!r}')
+
+    def test_no_legacy_transfer_wording_in_status_maps(self):
+        """「待接收 / 已接收」这两个自创叫法不许回到状态映射里。
+
+        只禁**映射字面量**（`pending: …待接收`），不限口语说明 ——
+        医院端「待接收物料」讲的是物料，不是转运单状态（转运单卡片已改称
+        「待签收交接单」：那个数字本来就是交接单张数，不是动物只数）。
+        """
+        offenders = []
+        pattern = re.compile(r"(pending|received)['\"]?\s*:\s*[^,\n}]*[待已]接收")
+        for rel in FRONTEND_FILES:
+            src = strip_js_comments(_read_raw(rel))
+            for m in pattern.finditer(src):
+                offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(
+            offenders,
+            '这些地方又把转运单状态写成「待接收 / 已接收」（后端 label 待签收 / 已签收）：\n  '
+            + '\n  '.join(offenders))
+
+    def test_treatment_status_not_labelled_by_stage(self):
+        """`in_progress` 不许显示成阶段文案「诊疗中」。
+
+        `Treatment.status`（进行中/已完成）与 `Treatment.stage`（待接诊/诊疗中/
+        诊疗完毕）是两个字段：把阶段词当状态名，同一张单在监管端两张表里
+        会一个说「诊疗中」一个说「进行中」。
+        """
+        offenders = []
+        for rel in FRONTEND_FILES:
+            src = strip_js_comments(_read_raw(rel))
+            for m in re.finditer(r"in_progress[^,\n}]*诊疗中", src):
+                offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(
+            offenders,
+            '这些地方把诊疗单状态 in_progress 写成阶段文案「诊疗中」：\n  ' + '\n  '.join(offenders))
+
+    def test_backend_open_statuses_is_the_only_predicate(self):
+        """后端签收/驳回两道门禁也必须读 `Transfer.OPEN_STATUSES`。
+
+        前端读真源、后端仍写两遍字面量的话，加一档时两边各漏一半 ——
+        界面把单子列进待办、后端却回「当前状态(partial)不可签收」。
+        """
+        src = _read_raw('business/views_transfer.py')
+        self.assertEqual(
+            src.count('Transfer.OPEN_STATUSES'), 2,
+            '签收/驳回两道门禁应有两处引用 Transfer.OPEN_STATUSES')
+        self.assertNotIn(
+            "in ('pending', 'partial')", src,
+            'views_transfer.py 又出现了字面量 pending+partial 判定')
+
+    def test_no_status_fallback_invents_a_state(self):
+        """查不到真源时不许兜底成某个具体状态（`|| '待签收'` 这类）。
+
+        领养人端时间线原来写 `{…}[ev.status] || '待签收'`：漏掉的 `partial`
+        被静默说成「待签收」，比显示英文码更糟 —— 英文码至少刺眼。
+        """
+        offenders = []
+        for rel in FRONTEND_FILES:
+            src = strip_js_comments(_read_raw(rel))
+            for m in re.finditer(r"\|\|\s*'(待签收|已签收|待审核|已完成|进行中)'", src):
+                offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(
+            offenders,
+            '这些状态兜底把未知取值猜成某个具体业务状态（应显示原始枚举码）：\n  '
+            + '\n  '.join(offenders))
+
+
+class TreatmentStageSingleSourceTest(SimpleTestCase):
+    """诊疗「阶段」的两套取值（三态 + 看板五态）各自只许有一处显示定义。
+
+    第五十二轮电脑端巡检（续四）遗留：`Treatment.stage`（三态）与医院看板的
+    `board_stage`（五态）都是后端**派生值**，前端却各写了三份互不相干的表 ——
+    `hospital.js` 的 `txStageBadge()` 一张 `[文案, badge]`、`renderBoard()` 的页签
+    又一张、`txStageText()` 第三张。后果不是难看：
+
+      - 同一个 code `checking` 在看板页签叫**「待检」**、在详情抽屉的「当前阶段」
+        叫**「待接诊」**（后端 label），同一只动物同一时刻两种说法，
+        医院与监管对账时像差了流程；
+      - 页签、状态列、操作按钮三处各自迭代一份固定列表，后端 `_board_stage()`
+        加一态时，最坏的表现是那一动物的单子在**五个桶里都不出现**（看板看着没数据），
+        而后端 `_board_stage()` 已经会返回它。
+
+    所以这里同时钉：三态文案 = `STAGE_CHOICES` 的 label / 五态取值与顺序 =
+    `Treatment.BOARD_STAGES` / 两张表里同名的 code 必须同名 / 别处不许再抄一份。
+    """
+
+    CSS = 'static/css/tnr-traditional.css'
+    COMMON = 'static/js/tnr-common.js'
+    HOSPITAL = 'static/js/portals/hospital.js'
+
+    def _entries(self, table):
+        body = find_property_literal(strip_js_comments(_read_raw(self.COMMON)), table)
+        self.assertIsNotNone(body, f'TNR_UI.{table} 真源不在了')
+        return {m.group(1): (m.group(2), m.group(3))
+                for m in re.finditer(
+                    r"(\w+):\s*\{\s*text:\s*'([^']*)'\s*,\s*badge:\s*'([^']*)'\s*,?\s*\}", body)}
+
+    def _order(self):
+        m = re.search(r'BOARD_STAGE_ORDER:\s*\[([\s\S]*?)\]',
+                      strip_js_comments(_read_raw(self.COMMON)))
+        self.assertIsNotNone(m, 'TNR_UI.BOARD_STAGE_ORDER 不在了 —— 页签又开始各写一份列表')
+        return [s.strip().strip("'\"")
+                for s in m.group(1).split(',') if s.strip()]
+
+    def test_treatment_stage_matches_backend_labels(self):
+        """三态必须与 `Treatment.STAGE_CHOICES` 双向对齐，文案逐字等于 label。"""
+        expected = dict(Treatment.STAGE_CHOICES)
+        got = {code: text for code, (text, _) in self._entries('TREATMENT_STAGE').items()}
+        self.assertEqual(set(expected) - set(got), set(),
+                         f'TREATMENT_STAGE 缺阶段 {sorted(set(expected) - set(got))}')
+        self.assertEqual(set(got) - set(expected), set(),
+                         f'TREATMENT_STAGE 有后端不存在的阶段 {sorted(set(got) - set(expected))}')
+        drift = [(c, got[c], expected[c]) for c in got if got[c] != expected[c]]
+        self.assertFalse(drift, '阶段文案与后端 label 不一致：'
+                         + ', '.join(f'{c}: 前端「{a}」vs 后端「{b}」' for c, a, b in drift))
+
+    def test_board_stage_order_matches_backend_stages(self):
+        """五态的**取值与顺序**都必须等于 `Treatment.BOARD_STAGES`。
+
+        比较用列表而不是集合：看板的页签顺序就是流程顺序，
+        顺序错了医生会以为「待出院」排在「诊疗中」前面。
+        """
+        self.assertEqual(self._order(), list(Treatment.BOARD_STAGES),
+                         '前端页签顺序与后端 BOARD_STAGES 不一致')
+
+    def test_board_stage_keys_and_badges_are_complete(self):
+        """五态表的键必须与页签顺序一一对应，配色名在 CSS 里真存在。"""
+        entries = self._entries('BOARD_STAGE')
+        order = self._order()
+        self.assertEqual(set(order) - set(entries), set(),
+                         f'BOARD_STAGE 缺 {sorted(set(order) - set(entries))}，页签会漏出英文码')
+        self.assertEqual(set(entries) - set(order), set(),
+                         f'BOARD_STAGE 有幽灵态 {sorted(set(entries) - set(order))}')
+        css = _read_raw(self.CSS)
+        missing = [badge for _, badge in entries.values()
+                   if css_rule(css, '.badge-' + badge) is None]
+        self.assertFalse(missing, f'BOARD_STAGE 配色名在 CSS 里没有规则：{sorted(set(missing))}')
+
+    def test_shared_stage_code_has_one_name(self):
+        """三态与五态里同名的 code，必须叫同一个名字。
+
+        `checking`/`treating` 两个 code 同时出现在两张表里：以前看板把 `checking`
+        叫「待检」、详情叫「待接诊」，`board_stage` 与 `stage` 的对应关系在界面上
+        就断了（同一个时刻两种文案）。
+        """
+        coarse = {c: t for c, (t, _) in self._entries('TREATMENT_STAGE').items()}
+        fine = {c: t for c, (t, _) in self._entries('BOARD_STAGE').items()}
+        clash = [(c, fine[c], coarse[c]) for c in sorted(set(fine) & set(coarse))
+                 if fine[c] != coarse[c]]
+        self.assertFalse(clash, '同一个阶段码在两张表里两种叫法：\n  '
+                         + '\n  '.join(f'{c}: 看板「{a}」vs 三态「{b}」' for c, a, b in clash))
+
+    def test_no_portal_restates_stage_labels(self):
+        """除真源以外，任何前端文件都不许把阶段码映射到**阶段文案**。
+
+        判据盯的是「码 → 真源里的某条文案」这种复制：医院端的悬停提示
+        （『已交接、尚未提交检查单』）与操作按钮名（『检查』『诊断』）是医院自己的
+        操作语，不算冒名；把 `checking: ['待检', 'badge-warning']` 或
+        `pending_diagnose: '待诊'` 再写一遍才算。
+        """
+        labels = {text for table in ('TREATMENT_STAGE', 'BOARD_STAGE')
+                  for text, _ in self._entries(table).values()}
+        codes = '|'.join(Treatment.BOARD_STAGES)
+        pat = re.compile(r'(?:%s)\s*:\s*(\[[^\]]*\]|"[^"]*"|\'[^\']*\')' % codes)
+        offenders = []
+        for rel in FRONTEND_FILES:
+            if rel.endswith('tnr-common.js'):
+                continue
+            src = strip_js_comments(_read_raw(rel))
+            for m in pat.finditer(src):
+                hit = next((lb for lb in labels if lb in m.group(1)), None)
+                if hit:
+                    offenders.append(
+                        f'{rel}:{src[:m.start()].count(chr(10)) + 1} '
+                        f'把阶段码写成「{hit}」')
+        self.assertFalse(offenders,
+                         '这些地方又抄了一份阶段文案（应调用 TNR_UI.boardStageText/'
+                         'boardStageBadge/treatmentStageText）：\n  ' + '\n  '.join(offenders))
+
+    def test_hospital_board_reads_the_stage_source(self):
+        """医院端看板、页签、详情三处都必须走真源。"""
+        src = strip_js_comments(_read_raw(self.HOSPITAL))
+        for token in ('TNR_UI.BOARD_STAGE', 'TNR_UI.BOARD_STAGE_ORDER',
+                      'TNR_UI.boardStageText', 'TNR_UI.boardStageBadge',
+                      'TNR_UI.treatmentStageText'):
+            self.assertIn(token, src,
+                          f'医院端没有用 {token} —— 阶段显示又开始自写一份')
+
+    def test_backend_buckets_and_filter_read_the_tables(self):
+        """后端两处也不许各写一遍：看板空桶、`?stage=` 筛选判据。
+
+        空桶字面量原来在「账号未绑机构」兜底与正常分桶各一份；`?stage=` 的
+        时间戳判据原来手写、与 `Treatment.stage` 属性推两遍。
+        """
+        src = _read_raw('business/views_treatment.py')
+        for literal in ("'pending_diagnose': []",
+                        'checked_at__isnull=False, done_at__isnull=True'):
+            at = src.find(literal)
+            self.assertEqual(
+                at, -1,
+                f'views_treatment.py 第 {src[:at].count(chr(10)) + 1} 行又手写了 {literal} '
+                '—— 阶段判据/桶名的第二处定义（应读 Treatment.BOARD_STAGES / STAGE_FILTERS）')
+        self.assertIn('Treatment.BOARD_STAGES', src,
+                      '看板空桶没有读 Treatment.BOARD_STAGES')
+        self.assertIn('Treatment.STAGE_FILTERS', src,
+                      '?stage= 筛选没有读 Treatment.STAGE_FILTERS')
+
+
+class PlatformEnumSingleSourceTest(SimpleTestCase):
+    """平台端四张枚举表各只许有一处定义：实体状态 / 角色 / 机构类型 / 芯片状态。
+
+    第五十二轮电脑端巡检（续五）盘点出来的重复：
+
+      - **启用/停用** 8 份：徽章表（还多写一个后端**永远不会产出**的
+        `disabled` 幽灵态）、三个状态筛选下拉、三行「停用/启用」按钮、
+        以及捕捉点端个人中心直接写死绿色「启用」（账号真被停用也照显示启用）；
+      - **角色名** 5 份：名称表、徽章表、筛选下拉、建号下拉、权限说明卡。
+        其中名称表把后端 label「市级政府管理员 / 区级政府管理员」简写成
+        「市级管理员 / 区级管理员」，而同页 `role_display` 与打印单据用全称；
+      - **机构类型** 3 份：页面 tab、弹窗标题、账号表单里的机构提示；
+      - **芯片状态** 4 份：两份还把元组顺序写反、把「已使用」写成「已植入」。
+
+    这些不是审美问题：同一个账号/机构在列表与单据上两种职务名，授权说明与
+    监管台账就对不上账；一个后端不存在的状态名会让排查时误以为是另一种停用。
+    """
+
+    COMMON = 'static/js/tnr-common.js'
+    CSS = 'static/css/tnr-traditional.css'
+    PLATFORM = 'static/js/portals/platform.js'
+    SHELTER = 'static/js/portals/shelter.js'
+
+    #: 实体状态的取值域只能来自 `core.models` 常量；这些文件里出现裸字符串即为漂移。
+    BACKEND_STATUS_FILES = (
+        'supervision/views.py',
+        'business/services.py',
+        'business/views_material.py',
+        'business/management/commands/seed_data.py',
+        'accounts/management/commands/ensure_superuser.py',
+        'accounts/management/commands/ensure_platform_admin.py',
+    )
+
+    def _entries(self, table):
+        body = find_property_literal(strip_js_comments(_read_raw(self.COMMON)), table)
+        self.assertIsNotNone(body, f'TNR_UI.{table} 真源不在了')
+        return {m.group(1): (m.group(2), m.group(3))
+                for m in re.finditer(
+                    r"(\w+):\s*\{\s*text:\s*'([^']*)'\s*,\s*badge:\s*'([^']*)'\s*,?\s*\}",
+                    body)}
+
+    def _code_string_literals(self, rel, values):
+        """源码里（不含注释与 docstring）取值为 values 之一的字符串字面量。
+
+        用 AST 而不是正则：注释里引用历史取值是合法的（本仓库大量注释在解释
+        「以前写的是 'active'」），docstring 里也可能引用；只有**参与执行**的
+        字面量才是第二处真源。
+        """
+        tree = ast.parse(_read_raw(rel), filename=rel)
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef,
+                                 ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, 'body', [])
+                first = body[0] if body else None
+                if (isinstance(first, ast.Expr)
+                        and isinstance(first.value, ast.Constant)
+                        and isinstance(first.value.value, str)):
+                    docstrings.add(id(first.value))
+        return [(node.lineno, node.value) for node in ast.walk(tree)
+                if isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in docstrings
+                and node.value in values]
+
+    def test_entity_status_matches_backend_domain(self):
+        """`ENTITY_STATUS` 的键序与文案 = `core.models.STATUS_VALUES/LABELS`。"""
+        entries = self._entries('ENTITY_STATUS')
+        self.assertEqual(list(entries), list(STATUS_VALUES),
+                         '实体状态键/顺序与后端取值域不一致（下拉顺序也读它）')
+        self.assertEqual({k: v[0] for k, v in entries.items()}, STATUS_LABELS,
+                         '实体状态文案与后端 STATUS_LABELS 不一致')
+        self.assertNotIn('disabled', entries,
+                         'ENTITY_STATUS 又出现了后端不会产出的 `disabled` 幽灵态')
+        css = _read_raw(self.CSS)
+        missing = [badge for _, badge in entries.values()
+                   if css_rule(css, '.badge-' + badge) is None]
+        self.assertFalse(missing, f'实体状态配色在 CSS 里没有规则：{sorted(set(missing))}')
+
+    def test_role_keys_and_labels_match_backend_choices(self):
+        """角色表与下拉顺序逐项等于 `User.ROLE_CHOICES`，文案逐字等于 label。"""
+        expected = dict(User.ROLE_CHOICES)
+        entries = self._entries('ROLE')
+        self.assertEqual(list(entries), [k for k, _ in User.ROLE_CHOICES],
+                         'ROLE 的键/顺序与 User.ROLE_CHOICES 不一致')
+        drift = [(k, v[0], expected[k]) for k, v in entries.items()
+                 if k in expected and v[0] != expected[k]]
+        self.assertFalse(drift, '角色文案与后端 label 不一致：'
+                         + ', '.join(f'{k}: 前端「{a}」vs 后端「{b}」'
+                                     for k, a, b in drift))
+        m = re.search(r'ROLE_ORDER:\s*\[([\s\S]*?)\]',
+                      strip_js_comments(_read_raw(self.COMMON)))
+        self.assertIsNotNone(m, 'TNR_UI.ROLE_ORDER 不在了 —— 下拉顺序又开始各写一份')
+        order = [s.strip().strip("'\"") for s in m.group(1).split(',') if s.strip()]
+        self.assertEqual(order, [k for k, _ in User.ROLE_CHOICES],
+                         'ROLE_ORDER 与 User.ROLE_CHOICES 顺序不一致')
+
+    def test_inst_type_matches_backend_choices(self):
+        """机构类型文案 = `Institution.TYPE_CHOICES` 的 label（房型 tab 不再自写）。"""
+        entries = self._entries('INST_TYPE')
+        expected = dict(Institution.TYPE_CHOICES)
+        self.assertEqual({k: v[0] for k, v in entries.items()}, expected,
+                         '机构类型文案与 Institution.TYPE_CHOICES 不一致')
+
+    def test_chip_status_matches_backend_choices(self):
+        """芯片四态 = `Chip.STATUS_CHOICES`，顺序也一致（选芯片下拉按它排）。"""
+        entries = self._entries('CHIP_STATUS')
+        expected = dict(Chip.STATUS_CHOICES)
+        self.assertEqual(list(entries), list(expected),
+                         'CHIP_STATUS 的键/顺序与 Chip.STATUS_CHOICES 不一致')
+        self.assertEqual({k: v[0] for k, v in entries.items()}, expected,
+                         '芯片状态文案与后端 label 不一致（已使用 vs 已植入）')
+
+    def test_platform_portal_reads_the_enum_sources(self):
+        """平台端四个枚举的显示/下拉/切换按钮都必须走 `TNR_UI` 真源。"""
+        src = strip_js_comments(_read_raw(self.PLATFORM))
+        for token in ('TNR_UI.entityStatusBadge(r.status)',
+                      'TNR_UI.entityStatusOptions()',
+                      'TNR_UI.entityToggleLabel(r.status)',
+                      'TNR_UI.entityToggleBtnClass(r.status)',
+                      'TNR_UI.roleBadge(r.role)',
+                      "TNR_UI.roleOptions(['adopter'])",
+                      'TNR_UI.roleText(this.currentUser.role)',
+                      'TNR_UI.instTypeText('):
+            self.assertIn(token, src,
+                          f'platform.js 没有用 {token} —— 枚举显示又开始自写一份')
+        for legacy in ('市级管理员', '区级管理员', 'disabled'):
+            self.assertNotIn(legacy, src,
+                             f'platform.js 又出现了旧枚举值「{legacy}」')
+        for pat, why in (
+                (r"\{\s*value:\s*'(?:active|inactive)'", '自写启停下拉选项'),
+                (r"'停用'\s*:\s*'启用'", '自写切换按钮文案'),
+                (r"status\s*:\s*\{\s*text:", '自写实体状态徽章表')):
+            m = re.search(pat, src)
+            self.assertIsNone(
+                m, f'platform.js 第 {src[:m.start()].count(chr(10)) + 1} 行又{why}'
+                   '（应读 TNR_UI.ENTITY_STATUS / ROLE / INST_TYPE）' if m else '')
+
+    def test_shelter_account_status_reads_the_source(self):
+        """捕捉点端个人中心的角色/账号状态也必须走真源，不许写死「启用」。"""
+        src = strip_js_comments(_read_raw(self.SHELTER))
+        self.assertIn('TNR_UI.entityStatusBadge(user?.status)', src,
+                      '捕捉点端账号状态又写死了（账号停用后仍显示启用）')
+        self.assertIn('TNR_UI.roleText(user?.role)', src,
+                      '捕捉点端角色名没有走真源')
+        self.assertNotIn("'启用'", src, '捕捉点端仍在字面量里写「启用」')
+        self.assertIn("'status': user.status", _read_raw('business/views_portal.py'),
+                      '门户 user_data 没有带 status —— 个人中心徽章会显示「—」')
+
+    def test_backend_status_writes_use_the_constants(self):
+        """实体状态的写侧不得再散落裸字符串，默认值必须引用常量。"""
+        self.assertEqual(STATUS_VALUES, ('active', 'inactive'))
+        self.assertEqual(STATUS_LABELS, {'active': '启用', 'inactive': '停用'})
+        offenders = []
+        for rel in self.BACKEND_STATUS_FILES:
+            for lineno, value in self._code_string_literals(
+                    rel, {'active', 'inactive', 'disabled'}):
+                offenders.append(f'{rel}:{lineno} 写了 {value!r}')
+        self.assertFalse(offenders,
+                         '实体状态取值域应使用 core.models.STATUS_* 常量：\n  '
+                         + '\n  '.join(offenders))
+        self.assertIn('default=STATUS_ACTIVE', _read_raw('core/models.py'),
+                      'District/Institution.status 默认值没有引用 STATUS_ACTIVE')
+        self.assertIn('default=STATUS_ACTIVE', _read_raw('accounts/models.py'),
+                      'User.status 默认值没有引用 STATUS_ACTIVE')
+
+
+class PetStatusSingleSourceTest(SimpleTestCase):
+    """宠物状态的文案与配色只许有一处定义：`TNR_UI.PET_STATUS`。
+
+    第五十二轮电脑端巡检时同一个 `Pet.status='in_treatment'` 有三种叫法
+    （监管端「待诊疗」、捕捉点端「诊疗中」、医院端「待诊疗/诊疗中」），
+    配色也各挑各的（info / warning）。这不是审美问题：监管对账时，
+    同一只动物在三端看起来像处在三个不同流转阶段，而纸质单据用的是
+    第四种（后端 choices 的 label）。物料流水类型在重构 B 里已经踩过同一脚，
+    这次把宠物状态按同一口径收口。
+
+    判据是**元数据驱动**的，不写死任何一条中文：
+      - 覆盖 = `Pet.STATUS_CHOICES` 的取值集合（后端加一态，前端漏了直接红）；
+      - 文案 = 后端 label 逐项相等（改后端措辞会打到前端来，反之也是）；
+      - 配色 = CSS 里真有 `.badge-<type>` 这条规则（拼错的色名渲染成无底色）。
+    """
+
+    CSS = 'static/css/tnr-traditional.css'
+
+    def _source(self):
+        return strip_js_comments(read('static/js/tnr-common.js'))
+
+    def _entries(self):
+        """{状态码: (文案, 配色)}，取自真源字面量本身。"""
+        body = find_property_literal(self._source(), 'PET_STATUS')
+        self.assertIsNotNone(body, 'TNR_UI.PET_STATUS 真源不在了')
+        return {m.group(1): (m.group(2), m.group(3))
+                for m in re.finditer(r"(\w+):\s*\{\s*text:\s*'([^']*)'\s*,\s*badge:\s*'([^']*)'", body)}
+
+    def test_pet_status_covers_every_backend_choice(self):
+        expected = {c[0] for c in Pet._meta.get_field('status').choices}
+        got = set(self._entries())
+        self.assertEqual(expected - got, set(),
+                         f'真源缺状态 {sorted(expected - got)}，界面会漏出英文枚举码')
+        self.assertEqual(got - expected, set(),
+                         f'真源里有后端不存在的状态 {sorted(got - expected)}（幽灵态）')
+
+    def test_pet_status_text_equals_backend_label(self):
+        labels = dict(Pet._meta.get_field('status').choices)
+        drift = [(code, text, labels[code])
+                 for code, (text, _) in self._entries().items()
+                 if code in labels and text != labels[code]]
+        self.assertFalse(
+            drift,
+            '这些状态的显示文案与后端 choices 的 label 不一致（同一状态两种叫法，'
+            '单据与界面会对不上）：\n  '
+            + '\n  '.join(f'{c}: 前端「{a}」 vs 后端「{b}」' for c, a, b in drift))
+
+    def test_pet_status_badge_exists_in_css(self):
+        css = _read_raw(self.CSS)
+        missing = [badge for _, badge in self._entries().values()
+                   if css_rule(css, '.badge-' + badge) is None]
+        self.assertFalse(missing,
+                         f'配色名在 CSS 里没有对应规则，徽章会渲染成没有底色：{sorted(set(missing))}')
+
+    def test_no_other_frontend_file_maps_pet_status(self):
+        """别的前端文件不许再自带宠物状态表（`in_treatment:` 作键只出现在真源）。
+
+        挑 `in_treatment` 当哨兵：它是宠物独有的取值，而 `owner_returned`、
+        `released` 同样出现在**办结去向**表里（`hospital.js` 的 `TX_DISPOSAL_*`、
+        出院单据映射），那些是另一份枚举，不该被这条判据误伤。
+        """
+        offenders = []
+        for rel in FRONTEND_FILES:
+            if rel == 'static/js/tnr-common.js':
+                continue
+            src = strip_js_comments(_read_raw(rel))
+            for m in re.finditer(r'(?m)^\s*in_treatment\s*:', src):
+                line = src[:m.start()].count('\n') + 1
+                offenders.append(f'{rel}:{line}')
+        self.assertFalse(
+            offenders,
+            '这些文件又写了一份宠物状态映射，会与真源各自漂移：\n  ' + '\n  '.join(offenders))
+
+    def test_portals_use_the_badge_helper(self):
+        """各端渲染宠物状态必须走 `TNR_UI.petStatusBadge`，不许再手拼徽章。
+
+        此前散着两种手拼：`'<span class="badge ' + TNR_API.getPetStatusBadge(…)`
+        与 `statusBadge(text, badge.replace('badge-',''))`。前者把 CSS 类名
+        当字符串往外传，后者再把前缀拆回来；配色真源一改，这两种写法
+        都得各改一遍，漏一处就是「这只动物没有底色」。
+        取值函数 `getPetStatusText/Badge` 已随迁移从 `tnr-api.js` 删除。
+        """
+        offenders = []
+        for rel in FRONTEND_FILES:
+            src = strip_js_comments(_read_raw(rel))
+            for pat in (r"getPetStatusBadge", r"getPetStatusText",
+                        r"\.replace\(\s*'badge-'"):
+                for m in re.finditer(pat, src):
+                    offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(
+            offenders,
+            '这些地方又在手拼宠物状态徽章（应走 TNR_UI.petStatusBadge）：\n  '
+            + '\n  '.join(offenders))
+        for rel in ('static/js/portals/shelter.js', 'static/js/portals/hospital.js',
+                    'static/js/portals/gov.js', 'static/js/portals/adopter.js'):
+            self.assertIn(
+                'TNR_UI.petStatusBadge(', strip_js_comments(_read_raw(rel)),
+                f'{rel} 不再使用共享宠物状态徽章 —— 文案/配色又各拼一份')
+
+
+class ReleaseStatusSingleSourceTest(SimpleTestCase):
+    """放归单状态的文案/配色与「未办结」口径，前后端各只许有一处定义。
+
+    第五十二轮电脑端巡检发现：放归在第四十八轮被拆成两段
+    （`pending` 待转运回小区 → `transferred` 已回小区待放归 → `released`），
+    后端改完了，**前端两份表根本没跟上**：
+      - `shelter.js` 放归页签 `filter(r => r.status === 'pending')` ——
+        `transferred` 的单子既不进「待放归」也不进「已放归」，整张单从界面消失，
+        办理人再也点不到「确认放归」，单据永远停在中间态；
+      - `gov.js` 放归监管 `released ? 已放归 : 待放归` 二值兜底 ——
+        动物已回小区只差签字，监管端仍显示「待放归」，两段流程走到哪看不出；
+      - 后端的重复放归判据同样只认 `pending`，动物一登记转运就又能开一张
+        放归单、也能被领养流程接手（双重承诺）。
+
+    所以这里同时钉三件事：显示真源覆盖 / 文案 = 后端 label /
+    「未办结」口径 = `Release.OPEN_STATUSES`，且别处不许再各写一份。
+    """
+
+    CSS = 'static/css/tnr-traditional.css'
+    COMMON = 'static/js/tnr-common.js'
+
+    def _entries(self):
+        body = find_property_literal(strip_js_comments(read(self.COMMON)), 'RELEASE_STATUS')
+        self.assertIsNotNone(body, 'TNR_UI.RELEASE_STATUS 真源不在了')
+        return {m.group(1): (m.group(2), m.group(3))
+                for m in re.finditer(
+                    r"(\w+):\s*\{\s*text:\s*'([^']*)'\s*,\s*badge:\s*'([^']*)'", body)}
+
+    def _open_status(self):
+        """`OPEN_RELEASE_STATUS: ['pending', 'transferred']` 里的取值。"""
+        m = re.search(r'OPEN_RELEASE_STATUS:\s*\[([^\]]*)\]',
+                      strip_js_comments(read(self.COMMON)))
+        self.assertIsNotNone(m, 'TNR_UI.OPEN_RELEASE_STATUS 不在了 —— 前端又开始各自判 pending')
+        return {s.strip().strip("'\"") for s in m.group(1).split(',') if s.strip()}
+
+    def test_release_status_covers_every_backend_choice(self):
+        expected = {c[0] for c in Release._meta.get_field('status').choices}
+        got = set(self._entries())
+        self.assertEqual(expected - got, set(),
+                         f'真源缺状态 {sorted(expected - got)}，界面会漏出英文枚举码')
+        self.assertEqual(got - expected, set(),
+                         f'真源里有后端不存在的状态 {sorted(got - expected)}（幽灵态）'
+                         f'——放归单没有撤销接口，别照着领养/转运抄一条 cancelled')
+
+    def test_release_status_text_equals_backend_label(self):
+        labels = dict(Release._meta.get_field('status').choices)
+        drift = [(code, text, labels[code])
+                 for code, (text, _) in self._entries().items()
+                 if code in labels and text != labels[code]]
+        self.assertFalse(
+            drift,
+            '放归状态的显示文案与后端 label 不一致（单据与界面两种叫法）：\n  '
+            + '\n  '.join(f'{c}: 前端「{a}」 vs 后端「{b}」' for c, a, b in drift))
+
+    def test_release_status_badge_exists_in_css(self):
+        css = _read_raw(self.CSS)
+        missing = [badge for _, badge in self._entries().values()
+                   if css_rule(css, '.badge-' + badge) is None]
+        self.assertFalse(missing,
+                         f'配色名在 CSS 里没有对应规则，徽章会渲染成没有底色：{sorted(set(missing))}')
+
+    def test_open_release_status_matches_backend(self):
+        """前端的「待放归」集合必须等于后端 `Release.OPEN_STATUSES`。
+
+        这条是跨语言的一致性判据：后端把中间态并入未办结（`release_confirm`
+        接受它），前端漏了 `transferred` 就是把单子藏起来；前端多写了终态，
+        已放归的单会同时出现在两张表里。
+        """
+        self.assertEqual(self._open_status(), set(Release.OPEN_STATUSES),
+                         '前端 OPEN_RELEASE_STATUS 与后端 Release.OPEN_STATUSES 口径不同：'
+                         '「待放归」= 未办结的放归单，只有一处定义')
+
+    def test_no_other_frontend_file_maps_release_status(self):
+        """别处不许再自带放归状态表（`transferred:` 作键只出现在真源）。
+
+        挑 `transferred` 当哨兵：它是放归单独有的取值，宠物/领养/转运都没有，
+        而 `released`、`pending` 到处都是（各流程自己的枚举），拿来判会满屏误伤。
+        """
+        offenders = []
+        for rel in FRONTEND_FILES:
+            if rel == self.COMMON:
+                continue
+            src = strip_js_comments(_read_raw(rel))
+            for m in re.finditer(r'(?m)^\s*transferred\s*:', src):
+                offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(offenders,
+                         '这些文件又写了一份放归状态映射，会与真源各自漂移：\n  '
+                         + '\n  '.join(offenders))
+
+    def test_release_lists_use_the_open_status(self):
+        """捕捉点端的「待放归」列表与医院端出院看板都必须按未办结口径取单。
+
+        写回 `=== 'pending'` 的话，`transferred` 的单子不会报错、不会红，
+        只是**从页签里消失** —— 这正是本类要防的那种静默缺陷。
+        """
+        for rel in ('static/js/portals/shelter.js', 'static/js/portals/hospital.js',
+                    'static/js/portals/gov.js'):
+            src = strip_js_comments(_read_raw(rel))
+            self.assertTrue(
+                'RELEASE_STATUS' in src or 'releaseStatusBadge' in src,
+                f'{rel} 没有取用 TNR_UI 的放归状态真源（状态列/阶段又各写一份）')
+        shelter = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        self.assertIn('OPEN_RELEASE_STATUS', shelter,
+                      '捕捉点端放归页签不再按「未办结」取单，已回小区待签字的放归单会从界面消失')
+        # 任何「拿 releases 列表比未办结单个状态」的写法都会漏掉一段（看板的
+        # 待放归统计就中过：只数 pending，动物登记转运后单子从待办里消失）。
+        # `=== 'released'` 允许 —— 那是「已放归」表要的就是终态。
+        bad = [m.group(0) for m in re.finditer(
+            r"releases\.filter\(\s*\w+\s*=>\s*\w+\.status\s*[!=]==\s*'(?!released)[a-z_]+'",
+            shelter)]
+        self.assertFalse(
+            bad,
+            '这些放归列表又开始各自判单个状态了（应为 TNR_UI.OPEN_RELEASE_STATUS，'
+            '见 Release.OPEN_STATUSES）：\n  ' + '\n  '.join(bad))
+
+
+    def test_shelter_adoption_surfaces_use_the_source(self):
+        """捕捉点端每一处领养单列表/详情都从真源取状态。
+
+        这里逐个点位检查，而不是「文件里出现过 `adoptionStatusBadge`」就行：
+        捕捉点端有四处领养展示（领养登记表、动物去向的领养页签、全量台账、
+        一宠一档详情），漏掉任何一处，那一处就会退回兜底表 —— 而兜底表里的
+        `cancelled` 恰好叫「已撤销」（后端是「已取消」），四处显示三种说法。
+        """
+        src = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        for anchor in ("tab === 'adoptions'", "tab === 'adoption'",
+                       'showAdoptionDetail(rec) {',
+                       "mountTable('adoptionTableWrap'"):
+            hits = list(re.finditer(re.escape(anchor), src))
+            self.assertTrue(hits, f'捕捉点端找不到 {anchor}，判据会空转')
+            for m in hits:
+                line = src[:m.start()].count(chr(10)) + 1
+                window = src[m.start():m.start() + 1600]
+                self.assertIn(
+                    'adoptionStatusBadge', window,
+                    f'shelter.js:{line} 起的领养单展示没取用状态真源（退回通用兜底表 = 旧叫法）')
+
+    def test_pet_archive_release_detail_shows_stage(self):
+        """每一处放归列表/明细都要按状态取徽章，不许写死终态。
+
+        捕捉点端有两处中过：
+          - 全量台账「放归台账」的状态列写死 `statusBadge('已放归', 'success')` ——
+            待转运、待小区签字的单子在台账里也一律显示绿色「已放归」；
+          - 一宠一档的放归明细只列「放归时间」，而 `released_at` 在办结之前是空的，
+            于是这两类单子看着跟「没填」一样，看不出动物在车上还是在小区等签字。
+        """
+        src = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        hits = list(re.finditer(r"tab === 'releases'", src))
+        self.assertTrue(hits, '捕捉点端不再有任何放归列表/明细，判据会空转')
+        for m in hits:
+            line = src[:m.start()].count(chr(10)) + 1
+            window = src[m.start():m.start() + 1400]
+            self.assertNotIn(
+                "statusBadge('已放归'", window,
+                f'shelter.js:{line} 的放归状态写死成「已放归」（待转运/待签字的单子也是绿的）')
+            self.assertIn('releaseStatusBadge', window,
+                          f'shelter.js:{line} 的放归列表/明细没取用放归状态真源')
+
+    def test_adopter_adoption_card_uses_status(self):
+        """领养人端「我的领养」卡片不许再写死绿色「已领养」。"""
+        src = strip_js_comments(_read_raw('static/js/portals/adopter.js'))
+        self.assertIn('adoptionStatusBadge(adoption.status)', src,
+                      '领养人端领养卡片的状态徽章不再取自 `Adoption.status`')
+
+    def test_no_binary_release_status_fallback(self):
+        """不许再写 `status === 'released' ? '已放归' : '待放归'`。
+
+        二值兜底会把未办结的两段压成同一档，监管端/时间线看不出动物
+        是还没送出、还是已经回小区只差物业签字；将来后端再加一段也会
+        被静默归进「待放归」。取值一律走 `TNR_UI.RELEASE_STATUS`。
+        """
+        offenders = []
+        for rel in FRONTEND_FILES:
+            src = strip_js_comments(_read_raw(rel))
+            for m in re.finditer(r"status\s*===\s*'released'\s*\?", src):
+                offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(
+            offenders,
+            '这些地方的放归状态又退回「released / 其余」二值判断了：\n  '
+            + '\n  '.join(offenders))
+
+
+class CheckInStatusSingleSourceTest(SimpleTestCase):
+    """回访打卡审核状态（`CheckIn.status`）的文案/配色只许有一处定义。
+
+    第五十二轮电脑端巡检（续）在同一类缺陷上又撞到一个点位：
+      - `gov.js` 领养业务详情的打卡时间线写的是
+        `c.status === 'approved' ? '已审核' : '待审核'` ——
+        **已驳回**的回访在监管端显示成「待审核」，监管看不出这条回访
+        已经判过不合格，也就看不出该走「违规收回」；文案还和后端 label
+        （已通过）不一致；
+      - 同一状态在 `shelter.js` 叫「未通过」、在 `adopter.js` 叫「已驳回」，
+        领养人和机构对同一条记录用两种说法，沟通成本全砸在纠纷上；
+      - 监管端领养列表的「回访打卡 N 次」只看条数：三条全驳回的领养
+        照样显示绿色徽章，跟「回访良好」完全相反。
+    """
+
+    CSS = 'static/css/tnr-traditional.css'
+    COMMON = 'static/js/tnr-common.js'
+    RENDERERS = ('static/js/portals/shelter.js', 'static/js/portals/gov.js',
+                 'static/js/portals/adopter.js')
+
+    def _entries(self):
+        body = find_property_literal(strip_js_comments(_read_raw(self.COMMON)),
+                                     'CHECKIN_STATUS')
+        self.assertIsNotNone(body, 'TNR_UI.CHECKIN_STATUS 真源不在了')
+        return {m.group(1): (m.group(2), m.group(3))
+                for m in re.finditer(
+                    r"(\w+):\s*\{\s*text:\s*'([^']*)'\s*,\s*badge:\s*'([^']*)'", body)}
+
+    def test_checkin_status_covers_every_backend_choice(self):
+        expected = {c[0] for c in CheckIn._meta.get_field('status').choices}
+        got = set(self._entries())
+        self.assertEqual(expected - got, set(),
+                         f'真源缺状态 {sorted(expected - got)}，界面会漏出英文枚举码')
+        self.assertEqual(got - expected, set(),
+                         f'真源里有后端不存在的状态 {sorted(got - expected)}（幽灵态）'
+                         f'—— 打卡没有「已取消」，别照着领养申请抄一行')
+
+    def test_checkin_status_text_equals_backend_label(self):
+        labels = dict(CheckIn._meta.get_field('status').choices)
+        drift = [(code, text, labels[code])
+                 for code, (text, _) in self._entries().items()
+                 if code in labels and text != labels[code]]
+        self.assertFalse(
+            drift,
+            '打卡状态的显示文案与后端 label 不一致（单据与界面两种叫法）：\n  '
+            + '\n  '.join(f'{c}: 前端「{a}」 vs 后端「{b}」' for c, a, b in drift))
+
+    def test_checkin_status_badge_exists_in_css(self):
+        css = _read_raw(self.CSS)
+        missing = [badge for _, badge in self._entries().values()
+                   if css_rule(css, '.badge-' + badge) is None]
+        self.assertFalse(missing,
+                         f'配色名在 CSS 里没有对应规则，徽章会渲染成没有底色：{sorted(set(missing))}')
+
+    def test_renderers_use_the_source(self):
+        """三处打卡展示都必须取真源，不再各写一份。"""
+        for rel in self.RENDERERS:
+            src = strip_js_comments(_read_raw(rel))
+            self.assertTrue(
+                'CHECKIN_STATUS' in src or 'checkinStatus' in src,
+                f'{rel} 没有取用 TNR_UI 的打卡状态真源（徽章/时间线又各写一份）')
+
+    def test_no_binary_checkin_status_fallback(self):
+        """不许再写 `status === 'approved' ? '中文文案' : …`。
+
+        二值兜底会把 `rejected`（已驳回）压成「待审核」，监管端看不出回访
+        已经判过不合格；后端将来加一档也会被同样吞掉。
+        取状态文案一律走 `TNR_UI.checkinStatusText/Badge`。
+        （`? 'done' : ''` 这种选 CSS 类名的不算 —— 所以判据要求真分支是中文。）
+        """
+        offenders = []
+        for rel in FRONTEND_FILES:
+            src = strip_js_comments(_read_raw(rel))
+            for m in re.finditer(r"===\s*'approved'\s*\?\s*'[^']*[\u4e00-\u9fff]", src):
+                offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(
+            offenders,
+            '这些地方的打卡状态退回「approved / 其余」二值判断了：\n  '
+            + '\n  '.join(offenders))
+
+    def _window(self, rel, anchor, size=700):
+        src = strip_js_comments(_read_raw(rel))
+        i = src.find(anchor)
+        self.assertNotEqual(i, -1, f'{rel} 里找不到 {anchor}（展示点位被删掉了？）')
+        return src[i:i + size]
+
+    def test_gov_checkin_count_shows_review_result(self):
+        """监管端的「回访打卡」必须带审核结果，不能只报一个条数。
+
+        以前是 `checkIns.filter(...).length` + `cnt > 0 ? badge-success : badge-warning`：
+        三条回访**全部驳回**的领养照样显示绿色「3次」，监管看板把
+        「回访全不合格」读成「回访良好」—— 方向完全相反，而且不报错。
+        """
+        for anchor in ("title: '回访打卡'", "label: '回访打卡'"):
+            win = self._window('static/js/portals/gov.js', anchor)
+            self.assertIn('CHECKIN_STATUS', win,
+                          f'监管端 {anchor} 又开始只数条数：待审/驳回与通过会被压成同一个绿色徽章')
+        self.assertNotIn(
+            "cnt > 0 ? 'badge-success'",
+            strip_js_comments(_read_raw('static/js/portals/gov.js')),
+            '监管端回访打卡列恢复了「有条数就绿」的旧判据')
+
+    def test_shelter_checkin_words_match_backend_label(self):
+        """机构端不许再自创「未通过」。
+
+        筛选下拉的选项以前手写成 待审核/已通过/**未通过**，
+        后端 label 与领养人端都是「已驳回」：同一条驳回记录，
+        机构台账写「未通过」、领养人手机显示「已驳回」，纠纷时两头对不上话。
+        """
+        src = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        self.assertNotIn(
+            '未通过', src,
+            '捕捉点端又出现了自创的打卡状态文案「未通过」（应取 TNR_UI.CHECKIN_STATUS）')
+        self.assertIn("options: Object.keys(TNR_UI.CHECKIN_STATUS)", src,
+                      '回访筛选下拉不再由真源生成，后端加一档这里就选不到')
+
+
+class AdoptionStatusSingleSourceTest(SimpleTestCase):
+    """领养单 / 在线领养申请单的状态显示，前后端各只许有一处定义。
+
+    第五十二轮电脑端巡检（续）在领养这一格发现的是一整套四种叫法：
+      - 后端 `Adoption.STATUS_CHOICES`：待领出 / **已完成** / **已取消**；
+      - `shelter.js` 筛选下拉：与后端一致（本轮起改为从真源生成）；
+      - `shelter.js` 徽章兜底表：`cancelled` 叫「已撤销」；
+      - `hospital.js` 出院看板：`completed` 叫「已领出」、`cancelled` 叫「已撤销」；
+      - `adopter.js` 我的领养卡片：徽章**硬编码绿色「已领养」**，完全不看
+        `adoption.status` —— `pending_claim`（医院还没确认领出）和
+        `cancelled`（已取消）的单子也显示「已领养」，领养人据此以为手续办完。
+    `AdoptionApplication.status` 另外还多一档 `cancelled`（领养人自己撤回），
+    此前在 `adopter.js` 里手抄了文本、徽章两张表。
+    """
+
+    CSS = 'static/css/tnr-traditional.css'
+    COMMON = 'static/js/tnr-common.js'
+
+    def _entries(self, table):
+        body = find_property_literal(strip_js_comments(_read_raw(self.COMMON)), table)
+        self.assertIsNotNone(body, f'TNR_UI.{table} 真源不在了')
+        return {m.group(1): (m.group(2), m.group(3))
+                for m in re.finditer(
+                    r"(\w+):\s*\{\s*text:\s*'([^']*)'\s*,\s*badge:\s*'([^']*)'", body)}
+
+    def _assert_source(self, table, model):
+        expected = {c[0] for c in model._meta.get_field('status').choices}
+        labels = dict(model._meta.get_field('status').choices)
+        got = self._entries(table)
+        self.assertEqual(expected - set(got), set(),
+                         f'{table} 缺状态 {sorted(expected - set(got))}，界面会漏出英文枚举码')
+        self.assertEqual(set(got) - expected, set(),
+                         f'{table} 里有后端不存在的状态 {sorted(set(got) - expected)}（幽灵态）')
+        drift = [(code, text, labels[code])
+                 for code, (text, _) in got.items()
+                 if code in labels and text != labels[code]]
+        self.assertFalse(
+            drift,
+            f'{table} 的显示文案与后端 label 不一致（单据与界面两种叫法）：\n  '
+            + '\n  '.join(f'{c}: 前端「{a}」 vs 后端「{b}」' for c, a, b in drift))
+        css = _read_raw(self.CSS)
+        missing = [badge for _, badge in got.values()
+                   if css_rule(css, '.badge-' + badge) is None]
+        self.assertFalse(missing,
+                         f'{table} 的配色名在 CSS 里没有对应规则，徽章会渲染成没有底色：'
+                         f'{sorted(set(missing))}')
+
+    def test_adoption_status_source_matches_backend(self):
+        self._assert_source('ADOPTION_STATUS', Adoption)
+
+    def test_apply_status_source_matches_backend(self):
+        self._assert_source('APPLY_STATUS', AdoptionApplication)
+
+    def test_renderers_use_the_source(self):
+        """领养单的三个展示点位都必须取真源。"""
+        for rel, token in (('static/js/portals/shelter.js', 'adoptionStatusBadge'),
+                           ('static/js/portals/hospital.js', 'ADOPTION_STATUS'),
+                           ('static/js/portals/adopter.js', 'adoptionStatusBadge')):
+            src = strip_js_comments(_read_raw(rel))
+            self.assertIn(token, src,
+                          f'{rel} 不再取用领养单状态真源（状态列/看板/卡片又各写一份）')
+        src = strip_js_comments(_read_raw('static/js/portals/adopter.js'))
+        self.assertTrue('APPLY_STATUS' in src or 'applyStatus' in src,
+                        '领养人端不再取用申请单状态真源（文本/徽章又各抄一份）')
+
+    def test_no_hardcoded_adoption_badge(self):
+        """不许再写死 `badge-success">已领养`。
+
+        「已领养」是**动物**（`Pet.status=adopted`）的文案，不是领养单的；
+        写死在卡片上就等于无视 `Adoption.status`，待领出/已取消都会显示成绿色已完成。
+        """
+        offenders = []
+        for rel in FRONTEND_FILES:
+            src = strip_js_comments(_read_raw(rel))
+            for m in re.finditer(r'badge-\w+">[^<]*已领养', src):
+                offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(
+            offenders,
+            '这些地方把领养单状态写死成「已领养」了（应取 TNR_UI.adoptionStatusBadge）：\n  '
+            + '\n  '.join(offenders))
+
+    def test_no_legacy_adoption_wording(self):
+        """「已撤销」「已领出」这两个自创叫法不许回来。
+
+        后端与领养人端对同一档都叫「已取消」；把 `completed` 说成「已领出」
+        则与动物状态「已领养」混成一件 —— 单据办结与动物出栏是两个字段。
+        """
+        offenders = []
+        for rel in FRONTEND_FILES:
+            src = strip_js_comments(_read_raw(rel))
+            for m in re.finditer(r'cancelled[^:]{0,40}:\s*[^,\n]*已撤销|已领出', src):
+                offenders.append(f'{rel}:{src[:m.start()].count(chr(10)) + 1}')
+        self.assertFalse(
+            offenders,
+            '这些文件又出现了领养单的旧叫法（已撤销 / 已领出）：\n  '
+            + '\n  '.join(offenders))
+
+    def test_shelter_adoption_filter_uses_source(self):
+        """捕捉点领养筛选下拉必须由真源生成。
+
+        以前这里逐条手写 `{ value, label }`，与 `ADOPTION_STATUS` 平行维护：
+        后端加一档或改一个叫法时，筛选条必定漏。取值与文案的正确性
+        由 `test_adoption_status_source_matches_backend` 对真源与后端 choices 守着。
+        """
+        src = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        self.assertIn('TNR_UI.adoptionStatusOptions()', src,
+                      '捕捉点领养筛选下拉不再由真源生成，后端加一档这里就选不到')
+        self.assertNotIn("value: 'pending_claim'", src,
+                         '领养筛选下拉又改回逐条手写了（应走 TNR_UI.adoptionStatusOptions）')
 
 
 class NoHardcodedStatusFallbackTest(SimpleTestCase):
@@ -480,31 +1711,12 @@ class BlacklistFormDistrictTest(SimpleTestCase):
                       '否则市级捕捉点操作员恒定 400')
 
 
-class CheckInStatusMappingTest(SimpleTestCase):
-    """回访打卡状态在捕捉点端是内联三元表达式，单独断言其覆盖全部取值。
-
-    `pending` 走的是最后的 else 分支，因此这里断言的是「三个取值各自都有
-    对应中文文案」，而不是断言每个枚举码都字面出现。
-    """
-
-    def test_shelter_checkin_status_covers_all(self):
-        source = read(PORTALS['shelter'])
-        anchor = re.search(r"r\.status === 'approved'", source)
-        self.assertIsNotNone(anchor, '未找到捕捉点端的打卡状态渲染')
-        end = source.find('\n', anchor.start())
-        line = source[anchor.start():end]
-        for token, label in (("'approved'", '已通过'),
-                             ("'rejected'", '未通过'),
-                             ('待审核', '待审核')):
-            self.assertIn(token, line, f'打卡状态渲染未处理 {token}')
-        # 三个分支各自的中文文案必须齐备，且不能漏出英文枚举码
-        for label in ('已通过', '未通过', '待审核'):
-            self.assertIn(label, line, f'打卡状态渲染缺少「{label}」文案')
-        for code in (c[0] for c in CheckIn._meta.get_field('status').choices):
-            self.assertNotIn(
-                f'>{code}<', line,
-                f'打卡状态渲染把枚举码 {code} 直接当成文案输出了'
-            )
+# （原 `CheckInStatusMappingTest` 已删除）它钉的是「捕捉点端那段内联三元表达式
+# 要把 approved/rejected/pending 都翻成中文」，并把其中的「未通过」当作正确文案。
+# 第五十二轮巡检（续）把打卡状态迁到 `TNR_UI.CHECKIN_STATUS` 之后，
+# 这段判据既锚不住（内联表达式没了）、又会把自创的「未通过」钉成标准 ——
+# 由 `CheckInStatusSingleSourceTest` 取代：文案以 `CheckIn.STATUS_CHOICES` 的
+# label 为准，且要求三端都取真源。
 
 
 # ---------------------------------------------------------------------------
@@ -1476,48 +2688,105 @@ class PageReachabilityTest(SimpleTestCase):
 
 
 class StaticAssetCacheBustTest(SimpleTestCase):
-    """静态资源的 `?v=` 必须**全局同一个值**。
+    """静态资源引入一律走 `{% asset_url %}`，缓存键由内容哈希给出。
 
-    改 `static/` 下任何文件都要同时升 **6 个模板里的 7 处** `?v=`
-    （`base.html` 的 CSS + `tnr-common.js`，以及 5 个门户各自引入的 `tnr-api.js`）。
-    ⚠ 数量随门户增加而变（第四十三轮新增 `/platform/` 后从 6 处变 7 处）——
-    别照抄旧数字，以 `PORTALS` 为准。
-    漏升任何一处，那个页面就会继续读浏览器缓存里的旧文件 ——
-    表现为「改了没生效」，而且**只在某一个端上不生效**，极难排查。
-    第十轮给 4 处补版本号、第二十二轮升 `20260918k` → `20260919a` 时都靠人工核对，
-    这条断言把它变成机器检查。
+    原先模板里写的是**人工日期串**（`?v=20261019b`），12 个引入点全靠人记得同时升，
+    而本类老判据只能查「这些值彼此相等」，查不出「有没有人忘记升」。
+    第五十二轮电脑端巡检把代价实盘打了出来：改了 `static/js/portals/shelter.js`
+    的个人中心渲染，浏览器仍在跑旧文件，页面显示「改了没生效」，
+    而所有源码判据全绿 —— 因为它们查的是磁盘上的文件，不是浏览器里跑的那一份。
+
+    现在的口径：**不许出现人工版本号**。缓存键 = 文件内容哈希，
+    内容没变继续用缓存，内容一变自动失效，没有任何需要人维护的清单。
     """
 
-    def test_all_version_query_params_are_identical(self):
-        seen = {}   # 版本号 → [文件:行]
-        for rel in ['templates/base.html'] + list(PORTALS.values()):
-            for i, line in enumerate(read(rel).split('\n'), 1):
-                for v in re.findall(r'\?v=([A-Za-z0-9_.-]+)', line):
-                    seen.setdefault(v, []).append(f'{rel}:{i}')
-        self.assertTrue(seen, '一个 ?v= 都没扫到 —— 扫描逻辑失效了')
-        self.assertEqual(
-            len(seen), 1,
-            '静态资源版本号不一致（漏升会导致某个端继续读缓存）：\n  '
-            + '\n  '.join(f'{v} → {", ".join(locs)}' for v, locs in seen.items()))
+    def _templates_with_static(self):
+        #: 需要缓存键的引入点（以 `PORTALS` 为准，别照抄注释里的旧数字）。
+        return ['templates/base.html'] + [PORTALS[r] for r in PORTALS]
 
-    def test_tnr_api_js_is_versioned_in_every_portal(self):
-        """4 个门户都必须给 `tnr-api.js` 带版本号。
+    def test_no_manual_version_stamp_survives_in_templates(self):
+        bad = []
+        for rel in self._templates_with_static():
+            for i, line in enumerate(_read_raw(rel).split('\n'), 1):
+                # `{% static 'x.js' %}?v=...` 这种「人工拼版本号」的写法必须绝迹
+                if re.search(r"\{%\s*static\s+'[^']+'\s*%\}\s*\?v=", line):
+                    bad.append(f'{rel}:{i}')
+        self.assertFalse(
+            bad,
+            '这些引入点还在用手写版本号，改了 static/ 下的文件后浏览器会继续跑旧版：\n  '
+            + '\n  '.join(bad))
 
-        （第十轮之前 4 处**都没有**版本号，改 `tnr-api.js` 后用户永远读旧文件。）
+    @staticmethod
+    def _asset_tag(path):
+        """模板里期望出现的写法：`{% asset_url 'js/...' %}`。
+
+        用拼接而不是 `%` 格式化 —— 标签本身的 `{%` / `%}` 会被 `%`-format
+        当成转换符读掉（`'% }'` 报「not enough arguments」），f-string 同理要
+        把花括号写成 `{{`。拼接最不容易看错。
         """
+        return '{' + "% asset_url '" + path + "' %" + '}'
+
+    def test_every_static_include_goes_through_asset_url(self):
+        """每个引入点都用 `{% asset_url %}`，且所在模板 `{% load ... assets %}`。"""
         missing = []
-        for name, rel in PORTALS.items():
-            source = read(rel)
-            # 注意 `{% static '...' %}` 的 `%}` 在路径与 `?v=` 之间 ——
-            # 漏掉它会让正则永远匹配不到版本号，把 4 个端全报成「缺版本号」
-            # （第一版就踩了，幸好它报错而不是静默通过）。
-            m = re.search(r"static\s+'js/tnr-api\.js'\s*%\}\s*(\?v=)?", source)
-            if m is None:
-                missing.append(f'{name}: 找不到 tnr-api.js 的引入语句')
-            elif not m.group(1):
-                missing.append(f'{name}: 引入了 tnr-api.js 但没带 ?v=')
-        self.assertEqual(missing, [], '门户引入 tnr-api.js 缺版本号：\n  '
-                                      + '\n  '.join(missing))
+        for role, rel in PORTALS.items():
+            src = _read_raw(rel)
+            for path in (f'js/portals/{role}.js', 'js/tnr-api.js'):
+                if self._asset_tag(path) not in src:
+                    missing.append(f"{rel}: 没有 {self._asset_tag(path)} 引入")
+        base = _read_raw('templates/base.html')
+        for path in ('css/tnr-traditional.css', 'js/tnr-common.js'):
+            if self._asset_tag(path) not in base:
+                missing.append(f"templates/base.html: 没有 {self._asset_tag(path)} 引入")
+        self.assertEqual(missing, [], '静态资源没走 asset_url：\n  ' + '\n  '.join(missing))
+
+        for rel in self._templates_with_static():
+            src = _read_raw(rel)
+            if 'asset_url' not in src:
+                continue
+            load = re.search(r'\{%\s*load\s+([^%]*?)%\}', src)
+            self.assertIsNotNone(load, f'{rel}: 用了 asset_url 却没有任何 {{% load %}}')
+            self.assertIn(
+                'assets', load.group(1).split(),
+                f'{rel}: {{% load %}} 里没有 `assets`，`asset_url` 会渲染成空串')
+
+    def test_stamp_tracks_file_content_not_a_hand_typed_date(self):
+        """同一秒内连改两次也必须换哈希 —— 失效判据取 `mtime_ns` + 字节数。
+
+        这条是本次改造的**全部意义**：取整到秒的 mtime 会让「编辑器保存后立刻
+        再存一次」命中旧哈希，于是「改了没生效」换个形式回来。
+        """
+        from core.templatetags.assets import asset_stamp
+
+        probe_rel = 'js/__cache_probe__.js'
+        # ⚠ 必须落在 `static/js/` 下：`STATICFILES_DIRS` 登记的是 `static/` 本身，
+        # 前缀为空串 —— 写到 `static/__cache_probe__.js` 时 `finders.find()` 永远找不到，
+        # 哈希恒为 `'0'`，本条判据会静默退化成空转（实测踩过）。
+        probe_abs = os.path.join(ROOT, 'static', 'js', '__cache_probe__.js')
+        self.addCleanup(lambda: os.path.exists(probe_abs) and os.remove(probe_abs))
+
+        with open(probe_abs, 'w', encoding='utf-8') as f:
+            f.write('window.__probe = 1;')
+        first = asset_stamp(probe_rel)
+        self.assertRegex(first, r'^[0-9a-f]{12}$', f'哈希形态不对：{first}')
+
+        # 同尺寸改写：字节数相同，只有 mtime 变 —— 光比尺寸不够。
+        with open(probe_abs, 'w', encoding='utf-8') as f:
+            f.write('window.__probe = 2;')
+        second = asset_stamp(probe_rel)
+        self.assertNotEqual(first, second,
+                            '内容变了哈希没变（缓存判据失效），浏览器会继续跑旧文件')
+
+        with open(probe_abs, 'w', encoding='utf-8') as f:
+            f.write('window.__probe = 22;')
+        third = asset_stamp(probe_rel)
+        self.assertNotEqual(second, third, '同秒内连改两次被合并成同一个哈希')
+
+    def test_missing_file_degrades_to_placeholder_not_crash(self):
+        """文件缺失时返回 `'0'`：缓存键不该把整页渲染打成 500。"""
+        from core.templatetags.assets import asset_stamp
+        self.assertEqual(asset_stamp('js/__definitely_not_here__.js'), '0')
+
 
 
 # ============================================================
@@ -1546,6 +2815,11 @@ FLOW_ENTRY_POINTS = {
     # 第四十七轮：原「快速登记」整块删除，诊疗登记入口换成三步流程的
     # `openTreatment()`（进入流程即开单），绝育病历并入「绝育」项目卡片。
     '诊疗登记': 'openTreatment(',
+    # 第五十一轮：病历改到**术后**才填，而 `plan/` 在已诊断后一律拒绝，
+    # 所以补录必须走独立接口。这条判据盯的就是「接口有了、界面没接」——
+    # 少了它，医生做完手术点「补录病历」提交不了，只能撤回诊断（会把
+    # 已执行项目的库存扣动一起打乱），而系统不会报任何错。
+    '绝育病历术后补录': 'treatmentSterilization(',
     '物料采购入库': 'purchaseMaterial(',
     '物料下发': 'dispatchMaterial(',
     '物料签收': 'receiveMaterial(',
@@ -1583,6 +2857,117 @@ class BusinessFlowEntryPointTest(SimpleTestCase):
             missing,
             '以下业务环节在所有门户模板里都找不到调用入口（流程不可达）：\n  '
             + '\n  '.join(missing))
+
+
+class SterilizationRecordTimingTest(SimpleTestCase):
+    """绝育手术病历的**填写时机**搬到术后之后，前端必须跟着变的四处判据。
+
+    第五十一轮把「必须六栏齐全」从「医嘱与处方」挪到「执行绝育项目」那一刻
+    （术前主刀/麻醉/过程/恢复在物理上还不存在，硬要填只能编一份假病历）。
+    这一轮漏任何一处都**不会报错**，只会让医生在界面里绕不出去：
+      ① 已诊断后要提交到独立接口 —— 漏了就是「补录病历点了没反应」
+        （`plan/` 在已诊断后一律拒绝，草稿永远提交不上去）；
+      ② 执行清单缺病历时要有补录入口 —— 漏了就是点「治疗完成」必吃 400；
+      ③ 计划阶段允许整份留空 —— 漏了就是逼医生术前编假病历。
+
+    ⚠ 断言一律**收窄到方法体内**（用 `METHOD_START` + `brace_body` 抠出来）：
+    在整份模板里搜关键词的话，随便一句注释就能让它通过。
+    """
+
+    def _body(self, name):
+        source = blank_comments(read(PORTALS['hospital']))
+        for m in METHOD_START.finditer(source):
+            head = m.group(0).lstrip()
+            if re.match(r'(?:async\s+)?' + re.escape(name) + r'\s*\(', head):
+                return brace_body(source, m.end() - 1)
+        self.fail(f'医院端找不到方法 {name}()（改名要同步这条判据）')
+
+    def _literal_list(self, var):
+        m = re.search(var + r':\s*\[([^\]]*)\]',
+                      blank_comments(read(PORTALS['hospital'])))
+        if not m:
+            self.fail(f'医院端没有 {var} 常量（病历栏名的前端真源）')
+        return re.findall(r"'([^']+)'", m.group(1))
+
+    def test_modal_submits_directly_once_diagnosed(self):
+        body = self._body('openSterilizationModal')
+        self.assertRegex(body, r'postOp\s*=\s*!!detail\.diagnosed_at',
+                         '弹窗要按「是否已诊断」决定提交方式：术前只写草稿，'
+                         '术后必须直接落库（plan/ 那时已经关门）')
+        self.assertIn('await TNR_API.treatmentSterilization(', body)
+        # 提交调用必须在「未诊断就早退」之后 —— 顺序反了等于术前也走直提交，
+        # 而服务端 `save_plan` 才是术前那条路的真源，两处写会互相覆盖。
+        self.assertLess(body.index("if (!postOp)"),
+                        body.index('treatmentSterilization('))
+        self.assertIn('draft.sterilization', body, '术前那条路（只存草稿）不能丢')
+        self.assertIn('is_disposed', body, '已办结要只读：病历是归档事实')
+
+    def test_modal_allows_an_empty_record_before_surgery(self):
+        """术前必须留一条「整份留空」的出路，且清空是真清空（六栏一起归零）。
+        判据里点名 `STER_DRAFT_FIELDS` —— 与服务端 `sterilization_draft_filled()`
+        同一份口径，少一栏都会把「留空」判成「填了一半」而拦住。"""
+        body = self._body('openSterilizationModal')
+        self.assertIn('sterClearBtn', body)
+        self.assertIn('STER_DRAFT_FIELDS', body)
+        self.assertIn("filled < vals.length", body,
+                      '缺栏要按栏点名，不能只说「请填写所有必填项」')
+
+    def test_exec_list_gates_on_the_stored_record(self):
+        body = self._body('step3HTML')
+        self.assertIn('sterRecordMissing(', body)
+        self.assertIn('tx-record-open', body)
+        # 缺栏判断必须在渲染「治疗完成」按钮之前算出来（三元表达式取 miss）
+        self.assertLess(body.index('sterRecordMissing('),
+                        body.index('data-act="tx-exec"'))
+
+    def test_plan_stage_may_leave_the_record_empty(self):
+        """「医嘱与处方」的预检只能拦**半份**病历，不能拦空白。"""
+        body = self._body('txPlanProblem')
+        self.assertIn('needs_record', body)
+        self.assertRegex(body, r'filled\s*>\s*0\s*&&\s*filled\s*<',
+                         '计划阶段的判据必须是「填了才要求填全」；'
+                         '写成「一律要求填全」会逼医生术前编假病历')
+
+    def test_must_predicate_matches_backend(self):
+        """绝育算不算「必执行」：排了时间**或**填了病历都算（服务端同口径）。
+
+        两边不一致的后果是界面显示「0 项必执行」、点「诊疗完成」却被服务端
+        拦住 —— 这是第五十一轮之前一直存在的错法（旧口径只认病历）。
+        """
+        body = self._body('txItemState')
+        self.assertRegex(body, r'must\s*=\s*isRec\s\?\s*\(hasDate\s*\|\|\s*recAny\)\s*:\s*hasRx')
+        self.assertIn('STER_DRAFT_FIELDS.some(', body)
+
+    def test_frontend_field_keys_are_the_backend_ones(self):
+        """病历栏名的前端清单必须与服务端逐字相等（顺序也要一致 ——
+        缺栏提示按这份顺序点名）。
+
+        栏名错一个（`surgeon` 写成 `doctor`）的表现是**保存成功但那一栏永远空**：
+        前端发的是错键，服务端读不到就当没填，六列留空，打印页缺主刀医生。
+        `STER_DRAFT_FIELDS` 对应服务端「算不算填过」的判据
+        （`sterilization_draft_filled()` 不看麻醉方式：下拉默认值不算医生填过），
+        两边不一致 → 一边算必执行、另一边不算。
+        """
+        backend = [key for key, _ in STERILIZATION_FIELDS]
+        self.assertEqual(self._literal_list('STER_REC_FIELDS'), backend)
+        self.assertEqual(
+            self._literal_list('STER_DRAFT_FIELDS'),
+            ['surgery_date'] + list(STERILIZATION_REQUIRED))
+        labels = re.search(r'STER_REC_LABELS:\s*\{([^}]*)\}',
+                           blank_comments(read(PORTALS['hospital'])))
+        self.assertTrue(labels, '缺栏要点名是哪一栏，得有一份中文标签表')
+        self.assertEqual(
+            [k for k, _ in re.findall(r'(\w+):\s*\'([^\']+)\'',
+                                       labels.group(1))], backend)
+
+    def test_exec_gate_reads_the_stored_columns(self):
+        """执行前的病历闸门读的是**库里六列**（`detail.sterilization_*`），
+        不是前端草稿 —— 「草稿说填了、库里没有」放行就等于放着一份空病历过去。
+        """
+        body = self._body('sterRecordMissing')
+        self.assertEqual(sorted(re.findall(r"'(sterilization_\w+)'", body)),
+                         sorted(col for _, col in STERILIZATION_FIELDS))
+
 
 
 # ============================================================
@@ -1882,52 +3267,49 @@ def select_filters(source):
 
 
 class FilterBarOptionCoverageTest(SimpleTestCase):
-    """下拉筛选条的选项必须与后端 choices **双向**对齐。
+    """状态筛选下拉的选项必须由真源生成，不再逐条手写。
 
-    「缺项」让用户筛不到某一类；「多项」制造死选项。两个方向都要断言。
+    以前这里用 `select_filters()` 解析字面量取值、再与后端 choices 双向比对。
+    改成生成式选项后，「能筛到全部取值」已经**等价于**「真源覆盖全部 choices」，
+    由 `CaptureTransferTreatmentSingleSourceTest` 与
+    `AdoptionStatusSingleSourceTest` 各自钉住；本类改为钉住另外两件事：
+
+      1. 筛选条确实调用生成器（`*StatusOptions()`），没有退回手写；
+      2. 生成器本身确实从 `text` 取文案、按键序输出 —— 否则「有真源」也可能
+         渲染出一列英文码或空标签。
+
+    ⚠ 生成式选项的 `options` 是函数调用，`select_filters()` 看不到取值，
+    再用它做覆盖性比对必然误报（与打卡状态筛选同一处理，见
+    `CheckInStatusSingleSourceTest` 的注释）。
     """
 
-    def _find(self, rel, must_have):
-        """按「选项里必然包含的取值」定位某一个下拉筛选条。
-
-        同一个 portal 里 label 为「状态」的筛选条有四五条，靠 key/label 无法区分；
-        用「某个只有该实体才有的枚举值」做指纹最稳（如 `partial` 只属于 Capture）。
-        """
-        for key, label, values, expr, pos in select_filters(read(rel)):
-            if values and must_have <= values:
-                return key, label, values
-        self.fail(f'{rel} 中未找到选项包含 {sorted(must_have)} 的下拉筛选条，'
-                  f'检查测试本身是否失效')
-
-    def _assert_covers(self, rel, must_have, model, field):
-        expected = {c[0] for c in model._meta.get_field(field).choices}
-        self.assertTrue(expected, f'{model.__name__}.{field} 没有定义 choices')
-        key, label, values = self._find(rel, must_have)
-        missing = expected - values
-        extra = values - expected
+    def test_shelter_status_filters_use_generators(self):
+        src = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        for token in ('TNR_UI.captureStatusOptions()',
+                      'TNR_UI.transferStatusOptions()',
+                      'TNR_UI.adoptionStatusOptions()'):
+            self.assertIn(token, src,
+                          f'捕捉点端状态筛选没有走 {token} —— 手写选项会漏掉后端新增的档位')
+        offenders = []
+        for pat in (r"value:\s*'partial'", r"value:\s*'pending_claim'",
+                    r"value:\s*'void'", r"value:\s*'received'"):
+            for m in re.finditer(pat, src):
+                offenders.append(f'第 {src[:m.start()].count(chr(10)) + 1} 行')
         self.assertFalse(
-            missing,
-            f'{rel} 的「{label}」筛选（key={key}）缺少 {sorted(missing)}，'
-            f'用户无法按这些取值过滤。后端 {model.__name__}.{field} 全部取值：{sorted(expected)}')
-        self.assertFalse(
-            extra,
-            f'{rel} 的「{label}」筛选（key={key}）含后端不存在的取值 {sorted(extra)} —— '
-            f'选中它们永远是 0 条（死选项）。后端 {model.__name__}.{field} 全部取值：'
-            f'{sorted(expected)}')
+            offenders,
+            '捕捉点端又出现了手写的状态筛选项（应调用 TNR_UI.*StatusOptions）：\n  '
+            + '\n  '.join(offenders))
 
-    def test_shelter_capture_status_filter_covers_all(self):
-        """捕捉单状态含 `void`（已作废），筛选下拉必须能选到它。"""
-        self._assert_covers(PORTALS['shelter'], {'partial'}, Capture, 'status')
-
-    def test_shelter_transfer_status_filter_covers_all(self):
-        self._assert_covers(PORTALS['shelter'], {'received'}, Transfer, 'status')
-
-    def test_shelter_adoption_status_filter_covers_all(self):
-        """领养状态只有 pending_claim/completed/cancelled，没有 pending/rejected。"""
-        self._assert_covers(PORTALS['shelter'], {'pending_claim'}, Adoption, 'status')
-
-    def test_shelter_checkin_status_filter_covers_all(self):
-        self._assert_covers(PORTALS['shelter'], {'approved'}, CheckIn, 'status')
+    def test_status_options_reads_text_in_key_order(self):
+        """生成器必须按键序、取真源的 `text`；只给 value 等于把英文码摆进下拉。"""
+        common = strip_js_comments(_read_raw('static/js/tnr-common.js'))
+        m = re.search(r'statusOptions\(table\)\s*\{([\s\S]*?)\n  \},', common)
+        self.assertIsNotNone(m, 'TNR_UI.statusOptions() 不在了 —— 筛选选项又各写一份')
+        body = m.group(1)
+        self.assertIn('Object.keys(TNR_UI[table])', body,
+                      'statusOptions 没有按键序遍历真源（下拉顺序会与后端 choices 脱节）')
+        self.assertIn('TNR_UI[table][value].text', body,
+                      'statusOptions 没有取真源的 text（下拉会漏出英文枚举码）')
 
 
 class DistrictFilterExcludesCityTest(SimpleTestCase):
@@ -2330,6 +3712,149 @@ class AccountFormCascadeContractTest(SimpleTestCase):
             '机构下拉为空时没有提示 —— 用户会以为系统里根本没有机构')
 
 
+class VetLicenseEntryContractTest(SimpleTestCase):
+    """执业兽医师证号的**整条录入链路**（第四十九轮补的录入口）。
+
+    业务口径（2026-10-19 确认）：执业身份的验证点就在**平台端「新增医院账号」**
+    这一步 —— 建号时录入证号，之后每张诊疗单靠它归属到人。
+
+    这条链路跨 6 个文件（模型 → 服务层判据 → 建号/改号视图 → 路由 → API 封装 →
+    平台端界面 → 开单快照 → 打印），任何一环「只是没接上」都不会报错：
+      - 界面上没这个输入框 → 证号恒为空 → 签名归属失效，而系统里一切正常；
+      - 服务端漏了必填 → 前端填得再认真也挡不住直接 POST；
+      - 改号接口不回写历史单据是**要求**，不是缺陷 —— 但「新单子也不更新」是真缺陷。
+    所以四类形态各钉一条。
+    """
+
+    def _js(self, rel, pattern, label):
+        source = read(rel)
+        m = re.search(pattern, source)
+        self.assertIsNotNone(m, f'找不到 {label} —— 本测试需要同步更新')
+        body = brace_body(source, source.index('{', m.start()))
+        self.assertIsNotNone(body, f'{label} 的花括号不配对')
+        return body
+
+    def _py_func(self, source, name):
+        """取顶层函数的整段源码（花括号配对在 Python 上不适用）。"""
+        m = re.search(r'^def ' + re.escape(name) + r'\(', source, re.M)
+        self.assertIsNotNone(m, f'找不到 {name} —— 本测试需要同步更新')
+        nxt = re.search(r'^(?:def |@|# =)', source[m.end():], re.M)
+        end = len(source) if nxt is None else m.end() + nxt.start()
+        return source[m.start():end]
+
+    def test_service_holds_the_only_rule(self):
+        """判据只在 `services.validate_vet_license` 里写一遍。
+
+        视图里出现证号长度/形状的就地校验就是第二真源 ——
+        同一个概念写多遍，就会有一遍没人改（本轮补录入口时最容易复制出去）。
+        """
+        body = self._py_func(read('business/services.py'), 'validate_vet_license')
+        self.assertIn("role != 'hospital'", body, '非医院角色填证号的分支没了')
+        self.assertIn('len(license_no)', body, '长度/形状判据没了')
+        for name in ('user_create', 'user_update'):
+            seg = self._py_func(read('supervision/views.py'), name)
+            self.assertIn('validate_vet_license(', seg,
+                          f'{name}() 没有调用服务层判据 —— 直接 POST 能绕过界面')
+            self.assertIn('normalize_vet_license(', seg,
+                          f'{name}() 没有先规范化，首尾空格会进证号')
+            self.assertNotRegex(
+                seg, r'vet_license[\s\S]{0,40}\.isdigit\(\)|len\(vet_license\)',
+                f'{name}() 里出现了就地形状校验 —— 与服务层重复，会各自漂移')
+
+    def test_create_and_edit_views_store_it(self):
+        src = read('supervision/views.py')
+        self.assertRegex(
+            src, r'user\.vet_license\s*=\s*vet_license',
+            '`user_create` 校验完没写库 —— 建号时填了证号，账号上还是空的')
+        self.assertRegex(
+            src, r"if 'vet_license' in data:",
+            '`user_update` 的证号分支必须按**键是否出现**决定改不改 ——\n'
+            '改成真值判断会让「只改姓名」的提交把证号清空。')
+
+    def test_route_and_api_wrapper_exist(self):
+        urls = read('supervision/urls.py')
+        self.assertRegex(
+            urls, r"users/<int:pk>/edit/'[^)]*views\.user_update",
+            '`users/<pk>/edit/` 路由没了 —— 抄错的证号没有纠正入口，\n'
+            '现场的下一步就是直连数据库改（绕过校验，也不进审计）。')
+        api = strip_js_comments(read('static/js/tnr-api.js'))
+        self.assertRegex(
+            api, r'updateUser\(id,\s*data\)[\s\S]{0,120}users/\$\{id\}/edit/',
+            '`TNR_API.updateUser` 没打到 `users/${id}/edit/` —— 界面上的保存是空操作。')
+
+    def test_platform_modal_has_required_field(self):
+        """新增账号模态框：证号输入框存在、只给医院角色看、提交前挡空。"""
+        body = self._js(PORTALS['platform'], r'showAccountModal\(\)\s*\{',
+                        'showAccountModal')
+        self.assertIn(
+            'id="acct-vet-license"', body,
+            '平台端「新增账号」里没有执业证号输入框 —— 业务口径要求建医院账号时\n'
+            '就录入证号（这是执业身份唯一的录入口），缺了它等于让现场去改数据库。')
+        self.assertIn(
+            "licenseGroup.style.display = role === 'hospital'", body,
+            '证号输入框没有随角色收起 —— 非医院角色也填得到，提交必被服务端拒。')
+        self.assertRegex(
+            body, r"role === 'hospital' && !vetLicense",
+            '医院角色提交前没挡空证号 —— 界面放行人，服务端拒 400，用户不知道为什么。')
+        self.assertRegex(
+            body, r'createUser\(\{[\s\S]{0,300}vet_license',
+            '提交时没把 vet_license 发给接口 —— 输入框成了摆设。')
+        # 反向对照：把上面这条锚点改掉，判据必须跟着红
+        planted = body.replace('vet_license: vetLicense', 'license: vetLicense')
+        self.assertNotEqual(
+            planted, body,
+            '反向对照锚点失效：`createUser` 的 payload 里已经不是 `vet_license: vetLicense` 了，\n'
+            '请确认上面那条 `createUser(...)` 断言是否已经抓不到真实字段名。')
+
+    def test_accounts_table_shows_and_edits_it(self):
+        # 判据收在 `renderAccountsTable()` 方法体内：`data-edit` 这个属性名
+        # 机构表也在用，拿整个模板搜会命中机构那一处，账号表删掉编辑按钮照样绿。
+        html = self._js(PORTALS['platform'], r'(?:async\s+)?renderAccountsTable\(\)\s*\{',
+                        'renderAccountsTable')
+        # 渲染器集中到 `cell.vetLicense` 后，列定义与本体的字符距离变远；
+        # 判据改为「列引用了共用渲染器」+「渲染器里有未登记标记」两段，
+        # 无论以后把渲染器挪到哪里都不会误红。
+        self.assertRegex(
+            html, r"key: 'vet_license',[^\n]*render: cell\.vetLicense",
+            '账号列表的「执业证号」列没有引用共用渲染器 cell.vetLicense')
+        self.assertRegex(
+            html, r"vetLicense: r =>[\s\S]{0,220}未登记",
+            '账号列表没有「执业证号」列或未登记标记 ——\n'
+            '平台端看不见空证号，就会以为医院都登记过了。')
+        self.assertIn('data-edit="${r.id}"', html, '账号列表没有编辑按钮。')
+        self.assertIn(
+            "'data-edit': (id) => this.showAccountEditModal", html,
+            '账号列表的编辑按钮没绑到编辑模态框 —— 点了没反应。')
+        edit = self._js(PORTALS['platform'], r'showAccountEditModal\(row\)\s*\{',
+                        'showAccountEditModal')
+        self.assertIn(
+            'TNR_API.updateUser(', edit,
+            '编辑模态框没走 updateUser —— 保存按钮点了没接口。')
+        self.assertNotIn(
+            'acctEdit-role', edit,
+            '编辑模态框又能改角色了 —— 服务端 `user_update` 只收姓名/电话/证号，\n'
+            '界面给出去而接口不认，等于一个永远保存不了的输入框。')
+        self.assertNotRegex(
+            edit, r'payload\.(role|district_id|institution_id|password|is_active)\s*=',
+            '编辑模态框提交了**改权限**的字段 —— 与 `user_update` 的收窄范围不一致，\n'
+            '这些字段的服务端守卫是被测不到的死代码。')
+
+    def test_open_treatment_snapshots_instead_of_reading_live(self):
+        """开单时快照进单据，打印时读单据 —— 反过来（打印实时读账号）是缺陷。"""
+        svc = read('business/services_treatment.py')
+        m = re.search(r'^def open_treatment\(', svc, re.M)
+        self.assertIsNotNone(m, '找不到 open_treatment —— 快照位置需要同步')
+        seg = svc[m.start():m.start() + 3000]
+        self.assertRegex(
+            seg, r'vet_license\s*=\s*getattr\(user,\s*.vet_license.',
+            '开单时没把账号证号快照进诊疗单 —— 单据上的签名归属为空。')
+        printer = read('business/views_print.py')
+        self.assertIn(
+            "_v('vet_license')", printer,
+            '打印模板不再读单据快照字段。如果它改成实时读 `User.vet_license`，\n'
+            '历史单据会跟着账号一起变 —— 那张单子就无法再证明当时是谁签的字。')
+
+
 class NarrowedOptionContractTest(SimpleTestCase):
     """「前端把选项收窄了、后端不校验」这一类（第十七轮）。
 
@@ -2501,19 +4026,40 @@ class InactiveEntityContractTest(SimpleTestCase):
     def test_shelter_portal_excludes_inactive_institutions(self):
         """捕捉点端的机构下拉必须与政府端一样排除停用机构。
 
-        ⚠ 第四十五轮起只剩**两处**：新建捕捉单的捕捉点、转运单的接收医院。
-        原来第三处（下发出库的接收医院）**过滤责任转移到了服务端** ——
+        ⚠ 第四十九轮起只剩**一处**：转运单的接收医院。
+        第二处（新建捕捉单的「执行机构」）不是「过滤被删了」，而是**整个下拉被删了**：
+        它原本是给监管账号代录用的（政府端转只读后这条路径整体消失，
+        判据见 `core/tests_gov_readonly.py`），现在捕捉点提交时
+        `shelter_id` 恒等于自己绑定的捕捉点。
+        第四十五轮起第三处（下发出库的接收医院）**过滤责任转移到了服务端** ——
         那个下拉改成由 `materials/dispatch-targets/` 提供，服务端在
-        `dispatch_targets()` 里 `status='active'` 收口（见下一条用例）。
-        闸门跟着责任走，而不是钉在「前端要出现 3 次这个写法」上。
+        `dispatch_targets()` 里以 `STATUS_ACTIVE` 收口（见下一条用例）。
+        闸门跟着责任走，而不是钉在「前端要出现 N 次这个写法」上。
+
+        区分「删了过滤」和「删了下拉」的办法是把两者都钉住：
+        若有人把执行机构下拉加回来却忘了排除停用机构，
+        下面两条断言会一起变红。
         """
         html = read(PORTALS['shelter'])
         found = (html.count("i.status === 'active'")
                  + html.count("h.status === 'active'"))
-        self.assertGreaterEqual(
-            found, 2,
-            '捕捉点端的机构下拉要排除停用机构：新建捕捉单的捕捉点、转运单的接收医院。\n'
-            '政府端早就过滤了，只写一半就是跨端漂移。')
+        self.assertEqual(
+            found, 1,
+            '捕捉点端排除停用机构的下拉数量变了（现在 %d 处，应为转运单的接收医院 1 处）。\n'
+            '少了：说明接收医院的过滤被删；多了：说明有新的机构下拉没进这份口径。\n'
+            '政府端早就过滤了，只写一半就是跨端漂移。' % found)
+        self.assertNotIn(
+            'ca_shelterId', html,
+            '「执行机构」下拉又回来了 —— 它属于第四十九轮删掉的「监管代录」入口。\n'
+            '要恢复就得先回答：谁替哪个捕捉点录，以及他有没有这个权限。')
+        # 反向对照：把接收医院那句过滤拆掉，计数器必须跟着归零。
+        # 不然这条判据可能是「数字恰好等于 1」的空转 —— 比如两种写法都被
+        # 改成 `status !== 'inactive'`，数量不变而口径已经变了。
+        planted = html.replace("filter(h => h.status === 'active')", 'filter(h => true)')
+        self.assertNotEqual(html, planted, '反向对照的锚点字符串失效了（模板里那句话被改写）')
+        self.assertEqual(
+            0, planted.count("i.status === 'active'") + planted.count("h.status === 'active'"),
+            '植入的缺陷没被计数器看见 —— 上面那条断言是假绿')
 
     def test_shelter_dispatch_targets_come_from_server_and_exclude_inactive(self):
         """「下发出库」的接收方下拉改由服务端给，服务端必须自己排除停用机构。
@@ -2536,9 +4082,11 @@ class InactiveEntityContractTest(SimpleTestCase):
             '写死成医院会把捕捉点 id 当医院 id 提交，服务端报「医院不存在」。')
         body = self._py_func(read('business/views_material.py'), 'dispatch_targets')
         self.assertIn(
-            "status='active'", body,
+            'status=STATUS_ACTIVE', body,
             '`dispatch_targets()` 没有排除停用机构 —— 停用机构仍会出现在下拉里，\n'
             '且因为下拉已经不看前端过滤，这一处漏了就是**整条链路**漏了。')
+        self.assertIn('STATUS_ACTIVE', read('business/views_material.py'),
+                      'views_material.py 没有使用 core.models.STATUS_ACTIVE')
 
     def test_capture_district_dropdowns_exclude_inactive_district(self):
         """区县下拉要排除停用区县，且必须留「当前值」的兜底。"""
@@ -2573,11 +4121,17 @@ class ShelterStockAdjustmentEntryTest(SimpleTestCase):
         self.assertGreater(idx, 0, '找不到 stock_adjustment 视图')
         # 只看紧邻的装饰器区（往上 400 字符足够覆盖三层装饰器）
         decorators = src[max(0, idx - 400):idx]
-        self.assertIn(
-            "@role_required('shelter', 'hospital', 'gov_city', 'gov_district')",
-            decorators,
-            'stock_adjustment 的角色白名单里没有 shelter —— 捕捉点的过期物料'
-            '就没有任何正规出口（既不能报废，也不能下发）。')
+        m = re.search(r"@role_required\(([^)]*)\)", decorators)
+        self.assertIsNotNone(m, 'stock_adjustment 上找不到 @role_required')
+        roles = set(re.findall(r"'([a-z_]+)'", m.group(1)))
+        # 逐角色断言，而不是把整串白名单抄进本用例 —— 抄死的那一份会在
+        # 每次调整角色时被顺手改掉，从而失去「钉住 shelter」的原意。
+        self.assertIn('shelter', roles,
+                      'stock_adjustment 的角色白名单里没有 shelter —— 捕捉点的'
+                      '过期物料就没有任何正规出口（既不能报废，也不能下发）。')
+        self.assertIn('hospital', roles, '医院侧库存异动入口消失')
+        self.assertFalse(roles & {'gov_city', 'gov_district'},
+                         '政府端只读（第四十九轮）：监管不该再能异动库存')
 
     def test_shelter_portal_has_adjustment_entry(self):
         html = read(PORTALS['shelter'])
@@ -2678,8 +4232,13 @@ class MarkdownLeakInUiCopyTest(SimpleTestCase):
     def test_no_markdown_bold_in_ui_copy(self):
         files = sorted(glob.glob(
             os.path.join(ROOT, 'templates', '**', '*.html'), recursive=True))
+        # `static/js/` 也必须扫：`TNR_UI` 的 toast / 批次预览 / 出库提示
+        # 都住在这里，第四十八轮「物料出库」那条 `将**增加**库存` 就是
+        # 只扫模板时漏掉的（`tnr-common.js`）。
+        files += sorted(glob.glob(
+            os.path.join(ROOT, 'static', 'js', '*.js'), recursive=True))
         self.assertGreater(len(files), 10,
-                           '一个模板都没扫到 —— 扫描逻辑失效了，不是「全部通过」')
+                           '一个前端文件都没扫到 —— 扫描逻辑失效了，不是「全部通过」')
         offenders = []
         for path in files:
             rel = os.path.relpath(path, ROOT)
@@ -3149,6 +4708,175 @@ class DateRangeFilterTest(SimpleTestCase):
                 continue
             self.assertIsNone(definition.search(read(rel)),
                               f'{rel} 里又定义了一份 inDateRange —— 判据必须唯一')
+
+
+class MobileLayoutTest(SimpleTestCase):
+    """390px 真机视口下的可用性契约（第五十五轮）。
+
+    这三类缺陷都是拿 390×844 视口实测出来的，静态断言锁定的是修法：
+    - 标签栏 4–6 个标签时内容宽 497–707px、容器只有 336–342px，
+      原先没有横向滚动，右侧标签永远点不到；
+    - 日志行「时间+模块+描述」挤在一行，描述只剩 ~70px，单行 217–255px 高；
+    - 分页按钮 32px、领养人端「清空」25px，低于 44px 触控热区。
+    """
+
+    CSS = 'static/css/tnr-traditional.css'
+    COMMON = 'static/js/tnr-common.js'
+
+    def test_tabs_scroll_horizontally_on_mobile(self):
+        css = _read_raw(self.CSS)
+        self.assertRegex(
+            css, r'body \.page-view \.tabs\s*\{[^}]*overflow-x:\s*auto',
+            '标签栏没有横向滚动 —— 手机上超过 3 个标签就被裁掉，右侧标签点不到')
+        self.assertRegex(
+            css, r'body \.page-view \.tabs \.tab-item\s*\{[^}]*flex:\s*0 0 auto',
+            '标签项会在横向滚动区里被压缩，应固定原宽')
+
+    def test_date_filters_are_rendered_as_a_pair(self):
+        source = read(self.COMMON)
+        idx = source.find("renderFilterBar(filters, actions = '', opts = {})")
+        self.assertGreater(idx, 0, 'renderFilterBar 签名变了，本用例需要同步')
+        body = source[idx:idx + 2400]
+        self.assertIn('filter-date-pair', body,
+                      '起止日期没有成对包裹 —— 手机端筛选条会多占一整行')
+        self.assertRegex(
+            body,
+            r"f\.type === 'date' && all\[i \+ 1\] && all\[i \+ 1\]\.type === 'date'",
+            '配对条件不再识别「连续两个日期控件」')
+        rule = css_rule(_read_raw(self.CSS), '.filter-date-pair')
+        self.assertIsNotNone(rule, '缺少 .filter-date-pair 的布局规则')
+        self.assertRegex(rule, r'display:\s*flex')
+
+    def test_mobile_filter_bar_uses_two_columns(self):
+        """手机端筛选条两列并排，日期对与操作按钮跨两列。
+
+        单列堆叠时 5 个条件占 5×70px，列表首屏被筛选条挤没；
+        但日期对若被拆到两列，「开始/结束」会各占一行、反而更高。
+        """
+        css = _read_raw(self.CSS)
+        self.assertRegex(
+            css,
+            r'body \.filter-bar\s*\{[^}]*display:\s*grid;'
+            r'[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)',
+            '移动端筛选条仍是单列堆叠 —— 多个条件会挤占整屏')
+        self.assertRegex(
+            css,
+            r'\.filter-date-pair,\s*\.filter-actions\s*\{[^}]*grid-column:\s*1 / -1',
+            '日期对/操作按钮没有跨列 —— 开始、结束日期会被拆到两行')
+
+    def test_mobile_table_actions_stay_visible(self):
+        """宽表横向滚动时操作列必须钉在右侧。
+
+        捕捉记录 7 列、平台账号 9 列，390px 下要横向滑动；操作列原先在
+        最右端，用户每次都要滑到底才能点「详情/编辑」。
+        """
+        css = _read_raw(self.CSS)
+        self.assertRegex(
+            css,
+            r'body \.table-wrapper \.data-table th\.dt-actions-th,\s*'
+            r'body \.table-wrapper \.data-table td\.dt-actions-td\s*\{'
+            r'[^}]*position:\s*sticky;[^}]*right:\s*0;',
+            '移动端操作列没有固定在右侧 —— 宽表必须滑到最右才能操作')
+        self.assertRegex(
+            css,
+            r'body \.table-wrapper \.data-table th\.dt-actions-th\s*\{'
+            r'[^}]*background:\s*var\(--rice-warm\)',
+            '固定后的表头操作列必须保持表头底色，否则滚动内容会透出')
+
+    def test_mobile_wide_tables_collapse_low_priority_columns(self):
+        """宽表在手机上收成「主列 + 操作」，低频列并入主列。
+
+        390px 实测账号表宽 996px、可视 332px（横滑 664px），捕捉记录 613px
+        （横滑 281px）；操作列吸附只让按钮「点得到」，每行仍要来回滑才能
+        看全。列压缩必须两半同时成立：低频列隐藏 + 主列 `mobileRender`
+        补回，缺一半就是信息消失或桌面重复。
+        """
+        css = _read_raw(self.CSS)
+        self.assertRegex(
+            css,
+            r'body \.dt-table th\.dt-col-mobile-hide,\s*'
+            r'body \.dt-table td\.dt-col-mobile-hide,\s*'
+            r'body \.dt-table col\.dt-col-mobile-hide\s*\{[^}]*display:\s*none',
+            '移动端没有隐藏低频列 —— 9 列账号表仍要横滑 664px')
+        self.assertRegex(
+            css,
+            r'body \.dt-table \.dt-mobile-only\s*\{[^}]*display:\s*block',
+            '主列的手机端详情没有显示 —— 低频列隐藏后信息会彻底丢失')
+        common = _read_raw(self.COMMON)
+        self.assertIn("col.mobile === 'hide'", common,
+                      'mountTable 不再识别 mobile:hide —— 列压缩失效')
+        self.assertIn('col.mobileRender', common,
+                      'mountTable 不再渲染 mobileRender —— 隐藏列的信息无法补回')
+        platform = _read_raw('static/js/portals/platform.js')
+        self.assertIn('mobileRender: mobileCard', platform,
+                      '账号表主列没有手机端详情 —— 姓名/角色/状态会消失')
+        self.assertGreaterEqual(
+            platform.count("mobile: 'hide'"), 8,
+            '账号表应把姓名/角色/区县/机构/证号/电话/开户时间/状态在手机收起')
+        shelter = _read_raw('static/js/portals/shelter.js')
+        self.assertIn('mobileRender: mobileCard', shelter,
+                      '捕捉记录主列没有手机端详情 —— 小区/数量/转运状态会消失')
+        self.assertGreaterEqual(
+            shelter.count("mobile: 'hide'"), 5,
+            '捕捉记录应把小区/物业/数量/转运状态/时间在手机收起')
+
+    def test_pagination_targets_are_touch_sized_on_mobile(self):
+        css = _read_raw(self.CSS)
+        self.assertRegex(
+            css,
+            r'@media \(max-width: 768px\)[\s\S]*?\.pagination-btn\s*\{'
+            r'[^}]*min-width:\s*44px;[^}]*height:\s*44px;',
+            '分页按钮在手机上仍是 32px —— 触控热区不足')
+
+    def test_mobile_log_rows_stack_detail(self):
+        for role in ('platform', 'gov'):
+            html = read_html(role)
+            self.assertRegex(
+                html,
+                r'@media \(max-width:768px\)\{\s*\.log-entry\{[^}]*flex-wrap:wrap[^}]*\}'
+                r'[\s\S]*?\.log-detail\{[^}]*flex:1 1 100%',
+                f'{role} 端日志描述没有独占一行 —— 手机上单条日志会撑到 217px 以上')
+
+    def test_adopter_date_clear_is_touch_sized(self):
+        rule = css_rule(read_html('adopter'), '.mobile-date-bar .date-bar-clear')
+        self.assertIsNotNone(rule, '领养人端「清空」按钮的规则不见了')
+        self.assertRegex(rule, r'min-width:\s*44px')
+        self.assertRegex(rule, r'min-height:\s*44px')
+
+    def test_date_pair_inputs_keep_desktop_width(self):
+        """成对日期在桌面端必须保留 140px 最小宽度。
+
+        第五十五轮引入 `.filter-date-pair` 时把 `min-width: 0` 写进了基础规则，
+        1366×900 实测两个日期输入被压到 121px（日期串显示不全）。
+        收缩只应发生在 768px 断点内。
+        """
+        rule = css_rule(
+            _read_raw(self.CSS), '.filter-date-pair .filter-item .form-input')
+        self.assertIsNotNone(rule, '成对日期输入的宽度规则不见了')
+        self.assertNotRegex(
+            rule, r'min-width:\s*0',
+            '基础规则禁止 min-width:0 —— 桌面端日期输入会被压到 121px')
+        self.assertRegex(rule, r'width:\s*100%')
+
+    def test_gov_stat_grid_does_not_pin_three_columns_inline(self):
+        js = read_js('gov')
+        self.assertNotIn(
+            'grid-template-columns:repeat(3,1fr);margin-bottom', js,
+            '内联三列覆盖了移动端两列栅格 —— 390px 宽下每列只有 111px')
+        self.assertIn(
+            'stat-grid stat-grid-3', js,
+            '三列统计区必须挂 .stat-grid-3 类：桌面三列、移动端两列由样式表统一裁决')
+        css = _read_raw(self.CSS)
+        self.assertRegex(
+            css,
+            r'body \.stat-grid\.stat-grid-3\s*\{[^}]*'
+            r'repeat\(3, minmax\(0, 1fr\)\)',
+            '桌面端缺少 .stat-grid-3 的三列规则')
+        self.assertRegex(
+            css,
+            r'@media \(max-width: 768px\)[\s\S]*?'
+            r'body \.stat-grid\.stat-grid-3\s*\{[^}]*repeat\(2,',
+            '移动端缺少 .stat-grid-3 的两列回退')
 
 
 class DateRangeCoverageTest(SimpleTestCase):
@@ -3678,3 +5406,581 @@ class PortalLandingPageTest(TestCase):
                     'platform', shown,
                     f'{url} 的账号提示没有列出平台管理端账号 `platform`')
 
+
+# ---------------------------------------------------------------------------
+# 第五十二轮 · 重构 A：四端门户外壳（portal/_portal_shell.html）
+# ---------------------------------------------------------------------------
+#
+# 合并前，`shelter_base.html` / `hospital_base.html` / `gov_base.html` /
+# `platform_base.html` 各抄了一份 156 行 CSS + 25 行侧栏脚本（剥掉注释、
+# 归一印章配色后四份 md5 完全相同）。合并的**唯一**风险不是「页面坏了」——
+# 坏了会 500、会看见 —— 而是两类静默漂移：
+#
+#   1. 侧栏高亮机制换了继承层级（`nav_xxx` 从「嵌在 `body` 里」变成
+#      「嵌在 `nav_items` 里，而 `nav_items` 在 `body` 里」）。Django 的
+#      `get_blocks()` 会递归收集嵌套 block，所以理论上照旧生效；但「理论上」
+#      不等于验证过：一旦某处不再递归收集，高亮**全部消失**，页面照常 200，
+#      用户只是分不清自己在哪一页。
+#   2. 印章底色改走 `--portal-seal`（外壳给兜底值、角色 base 覆盖）。写死
+#      映射表时我把平台端误填成朱砂 —— 前后 DOM/CSS 逐字比对才抓到。
+#      也就是说这类错误**只有比对渲染结果才会发现**，静态读源码发现不了。
+#
+# 所以这里的判据全部打在**渲染产物**上（不是读源码），且每条正向判据都配
+# 一条反向对照：`nav_xxx` 写错名字时必须「一个都不高亮」，否则「高亮存在」
+# 这条断言可能只是恒真。
+#
+# 静态判据（第 5 条）防止退化：角色 base 里不许再出现 `<style>` 或侧栏脚本 ——
+# 一旦有人把 CSS 抄回角色文件，合并就白做了，而漂移又回来了。
+# ---------------------------------------------------------------------------
+
+#: 角色 base → (用于渲染的 User.role, 印章底色, 高亮试点的 block 名, 该 block 的侧栏标签)
+PORTAL_SHELL_CASES = {
+    'gov': ('gov_city', 'var(--grad-gold)', 'nav_dashboard', '数据总览大屏'),
+    'shelter': ('shelter', 'var(--grad-cinnabar)', 'nav_blacklist', '黑名单管理'),
+    'hospital': ('hospital', 'var(--grad-cinnabar)', 'nav_ledger', '单据台账'),
+    'platform': ('platform_admin', 'var(--grad-gold)', 'nav_config', '系统配置'),
+}
+
+#: 渲染出的侧栏锚点：class 与标签文本
+SHELL_ANCHOR = re.compile(
+    r'<a class="nav-item([^"]*)"[^>]*>(.*?)</a>', re.S)
+SHELL_LABEL = re.compile(r'nav-item-label">([^<]+)</span>')
+
+
+class PortalShellTest(SimpleTestCase):
+    """四端门户共用外壳的渲染契约（重构 A 的回归锁）。"""
+
+    MARKER = 'SHELL-ACTIVE-MARKER'
+
+    def _render(self, role, override_block=None):
+        """渲染 `{role}_base.html`，可附带一个 block 覆写（模拟各端 portal.html）。"""
+        src = "{% extends 'portal/" + role + "_base.html' %}"
+        if override_block:
+            src += ('{% block ' + override_block + ' %}'
+                    + self.MARKER + '{% endblock %}')
+        template = Engine.get_default().from_string(src)
+        request = RequestFactory().get('/')
+        request.user = User(username='测试员', role=PORTAL_SHELL_CASES[role][0])
+        return template.render(Context({'user': request.user}))
+
+    def _nav_classes(self, html):
+        """返回 {侧栏标签: 该锚点的 class 后缀}。"""
+        out = {}
+        for cls, inner in SHELL_ANCHOR.findall(html):
+            m = SHELL_LABEL.search(inner)
+            if m:
+                out[m.group(1).strip()] = cls.strip()
+        return out
+
+    def test_shell_assets_render_exactly_once(self):
+        """每页只有一份外壳的 CSS 与侧栏脚本 —— 既没丢，也没被抄第二遍。"""
+        for role in PORTAL_SHELL_CASES:
+            with self.subTest(role=role):
+                html = self._render(role)
+                # 选一条在外壳 CSS 里**只出现一次**的规则：`.portal-sidebar {`
+                # 本身出现两次（基础态 + @media 收起态），拿它计数会把正常结果
+                # 判成「被抄了两遍」。
+                self.assertEqual(
+                    html.count('.portal-sidebar-overlay.show'), 1,
+                    f'{role}: 侧栏遮罩规则出现 '
+                    f'{html.count(".portal-sidebar-overlay.show")} 次（应为 1 次：'
+                    '0 = 外壳没接上，≥2 = 有人又把 CSS 抄回角色文件）')
+                self.assertEqual(
+                    html.count('portalSidebarToggle'), 2,   # 按钮 + 脚本各一次
+                    f'{role}: 侧栏开关脚本/按钮数量不对，实得 '
+                    f'{html.count("portalSidebarToggle")}')
+                self.assertIn('transform: translateX(-100%)', html,
+                              f'{role}: 移动端收起侧栏的规则丢了')
+
+    def test_nav_highlight_block_still_reaches_the_shell(self):
+        """portal.html 覆写 `nav_xxx` 仍然只点亮那一条导航。
+
+        这正是重构 A 换掉继承层级的地方：block 名躲在 `nav_items` 里，
+        `nav_items` 又躲在 `body` 里。断言打在**渲染出的 class** 上。
+        """
+        for role, (_kind, _seal, block, label) in PORTAL_SHELL_CASES.items():
+            with self.subTest(role=role):
+                classes = self._nav_classes(self._render(role, block))
+                self.assertTrue(classes, f'{role}: 一条导航都没解析到，判据失效')
+                self.assertEqual(
+                    classes.get(label), self.MARKER,
+                    f'{role}: 「{label}」没有被 {{% block {block} %}} 点亮'
+                    f'（实得 {classes.get(label)!r}）—— 嵌套 block 的继承断了')
+                lit = [t for t, c in classes.items() if self.MARKER in c]
+                self.assertEqual(lit, [label],
+                                 f'{role}: 点亮了 {lit}，应只有「{label}」')
+
+    def test_unknown_block_name_highlights_nothing(self):
+        """反向对照：block 名写错时必须**一个都不亮**。
+
+        没有这条，「高亮存在」可能只是恒真（比如 MARKER 被写进了正文）。
+        """
+        for role in PORTAL_SHELL_CASES:
+            with self.subTest(role=role):
+                html = self._render(role, 'nav_this_block_does_not_exist')
+                self.assertNotIn(
+                    self.MARKER, html,
+                    f'{role}: 不存在的 block 名居然把 MARKER 渲染出来了 —— '
+                    '上一条用例的正向断言不可信')
+
+    def test_seal_color_per_role(self):
+        """印章底色：政府端 / 平台端=鎏金，捕捉点 / 医院端=朱砂。
+
+        合并时这一处最容易改错（底色原来硬编码在各自的 CSS 里，
+        现在走 `--portal-seal`）。我第一版就把平台端写成了朱砂。
+        """
+        for role, (_kind, seal, _block, _label) in PORTAL_SHELL_CASES.items():
+            with self.subTest(role=role):
+                html = self._render(role)
+                self.assertIn(
+                    '--portal-seal: %s' % seal, html,
+                    f'{role}: 印章底色不是 {seal}')
+
+    def test_role_base_holds_only_role_differences(self):
+        """角色 base 里不许再出现整段外壳（CSS / 侧栏脚本）。
+
+        这条防的是**退化**：有人图省事把 CSS 抄回角色文件，改一处漏三处
+        的老问题就跟着回来了 —— 而页面依旧 200，静态走查看不出来。
+        """
+        for role in PORTAL_SHELL_CASES:
+            rel = f'templates/portal/{role}_base.html'
+            src = read(rel)
+            with self.subTest(role=role):
+                self.assertIn("{% extends 'portal/_portal_shell.html' %}", src,
+                              f'{rel}: 没有接共用外壳')
+                self.assertNotIn('<style>', src,
+                                 f'{rel}: 又出现了 <style> —— 外壳 CSS 被抄回角色文件')
+                self.assertNotIn('portalSidebarToggle', src,
+                                 f'{rel}: 侧栏开关脚本被抄回角色文件')
+                self.assertLess(
+                    len(src.splitlines()), 80,
+                    f'{rel}: {len(src.splitlines())} 行 —— 角色 base 应当只放本端差异')
+
+    #: 五端门户模板（真实文件，不是模拟的 from_string 子模板）→ 渲染时用的账号角色
+    PORTAL_RENDER_ROLES = {
+        'shelter': 'shelter', 'hospital': 'hospital', 'gov': 'gov_city',
+        'platform': 'platform_admin', 'adopter': 'adopter',
+    }
+
+    def _render_real(self, role, user_role):
+        request = RequestFactory().get('/portal/')
+        request.user = User(username='测试员', role=user_role)
+        return render_to_string(f'portal/{role}/portal.html', request=request)
+
+    def test_real_portals_keep_the_mobile_sidebar_toggle(self):
+        """五端真实门户页：侧栏的开关按钮与开关脚本必须**同生同灭**。
+
+        重构 B 实测到的缺陷正是这一条：shelter / hospital 的 `portal.html` 覆写了
+        `{% block extra_js %}` 却没写 `{{ block.super }}`，把外壳那段开关脚本整段
+        顶掉 —— 页面照样 200、电脑端照样能用，只有手机上侧栏再也展不开。
+        所以断言必须打在**渲染结果**上：`portalSidebarToggle` 出现两次
+        （`<button id=…>` + `getElementById('…')`），少一次就是半边丢了。
+
+        领养端刻意不用侧栏（自有 `mobile-frame` 布局），所以它两侧都不该有；
+        这条同时把「有侧栏却没有开关」和「没侧栏却留着开关」两种错法卡住。
+        """
+        for role, user_role in self.PORTAL_RENDER_ROLES.items():
+            with self.subTest(role=role):
+                html = self._render_real(role, user_role)
+                has_sidebar = 'id="portalSidebar"' in html
+                got = html.count('portalSidebarToggle')
+                if has_sidebar:
+                    self.assertEqual(
+                        got, 2,
+                        f'{role}: 页面有侧栏，但 portalSidebarToggle 出现 {got} 次（应为 2）'
+                        '—— 1 = 开关脚本被 `{% block extra_js %}` 顶掉了（补 '
+                        '`{{ block.super }}`）；0 = 连按钮也丢了')
+                else:
+                    self.assertEqual(
+                        got, 0,
+                        f'{role}: 本端不渲染侧栏，却留着 {got} 处侧栏开关 —— '
+                        '外壳与本页布局已经对不上')
+
+    def test_extra_js_override_without_block_super_reproduces_the_defect(self):
+        """反向对照：上一条的「== 2」不是恒真 —— 摘掉 `{{ block.super }}` 立刻变 1。
+
+        这正是 shelter / hospital 当时的写法。没有这条对照，「按钮和脚本各一份」
+        有可能只是恰好恒成立（比如判据根本没渲染到那段），改坏了也不报。
+        """
+        role, user_role = 'shelter', 'shelter'
+        stripped = "{% extends 'portal/shelter_base.html' %}" \
+                   '{% block extra_js %}<!-- 顶掉了外壳的侧栏开关 -->{% endblock %}'
+        kept = "{% extends 'portal/shelter_base.html' %}" \
+               '{% block extra_js %}{{ block.super }}{% endblock %}'
+        request = RequestFactory().get('/portal/')
+        request.user = User(username='测试员', role=user_role)
+        html = Engine.get_default().from_string(stripped).render(
+            Context({'user': request.user}))
+        self.assertEqual(
+            html.count('portalSidebarToggle'), 1,
+            '反向对照失效：不写 block.super 也拿得到开关脚本，判据不可信')
+        self.assertEqual(
+            Engine.get_default().from_string(kept).render(
+                Context({'user': request.user})).count('portalSidebarToggle'),
+            2,
+            f'{role}: 写了 block.super 仍然只有开关按钮 —— 外壳那段脚本没接上')
+
+
+class DischargeAdviceKeyCoverageTest(SimpleTestCase):
+    """出院弹窗的「医生已建议」映射必须覆盖后端全部去向 key（第五十二轮）。
+
+    `mark_done()` 把去向**建议**写进 `Treatment.disposal_advised`，医院端待出院
+    弹窗 `openDischargeChoice()` 再拿一张前端手写的 `ADVISED_KIND` 表把它翻译成
+    四类出院单据之一（领养 / 死亡含无害化 / 领回 / 放归）。
+
+    那张表是后端 `DISPOSAL_CHOICES` 的**第二份清单**：加一个 key 时后端不会报错，
+    前端只会走进 `suggested = ''` 分支，弹一句「诊疗完成时没记去向建议」——
+    而医生在「诊疗完成」那一刻明明选过。界面把已发生的事说成没发生，
+    与第五十二轮开头那条「打得出办结去向而动物还在院」是同一族缺陷，
+    所以这里按**源码**比对两份清单，不靠人记得同步。
+    """
+
+    def test_advised_kind_covers_every_backend_disposal_key(self):
+        js = read_js('hospital')
+        literal = find_object_literal(js, 'ADVISED_KIND')
+        self.assertIsNotNone(
+            literal,
+            '医院端找不到 `const ADVISED_KIND = {` —— 出院弹窗不再翻译去向建议了？'
+            '若确实改名，本判据要跟着改；悄悄删掉等于建议功能没人管了。')
+        mapped = object_keys(literal)
+        backend = {k for k, _ in Treatment.DISPOSAL_CHOICES}
+        self.assertEqual(
+            backend - mapped, set(),
+            f'后端新增去向 {sorted(backend - mapped)} 没进 ADVISED_KIND —— '
+            '勾了这些建议的单子弹窗会说「没记去向建议」，等于把医生的判断丢掉。')
+        self.assertEqual(
+            mapped - backend, set(),
+            f'ADVISED_KIND 里有后端不存在的 key {sorted(mapped - backend)} —— '
+            '`mark_done()` 的校验不会放行它们，这张表里的分支是死代码。')
+
+    def test_advised_kind_targets_a_real_discharge_option(self):
+        """映射的**值**必须是弹窗 OPTS 里真的四类单据之一。
+
+        写错成一个不存在的 kind（`'dead'` 打成 `'died'`）时，
+        `suggested` 永远匹配不上任何按钮，高亮与「医生已建议」标签静默失效。
+        """
+        js = read_js('hospital')
+        start = js.find('openDischargeChoice(petId, tid, advised)')
+        self.assertGreater(start, 0, '医院端找不到出院去向选择弹窗')
+        opts_end = js.find('];', start)
+        self.assertGreater(opts_end, start, '出院弹窗的 OPTS 数组找不到结尾')
+        opts = set(re.findall(r"\{\s*k:\s*'([a-z]+)'", js[start:opts_end]))
+        self.assertTrue(opts, '出院弹窗的 OPTS 里没解析出任何单据类型')
+        literal = find_object_literal(js, 'ADVISED_KIND')
+        targets = set(re.findall(r":\s*'([a-z]+)'", literal))
+        self.assertFalse(
+            targets - opts,
+            f'ADVISED_KIND 映射到不存在的单据类型 {sorted(targets - opts)}，'
+            f'弹窗里只有 {sorted(opts)} —— 建议高亮会静默不生效。')
+
+    def test_board_row_exposes_the_advised_key(self):
+        """看板行必须同时给出建议的 key 与中文，前端才既预选又能显示。
+
+        只发 `disposal_advised`（key）时，界面要么显示英文码、要么在
+        后端加 key 时静默漏一项；只发 label 时弹窗又拿不到 key 去映射。
+        """
+        src = _read_raw('business/views_treatment.py')
+        start = src.find('def _board_row(treatment):')
+        self.assertGreater(start, 0, '找不到诊疗看板行构造函数')
+        body = src[start:src.find('\ndef ', start + 1)]
+        self.assertIn("'disposal_advised': treatment.disposal_advised", body,
+                      '看板行没给出建议的 key —— 出院弹窗没法预选单据')
+        self.assertIn("'disposal_advised_label': _disposal_label(treatment.disposal_advised)", body,
+                      '看板行没给出建议的中文 —— 界面会漏出英文枚举码')
+
+
+class HospitalDischargeTodoTest(SimpleTestCase):
+    """首页待办必须把「待诊疗」与「待出院」分开（第五十二轮电脑端巡检发现）。
+
+    实测数据：动物 `TNR261018002` 的诊疗单已办结（`disposal='released'`），
+    但放归分两段，`dispose(defer_pet_status=True)` 会**故意**把 `Pet.status`
+    留在 `in_treatment` 等转运与放归单据。首页当时按
+    `pets.filter(p => p.status === 'in_treatment')` 生成待办，于是它挂成
+    「待诊疗：TNR261018002 · 狗」，点进去诊疗看板却**任何一列都没有它**
+    （看板按诊疗单阶段分，它已在「已出院」）。
+    界面承诺了一件已经做完的事，又把真正没做完的那件藏起来 ——
+    与本轮开头「印得出办结去向而动物还在院」是同一族，方向相反罢了。
+
+    判据按源码取证的三条：待办由「最新一张诊疗单是否已办结」分流、
+    两条待办各自跳对的标签页、概览卡片与待办**同源**（不能一个数 3 一个列 5）。
+    """
+
+    def _pending_treatment_loop_source(self, js):
+        """返回推送「待诊疗：」那条待办的 `.forEach` 是被哪个数组驱动的。"""
+        idx = js.find("title: '待诊疗：'")
+        self.assertGreater(idx, 0, '首页没有「待诊疗」待办 —— 分类逻辑被删了？')
+        head = js.rfind('.forEach(', 0, idx)
+        self.assertGreater(head, 0, '「待诊疗」待办不在任何 forEach 里，判据取不到来源')
+        start = js.rfind('\n', 0, head)
+        return js[start:head].strip()
+
+    def test_pending_treatment_is_split_by_latest_record(self):
+        js = read_js('hospital')
+        loop = self._pending_treatment_loop_source(js)
+        self.assertIn('pendTreatPets', loop,
+                      '「待诊疗」待办不是由 `pendTreatPets` 驱动的 —— '
+                      '退回按 `Pet.status` 一刀切的话，放归两段的动物会被说成待诊疗，'
+                      '而诊疗看板里没有它。')
+        # 分流判据只看一个事实：最新一张诊疗单办结了没有
+        self.assertIn('latestTxByPet', js, '首页没有「每只动物最新一张诊疗单」的归并')
+        self.assertIn('t.is_disposed', js, '分流没用到「已办结」判据')
+
+    def test_pending_discharge_todo_navigates_to_discharge(self):
+        js = read_js('hospital')
+        idx = js.find("title: '待出院：'")
+        self.assertGreater(idx, 0,
+                           '首页没有「待出院」待办 —— 已办结但还没出院的动物就没有任何入口了')
+        tail = js[idx:idx + 260]
+        self.assertIn("nav: 'discharge'", tail,
+                      '「待出院」待办没跳到出院管理，点了等于没点')
+
+    def test_stat_card_shares_the_todo_source(self):
+        """概览卡片的数字与待办列表必须同源，否则「待诊疗任务 5 / 列表 3 条」。"""
+        js = read_js('hospital')
+        self.assertIn("const pendTreat = pendTreatPets.length;", js,
+                      '「待诊疗任务」卡片不再用分流后的数量')
+        self.assertRegex(
+            js, r"pendDischarge = pendDischargePets\.length",
+            '「待出院动物」卡片没有数量来源')
+        # 禁止式：老的一刀切写法不能残留在首页待办里
+        self.assertNotIn(
+            "pets.filter(p => p.status === 'in_treatment').forEach", js,
+            '首页仍按 `Pet.status` 一刀切生成待办 —— 本条判据要防的正是这个写法')
+
+
+class HospitalMaterialLoadTest(SimpleTestCase):
+    """物料页的读取失败必须说出来（第五十三轮电脑端巡检）。
+
+    物料主数据与流水是这一整页的唯一数据源。静默读（`getMaterials` /
+    `getMaterialTransactions`）在服务端拒绝时返回 `[]`，页面会渲染成
+    「六个页签全是 0、台账暂无记录」—— 与「本院真的没有物料」在界面上
+    完全一样，操作员会以为库存被清空了。
+
+    另外「库存异动」「出库报备」原先各自在**每次筛选**时重拉一遍物料并
+    空 catch 吞掉失败：搜索框每敲一个字就多一次请求。物料主数据现在只在
+    进入页面时拉一次，页签与筛选只做本地过滤。
+    """
+
+    def test_material_page_uses_strict_reads_only(self):
+        js = strip_js_comments(read_js('hospital'))
+        self.assertIn('getMaterialTransactionsStrict()', js,
+                      '物料流水不再严格读 —— 403/500 会被渲染成「暂无台账」')
+        self.assertIn('getMaterialsStrict()', js,
+                      '物料主数据不再严格读 —— 库存页会渲染成「暂无物料」')
+        for silent in ('getMaterialTransactions()', 'getMaterials()'):
+            self.assertNotIn(
+                silent, js,
+                f'医院端又用静默读 `{silent}` —— 失败会被伪装成「没有数据」；'
+                '整页数据源请用 Strict 版本并在失败时显示错误')
+
+    def test_material_load_failure_has_visible_error_and_retry(self):
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('async render_material()')
+        self.assertGreater(start, 0, '医院端物料页入口不在了')
+        end = js.find('\n  async renderMaterialTab', start)
+        self.assertGreater(end, start, '找不到 render_material 的结尾')
+        body = js[start:end]
+        self.assertIn('物料数据加载失败', body,
+                      '物料页读取失败时没有专用错误态 —— 会静默显示成空数据')
+        self.assertIn('materialReloadBtn', body,
+                      '物料页错误态没有「重新加载」按钮，用户只能切页重进')
+        self.assertIn('this._matMaterials = materials', body,
+                      '物料主数据没有缓存 —— 页签会各自重拉（每次筛选一次请求）')
+
+    def test_material_tab_switch_passes_the_cached_materials(self):
+        """页签点击与筛选回调都必须把缓存传给 tab 渲染器。
+
+        只给 `txns` 不给 `materials` 时，「实时库存」会显示「暂无物料」、
+        异动/出库的下拉只剩「请选择」—— 页面不报错，看起来像真的没数据。
+        """
+        js = strip_js_comments(read_js('hospital'))
+        for call in ('\n        this.renderMaterialTab(txns, materials);',
+                     'this.renderMaterialTab(this._matCache || [], this._matMaterials || []), page)'):
+            self.assertIn(call, js,
+                          f'物料页少了带缓存参数的渲染调用：{call!r}')
+
+
+class HospitalAdoptionInfoFilterTest(SimpleTestCase):
+    """领养维护的筛选条必须真的可用（第五十三轮电脑端巡检）。
+
+    「无待领养动物」的两条分支各自提前 `return`，**没有调用 `bindFilter`**：
+    筛选条看得见、输入没反应（日期由 `renderFilterBar` 自动追加，本来就在）。
+    现在三条分支合并成一次渲染，并在末尾统一挂表、绑筛选。
+    """
+
+    def _body(self):
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('async render_adoption_info()')
+        self.assertGreater(start, 0, '医院端领养信息维护入口不在了')
+        end = js.find('\n  renderPhotoSlot', start)
+        self.assertGreater(end, start, '找不到 render_adoption_info 的结尾')
+        return js[start:end]
+
+    def test_filters_are_bound_and_no_early_return_skips_them(self):
+        body = self._body()
+        self.assertIn('TNR_UI.bindFilter(() => { mountClaims(); mountAppl(); }, page);',
+                      body, '领养维护没有绑定筛选 —— 搜索框会没反应')
+        self.assertEqual(body.count('page.innerHTML = infoBarHtml'), 1,
+                         '领养维护又拆出了多条渲染分支 —— 提前 return 的分支会跳过'
+                         ' mountTable/bindFilter，搜索与日期筛选静默失效')
+
+
+# ============================================================
+# 表格列直绑 DateTimeField（第五十二轮电脑端巡检）
+# ============================================================
+
+#: 这些字段在库里是 `DateTimeField`，`serialize_instance` 用 `isoformat()`
+#: 输出 `2026-10-16T16:33:51.504093+00:00`。列上不写 `render` 就会把这一串
+#: **原样打到界面上**（实测：领养信息维护「登记时间」列）。
+def _datetime_attnames():
+    from django.apps import apps as django_apps
+    from django.db.models import DateTimeField
+    names = set()
+    for model in django_apps.get_models():
+        if model._meta.app_label not in ('business', 'core', 'accounts'):
+            continue
+        for field in model._meta.get_fields():
+            if isinstance(field, DateTimeField):
+                names.add(field.attname)
+    return names
+
+
+def _enclosing_object_literal(source, idx):
+    """返回 `idx` 所在**最内层** `{...}` 对象字面量的文本（跳过字符串）。"""
+    depth = 0
+    start = None
+    for i in range(idx, -1, -1):
+        c = source[i]
+        if c in '"\'`':
+            continue
+        if c == '}':
+            depth += 1
+        elif c == '{':
+            if depth == 0:
+                start = i
+                break
+            depth -= 1
+    if start is None:
+        return None
+    return brace_body(source, start)
+
+
+class TableColumnDatetimeBindingTest(SimpleTestCase):
+    """凡是列 `key` 直绑 DateTimeField，必须配 `render` 做本地化格式化。
+
+    `TNR_UI.mountTable` 的取值是 `row[col.key] ?? ''`，没有任何兜底格式化，
+    所以「忘了写 render」不会报错、不会 500，只是把 UTC ISO 串摊给操作员看。
+    同一条列上 `key` 仍要保留 —— 表头排序按 `row[col.key]` 比，ISO 串
+    字典序 = 时间序，删掉 `key` 会让该列失去排序（`gov.js` 的写法就是两者都留）。
+    """
+
+    def test_no_column_binds_a_datetime_field_raw(self):
+        names = _datetime_attnames()
+        self.assertTrue(names, '取不到 DateTimeField 清单，判据会静默恒真')
+        offenders = []
+        for role, rel in PORTAL_JS.items():
+            src = strip_js_comments(_read_raw(rel))
+            for m in re.finditer(r"key:\s*['\"](\w+)['\"]", src):
+                if m.group(1) not in names:
+                    continue
+                literal = _enclosing_object_literal(src, m.start())
+                if literal is None or 'render' in literal:
+                    continue
+                offenders.append(
+                    f'{role}:{src[:m.start()].count(chr(10)) + 1} '
+                    f'key={m.group(1)}')
+        self.assertFalse(
+            offenders,
+            '这些表格列把 DateTimeField 原样渲染成 UTC ISO 串，'
+            f'需要 `render: r => TNR_UI.formatDateTime(r.<字段>)`：{offenders}')
+
+    def test_formatter_used_by_those_columns_is_the_shared_one(self):
+        """格式化只能走 `TNR_UI.formatDateTime` —— 各端自己 `slice(0,10)` 会退一天。"""
+        for role in ('hospital', 'gov'):
+            js = strip_js_comments(read_js(role))
+            for m in re.finditer(r"key:\s*'created_at'[^{}]*?render:[^{}]*?\}", js):
+                self.assertIn(
+                    'formatDateTime', m.group(0),
+                    f'{role}: created_at 列没有走共享格式化函数')
+
+    def test_euthanasia_date_column_shows_dash_when_null(self):
+        """`euthanized_at` 是可空 DateField，空值要显示 `—` 而不是空白格。"""
+        js = strip_js_comments(read_js('hospital'))
+        self.assertEqual(
+            len(re.findall(r"title:\s*'处置日期'[^{}]*render:[^{}]*formatDate", js),),
+            2,
+            '安乐死列表与台账的「处置日期」列应各有 1 处 formatDate 兜底')
+
+# ============================================================
+# 平台端核心配置页的读取与建号（第五十四轮电脑端巡检）
+# ============================================================
+
+class PlatformAdminReadTest(SimpleTestCase):
+    """平台端是「建机构 / 建账号 / 改配置」的入口，读失败不能伪装成空列表。
+
+    另外两条与安全直接相关：
+    - 编辑弹窗在缓存/读取失败时**必须中止**，不能把 `id` 当成新增；
+    - 新账号不得带统一默认口令，密码框必须是 password 类型。
+    """
+
+    def _src(self):
+        return strip_js_comments(read_js('platform'))
+
+    def test_platform_lists_use_strict_reads_only(self):
+        js = self._src()
+        for strict in ('getDistrictsStrict()', 'getInstitutionsStrict(', 'getUsersStrict()'):
+            self.assertIn(strict, js, f'平台端缺少严格读 {strict}')
+        for silent in ('getDistricts()', 'getInstitutions(', 'getUsers('):
+            self.assertNotIn(silent, js,
+                             f'平台端又用静默读 `{silent}` —— 失败会被渲染成「暂无数据」')
+        api = strip_js_comments(_read_raw('static/js/tnr-api.js'))
+        self.assertIn('async getUsersStrict(role)', api,
+                      '`getUsersStrict` 没有对应的严格读方法')
+
+    def test_list_failures_are_visible_and_retryable(self):
+        js = self._src()
+        for title in ('区县数据加载失败', '机构数据加载失败', '账号数据加载失败'):
+            self.assertIn(title, js)
+        self.assertIn('showLoadError(', js)
+        self.assertIn('data-reload', js)
+
+    def test_settings_failures_are_visible_and_retryable(self):
+        """编号规则 / 操作日志 / 公告读失败也必须带「重新加载」。
+
+        这三处原先各写一份红色的「加载失败…」空态，没有重试入口，
+        用户只能切页签碰运气；弱网下会被误认为功能坏了。
+        """
+        js = self._src()
+        for title in ('编号规则加载失败', '操作日志加载失败', '公告数据加载失败'):
+            self.assertIn(f"this.showLoadError(el, '{title}'", js,
+                          f'「{title}」没有走统一的失败态（含重新加载按钮）')
+
+    def test_edit_modals_abort_instead_of_falling_back_to_create(self):
+        js = self._src()
+        for msg in ('区县不存在或已被删除，请刷新列表', '机构不存在或已被删除，请刷新列表'):
+            self.assertIn(msg, js, '编辑弹窗在记录找不到时会静默退化成新增')
+
+    def test_account_creation_has_no_default_password(self):
+        js = self._src()
+        self.assertNotIn('value="123456"', js, '账号创建表单又预填了默认口令')
+        self.assertNotIn("password || '123456'", js, '前端又把空口令回退成 123456')
+        self.assertIn('type="password" class="form-input" id="acct-password"', js,
+                      '初始密码框必须是 password 类型')
+        self.assertIn('请设置初始密码', js)
+
+    def test_tables_show_the_date_they_filter_on(self):
+        js = self._src()
+        for title in ('创建时间', '开户时间'):
+            self.assertIn(title, js, f'列表按日期筛选却没有「{title}」列')
+
+    def test_filter_after_load_error_does_not_overwrite_error_state(self):
+        """读失败后筛选框仍绑着 `renderAccountsTable()`，不能被空列表覆盖成「暂无账号」。
+
+        失败时必须把缓存置空、渲染函数在未加载状态下直接返回 ——
+        否则用户一敲搜索框，错误提示就消失了，看到的是一份空表。
+        """
+        js = self._src()
+        self.assertIn('this._users = null;', js,
+                      '账号读取失败后仍保留旧缓存，筛选会把错误态换成过期名单')
+        self.assertIn('if (!this._users) return;', js,
+                      '未加载状态仍允许渲染账号表，错误态会被空表覆盖')

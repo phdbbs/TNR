@@ -1,9 +1,14 @@
 """转运拆分下发/签收/驳回/撤回视图测试。"""
+from unittest import mock
+
+from django.utils import timezone
+
+from business import views_transfer
 from business.models import Pet, Transfer
 from business.services import busy_transfer_codes, capture_transfer_state
 from business.tests.base import (
     assert_doc_no,BusinessTestBase, make_capture, make_institution,
-                                 make_pet)
+                                 make_pet, make_user)
 
 TRANSFER_URL = '/api/business/transfers/'
 
@@ -44,7 +49,7 @@ class TransferCreateTest(BusinessTestBase):
 
     def test_split_to_multiple_hospitals(self):
         pets = self._make_transit_pets(2)
-        self.login_as(self.gov_city)
+        self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(f'{TRANSFER_URL}create/', {
             'from_shelter_id': self.shelter_a.id,
             'items': [
@@ -60,7 +65,7 @@ class TransferCreateTest(BusinessTestBase):
 
     def test_duplicate_pet_assigned_only_once(self):
         pet = self._make_transit_pets(1)[0]
-        self.login_as(self.gov_city)
+        self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(f'{TRANSFER_URL}create/', {
             'from_shelter_id': self.shelter_a.id,
             'items': [
@@ -120,7 +125,7 @@ class TransferCreateTest(BusinessTestBase):
                   message='缺少转运明细')
 
     def test_missing_shelter_rejected(self):
-        self.login_as(self.gov_a)  # 政府账号无机构
+        self.login_as(make_user(role='shelter', district=self.district_a))  # 没挂机构
         self.expect_fail(self.post_json(f'{TRANSFER_URL}create/', {
             'to_hospital_id': self.hospital_a.id, 'pet_codes': ['X1'],
         }), message='缺少捕捉点信息')
@@ -349,6 +354,225 @@ class PartialReceiveTest(BusinessTestBase):
         self.assertEqual(state['received'], 2, '部分签收的 2 只没被算作已签收')
 
 
+class ConcurrentTransferWriteTest(BusinessTestBase):
+    """签收/驳回的**并发**窗口 —— 第五十一轮。
+
+    ⚠ 这类用例必须把竞写**注入到「视图读出单据之后、写回之前」**。
+    顺序点两次的用例（先签 A 再签 B）撞不进这个窗口：把实现变异回
+    「读旧值 → 拼新值 → 整列覆盖」，它们照样全绿，而生产上恰恰是
+    那种写法在丢数据。
+    """
+
+    def _make_pending(self, count=3):
+        pets = [make_pet(district=self.district_a, shelter=self.shelter_a)
+                for _ in range(count)]
+        transfer = Transfer.objects.create(
+            from_shelter=self.shelter_a, to_hospital=self.hospital_a,
+            pet_codes=','.join(p.code for p in pets), pet_count=count,
+            district=self.district_a)
+        return pets, transfer
+
+    def _race_after_load(self, transfer_id, competing):
+        """让 `competing` 正好发生在本次请求读完单据之后。"""
+        real = views_transfer.get_own_institution_object
+        fired = []
+
+        def racing(*args, **kwargs):
+            row = real(*args, **kwargs)
+            if row is not None and row.id == transfer_id and not fired:
+                fired.append(True)
+                competing(row)
+            return row
+
+        return mock.patch.object(views_transfer, 'get_own_institution_object',
+                                 racing)
+
+    def test_competing_receipt_does_not_overwrite_mine(self):
+        """两人分点同一车动物：后提交的那笔**不能覆盖**先落库的那批号。
+
+        旧实现两笔都从 `received_codes=''` 出发、各自整列覆盖 ——
+        先签的 2 只既不在单据上、又已经是 `in_treatment`（人躺在医院里），
+        单据却不认它们：剩余数、状态、捕捉单重算全部跟着错，且不报错。
+        """
+        pets, transfer = self._make_pending(3)
+        self.login_as(self.hospital_user_a)
+
+        def other_operator(row):
+            Transfer.objects.filter(pk=row.pk).update(
+                received_codes=','.join([pets[2].code]), status='partial',
+                received_at=timezone.localdate())
+            Pet.objects.filter(code=pets[2].code).update(status='in_treatment')
+
+        with self._race_after_load(transfer.id, other_operator):
+            resp = self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                                  {'pet_codes': [pets[0].code]})
+        self.assertEqual(resp.status_code, 409, resp.content)
+
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.received_codes, pets[2].code,
+                         '竞手的签收记录被我这笔覆盖掉了')
+        self.assertEqual(transfer.status, 'partial')
+        pets[0].refresh_from_db()
+        self.assertEqual(pets[0].status, 'in_transit',
+                         '抢输的一方不能把自己那几只改成待诊疗')
+
+    def test_two_partial_receipts_on_same_slip_do_not_lose_either(self):
+        """**同一版状态**下的两笔部分签收：只有比 `received_codes` 才拦得住。
+
+        上面那条从 `pending` 出发，抢输的一方是靠「状态被人改过了」发现的；
+        本条让单据已经是 `partial`，两人各签剩余的一只 —— 竞手写完**状态仍是
+        `partial`**，于是「判状态」这条 WHERE 完全没反应，只有把「我读到的
+        `received_codes`」也写进 WHERE 才能发现冲突。少了这个判据，先签的那只
+        会从单据上消失（整列覆盖），而它已经在医院里了。
+        """
+        pets, transfer = self._make_pending(3)
+        self.login_as(self.hospital_user_a)
+        # 先签掉第 1 只，把单据推进到 partial
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                               {'pet_codes': [pets[0].code]}))
+
+        def other_operator(row):
+            Transfer.objects.filter(pk=row.pk).update(
+                received_codes=','.join([pets[0].code, pets[1].code]))
+            Pet.objects.filter(code=pets[1].code).update(status='in_treatment')
+
+        with self._race_after_load(transfer.id, other_operator):
+            resp = self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                                  {'pet_codes': [pets[2].code]})
+        self.assertEqual(resp.status_code, 409, resp.content)
+
+        transfer.refresh_from_db()
+        self.assertEqual(set(transfer.received_codes.split(',')),
+                         {pets[0].code, pets[1].code},
+                         '竞手刚签的那只被我这笔整列覆盖了')
+        pets[2].refresh_from_db()
+        self.assertEqual(pets[2].status, 'in_transit')
+
+    def test_conflicted_receipt_can_be_redone_after_refresh(self):
+        """**反向对照**：409 之后刷新重签必须能成 —— 否则这条闸变成永久锁死。"""
+        pets, transfer = self._make_pending(3)
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                               {'pet_codes': [pets[2].code]}))
+        body = self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                                      {'pet_codes': [pets[0].code]}))['data']
+        self.assertEqual(set(body['receivedCodes'].split(',')),
+                         {pets[2].code, pets[0].code})
+
+    def test_reject_losing_to_a_concurrent_receipt_is_refused(self):
+        """驳回与签收同时发生：已经有人签了 2 只，整单驳回必须被拒。
+
+        否则那 2 只已经进了诊疗，却挂着一张 `rejected` 的单；
+        而 `Pet.objects.filter(code__in=remaining).update(status='in_transit')`
+        还会把**别人刚签收**的动物一起退回在途。
+        """
+        pets, transfer = self._make_pending(3)
+        self.login_as(self.hospital_user_a)
+
+        def other_operator(row):
+            Transfer.objects.filter(pk=row.pk).update(
+                received_codes=','.join([pets[0].code, pets[1].code]),
+                status='partial', received_at=timezone.localdate())
+            Pet.objects.filter(code__in=[pets[0].code, pets[1].code]).update(
+                status='in_treatment')
+
+        with self._race_after_load(transfer.id, other_operator):
+            resp = self.post_json(f'{TRANSFER_URL}{transfer.id}/reject/',
+                                  {'reason': '车辆不足'})
+        self.assertEqual(resp.status_code, 409, resp.content)
+
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'partial', '已签收的单据被驳回覆盖了')
+        for p in pets[:2]:
+            p.refresh_from_db()
+            self.assertEqual(p.status, 'in_treatment',
+                             '别人已签收的动物被驳回一起退回了在途')
+
+    def test_reject_losing_to_a_newer_partial_receipt_is_refused(self):
+        """竞手只推进 `received_codes`、**状态没变**时，驳回同样必须被拒。
+
+        上一条用例把竞手写成了 `pending → partial`，所以「比 status」就能拦住 ——
+        它抓不到真正危险的那一型：单据**已经是** `partial`，两人在同一版上继续动。
+        A 读出 `partial / 已签 p0`，B 在同一瞬间又签了 p1（状态照旧是 `partial`）。
+        只钉 `status` 的 WHERE 照样成立，于是 A 按**陈旧的** `remaining`
+        （p1、p2、p3）把它们从 `in_treatment` 改回 `in_transit` 且 `hospital=None`：
+        p1 已经躺在医院里、甚至已经开了诊疗单，单据却说不认识它。
+        A 收到「已驳回」、B 收到「签收成功」，全程没有一行报错。
+        """
+        pets, transfer = self._make_pending(4)
+        self.login_as(self.hospital_user_a)
+        # 先把单据推到 partial（A 与 B 都从这一版读出）
+        Transfer.objects.filter(pk=transfer.pk).update(
+            status='partial', received_codes=pets[0].code,
+            received_at=timezone.localdate())
+        Pet.objects.filter(code=pets[0].code).update(
+            status='in_treatment', hospital=self.hospital_a)
+
+        def other_operator(row):
+            # B 又签一只：状态仍是 partial（还差 p2/p3），只有清单前进了
+            Transfer.objects.filter(pk=row.pk).update(
+                received_codes=','.join([pets[0].code, pets[1].code]))
+            Pet.objects.filter(code=pets[1].code).update(
+                status='in_treatment', hospital=self.hospital_a)
+
+        with self._race_after_load(transfer.id, other_operator):
+            resp = self.post_json(f'{TRANSFER_URL}{transfer.id}/reject/',
+                                  {'reason': '笼位不足'})
+        self.expect_fail(resp, 409)
+
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'partial', '抢输的驳回不该改单据状态')
+        self.assertEqual(transfer.received_codes,
+                         ','.join([pets[0].code, pets[1].code]),
+                         '竞手刚签的那只被驳回抹掉了')
+        pets[1].refresh_from_db()
+        self.assertEqual(pets[1].status, 'in_treatment',
+                         '别人刚签收的动物被驳回退回了在途')
+        self.assertEqual(pets[1].hospital_id, self.hospital_a.id,
+                         '退回还顺手抹掉了归属医院，动物从此无人认领')
+
+    def test_reject_on_unchanged_partial_still_works(self):
+        """**反向对照**：没有竞手时，partial 单驳回剩余照旧能成。
+
+        没有这条，上面那条判据可以靠「一律 409」通过，而生产上没人能驳回。
+        """
+        pets, transfer = self._make_pending(3)
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/',
+                               {'pet_codes': [pets[0].code]}))
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/reject/',
+                               {'reason': '笼位不足'}))
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'rejected')
+        pets[1].refresh_from_db()
+        self.assertEqual(pets[1].status, 'in_transit', '未签收的要退回在途')
+        pets[0].refresh_from_db()
+        self.assertEqual(pets[0].status, 'in_treatment',
+                         '已签收的那只不能被「驳回剩余」一起退回')
+
+    def test_receive_failure_after_receipt_leaves_no_half_state(self):
+        """签收的后半段炸了，前半段（单据 + 宠物状态）必须一起回滚。
+
+        旧实现整段不在事务里：单据已改 `received`、宠物已 `in_treatment`，
+        而捕捉单重算抛错 → 页面 500，台账留下一张「已签收但捕捉单还挂着
+        待转运」的单，且没人知道哪一半天。
+        """
+        pets, transfer = self._make_pending(3)
+        self.login_as(self.hospital_user_a)
+        with mock.patch.object(views_transfer, 'recalc_captures_for_transfer',
+                               side_effect=RuntimeError('重算炸了')):
+            with self.assertRaises(RuntimeError):
+                self.post_json(f'{TRANSFER_URL}{transfer.id}/receive/', {})
+
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'pending')
+        self.assertEqual(transfer.received_codes, '')
+        for p in pets:
+            p.refresh_from_db()
+            self.assertEqual(p.status, 'in_transit',
+                             '单据回滚了但宠物状态留下了 —— 两半不一致')
+
+
 class TransferRejectAndReassignGuardTest(BusinessTestBase):
     """驳回回退 + 「不可重复下发 / 不可跨区下发」守卫。"""
     def _make_pending(self):
@@ -532,19 +756,26 @@ class TransferWithdrawTest(BusinessTestBase):
         self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'),
                          status=404, message='不存在')
 
-    def test_other_district_gov_gets_404(self):
+    def test_gov_cannot_withdraw_same_district(self):
+        """政府端只读（第四十九轮）：本区县监管也不能代捕捉点撤回。"""
+        pet, transfer = self._make_pending()
+        self.login_as(self.gov_a)
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'),
+                         status=403)
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'pending', '被拒的撤回不能已经把单改成 void')
+
+    def test_gov_cannot_withdraw_other_district(self):
+        """跨区县的监管账号同样是 403，而不是 404。
+
+        ⚠ 这里回 403 而不是「不存在」并不泄漏信息：角色闸门跑在归属判断**之前**，
+        任何区县、任何存在与否都统一 403，观测面上分不出「有这张单」和「没这张单」。
+        以前这两支分别是 404 / 200，是「监管代录」留下的口径，已随只读模式一并收掉。
+        """
         _, transfer = self._make_pending()
         self.login_as(self.gov_b)  # 乙区监管
         self.expect_fail(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'),
-                         status=404, message='不存在')
-
-    def test_same_district_gov_can_withdraw(self):
-        """本区县监管可代捕捉点撤回。"""
-        pet, transfer = self._make_pending()
-        self.login_as(self.gov_a)
-        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'))
-        pet.refresh_from_db()
-        self.assertEqual(pet.status, 'in_transit')
+                         status=403)
 
     def test_hospital_cannot_withdraw(self):
         _, transfer = self._make_pending()

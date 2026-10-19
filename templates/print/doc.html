@@ -20,7 +20,12 @@
   .no-line .no { font-size:17px; font-weight:700; font-family:ui-monospace,Menlo,monospace;
                  letter-spacing:2px; color:#9D2933; }
   table { width:100%; border-collapse:collapse; }
-  td { border:1px solid #444; padding:7px 10px; vertical-align:top; }
+  td { border:1px solid #444; padding:7px 10px; vertical-align:top;
+       /* 长备注 / 连续号码（无空格）必须能折行，否则把整列撑破、
+          右边内容挤出 A4 版心 —— 与 60e656b「整列空白」是同一类视觉缺陷 */
+       word-break:break-word; overflow-wrap:anywhere; }
+  /* 行不许跨页断头：一字段值被劈到两页，纸质归档就分不清它属于哪一栏 */
+  tr { break-inside:avoid; page-break-inside:avoid; }
   td.lbl { width:96px; background:#F7F3EC; color:#333; white-space:nowrap; }
   .rel-title { margin:16px 0 6px; font-weight:700; letter-spacing:2px; }
   .rel-table td.lbl { width:80px; }
@@ -64,13 +69,13 @@
 
     {% if related %}
     {# 关联单据链：点单号可跳到那张单的打印页，纸质归档时单据互见。 #}
-    {# ⚠ 路径是 /print/...，不在 /api/ 下（见 tnr_system/urls.py）。 #}
-    {# 这里写死过一次旧路径 /api/business/print/...，改路由后会全变断链。 #}
+    {# 一律用 `{% url %}` 反向解析，不写死路径：这条链写死过一次旧路径 #}
+    {# /api/business/print/...，改路由后整片断链，而且打印页不报错、只是链接点不动。 #}
     <div class="rel-title">关联单据</div>
     <table class="rel-table">
       {% for rtitle, rno, rdoc, rpk in related %}
       <tr><td class="lbl">{{ rtitle }}：</td>
-          <td><a href="/print/{{ rdoc }}/{{ rpk }}/">{{ rno }}</a></td></tr>
+          <td><a href="{% url 'print_doc' rdoc rpk %}">{{ rno }}</a></td></tr>
       {% endfor %}
     </table>
     {% endif %}

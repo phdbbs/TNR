@@ -29,7 +29,18 @@ const TNR_UI = {
     const icons = { success: '✓', warning: '⚠', danger: '✕', info: 'ℹ' };
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    toast.innerHTML = `<span class="toast-icon">${icons[type] || '✓'}</span><span class="toast-text">${message}</span>`;
+    // message 必须走 **textContent**，不能用 innerHTML 拼串。
+    // 服务端大量把用户输入原样回显在 message 里，例如
+    // `raise ValueError(f'去向建议「{advised}」不合法')`、
+    // `f'还有 N 项未完成：{物料名}'` —— 用 innerHTML 就等于
+    // 「请求体 → 界面 HTML」的反射型 XSS 通道。图标是常量，留在 HTML 里没问题。
+    const icon = document.createElement('span');
+    icon.className = 'toast-icon';
+    icon.textContent = icons[type] || '✓';
+    const text = document.createElement('span');
+    text.className = 'toast-text';
+    text.textContent = message == null ? '' : String(message);
+    toast.append(icon, text);
     container.appendChild(toast);
     setTimeout(() => {
       toast.style.opacity = '0';
@@ -263,11 +274,10 @@ const TNR_UI = {
     }
     const chip = (res && res.chip) || {};
     const events = (res && res.events) || [];
-    const statusText = { available: '可用', in_transit: '在途', used: '已植入', void: '作废' };
     let html = '<div style="padding:var(--sp-4);">'
       + this.renderDescList([
         { label: '芯片号', value: '<span class="font-mono">' + this.escape(chip.number || number) + '</span>' },
-        { label: '当前状态', value: statusText[chip.status] || chip.status || '—' },
+        { label: '当前状态', value: TNR_UI.chipStatusText(chip.status) },
         { label: '持有机构', value: this.escape(chip.institutionName || '—') },
         { label: '绑定宠物', value: chip.petCode ? this.escape(chip.petCode) : '—' }
       ]) + '</div>';
@@ -413,7 +423,7 @@ const TNR_UI = {
       // 不能让它掉进下面 qty<1 的「填写数量后…」分支：用户填了 -3，
       // 界面却像没填，只会让人以为预览坏了。
       if (qty < 0) {
-        hintEl.innerHTML = '<span class="fs-sm" style="color:var(--bamboo-green);">↺ 负数量 = 盘盈 / 退回入库，将**增加**库存 '
+        hintEl.innerHTML = '<span class="fs-sm" style="color:var(--bamboo-green);">↺ 负数量 = 盘盈 / 退回入库，将<b>增加</b>库存 '
           + Math.abs(qty) + '，不扣减任何批次</span>';
         return;
       }
@@ -606,7 +616,10 @@ const TNR_UI = {
       html += '<colgroup>';
       opts.columns.forEach((col, i) => {
         const w = widths ? widths[i] : (col.width || null);
-        html += `<col style="${w ? 'width:' + (typeof w === 'number' ? w + 'px' : w) + ';' : ''}">`;
+        // 移动端列压缩：`mobile:'hide'` 的列在 ≤768px 隐藏（见 CSS），
+        // 其内容应通过主列的 `mobileRender` 带回，否则手机上信息直接消失。
+        const hide = col.mobile === 'hide' ? ' class="dt-col-mobile-hide"' : '';
+        html += `<col${hide} style="${w ? 'width:' + (typeof w === 'number' ? w + 'px' : w) + ';' : ''}">`;
       });
       if (actionsCol) html += `<col style="${widths && widths[opts.columns.length] ? 'width:' + widths[opts.columns.length] + 'px' : 'width:1px;'}">`;
       html += '</colgroup><thead><tr>';
@@ -615,7 +628,8 @@ const TNR_UI = {
         const sorted = st.sortKey === col.key;
         const arrow = sortable ? `<span class="dt-sort ${sorted ? 'on ' + (st.sortDir === 'desc' ? 'desc' : 'asc') : ''}">${sorted ? (st.sortDir === 'desc' ? '▼' : '▲') : '⇅'}</span>` : '';
         const align = col.align ? `text-align:${col.align};` : '';
-        html += `<th class="${sortable ? 'dt-sortable' : ''}" data-dt-sort="${sortable ? esc(col.key) : ''}" style="${align}">${col.title}${arrow}`;
+        const hide = col.mobile === 'hide' ? ' dt-col-mobile-hide' : '';
+        html += `<th class="${sortable ? 'dt-sortable' : ''}${hide}" data-dt-sort="${sortable ? esc(col.key) : ''}" style="${align}">${col.title}${arrow}`;
         if (col.resizable !== false) html += `<span class="dt-colresizer" data-dt-col="${i}"></span>`;
         html += '</th>';
       });
@@ -624,8 +638,14 @@ const TNR_UI = {
       pageRows.forEach((row, idx) => {
         html += '<tr>';
         opts.columns.forEach(col => {
-          const val = typeof col.render === 'function' ? col.render(row, idx) : (row[col.key] ?? '');
-          html += `<td>${val ?? ''}</td>`;
+          let val = typeof col.render === 'function' ? col.render(row, idx) : (row[col.key] ?? '');
+          // 仅手机可见的补充内容，挂在主列单元格里；桌面端由 CSS 隐藏，
+          // 不改变原有列宽与信息密度。
+          if (typeof col.mobileRender === 'function') {
+            val += `<div class="dt-mobile-only">${col.mobileRender(row, idx)}</div>`;
+          }
+          const hide = col.mobile === 'hide' ? ' class="dt-col-mobile-hide"' : '';
+          html += `<td${hide}>${val ?? ''}</td>`;
         });
         if (actionsCol) html += `<td class="dt-actions-td"><div class="flex gap-2">${opts.rowActions(row, idx)}</div></td>`;
         html += '</tr>';
@@ -1388,6 +1408,17 @@ const TNR_UI = {
     return this.formatDate(date) + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
   },
 
+  /* 手机端列压缩的行内补充内容（见 mountTable 的 `mobileRender`）。
+     标签是页面写死的文案，值由调用方负责转义 —— 这里不做二次处理。 */
+  mobileLine(label, val) {
+    return '<div class="dt-mobile-line"><span class="dt-mobile-label">' + label
+      + '</span><span class="dt-mobile-value">' + val + '</span></div>';
+  },
+
+  mobileMore(inner) {
+    return '<details class="dt-mobile-more"><summary>更多信息</summary>' + inner + '</details>';
+  },
+
   /** 今天（本地）YYYY-MM-DD，用作表单日期默认值。
    *
    * **不要用 `new Date().toISOString().substr(0,10)`** —— toISOString() 返回
@@ -1417,6 +1448,503 @@ const TNR_UI = {
   // === 状态徽章 ===
   statusBadge(text, type = 'default') {
     return `<span class="badge badge-${type}">${text}</span>`;
+  },
+
+  /* 把状态真源转成筛选条选项（顺序 = 真源定义顺序）。
+     筛选条逐条手写等于多一处「后端加一档时必定漏掉」的副本；
+     生成式选项的覆盖性由「真源 ↔ 后端 choices」的判据负责。 */
+  statusOptions(table) {
+    return Object.keys(TNR_UI[table]).map(value => ({
+      value, label: TNR_UI[table][value].text,
+    }));
+  },
+
+  /* === 宠物状态的唯一显示真源（第五十二轮电脑端巡检）===
+     同一个 `Pet.status` 此前有**三份**显示表，而且已经抄漂移：
+       - `tnr-api.js` 的原取值函数：`in_treatment` → 「待诊疗/诊疗中」、`pending_claim` → cinnabar；
+       - `gov.js` 的本地 `petStatus`：`in_treatment` → 「待诊疗」、warning；
+       - `shelter.js` 的通用 `statusBadge`：`in_treatment` → 「诊疗中」、`owner_returned` → 「已领回」。
+     后果不是难看：同一只动物在捕捉点端叫「诊疗中」、监管端叫「待诊疗」、
+     医院端叫「待诊疗/诊疗中」，而**纸质单据与监管报表**用的是后端 choices 的
+     「待诊疗」——三端对账时会被当成三种不同的流转阶段。
+     文案以 `business/models.py` 的 `Pet.STATUS_CHOICES` 为准（闸门逐条比相等），
+     配色取此前覆盖面最广的那一份（`TNR_API` 的徽章表，五端都在用）。
+     ⚠ 这里是**展示**真源，不改变状态机本身：合法取值仍由后端 choices 决定。 */
+  PET_STATUS: {
+    in_transit:     { text: '在途',          badge: 'warning' },
+    in_treatment:   { text: '待诊疗',        badge: 'info' },
+    pending_adopt:  { text: '待领养',        badge: 'cinnabar' },
+    pending_claim:  { text: '待领出',        badge: 'cinnabar' },
+    adopted:        { text: '已领养',        badge: 'success' },
+    released:       { text: '已放归',        badge: 'success' },
+    euthanized:     { text: '已安乐死',      badge: 'danger' },
+    dead:           { text: '已死亡/无害化', badge: 'danger' },
+    owner_returned: { text: '主人领回',      badge: 'default' },
+  },
+
+  /* 宠物状态的取值函数（与 RELEASE_STATUS 等同一套写法）。
+     徽章整段返回，调用方不要再自己拼 `<span class="badge …">`，
+     更不要用 `.replace('badge-', '')` 把类名拆回来 —— 那等于把
+     「配色」和「展示」拆成两步，改真源时总有一处漏掉。 */
+  petStatusText(status) {
+    const m = TNR_UI.PET_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  petStatusBadge(status) {
+    const m = TNR_UI.PET_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.petStatusText(status)) + '</span>';
+  },
+
+  /* === 放归单状态的唯一显示真源（第五十二轮，做法与 PET_STATUS 一致）===
+     `Release.status` 同样被抄了三份，中间态 `transferred`（已回小区待放归）
+     在两份里**根本不存在**：
+       - `hospital.js` 出院看板：三段齐全（唯一写全的一处）；
+       - `gov.js` 放归监管：`released ? 已放归 : 待放归` 的二值兜底 ——
+         动物已经回到小区、只差物业签字，监管端仍显示「待放归」，
+         两段流程走到哪一段完全看不出来；
+       - `shelter.js` 放归页签：`filter(status === 'pending')` ——
+         `transferred` 的单子既不进待放归也不进已放归，**整张单从界面上消失**，
+         办理人也再也点不到「确认放归」，单据永远停在 transferred。
+     文案以 `business/models.py` 的 `Release.STATUS_CHOICES` 为准（闸门逐条比相等）。
+     ⚠ 本表只管展示，**不要拿它的键当「未办结」判据**：列表筛选请用
+     `OPEN_RELEASE_STATUS`（口径见下面那条）。 */
+  RELEASE_STATUS: {
+    pending:     { text: '待转运回小区',   badge: 'warning' },
+    transferred: { text: '已回小区待放归', badge: 'info' },
+    released:    { text: '已放归',         badge: 'success' },
+  },
+
+  /* 「待放归」= 尚未办结的放归单 = `pending` ∪ `transferred`。
+     这条口径的**唯一定义处**是后端 `release_confirm`
+     （`business/views_release.py`：`if release.status not in ('pending', 'transferred')`），
+     第四十八轮把放归拆成两段之前只有 `pending`，前端如果继续只筛 `pending`，
+     拆段的中间态就成了界面盲区。前端三处列表/判据都必须引用本数组，
+     不要再各自写 `=== 'pending'`。 */
+  OPEN_RELEASE_STATUS: ['pending', 'transferred'],
+
+  /* 放归状态的纯文案（时间线、抽屉等不带徽章的地方用）。
+     真源查不到时显示原始枚举码，不猜成某个具体业务状态 ——
+     「released 之外一律叫待放归」会把「已回小区、只差签字」也压成待放归。 */
+  releaseStatusText(status) {
+    const m = TNR_UI.RELEASE_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  /* 放归状态徽章：真源查不到时显示原始枚举码（不猜成某个具体业务状态）。
+     与 `petStatusText` 同一套兜底口径。
+     `title` 可选，用作悬停说明（例如把转运时间挂在徽章上，省掉一列）。 */
+  releaseStatusBadge(status, title) {
+    const m = TNR_UI.RELEASE_STATUS[status];
+    const tip = title ? ' title="' + TNR_UI.escape(title) + '"' : '';
+    return `<span class="badge badge-${m ? m.badge : 'default'}"${tip}>` +
+      TNR_UI.escape(TNR_UI.releaseStatusText(status)) + '</span>';
+  },
+
+  /* === 回访打卡审核状态的唯一显示真源（做法与 PET_STATUS / RELEASE_STATUS 一致）===
+     `CheckIn.status` 三个取值此前散在四处：
+       - `shelter.js` 回访页：徽章 + 筛选下拉 + 详情抽屉，写的是「未通过」；
+       - `adopter.js`：`getCheckinStatusBadge()` 自带一份，写的是「已驳回」；
+       - `gov.js` 领养业务详情的打卡时间线：`c.status === 'approved' ? '已审核'
+         : '待审核'` —— 二值兜底把**已驳回**的打卡显示成「待审核」，
+         监管端看不出这条回访其实已经判过不合格，也就不会触发后面的收回。
+     后端 `CheckIn.STATUS_CHOICES`（`business/models.py`）的 label 是
+     待审核 / 已通过 / 已驳回，文案以它为准（闸门逐条比相等）。 */
+  CHECKIN_STATUS: {
+    pending:  { text: '待审核', badge: 'warning' },
+    approved: { text: '已通过', badge: 'success' },
+    rejected: { text: '已驳回', badge: 'danger' },
+  },
+
+  checkinStatusText(status) {
+    const m = TNR_UI.CHECKIN_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  checkinStatusBadge(status) {
+    const m = TNR_UI.CHECKIN_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.checkinStatusText(status)) + '</span>';
+  },
+
+  /* === 捕捉单状态的唯一显示真源 ===
+     `Capture.status` 由后端按「本单宠物的转运情况」推导
+     （待转运 / 部分转运 / 已完成 / 已作废），不许人工填。
+     此前监管端两张表（全业务列表 + 台账列表）、监管端详情抽屉、捕捉点端
+     `Shelter.captureStatusBadge` 各写一份 —— 四份文案恰好一致才没出事，
+     后端加一档必然漏一处。 */
+  CAPTURE_STATUS: {
+    pending:   { text: '待转运',   badge: 'warning' },
+    partial:   { text: '部分转运', badge: 'info' },
+    completed: { text: '已完成',   badge: 'success' },
+    void:      { text: '已作废',   badge: 'default' },
+  },
+
+  captureStatusText(status) {
+    const m = TNR_UI.CAPTURE_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  captureStatusBadge(status) {
+    const m = TNR_UI.CAPTURE_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.captureStatusText(status)) + '</span>';
+  },
+
+  captureStatusOptions() {
+    return TNR_UI.statusOptions('CAPTURE_STATUS');
+  },
+
+  /* === 转运单状态的唯一显示真源 ===
+     ⚠ 两个坑：
+       1) `pending` 后端叫**待签收**、`received` 叫**已签收**，监管端三处
+          都写成「待接收 / 已接收」—— 与医院端、捕捉点端对不上账；
+       2) 监管端三处**都漏了 `partial`（部分签收）**，而兜底写的是
+          `m[r.status] || { t: r.status }` / `|| '待签收'`：
+          一半动物已签收的转运单，在监管端状态列直接印出英文码 `partial`，
+          在领养人端的生命周期时间线里又被兜底成「待签收」——
+          两种显示都看不出「已经签收了一部分」这件事。 */
+  TRANSFER_STATUS: {
+    pending:  { text: '待签收',   badge: 'warning' },
+    partial:  { text: '部分签收', badge: 'info' },
+    received: { text: '已签收',   badge: 'success' },
+    rejected: { text: '已驳回',   badge: 'danger' },
+    void:     { text: '已撤回',   badge: 'default' },
+  },
+
+  /* 「待签收」= 还没签完 = `pending` ∪ `partial`。
+     口径的唯一定义处是后端 `Transfer.OPEN_STATUSES`（签收与驳回两处门禁都读它），
+     闸门逐条比对两边取值。医院可以先签一部分，剩余动物仍在待办里；只认 `pending`
+     会让部分签收的单子从待办列表消失、行内没有「去签收」按钮，
+     而捕捉点仍把这几只动物算作在途占用 —— 谁都不会再去看这张单。 */
+  OPEN_TRANSFER_STATUS: ['pending', 'partial'],
+
+  transferStatusText(status) {
+    const m = TNR_UI.TRANSFER_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  transferStatusBadge(status) {
+    const m = TNR_UI.TRANSFER_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.transferStatusText(status)) + '</span>';
+  },
+
+  transferStatusOptions() {
+    return TNR_UI.statusOptions('TRANSFER_STATUS');
+  },
+
+  isOpenTransferStatus(status) {
+    return TNR_UI.OPEN_TRANSFER_STATUS.indexOf(status) !== -1;
+  },
+
+  /* === 诊疗单状态的唯一显示真源 ===
+     `Treatment.status` 只有进行中 / 已完成两档。监管端两张表一份写「诊疗中」、
+     一份写「进行中」，配色还一黄一蓝 —— 「诊疗中」其实是**阶段**
+     （`Treatment.STAGE_CHOICES`：待接诊 / 诊疗中 / 诊疗完毕）的文案被抄来当了状态名。
+     阶段与状态是两个字段，取值也不同，不许互相冒名（阶段的显示另有医院端流程标签）。 */
+  TREATMENT_STATUS: {
+    in_progress: { text: '进行中', badge: 'info' },
+    completed:   { text: '已完成', badge: 'success' },
+  },
+
+  treatmentStatusText(status) {
+    const m = TNR_UI.TREATMENT_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  treatmentStatusBadge(status) {
+    const m = TNR_UI.TREATMENT_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.treatmentStatusText(status)) + '</span>';
+  },
+
+  /* === 诊疗「阶段」的唯一显示真源（三态 + 看板五态两张表）===
+     阶段有两个粒度，都是**后端派生值**（不存列）：
+       - `Treatment.stage`：checked_at/done_at 推三档，文案 = `STAGE_CHOICES` 的 label；
+       - 医院看板的 `board_stage`：再多看 diagnosed_at/disposed_at 推五档，
+         判据在后端 `_board_stage()`，前端只许展示。
+     本轮之前五档的文案只活在 `hospital.js` 的函数体里，同一个界面还各写一遍：
+     `txStageBadge()` 一张 `[文案, badge]` 表、`renderBoard()` 的页签又一张、
+     `txStageText()` 第三张（三档）。改一个页签名要翻三个方法，于是同一个 code
+     `checking` 在页签叫「待检」、在详情的「当前阶段」叫「待接诊」——
+     同一只动物、同一时刻，看板和抽屉两种说法。现在 `checking` 两张表都叫「待接诊」，
+     `pending_diagnose` 叫「待诊断」（旧称「待诊」和「待接诊」只差一个字，扫一眼分不清）。
+     阶段与状态是两个字段，取值不同，不许互相冒名（`TREATMENT_STATUS` 只管 进行中/已完成）。 */
+  TREATMENT_STAGE: {
+    checking: { text: '待接诊', badge: 'warning' },
+    treating: { text: '诊疗中', badge: 'info' },
+    done:     { text: '诊疗完毕', badge: 'success' },
+  },
+
+  treatmentStageText(stage) {
+    const m = TNR_UI.TREATMENT_STAGE[stage];
+    return m ? m.text : (stage || '—');
+  },
+
+  /* 看板五态的**流程顺序**，与后端 `Treatment.BOARD_STAGES` 逐位相同。
+     页签、操作按钮、筛选都按它迭代，取值增减只改这一处 + 后端一处。 */
+  BOARD_STAGE_ORDER: ['checking', 'pending_diagnose', 'treating',
+                      'pending_discharge', 'discharged'],
+
+  BOARD_STAGE: {
+    checking:          { text: '待接诊',  badge: 'warning' },
+    pending_diagnose:  { text: '待诊断',  badge: 'info' },
+    treating:          { text: '诊疗中',  badge: 'info' },
+    pending_discharge: { text: '待出院',  badge: 'warning' },
+    discharged:        { text: '已出院',  badge: 'success' },
+  },
+
+  boardStageText(stage) {
+    const m = TNR_UI.BOARD_STAGE[stage];
+    return m ? m.text : (stage || '—');
+  },
+
+  boardStageBadge(stage) {
+    const m = TNR_UI.BOARD_STAGE[stage];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.boardStageText(stage)) + '</span>';
+  },
+
+  /* === 「启用 / 停用」的唯一显示真源（区县 / 机构 / 账号三张表共用）===
+     `District.status`、`Institution.status`、`User.status` 都是
+     `CharField(default='active')`、**没有 choices**：取值域由后端常量
+     `core.models.STATUS_VALUES` 界定，平台端 6 个写入点（三个开关 + 三个编辑口）
+     与停用守卫读取侧都读它。
+
+     本轮之前这一件事在界面上有 8 份写法：徽章表 1 份（里面还多写了一个后端
+     **永远不会产出**的 `disabled` —— 幽灵态，「停用」有两种来源，出问题时分不清
+     是哪个号真被停过）、状态筛选下拉 3 份、行内「停用/启用」按钮 3 份、
+     捕捉点端「个人中心 · 账号状态」直接**写死绿色「启用」**（账号真被停用也照显示启用）。 */
+  ENTITY_STATUS: {
+    active:   { text: '启用', badge: 'success' },
+    inactive: { text: '停用', badge: 'danger' },
+  },
+
+  entityStatusText(status) {
+    const m = TNR_UI.ENTITY_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  entityStatusBadge(status) {
+    const m = TNR_UI.ENTITY_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.entityStatusText(status)) + '</span>';
+  },
+
+  entityStatusOptions() {
+    return Object.keys(TNR_UI.ENTITY_STATUS).map(k => ({
+      value: k, label: TNR_UI.ENTITY_STATUS[k].text }));
+  },
+
+  /* 行内切换按钮的动作词 = **点下去之后变成的状态**，不是当前状态。
+     以前三个列表各写一遍 `r.status === 'active' ? '停用' : '启用'`。 */
+  entityToggleLabel(status) {
+    return TNR_UI.entityStatusText(status === 'active' ? 'inactive' : 'active');
+  },
+
+  /* 同上：按钮配色也跟着**目标**状态的徽章色（停用=红、启用=绿），
+     以前三份列表各自又写了一遍 `'danger' : 'success'`。 */
+  entityToggleBtnClass(status) {
+    const m = TNR_UI.ENTITY_STATUS[status === 'active' ? 'inactive' : 'active'];
+    return m ? m.badge : 'default';
+  },
+
+  /* === 角色显示真源（文案 = `User.ROLE_CHOICES` 的 label）===
+     平台端原来有五份：名称表、徽章表、账号筛选下拉、建号表单下拉、
+     角色权限说明卡。名称表还与后端**对不上账** —— 后端 label 是
+     「市级政府管理员 / 区级政府管理员」，平台端简写成「市级管理员 / 区级管理员」，
+     而接口同时带出的 `role_display` 是全称：同一个账号，管理列表里一个职务名、
+     个人中心里另一个。角色名是要进公文与授权说明的，两种叫法不能并存。 */
+  ROLE_ORDER: ['platform_admin', 'gov_city', 'gov_district',
+               'shelter', 'hospital', 'adopter'],
+
+  ROLE: {
+    platform_admin: { text: '平台管理员',     badge: 'ink' },
+    gov_city:       { text: '市级政府管理员', badge: 'ink' },
+    gov_district:   { text: '区级政府管理员', badge: 'info' },
+    shelter:        { text: '捕捉点操作员',   badge: 'cinnabar' },
+    hospital:       { text: '医院操作员',     badge: 'success' },
+    adopter:        { text: '领养人',         badge: 'warning' },
+  },
+
+  roleText(role) {
+    const m = TNR_UI.ROLE[role];
+    return m ? m.text : (role || '—');
+  },
+
+  roleBadge(role) {
+    const m = TNR_UI.ROLE[role];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.roleText(role)) + '</span>';
+  },
+
+  /* 建号/筛选的下拉选项。`exclude` 传角色数组：平台端不建领养人
+     （由捕捉点在领养登记时自动创建），这一条业务规则留在调用点，
+     文案与顺序仍取自真源。 */
+  roleOptions(exclude) {
+    const skip = exclude || [];
+    return TNR_UI.ROLE_ORDER.filter(k => skip.indexOf(k) === -1)
+      .map(k => ({ value: k, label: TNR_UI.ROLE[k].text }));
+  },
+
+  /* === 机构类型真源（文案 = `Institution.TYPE_CHOICES` 的 label）=== */
+  INST_TYPE: {
+    shelter:   { text: '捕捉点', badge: 'cinnabar' },
+    hospital:  { text: '医院',   badge: 'success' },
+    community: { text: '小区',   badge: 'info' },
+  },
+
+  instTypeText(type) {
+    const m = TNR_UI.INST_TYPE[type];
+    return m ? m.text : (type || '—');
+  },
+
+  instTypeBadge(type) {
+    const m = TNR_UI.INST_TYPE[type];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.instTypeText(type)) + '</span>';
+  },
+
+  /* === 芯片四态真源（文案 = `Chip.STATUS_CHOICES` 的 label）===
+     此前四份：捕捉点芯片列表、医院端选芯片、本文件「芯片追溯」抽屉，
+     以及宠物状态表顺手复用了一次 `in_transit` 文案。其中两份还把**元组顺序写反**
+     （一份 `[文案, badge]`、一份 `[badge, 文案]`），抄表时最容易错的形式。
+     后端 label 是「已使用 / 已作废」，前端三份都写「已植入 / 作废」——
+     芯片存在的意义就是逐号追溯，打印单据（读后端 label）与界面两种说法，
+     对账时得多问一句「已植入是不是就是已使用」。 */
+  CHIP_STATUS: {
+    available:  { text: '可用',   badge: 'success' },
+    in_transit: { text: '在途',   badge: 'warning' },
+    used:       { text: '已使用', badge: 'cinnabar' },
+    void:       { text: '已作废', badge: 'default' },
+  },
+
+  chipStatusText(status) {
+    const m = TNR_UI.CHIP_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  chipStatusBadge(status) {
+    const m = TNR_UI.CHIP_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.chipStatusText(status)) + '</span>';
+  },
+
+  /* === 领养单状态的唯一显示真源（做法与 PET_STATUS / RELEASE_STATUS 一致）===
+     `Adoption.status` 三个取值此前有四份写法，同一个 code 四种叫法：
+       - 后端 label：待领出 / 已完成 / 已取消；
+       - `shelter.js` 筛选下拉：与后端一致（唯一对的一处）；
+       - `shelter.js` 徽章兜底表：`cancelled` 叫「已撤销」；
+       - `hospital.js` 出院看板：`completed` 叫「已领出」、`cancelled` 叫「已撤销」；
+       - `adopter.js` 我的领养卡片：**硬编码「已领养」**，压根不看 status ——
+         `pending_claim`（还没去医院领动物）与 `cancelled`（已取消）的单据
+         也一律显示绿色「已领养」，领养人据此以为手续已办完。
+     ⚠ 与 `PET_STATUS.pending_claim/adopted` 是两回事：那是**动物**的状态，
+     这是**领养单**的状态；单据办结与动物出栏虽同义，字段不同、取值也不同。 */
+  ADOPTION_STATUS: {
+    pending_claim: { text: '待领出', badge: 'cinnabar' },
+    completed:     { text: '已完成', badge: 'success' },
+    cancelled:     { text: '已取消', badge: 'default' },
+  },
+
+  adoptionStatusText(status) {
+    const m = TNR_UI.ADOPTION_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  adoptionStatusBadge(status) {
+    const m = TNR_UI.ADOPTION_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.adoptionStatusText(status)) + '</span>';
+  },
+
+  adoptionStatusOptions() {
+    return TNR_UI.statusOptions('ADOPTION_STATUS');
+  },
+
+  /* === 在线领养申请单状态的唯一显示真源 ===
+     `AdoptionApplication.status` 只有领养人端在渲染，此前在本文件里手写了
+     两张表（`getApplyStatusText` / `getApplyStatusBadge`），同一状态两处各排各的序。
+     `cancelled`（领养人自己撤回，见 `applications/cancel/`）是第四档，
+     机构端与监管端的筛选/徽章都得上它，不能再各写一份。 */
+  APPLY_STATUS: {
+    pending:  { text: '待审核', badge: 'warning' },
+    approved: { text: '已通过', badge: 'success' },
+    rejected: { text: '已拒绝', badge: 'danger' },
+    cancelled: { text: '已取消', badge: 'default' },
+  },
+
+  applyStatusText(status) {
+    const m = TNR_UI.APPLY_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  applyStatusBadge(status) {
+    const m = TNR_UI.APPLY_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.applyStatusText(status)) + '</span>';
+  },
+
+  /* 把「可能为空的几个字段」拼成一行小字（物种 · 品种 · 性别 这类）。
+     以前各处写 `a + ' · ' + b`，字段一空就留下「猫 · 」这种半截分隔符，
+     名字为空时更是直接以「 · 」开头。空值跳过、全空给占位符。
+     ⚠ 本函数**内部已转义**，调用方不要再套一次 escape。 */
+  joinInfo(parts, sep = ' · ') {
+    const list = (parts || []).filter(p => p !== null && p !== undefined && String(p).trim() !== '');
+    return list.length ? list.map(p => TNR_UI.escape(String(p))).join(sep) : '—';
+  },
+
+  /* === 物料流水类型的唯一显示真源（第五十二轮 重构 B）===
+     同样六个取值此前在捕捉点 / 医院 / 监管三端各抄一份，一共 7 张表，
+     而且**已经抄漂移了**：`adjustment` 在捕捉点叫「库存异动」、监管端叫「调整」，
+     `consume` 一处 `warning` 色、另一处 `cinnabar` 色 —— 同一笔流水在三端
+     显示成三种样子，监管对账时会被当成三种不同的业务。
+     后端 `MaterialTransaction.TYPE_CHOICES` 新增取值时，只改这里一行，
+     三端的表格、抽屉、筛选下拉同时跟上。
+     `long` 用在台账与筛选（要说清是哪一类动作），`short` 用在紧凑列与详情抽屉。 */
+  MATERIAL_TXN_TYPES: {
+    purchase:   { long: '采购入库', short: '采购', badge: 'success' },
+    dispatch:   { long: '下发出库', short: '下发', badge: 'info' },
+    receive:    { long: '签收入库', short: '签收', badge: 'cinnabar' },
+    consume:    { long: '诊疗消耗', short: '消耗', badge: 'warning' },
+    adjustment: { long: '库存异动', short: '异动', badge: 'danger' },
+    outbound:   { long: '物料出库', short: '出库', badge: 'cinnabar' },
+  },
+
+  /* 视角差异**不是**漂移：同一笔 `dispatch`，捕捉点/监管端是「我发出去」
+     （下发出库），医院端是「别人发给我」（捕捉点下发）。只显式标注真正
+     因视角而变的这一处，别让它退化成「各端爱怎么写怎么写」。 */
+  MATERIAL_TXN_VIEW_LABELS: {
+    hospital: { dispatch: { long: '捕捉点下发', short: '捕捉点下发' } },
+  },
+
+  materialTxn(type, form = 'long', view = '') {
+    const base = this.MATERIAL_TXN_TYPES[type];
+    if (!base) return null;
+    const over = (this.MATERIAL_TXN_VIEW_LABELS[view] || {})[type] || {};
+    const text = over[form] || base[form];
+    /* `form` 拼错（`'short'` 打成 `'shot'`）时必须返回 null，不能返回
+       `{ text: undefined }` —— 那会在表格里渲染成字面量 "undefined"，
+       而「这一列是 undefined」和「这一列漏了映射」在满屏数据里一样不显眼。
+       退回 null 让调用方显示原始枚举码：错得看得见，才有机会被发现。 */
+    return text ? { text, badge: base.badge } : null;
+  },
+
+  /* 未知类型显示原始枚举码（跟旧版逐字一致），且**必须转义** ——
+     它是接口回来的字符串，不是这里写死的文案。 */
+  materialTxnBadge(type, form = 'long', view = '') {
+    const m = this.materialTxn(type, form, view);
+    return this.statusBadge(m ? m.text : this.escape(String(type)),
+                            m ? m.badge : 'default');
+  },
+
+  materialTxnOptions(form = 'long', view = '') {
+    return Object.keys(this.MATERIAL_TXN_TYPES).map(t => {
+      const m = this.materialTxn(t, form, view);
+      return { value: t, label: m ? m.text : t };
+    });
   },
 
   // === 渲染侧边栏 ===
@@ -1521,24 +2049,35 @@ const TNR_UI = {
     const all = (opts.noDateRange || hasDateRange)
       ? list : list.concat(this.DATE_RANGE_FILTERS);
 
-    let html = `<div class="filter-bar"${opts.id ? ` id="${this.escape(opts.id)}"` : ''}>`;
-    all.forEach(f => {
-      html += '<div class="filter-item">';
-      html += `<div class="filter-item-label">${f.label}</div>`;
+    const itemHtml = (f) => {
+      let h = '<div class="filter-item">';
+      h += `<div class="filter-item-label">${f.label}</div>`;
       if (f.type === 'select') {
-        html += `<select class="form-select" data-filter="${f.key}">`;
-        html += '<option value="">全部</option>';
+        h += `<select class="form-select" data-filter="${f.key}">`;
+        h += '<option value="">全部</option>';
         f.options.forEach(opt => {
-          html += `<option value="${opt.value}">${opt.label}</option>`;
+          h += `<option value="${opt.value}">${opt.label}</option>`;
         });
-        html += '</select>';
+        h += '</select>';
       } else if (f.type === 'search') {
-        html += `<div class="search-input"><span class="search-input-icon">🔍</span><input type="text" class="form-input" data-filter="${f.key}" placeholder="${f.placeholder || '搜索...'}"></div>`;
+        h += `<div class="search-input"><span class="search-input-icon">🔍</span><input type="text" class="form-input" data-filter="${f.key}" placeholder="${f.placeholder || '搜索...'}"></div>`;
       } else {
-        html += `<input type="${f.type || 'text'}" class="form-input" data-filter="${f.key}" placeholder="${f.placeholder || ''}">`;
+        h += `<input type="${f.type || 'text'}" class="form-input" data-filter="${f.key}" placeholder="${f.placeholder || ''}">`;
       }
-      html += '</div>';
-    });
+      return h + '</div>';
+    };
+    let html = `<div class="filter-bar"${opts.id ? ` id="${this.escape(opts.id)}"` : ''}>`;
+    /* 起止日期成对包一层：手机端两列并排、桌面端仍在同一行。
+       分开做两个整行控件时，仅日期就占掉 ~170px 屏高，列表首屏被筛选条挤没。 */
+    for (let i = 0; i < all.length; i++) {
+      const f = all[i];
+      if (f && f.type === 'date' && all[i + 1] && all[i + 1].type === 'date') {
+        html += '<div class="filter-date-pair">' + itemHtml(f) + itemHtml(all[i + 1]) + '</div>';
+        i += 1;
+      } else if (f) {
+        html += itemHtml(f);
+      }
+    }
     // 搜索/重置紧跟筛选条件且样式一致；自定义操作（新增/导出等）单独分组、样式区分
     const stdButtons = opts.noButtons ? '' :
       `<button type="button" class="btn btn-secondary btn-sm" data-fb="search">搜索</button>` +

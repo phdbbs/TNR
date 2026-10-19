@@ -6,7 +6,6 @@ TNR 业务系统 - 机构库存服务层（从 services.py 拆出）
 新代码建议直接 `from business.services_stock import ...`。
 """
 import datetime
-from datetime import timedelta
 
 from django.db.models import F, Sum
 from django.utils import timezone
@@ -566,7 +565,7 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
         不写机构库存表、也不记批次）—— 那条路径只为历史调用与单元测试
         保留，生产代码一律显式传 `institution`。
     :param extra: 额外字段，如 operator/batch_no/expiry_date/supplier/
-        from_to/note/ledger_no/district/ref_no/reason
+        from_to/note/ledger_no/district 或 district_id/ref_no/reason
     :return: 创建的 MaterialTransaction **列表**。B5 起出库跨批次会自动拆成
         多笔（同 ledger_no/note，每笔 batch_no = 所扣批次、quantity = 该批
         扣减量）——「一笔业务」在物理上就是 N 行，返回单条会让调用方
@@ -591,7 +590,17 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
     「写库后才 `return json_fail` / `raise`」= 孤儿记录，判据一律前置。
     """
     inst = institution if institution is not None else hospital
-    district = extra.get('district') or material.district
+    # 归属区县：显式传入优先，其次退回物料区县。
+    # ⚠ 四个调用点（采购 / 下发 / 盘点 / 出库）一律传 `district_id=`（pk），
+    # 而这里原先只读 `extra['district']` —— 显式区县被**静默丢弃**，
+    # 流水永远落到 `material.district`。R45 口径要求业务记录归属**实际区县**
+    # （市级绝不能作业务归属），所以必须让显式值生效，而不是删掉这个参数。
+    if extra.get('district') is not None:
+        district_fields = {'district': extra['district']}
+    elif extra.get('district_id') is not None:
+        district_fields = {'district_id': extra['district_id']}
+    else:
+        district_fields = {'district': material.district}
     operator = extra.get('operator')
     today = timezone.localdate()
 
@@ -655,8 +664,8 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
         date=today,
         ledger_no=extra.get('ledger_no', ''),
         ref_no=extra.get('ref_no', ''),  # 接收单关联下发单号（第四十六轮单据链）
-        district=district,
         note=extra.get('note', ''),
+        **district_fields,
     )
 
     txns = []

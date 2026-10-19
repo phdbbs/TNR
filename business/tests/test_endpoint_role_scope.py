@@ -227,12 +227,14 @@ class BlacklistRoleSetCharacterizationTest(BusinessTestBase):
     `AuxiliaryEndpointRoleSubsetTest` 的职责），但能挡住**这里**被静默改回去。
     """
 
+    # 第四十九轮：政府端转只读。列表与 `check` 是**读**（`check` 虽是 POST，
+    # 只查询不改库），政府端照旧放行；`create/update/delete` 三个写接口收掉。
     EXPECTED = {
         '/api/business/blacklist/': {'shelter', 'gov_city', 'gov_district'},
-        '/api/business/blacklist/create/': {'shelter', 'gov_city', 'gov_district'},
+        '/api/business/blacklist/create/': {'shelter'},
         '/api/business/blacklist/check/': {'shelter', 'gov_city', 'gov_district'},
-        '/api/business/blacklist/<int:pk>/update/': {'shelter', 'gov_city', 'gov_district'},
-        '/api/business/blacklist/<int:pk>/delete/': {'shelter', 'gov_city', 'gov_district'},
+        '/api/business/blacklist/<int:pk>/update/': {'shelter'},
+        '/api/business/blacklist/<int:pk>/delete/': {'shelter'},
     }
 
     def test_role_sets_are_pinned(self):
@@ -245,4 +247,5 @@ class BlacklistRoleSetCharacterizationTest(BusinessTestBase):
             self.assertEqual(
                 actual[pat], expected,
                 f'{pat} 的角色集合变了：{sorted(actual[pat])} != {sorted(expected)}。'
-                '若是刻意放宽，请同时确认该角色**前端有调用点**且返回体不含多余个人信息')
+                '若是刻意放宽，请同时确认该角色**前端有调用点**且返回体不含多余个人信息；'
+                '若是把政府端放回去，先回答「监管代录」这个问题（见 `gov_portal` 的说明）')

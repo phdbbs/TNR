@@ -23,7 +23,8 @@ from core import audit
 from core.models import AuditLog, District
 
 #: 操作日志的渲染/搜索在**平台端**（第四十二轮从政府端迁入）。
-LOG_PORTAL = 'templates/portal/platform/portal.html'
+#: 第五十二轮 重构 B：日志页的代码住在 `static/js/portals/platform.js`。
+LOG_PORTAL = 'static/js/portals/platform.js'
 
 
 def _log_render_fields():
@@ -411,7 +412,9 @@ class AuditWriteCoverageTest(BusinessTestBase):
         pet = make_pet(district=self.district_a)
         checkin = CheckIn.objects.create(pet=pet, pet_code=pet.code,
                                          adopter=self.adopter, month='2026-01')
-        self.login_as(self.gov_a)
+        # 用捕捉点身份审核：第四十九轮政府端转只读，`checkin_review` 的写角色
+        # 只剩 `shelter`。审计归属判据要求「日志里能读出区县」，这条与角色无关。
+        self.login_as(self.shelter_user_a)
         self.ok(self.post_json(f'/api/business/checkins/{checkin.id}/review/',
                                {'status': 'approved'}))
         self._assert_attributed(self.district_a, '回访打卡')
@@ -477,7 +480,7 @@ class AuditWriteCoverageTest(BusinessTestBase):
         self.ok(self.post_json('/api/supervision/users/create/', {
             'username': 'audit_new_user', 'name': '新用户',
             'role': 'gov_district', 'district_id': self.district_a.id,
-            'password': '123456'}))
+            'password': 'TnrAudit!2026'}))
         self._assert_attributed(self.district_a, '用户管理')
 
     def test_user_toggle(self):

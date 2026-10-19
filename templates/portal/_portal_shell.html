@@ -1,0 +1,273 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% comment %}
+四个业务端（捕捉点 / 医院 / 政府 / 平台）共用的门户外壳 —— 第五十二轮重构 A。
+
+合并前的事实：shelter_base.html、hospital_base.html、gov_base.html、
+platform_base.html 四个文件共 1060 行，其中 <style>（156 行）与
+block extra_js（侧栏开关，25 行）逐字节相同 —— 剥掉注释、再把
+--grad-gold / --grad-cinnabar 归一之后四份 md5 一致；HTML 骨架只差品牌文案、
+导航项和一处角色兜底文本。也就是说 900 多行是同一份样板抄了四遍。
+
+抄四遍的代价不是「不好看」，而是改一处要改四处，漏掉的那份静默生效：
+第四十二轮给政府端加「点菜单项后自动收起侧栏」时只改了 gov_base.html，
+另外三端在手机上照旧遮挡内容；这种漂移不报错、不 500，只有拿手机点开才看得见。
+
+所以这里只留一份外壳，角色差异全部走 block：
+  - seal_grad / seal_char / brand_name / brand_sub：印章配色与品牌文案
+  - nav_items：本端导航。导航项里的 block nav_xxx 仍然嵌在 nav_items 内，
+    与合并前「nav_xxx 嵌在 body 内」是同一机制：Django 的 get_blocks()
+    会递归收集嵌套 block，所以子模板（各端 portal.html）覆写高亮照旧生效。
+  - page_title / role_display：顶栏标题与侧栏角色兜底
+
+⚠ 外壳里不要写角色相关的判断（形如 if user.role == ...）。一写就把四端耦合
+回来了：以后加第五端得动这份公共文件，而它一改就是四端同时回归。
+差异只允许出现在角色 base 里。
+
+领养人端（adopter_base.html）不进这个外壳：它是 420px 移动框架 + 底部导航，
+没有侧栏与开关脚本，硬合并只会让外壳长出一堆条件分支。
+{% endcomment %}
+
+{% block extra_head %}
+<style>
+  body { background: var(--rice-paper); }
+  .topbar { display: none !important; }
+
+  .portal-layout {
+    display: flex;
+    min-height: 100vh;
+  }
+
+  /* 侧边栏 */
+  .portal-sidebar {
+    width: var(--sidebar-w);
+    background: var(--grad-sidebar);
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 200;
+    transition: transform var(--t-slow);
+    overflow: hidden;
+  }
+
+  .portal-sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: var(--sp-4);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    flex-shrink: 0;
+  }
+
+  /* 印章底色 = 本端主题色，由角色 base 通过 --portal-seal 传入 */
+  .portal-sidebar-brand .seal-icon {
+    width: 36px;
+    height: 36px;
+    background: var(--portal-seal, var(--grad-cinnabar));
+    border-radius: var(--r-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    flex-shrink: 0;
+    font-family: var(--font-display);
+  }
+
+  .portal-sidebar-brand-text {
+    font-family: var(--font-display);
+    font-size: var(--fs-lg);
+    font-weight: 700;
+    color: #fff;
+    white-space: nowrap;
+  }
+
+  .portal-sidebar-brand-sub {
+    font-size: var(--fs-xs);
+    color: rgba(255,255,255,0.4);
+    white-space: nowrap;
+  }
+
+  .portal-sidebar-nav {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: var(--sp-3) var(--sp-2);
+  }
+
+  .portal-sidebar-nav::-webkit-scrollbar { width: 4px; }
+  .portal-sidebar-nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); }
+
+  .portal-sidebar-footer {
+    padding: var(--sp-3);
+    border-top: 1px solid rgba(255,255,255,0.08);
+    flex-shrink: 0;
+  }
+
+  .portal-sidebar-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(28,28,28,0.4);
+    z-index: 199;
+  }
+
+  .portal-sidebar-overlay.show { display: block; }
+
+  /* 主区域 */
+  .portal-main {
+    flex: 1;
+    margin-left: var(--sidebar-w);
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    min-width: 0;
+  }
+
+  .portal-topbar {
+    height: var(--header-h);
+    background: var(--white);
+    border-bottom: 1px solid var(--border-light);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 var(--sp-6);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: var(--shadow-xs);
+  }
+
+  .portal-topbar-left {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-4);
+  }
+
+  .portal-topbar-toggle {
+    display: none;
+    width: 36px;
+    height: 36px;
+    border: none;
+    background: var(--rice-paper);
+    border-radius: var(--r-md);
+    cursor: pointer;
+    font-size: 18px;
+    color: var(--ink-text);
+    align-items: center;
+    justify-content: center;
+  }
+
+  .portal-topbar-title {
+    font-family: var(--font-display);
+    font-size: var(--fs-xl);
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .portal-topbar-right {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+  }
+
+  .portal-content {
+    flex: 1;
+    padding: var(--sp-6);
+    overflow-y: auto;
+  }
+
+  /* 响应式 */
+  @media (max-width: 768px) {
+    .portal-sidebar { transform: translateX(-100%); }
+    .portal-sidebar.show { transform: translateX(0); }
+    .portal-main { margin-left: 0; }
+    .portal-topbar-toggle { display: flex; }
+    .portal-content { padding: var(--sp-3); }
+  }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="portal-layout">
+
+  <aside class="portal-sidebar" id="portalSidebar"
+         style="--portal-seal: {% block seal_grad %}var(--grad-cinnabar){% endblock %};">
+    <div class="portal-sidebar-brand">
+      <div class="seal-icon">{% block seal_char %}端{% endblock %}</div>
+      <div>
+        <div class="portal-sidebar-brand-text">{% block brand_name %}业务门户{% endblock %}</div>
+        <div class="portal-sidebar-brand-sub">{% block brand_sub %}Portal{% endblock %}</div>
+      </div>
+    </div>
+
+    <nav class="portal-sidebar-nav">
+      {% block nav_items %}{% endblock %}
+    </nav>
+
+    <div class="portal-sidebar-footer">
+      <div class="sidebar-user">
+        <div class="sidebar-user-avatar">{{ user.username|slice:":1"|upper }}</div>
+        <div class="sidebar-user-info">
+          <div class="sidebar-user-name">{{ user.username|default:"未登录" }}</div>
+          <div class="sidebar-user-role">{% block role_display %}{{ user.get_role_display }}{% endblock %}</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <div class="portal-sidebar-overlay" id="portalSidebarOverlay"></div>
+
+  <div class="portal-main">
+    <header class="portal-topbar">
+      <div class="portal-topbar-left">
+        <button class="portal-topbar-toggle" id="portalSidebarToggle">☰</button>
+        <div class="portal-topbar-title">{% block page_title %}业务门户{% endblock %}</div>
+      </div>
+      <div class="portal-topbar-right">
+        <a href="{% url 'portal' %}" class="btn btn-ghost btn-sm">门户</a>
+        <a href="{% url 'accounts:logout' %}" class="btn btn-secondary btn-sm">退出</a>
+      </div>
+    </header>
+
+    <main class="portal-content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  // 移动端侧边栏开关
+  (function() {
+    var toggle = document.getElementById('portalSidebarToggle');
+    var sidebar = document.getElementById('portalSidebar');
+    var overlay = document.getElementById('portalSidebarOverlay');
+    function closeSidebar() {
+      if (sidebar) sidebar.classList.remove('show');
+      if (overlay) overlay.classList.remove('show');
+    }
+    if (toggle && sidebar && overlay) {
+      toggle.addEventListener('click', function() {
+        sidebar.classList.toggle('show');
+        overlay.classList.toggle('show');
+      });
+      overlay.addEventListener('click', closeSidebar);
+    }
+    // 手机上点击菜单项后自动收起侧边栏，避免遮挡内容
+    var nav = document.querySelector('.portal-sidebar-nav');
+    if (nav) {
+      nav.addEventListener('click', function(e) {
+        if (e.target.closest('a, .nav-item')) closeSidebar();
+      });
+    }
+  })();
+</script>
+{% endblock %}

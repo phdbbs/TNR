@@ -8,7 +8,7 @@
 | `get-silent` | 含 `this._get(` | 返回 `[]`（**忽略 HTTP 状态**） | ❌ 接不住 |
 | `post-silent` | 含 `this._post(` / `this._postForm(` | 返回 `res.json()`（不校验 `success`） | ❌ 接不住**除非**外面包了 `TNR_UI.assertOk` |
 | `throwing` | 含 `this.get(` / `this.post(` / `this._handle(`，或显式 `fetch(` + `throw` | 抛异常 | ✅ 接得住 |
-| `pure` | 都不含（如 `getPetStatusText`） | 不发请求 | —（不参与判定） |
+| `pure` | 都不含（如 `petAttrText`） | 不发请求 | —（不参与判定） |
 | `fallback` | 含 `fetch(` 且有本地兜底（如 `generatePetCodes`） | 静默降级到本地 | ⚠ 有意为之，单独列 |
 
 `TNR_UI.assertOk(res, msg)` 只在 `res.success === false` 时抛错 —— 所以它**只对
@@ -40,12 +40,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jslex import SCRIPT_RE, match_brace, strip_js  # noqa: E402
+from frontend_sources import ROLES, read_js  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 API_PATH = ROOT / 'static/js/tnr-api.js'
-#: ⚠ 新增门户必须加进来，否则清点器看不见它 —— 覆盖面无声明地缩水。
-#: `platform` 是第四十二轮新增的平台管理端（全局设置页从政府端迁入）。
-PORTALS = ('shelter', 'gov', 'hospital', 'adopter', 'platform')
+#: 门户清单的唯一真源是 `scripts/frontend_sources.py::ROLES`（一处登记）。
+#: 以前这里也抄了一份元组，抽 JS 之后「名字对不上文件」就是漏扫 ——
+#: 而漏扫的表现是清点结果变少，看起来像「缺陷被修完了」。
+PORTALS = ROLES
 
 CALL_RE = re.compile(r'TNR_API\.([A-Za-z_]\w*)\s*\(')
 CATCH_RE = re.compile(r'\s*catch\s*(\([^)]*\))?\s*\{')
@@ -56,7 +58,7 @@ PRIMITIVES = ('_get', '_post', '_postForm')
 def api_methods(api_src):
     """方法名 -> 类别（见模块 docstring 的表）。
 
-    ⚠ **同步方法也要扫**：`getPetStatusText` / `petAttrText` 这些纯文案函数是
+    ⚠ **同步方法也要扫**：`petAttrText` / `getMaterialCategoryText` 这些纯文案函数是
     同步的。只扫 `async` 的话它们压根不在表里，`survey` 只能靠「未知即 pure」
     的默认值兜着 —— 那是**隐式**的，一旦默认值被改坏就没人发现。
     这里显式登记，让「纯函数」是个**结论**而不是**巧合**。
@@ -115,16 +117,40 @@ SUCCESS_RE = re.compile(r'\.success\b')
 # 「catch 体里向用户呈现了失败」的判据。
 # 只有这些才算「作者承诺了失败提示」—— 承诺落空才是缺陷。
 # `pets = []`（降级为空）或只有注释，都属于**有意降级**，不在缺陷之列。
-PRESENT_RE = re.compile(r'\b(toast|alert)\s*\(|\.innerHTML\b|\.textContent\b')
+#
+# `showLoadError(...)` 这类**统一的失败态助手**也要算呈现：它内部写的是
+# `el.innerHTML`，但调用点本身看不到 innerHTML —— 探针若只认直接赋值，
+# 平台端三页改用助手后，`test_planted_regression_is_detected` 就会假绿
+# （植入静默读也报不出死 catch）。第五十五轮实测踩到过。
+PRESENT_RE = re.compile(
+    r'\b(toast|alert|show\w*Error)\s*\(|\.innerHTML\b|\.textContent\b')
+
+
+def _script_spans(src):
+    """返回要当 JS 处理的 `(start, end)` 区间列表。
+
+    与 `jslex.stripped_kinds` 同一个约定：给的是 HTML 就只取内联 `<script>` 体，
+    给的是**纯 JS** 就整份当一段脚本。
+
+    这个分支不是防御性冗余 —— 第五十二轮把门户逻辑搬到
+    `static/js/portals/<role>.js` 之后，如果还只按 `<script>` 找，
+    `finditer` 命中 0 次，清点结果直接变成「一处死 catch 都没有」，
+    `test_no_dead_catch_anywhere` 会**假绿**（判据看不见代码的最坏形态）。
+    """
+    if '<script' not in src.lower():
+        return [(0, len(src))]
+    spans = []
+    for m in SCRIPT_RE.finditer(src):
+        if re.search(r'\bsrc\s*=', m.group('attrs'), re.IGNORECASE):
+            continue                       # 外链脚本，没有可剥的源码
+        spans.append((m.start('body'), m.end('body')))
+    return spans
 
 
 def survey(src, api):
     rows = []
-    for m in SCRIPT_RE.finditer(src):
-        if re.search(r'\bsrc\s*=', m.group('attrs'), re.IGNORECASE):
-            continue
-        a = m.start('body')
-        body_st = strip_js(src[a:m.end('body')])
+    for a, b in _script_spans(src):
+        body_st = strip_js(src[a:b])
         for t in re.finditer(r'\btry\s*\{', body_st):
             try_end = match_brace(body_st, body_st.index('{', t.start()))
             if try_end < 0:
@@ -208,7 +234,7 @@ def main():
     tally = {}
     need = []
     for name in PORTALS:
-        src = (ROOT / f'templates/portal/{name}/portal.html').read_text(encoding='utf-8')
+        src = read_js(name)
         rows = survey(src, api)
         print(f'== {name}：含 API 调用的 try/catch {len(rows)} 处')
         for r in rows:

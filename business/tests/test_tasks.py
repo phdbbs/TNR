@@ -48,6 +48,49 @@ class AutoPromoteTest(BusinessTestBase):
         pet.refresh_from_db()
         self.assertEqual(pet.status, 'in_treatment')
 
+    def test_release_deferred_pet_not_promoted(self):
+        """放归两段：办结了「放回原小区」但动物还在院内等转运，不得被改成待领养。
+
+        `dispose(defer_pet_status=True)` 刻意造出「`status='completed'` 且
+        `Pet.status='in_treatment'`」这个中间态，正是旧判据的命中对象 ——
+        不排除的话，一只要回原小区的猫 5 天后会出现在领养大厅。
+        """
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='in_treatment')
+        t = _completed_treatment(pet, days_ago=6)
+        Treatment.objects.filter(id=t.id).update(
+            disposal='released', disposed_at=timezone.now() - timedelta(days=6))
+        auto_promote_to_adoptable()
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_treatment',
+                         '已定放归去向的动物不应被定时任务上架领养大厅')
+        self.assertFalse(AdoptionHallListing.objects.filter(pet=pet).exists())
+
+    def test_force_also_skips_non_adopt_disposal(self):
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='in_treatment')
+        t = _completed_treatment(pet, days_ago=0)
+        Treatment.objects.filter(id=t.id).update(disposal='owner_returned')
+        auto_promote_to_adoptable(force=True)
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_treatment')
+
+    def test_cutoff_uses_done_at(self):
+        """「诊疗完成 5 天」按 `done_at` 算，不是建档时间 —— 建档 8 天前、
+        昨天才诊疗完成的动物还不能上架。"""
+        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+                       status='in_treatment')
+        t = _completed_treatment(pet, days_ago=8)
+        Treatment.objects.filter(id=t.id).update(done_at=timezone.now() - timedelta(days=1))
+        auto_promote_to_adoptable()
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_treatment')
+
+        Treatment.objects.filter(id=t.id).update(done_at=timezone.now() - timedelta(days=6))
+        auto_promote_to_adoptable()
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'pending_adopt')
+
     def test_non_treatment_pet_untouched(self):
         pet = make_pet(district=self.district_a, hospital=self.hospital_a,
                        status='adopted')

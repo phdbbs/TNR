@@ -42,6 +42,37 @@ class EuthanasiaCreateTest(BusinessTestBase):
         self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'reason': 'x'}),
                   message='不可安乐死')
 
+    def test_create_missing_date_rejected(self):
+        """处置日期必填（第五十二轮电脑端巡检）。
+
+        表单标了「处置日期*」，接口原先把空值静默落成 `None` ——
+        一张没有日期的不可逆处置单据，打印件与监管台账的日期栏直接空着。
+        """
+        pet = self._pet()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {
+            'pet_id': pet.id, 'reason': '病重', 'condition': '多器官衰竭'}),
+            message='安乐死日期不能为空')
+        self.assertEqual(Euthanasia.objects.filter(pet=pet).count(), 0)
+
+    def test_create_unparseable_date_rejected(self):
+        """解析失败不能退化成「没有日期」，否则错填的日期会静默丢失。"""
+        pet = self._pet()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(f'{URL}create/', {
+            'pet_id': pet.id, 'reason': '病重', 'condition': 'x',
+            'euthanized_at': '2026/03/01'}),
+            message='格式不正确')
+        self.assertEqual(Euthanasia.objects.filter(pet=pet).count(), 0)
+
+    def test_create_dead_kind_requires_its_own_date_label(self):
+        """`dead`（死亡 / 无害化）走同一个入口，缺日期时提示用本 kind 的名称。"""
+        pet = self._pet()
+        self.login_as(self.hospital_user_a)
+        resp = self.post_json(f'{URL}create/', {
+            'pet_id': pet.id, 'kind': 'dead', 'reason': '送医途中死亡', 'condition': 'x'})
+        self.expect_fail(resp, message='死亡 / 无害化日期不能为空')
+
     def test_shelter_cannot_create(self):
         pet = self._pet()
         self.login_as(self.shelter_user_a)
@@ -135,7 +166,8 @@ class EuthanasiaKindTest(BusinessTestBase):
         pet = self._pet()
         self.login_as(self.hospital_user_a)
         body = self.ok(self.post_json(f'{URL}create/',
-                                      {'pet_id': pet.id, 'reason': '病重'}))
+                                      {'pet_id': pet.id, 'reason': '病重',
+                                       'euthanized_at': '2026-03-01'}))
         self.assertEqual(body['data']['kind'], 'euthanasia')
         pet.refresh_from_db()
         self.assertEqual(pet.status, 'euthanized')
@@ -144,7 +176,8 @@ class EuthanasiaKindTest(BusinessTestBase):
         pet = self._pet()
         self.login_as(self.hospital_user_a)
         body = self.ok(self.post_json(f'{URL}create/', {
-            'pet_id': pet.id, 'reason': '送医途中死亡', 'kind': 'dead'}))
+            'pet_id': pet.id, 'reason': '送医途中死亡', 'kind': 'dead',
+            'euthanized_at': '2026-03-01'}))
         self.assertEqual(body['data']['kind'], 'dead')
         self.assertEqual(Euthanasia.objects.get(id=body['data']['id']).kind, 'dead')
         pet.refresh_from_db()
@@ -169,6 +202,7 @@ class EuthanasiaKindTest(BusinessTestBase):
         pet = self._pet()
         self.login_as(self.hospital_user_a)
         body = self.ok(self.post_json(f'{URL}create/',
-                                      {'pet_id': pet.id, 'reason': 'x'}))
+                                      {'pet_id': pet.id, 'reason': 'x',
+                                       'euthanized_at': '2026-03-01'}))
         record = Euthanasia.objects.get(id=body['data']['id'])
         self.assertEqual(record.institution_id, self.hospital_a.id)

@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""渲染各门户页面，把内联 <script> 抽出来做语法检查。
+"""渲染各门户页面，把内联 <script> 抽出来做语法检查；顺带 `node --check` 门户 JS。
 
 存在的理由：模板里的内联 JS **没有任何静态校验** —— Django 模板标签会让
 `node --check` 直接失败，所以「改了模板 JS 但写错一个括号」只能等浏览器
 报错才发现，而浏览器里的表现是**整页白屏**（脚本解析失败 → 后续
 `DOMContentLoaded` 回调根本不注册），不是一句可读的错误。
 这里把渲染结果抽出来交给 node 解析，把这类错误挡在部署前。
+
+第五十二轮 重构 B 之后，各端的应用逻辑搬到 `static/js/portals/<role>.js`，
+模板里只剩引导脚本（`window.TNR_USER = {{ user_data|safe }}` 那一类）。
+所以这个脚本现在查**两样**东西：
+  * 渲染结果里的内联段 —— 仍然是「模板标签 + JS」混着的，只能渲染后检查；
+  * `static/js/portals/*.js` —— 纯 JS，直接 `node --check`，不需要登录、
+    也不受模板改动影响。抽取的收益正在这里：**能脱离 Django 校验**。
 
 用法（在项目根，用本地 venv）::
 
@@ -24,7 +31,10 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'scripts'))
 os.chdir(ROOT)
+
+from frontend_sources import ROLES, js_path  # noqa: E402  门户 JS 清单一处登记
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tnr_system.settings')
 import django  # noqa: E402
@@ -110,7 +120,31 @@ def main():
 
     print()
     print(f'  检查了 {checked} 段内联脚本，{failures} 处失败')
-    return 1 if failures else 0
+
+    # ---- 门户 JS 文件（第五十二轮 重构 B 之后，应用逻辑住在这里）----
+    #
+    # 文件**不存在**算失败而不是跳过：模板里的 `<script src=…portals/x.js>` 一旦
+    # 指向缺失文件，浏览器只是静默 404 —— 页面框架渲染正常、点什么都没反应，
+    # 是最难从现象倒查的一类故障。
+    static_fail = 0
+    for role in ROLES:
+        path = js_path(role)
+        if not path.exists():
+            print(f'  ✗ {path.relative_to(ROOT)} 缺失（模板仍在引用它）')
+            static_fail += 1
+            continue
+        r = subprocess.run([node, '--check', str(path)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            static_fail += 1
+            print(f'  ✗ {path.relative_to(ROOT)} 语法错误：')
+            print('    ' + (r.stderr or '').strip().replace('\n', '\n    ')[:800])
+        else:
+            print(f'  ✓ {path.relative_to(ROOT)}')
+    print()
+    print(f'  检查了 {checked} 段内联脚本 + {len(ROLES)} 个门户 JS，'
+          f'{failures + static_fail} 处失败')
+    return 1 if (failures or static_fail) else 0
 
 
 if __name__ == '__main__':

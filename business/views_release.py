@@ -9,13 +9,15 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
-from business.models import Release, Pet, Capture
+from business.models import Release
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
     generate_doc_no, get_district_filtered_queryset,
     get_active_pet, get_hospital_scoped_pet, get_scoped_object,
+    get_printable_object,
     hospital_pet_write_error, pet_has_active_adoption,
+    pet_has_pending_release,
     resolve_community,
 )
 
@@ -52,7 +54,7 @@ def release_list(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@role_required('shelter', 'hospital')
 @login_required
 def release_create(request):
     """创建放归记录（放回原捕捉小区）
@@ -93,9 +95,10 @@ def release_create(request):
     if pet_has_active_adoption(pet):
         return json_fail('该宠物已有未完结的领养记录，请先撤销领养后再办理放归')
 
-    # 防止重复创建待放归记录
-    if Release.objects.filter(pet=pet, status='pending').exists():
-        return json_fail('该宠物已有待放归记录，请勿重复创建')
+    # 防止重复创建待放归记录（口径见 `Release.OPEN_STATUSES`：
+    # 已登记转运、等签字的单同样未办结，不能再开第二张）
+    if pet_has_pending_release(pet):
+        return json_fail('该宠物已有未办结的放归记录，请勿重复创建')
 
     # 匹配原小区
     #
@@ -149,7 +152,7 @@ def release_create(request):
 
 
 @csrf_exempt
-@role_required('hospital', 'shelter', 'gov_city', 'gov_district')
+@role_required('hospital', 'shelter')
 @login_required
 def release_transfer(request, pk):
     """把动物**转运回原小区**（第四十八轮：放归的第一段）。
@@ -162,7 +165,13 @@ def release_transfer(request, pk):
     件事：小区接收人还没签字、动物还在车上，台账上已经写「已放归」了。
     """
     user = request.user
-    release = get_scoped_object(Release, pk, user)
+    # 按「本机构 ∪ 本区县」取单，与 `release_list` 医院端口径一致。
+    # 用 `get_scoped_object`（只按区县）会让跨区县送医的医院
+    # **在出院页看得到这张放归单、点「转运回小区」却 404**：
+    # `Release.district` 是动物的区县，`Release.institution` 才是本院
+    # （见 `release_create`：`institution_id=pet.hospital_id or pet.shelter_id`），
+    # 结果单据永远停在「待放归」。
+    release = get_printable_object(Release, pk, user)
     if release is None:
         return json_fail('放归记录不存在或无权访问', status=404)
 
@@ -179,7 +188,7 @@ def release_transfer(request, pk):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def release_confirm(request, pk):
     """小区确认放归（接收人签字确认）
@@ -193,6 +202,7 @@ def release_confirm(request, pk):
 
     ⚠ 允许 `pending` 直接确认：旧前端 / 历史数据没有「转运回小区」这一步，
     不能因为新增了中间状态就把它们卡死。新流程走 `transferred`。
+    接受的取值 = `Release.OPEN_STATUSES`（前后端共用这一条口径）。
     """
     data = parse_json_body(request)
     user = request.user
@@ -201,7 +211,7 @@ def release_confirm(request, pk):
     if release is None:
         return json_fail('放归记录不存在或无权访问', status=404)
 
-    if release.status not in ('pending', 'transferred'):
+    if release.status not in Release.OPEN_STATUSES:
         return json_fail(f'当前状态({release.get_status_display()})不可确认')
 
     if release.pet_id and release.pet.is_deleted:

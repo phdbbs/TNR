@@ -7,7 +7,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
 
-from business.models import Material, MaterialTransaction, Pet
+from business.models import Chip, Material, MaterialTransaction, Pet
 from business.services import (
     check_blacklist, generate_ledger_no, generate_pet_codes,
     get_district_filtered_queryset, get_hospital_stock, serialize_instance,
@@ -113,6 +113,73 @@ class UseChipTest(TestCase):
         hospital = make_institution(type='hospital', name='本院')
         pet = make_pet()
         self.assertTrue(use_chip(chip.number, pet, institution=hospital))
+
+    def test_void_chip_raises(self):
+        """**已作废**（损坏 / 丢失，随库存异动报损）的芯片不能植进动物。
+
+        第四态原先没人判：`chip_batch_void()` 明确「只作废 available」的号，
+        作废之后却照样能被 `use_chip()` 用掉 —— 档案与实物对不上，
+        而那颗的库存早在异动时就扣掉了（再扣一次是重复扣）。
+        """
+        chip = make_chip(status='void')
+        pet = make_pet()
+        with self.assertRaises(ValueError) as ctx:
+            use_chip(chip.number, pet)
+        self.assertIn('已作废', str(ctx.exception))
+
+        chip.refresh_from_db()
+        pet.refresh_from_db()
+        # 文案之外还要盯住**结果**：即便有人把上面那条友好分支删了，
+        # `WHERE status='available'` 也得让这颗号落不下去（双保险）。
+        self.assertEqual(chip.status, 'void')
+        self.assertEqual(chip.pet_id, None)
+        self.assertFalse(pet.chip_no)
+
+    def test_competing_use_landed_after_our_read_is_rejected(self):
+        """「读 → 判 → 写」中间的并发必须由**条件更新**拦下。
+
+        ⚠ 这条**不是**「先后调用两次」（那种顺序用例第一道状态判据就拦住了，
+        把 CAS 变异回盲写 `chip.save()` 它照样通过 —— 测不到竞态）。
+        这里把竞写**注入到读之后、写之前**：模拟另一家医院在我们读到
+        `available` 之后、落库之前，把同一个号植给了别的动物。
+
+        旧写法两笔都「成功」：芯片归后写的那只，而两只动物的档案上都写着
+        同一个号 —— 一颗法定身份对应两只动物，要到领养/无害化对不上号才暴露。
+        """
+        chip = make_chip()
+        winner, loser = make_pet(), make_pet()
+        real_get = Chip.objects.get
+
+        def racing_get(*args, **kwargs):
+            row = real_get(*args, **kwargs)
+            Chip.objects.filter(number=chip.number).update(
+                status='used', pet=winner, used_at=date.today())
+            return row
+
+        with mock.patch.object(Chip.objects, 'get', side_effect=racing_get):
+            with self.assertRaises(ValueError) as ctx:
+                use_chip(chip.number, loser)
+        self.assertIn('已被他人使用', str(ctx.exception))
+
+        chip.refresh_from_db()
+        loser.refresh_from_db()
+        self.assertEqual(chip.pet, winner, '芯片该归先落库的那一笔')
+        self.assertFalse(loser.chip_no, '输的那一笔不能把号写进自己的宠物档案')
+
+    def test_pet_write_failure_rolls_back_chip_status(self):
+        """芯片标记与宠物档案是同一笔业务的两半，必须同生同死。
+
+        只落一半的后果是「芯片说已被使用、没有任何宠物写着这个号」
+        （追溯查不到动物）或反向（宠物写着号、芯片还是 available，
+        于是它还能被植给第二只 —— 正好退化成上面那条用例要防的形态）。
+        """
+        chip = make_chip()
+        pet = make_pet()
+        with mock.patch.object(Pet, 'save', side_effect=RuntimeError('库挂了')):
+            with self.assertRaises(RuntimeError):
+                use_chip(chip.number, pet)
+        chip.refresh_from_db()
+        self.assertEqual(chip.status, 'available')
 
 
 class AdjustStockTest(TestCase):

@@ -126,7 +126,7 @@ def checkin_create(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def checkin_review(request, pk):
     """审核回访打卡
@@ -142,10 +142,10 @@ def checkin_review(request, pk):
 
     # 打卡记录本身无 district 字段，按所属宠物的区县收敛可见范围，
     # 避免只凭主键即可跨区县审核他人的回访打卡。
+    # 「全市（市级）」操作员不收敛：现场两个捕捉点就挂在市级，它们服务全市，
+    # 按区县过滤会让它们一条也审不了（政府角色第四十九轮起已不能审核）。
     qs = CheckIn.objects.select_related('pet')
-    if user.role == 'gov_city':
-        pass
-    elif getattr(getattr(user, 'district', None), 'is_city', False):
+    if getattr(getattr(user, 'district', None), 'is_city', False):
         pass
     elif user.district_id:
         qs = qs.filter(pet__district_id=user.district_id)
@@ -200,7 +200,7 @@ def blacklist_list(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def blacklist_create(request):
     """添加黑名单
@@ -249,7 +249,7 @@ def blacklist_create(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def blacklist_update(request, pk):
     """编辑黑名单记录。"""
@@ -286,7 +286,7 @@ def blacklist_update(request, pk):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def blacklist_delete(request, pk):
     """移出黑名单（逻辑删除，数据库记录保留）。"""

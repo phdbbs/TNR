@@ -78,6 +78,11 @@ class Command(BaseCommand):
             ('捕捉点库存字段与机构库存合计不一致', self.check_shelter_stock_field),
         ]
 
+        # 「待补录」类：只提示、不计入退出码（理由见下面输出段的说明）。
+        advisories = [
+            ('医院操作员未登记执业兽医师证号', self.check_hospital_without_vet_license),
+        ]
+
         total_issues = 0
         for title, check in checks:
             try:
@@ -99,6 +104,29 @@ class Command(BaseCommand):
             if count > len(samples):
                 self.stdout.write(f'    …（其余 {count - len(samples)} 条未列出）')
 
+        # ---- 待办提示（**不计入退出码**）----
+        # 与上面「一致性问题」的区别：那些是**不该存在**的数据；这些是
+        # 补录入口上线**之前**就存在的账号，业务口径明确「不追溯」（判据见
+        # `services.validate_vet_license`：只在建号/改号两个写入点强制）。
+        # 把它们算进退出码的后果不是「有人去补」，而是部署脚本天天红、
+        # 大家开始忽略巡检输出 —— 那才是真正会漏问题的状态。
+        for title, check in advisories:
+            try:
+                count, samples = check(limit)
+            except Exception as exc:  # noqa: BLE001
+                self.stdout.write(self.style.ERROR(
+                    f'? {title}：检查本身出错 —— {exc}'))
+                continue
+            if count == 0:
+                self.stdout.write(f'✓ {title}')
+                continue
+            self.stdout.write(self.style.NOTICE(
+                f'i {title}：{count} 条（属待补录，不阻断）'))
+            for line in samples:
+                self.stdout.write(f'    - {line}')
+            if count > len(samples):
+                self.stdout.write(f'    …（其余 {count - len(samples)} 条未列出）')
+
         self.stdout.write('')
         if total_issues:
             self.stdout.write(self.style.ERROR(f'发现 {total_issues} 条一致性问题'))
@@ -109,6 +137,21 @@ class Command(BaseCommand):
     # ============================================
     # 账号 / 机构
     # ============================================
+    @staticmethod
+    def check_hospital_without_vet_license(limit):
+        """启用中的医院操作员没登记执业证号 = 他签的诊疗单无法追溯到执业人。
+
+        证号自第四十九轮起成为**建号必填**，但现网存量医院账号的证号是空的
+        （口径：不追溯、不做登录门禁，见 `services.validate_vet_license`）。
+        这条的作用是把「还有哪些要补」列出来 —— 平台端账号列表现在能看到
+        「未登记」，批量核对仍得靠巡检。
+        """
+        qs = (User.objects.filter(role='hospital', is_active=True, vet_license='')
+              .select_related('institution').order_by('id'))
+        return _rows(qs, lambda u: (
+            f'{u.username}（{u.institution.name if u.institution_id else "未挂机构"}）'
+            f' · {_district_name(u)}'), limit)
+
     @staticmethod
     def check_user_institution_district(limit):
         """账号区县必须与所属机构所在区县自洽（判定逻辑与建号校验共用一份）。

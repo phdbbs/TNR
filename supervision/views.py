@@ -4,9 +4,10 @@ Task 13: 政府监管后端
 - 业务监管 / 物资监管 / 台账中心 / 操作日志 / 系统配置
 """
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Sum, Count, Q, Prefetch, Max
-from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import api_login_required, role_required
@@ -22,10 +23,16 @@ from business.services import (
     get_district_scope, pet_brief, pet_archive_records, with_camel_keys,
     validate_operator_district, cascade_operator_district,
     validate_user_manage_scope, inactive_district_error,
+    is_valid_phone, normalize_vet_license, validate_vet_license,
+    validate_vet_license_unique,
     parse_int_param, parse_date_param, date_upper_exclusive, aware_day_start,
 )
 from core.audit import ACTION_LABELS
-from core.models import AuditLog, District, Institution
+from core.models import (
+    AuditLog, District, Institution,
+    STATUS_ACTIVE, STATUS_INACTIVE, STATUS_VALUES, status_label,
+)
+from core.privacy import mask_id_card
 from core.scope import is_empty_scope
 from .models import SystemConfig
 
@@ -275,7 +282,7 @@ def institution_create(request):
         address=body_str(data, 'address').strip(),
         contact=body_str(data, 'contact').strip(),
         phone=phone,
-        status='active',
+        status=STATUS_ACTIVE,
     )
     return json_ok(serialize_instance(inst), message='机构创建成功')
 
@@ -382,13 +389,13 @@ def institution_toggle_status(request, pk):
     if inst is None:
         return json_fail('机构不存在或无权访问', status=404)
 
-    inst.status = 'inactive' if inst.status == 'active' else 'active'
+    inst.status = STATUS_INACTIVE if inst.status == STATUS_ACTIVE else STATUS_ACTIVE
     inst.save(update_fields=['status'])
     # 审计用上下文：响应体只回 id/status，中间件读不出归属区县
     request.audit_district = inst.district
     return json_ok(
         {'id': inst.id, 'status': inst.status},
-        message=f'机构已{"停用" if inst.status == "inactive" else "启用"}'
+        message=f'机构已{status_label(inst.status)}'
     )
 
 
@@ -431,7 +438,7 @@ def district_create(request):
     is_city = bool(data.get('is_city', False))
 
     district = District.objects.create(
-        name=name, code=code, is_city=is_city, status='active'
+        name=name, code=code, is_city=is_city, status=STATUS_ACTIVE
     )
     # 审计用上下文：`District` 自己没有 district 外键，响应体里读不出归属区县
     request.audit_district = district
@@ -493,8 +500,9 @@ def district_edit(request, pk):
         # 编辑接口必须与它**同值域**，否则前者只是「界面上不容易踩到」，
         # 不是约束 —— 直接调接口就能塞进任意状态。
         new_status = body_str(data, 'status')
-        if new_status not in ('active', 'inactive'):
-            return json_fail('区县状态只能是启用（active）或停用（inactive）')
+        if new_status not in STATUS_VALUES:
+            return json_fail('区县状态只能是 ' + ' / '.join(
+                f'{status_label(v)}（{v}）' for v in STATUS_VALUES))
         district.status = new_status
         update_fields.append('status')
 
@@ -518,12 +526,12 @@ def district_toggle_status(request, pk):
     except District.DoesNotExist:
         return json_fail('区县不存在', status=404)
 
-    district.status = 'inactive' if district.status == 'active' else 'active'
+    district.status = STATUS_INACTIVE if district.status == STATUS_ACTIVE else STATUS_ACTIVE
     district.save(update_fields=['status'])
     request.audit_district = district
     return json_ok(
         {'id': district.id, 'status': district.status},
-        message=f'区县已{"停用" if district.status == "inactive" else "启用"}'
+        message=f'区县已{status_label(district.status)}'
     )
 
 
@@ -584,6 +592,10 @@ def user_list(request):
             'institution_id': u.institution_id,
             'institution_name': u.institution.name if u.institution else '',
             'phone': u.phone,
+            # 执业证号：平台端建医院账号时录入的身份凭证（业务 2026-10-19 口径）。
+            # 列表要带 —— 监管/平台要能在账号表里直接看出「这个医院账号到底有没有证」，
+            # 藏进详情就等于还是要挨个点。
+            'vet_license': u.vet_license,
             'status': u.status,
             'is_active': u.is_active,
             'is_superuser': u.is_superuser,
@@ -608,7 +620,12 @@ def user_create(request):
     - shelter：可挂市级或区县（归属市级的捕捉点，各区县管理账号无权查看其数据）
     - adopter：不在平台/政府端创建（由捕捉点在领养登记时自动创建）
     - hospital：必须关联医院机构（institution.type='hospital'）
+    - hospital：**必须登记执业兽医师证号**（第四十九轮补的录入口，
+      诊疗单签名靠它带出；判据在 `services.validate_vet_license`，
+      非医院角色填了证号同样拒绝）
     - shelter：必须关联捕捉点机构（institution.type='shelter'）
+    - **初始密码必须显式提供**，不再回退到统一默认口令；
+      强度判据与改密接口一致（Django `AUTH_PASSWORD_VALIDATORS`）。
     """
     data = parse_json_body(request)
 
@@ -618,9 +635,7 @@ def user_create(request):
     if User.objects.filter(username=username).exists():
         return json_fail('用户名已存在')
 
-    password = body_str(data, 'password').strip() or '123456'
-    if len(password) < 6:
-        return json_fail('密码长度不能少于6位')
+    password = body_str(data, 'password').strip()
 
     role = data.get('role')
     # 平台端不允许创建领养人
@@ -684,6 +699,16 @@ def user_create(request):
         except Institution.DoesNotExist:
             return json_fail('所选机构不是医院类型')
 
+    # 执业兽医师证号（第四十九轮补的录入口 —— 见 `services.validate_vet_license`）：
+    # 平台端建医院账号时录入，用它验证操作人的执业身份；诊疗单落库时快照带出。
+    vet_license = normalize_vet_license(data.get('vet_license'))
+    license_err = validate_vet_license(role, vet_license)
+    if license_err:
+        return json_fail(license_err)
+    duplicate_err = validate_vet_license_unique(vet_license)
+    if duplicate_err:
+        return json_fail(duplicate_err)
+
     # 账号区县必须与机构所在区县自洽：账号的 district 决定**读取**侧的区县
     # 隔离范围，而 institution 决定它代表谁。不一致的账号会「看到 A 区县的档案、
     # 以 B 区县的机构身份操作」，而平台端用户管理没有编辑入口、事后改不回来。
@@ -697,13 +722,36 @@ def user_create(request):
     if scope_err:
         return json_fail(scope_err)
 
+    phone = body_str(data, 'phone').strip()
+    # 与机构新建/账号编辑同一条判据：接口不拦就等于没拦（前端那个正则
+    # 只在平台端表单里跑，直接 POST 能把电话写成任意字符串）。
+    if not is_valid_phone(phone):
+        return json_fail('联系电话格式不正确')
+
+    # 口令必须由建号人显式设置：平台端建的是后台管理/操作账号，
+    # 统一默认口令一旦泄漏，拿到的是全院/全区的业务权限。
+    # 密码学判据与 `/api/me/password/` 共用 Django 的校验器，避免两套口径。
+    if not password:
+        return json_fail('请设置初始密码')
+    if len(password) < 6:
+        return json_fail('密码长度不能少于6位')
+    # 传一个未落库的 User 给校验器：`UserAttributeSimilarityValidator`
+    # 只有在拿到 user 时才比对用户名/姓名。不传会让「口令=用户名」在建号
+    # 这一侧放行，而改密接口（传 request.user）却拒绝 —— 同一套判据两个结果。
+    probe = User(username=username, first_name=name)
+    try:
+        validate_password(password, probe)
+    except ValidationError as e:
+        return json_fail('；'.join(e.messages))
+
     user = User.objects.create_user(
         username=username,
         password=password,
     )
     user.role = role
-    user.phone = body_str(data, 'phone').strip()
-    user.status = 'active'
+    user.phone = phone
+    user.vet_license = vet_license
+    user.status = STATUS_ACTIVE
     user.first_name = name
     user.district = district
     if institution:
@@ -716,7 +764,89 @@ def user_create(request):
         'username': user.username,
         'name': user.get_full_name() or user.username,
         'role': user.role,
+        'vet_license': user.vet_license,
     }, message='用户创建成功')
+
+
+# ============================================
+# 9b. 编辑账号的可纠正字段
+# ============================================
+@csrf_exempt
+@role_required('platform_admin')
+@login_required
+def user_update(request, pk):
+    """编辑账号的**姓名 / 电话 / 执业证号**三个字段。
+
+    为什么要有这条路径：执业证号是人手抄进来的证件号，抄错是常态；
+    而本平台原先**没有任何账号编辑入口**（`user_create` 的注释里就把这件事
+    当成「建号时必须校验干净」的理由）。没有纠正入口的后果不是「将错就错」，
+    而是现场去直连数据库改 —— 绕过校验、也不进审计，签名归属反而更不可信。
+
+    ⚠ **范围刻意收窄**：这里只改三个「抄错」类字段。
+    角色 / 所属区县 / 关联机构 / 口令 / 启停 **一律不动** ——
+    它们改变的是这个账号**能看什么、能代表谁**，影响面完全不同，
+    各自已有专属路径（`user_toggle_status`、`user_create`），
+    混进同一个接口就等于把越权面开成一个按钮。
+    """
+    data = parse_json_body(request)
+    user = User.objects.filter(id=pk).first()
+    if user is None:
+        # 只有平台管理员能进本接口（`@role_required('platform_admin')`），
+        # 而平台管理员是全局角色（`core.scope.GLOBAL_SCOPE_ROLES`）——
+        # 这里**不需要**再套一层区县范围过滤，套了反而是死代码。
+        # 「不存在」与「无权」共用同一句话，别写出两种形态。
+        return json_fail('用户不存在或无权访问', status=404)
+
+    changed = []
+    if 'name' in data:
+        name = body_str(data, 'name').strip()
+        if not name:
+            return json_fail('姓名不能为空')
+        if name != user.first_name:
+            user.first_name = name
+            changed.append('姓名')
+    if 'phone' in data:
+        phone = body_str(data, 'phone').strip()
+        if not is_valid_phone(phone):
+            return json_fail('联系电话格式不正确')
+        if phone != user.phone:
+            user.phone = phone
+            changed.append('电话')
+
+    # 证号：**只有请求里出现了这个键才动它**。
+    # 不出现 = 保持原值；出现且为空 = 清空（业务允许「先停用、证号回收」的中间态，
+    # 但医院操作员清空会被下面的校验拒绝，所以真正的清空只发生在非医院账号上）。
+    if 'vet_license' in data:
+        license_no = normalize_vet_license(data.get('vet_license'))
+        # 校验用的是**账号自己的角色**，不是操作者以为的角色：
+        # 给捕捉点操作员塞证号必须拒绝，而这条路径改不了角色，所以取库里的值。
+        err = validate_vet_license(user.role, license_no)
+        if err:
+            return json_fail(err)
+        err = validate_vet_license_unique(license_no, exclude_pk=user.pk)
+        if err:
+            return json_fail(err)
+        if license_no != user.vet_license:
+            # 留一份旧证号进审计：证号变了，历史单据上快照的仍是旧号，
+            # 「什么时候改的、从哪个号改过来的」必须查得到。
+            request.audit_detail = f'执业证号 {user.vet_license or "（空）"} → {license_no or "（空）"}'
+            user.vet_license = license_no
+            changed.append('执业证号')
+
+    if not changed:
+        return json_ok({'id': user.id}, message='没有需要保存的修改')
+
+    user.save()
+    request.audit_district = user.district
+    request.audit_object_repr = user.username
+    return json_ok({
+        'id': user.id,
+        'username': user.username,
+        'name': user.get_full_name() or user.username,
+        'phone': user.phone,
+        'vet_license': user.vet_license,
+        'changed': changed,
+    }, message='、'.join(changed) + '已更新')
 
 
 # ============================================
@@ -755,10 +885,10 @@ def user_toggle_status(request, pk):
                 role='gov_city', is_active=True,
             ).exclude(id=user.id).exists()
             if not has_other:
-                return json_fail('系统至少需保留一个启用中的市级管理员账号')
+                return json_fail(f'系统至少需保留一个启用中的{user.get_role_display()}账号')
 
     user.is_active = not user.is_active
-    user.status = 'active' if user.is_active else 'inactive'
+    user.status = STATUS_ACTIVE if user.is_active else STATUS_INACTIVE
     user.save(update_fields=['is_active', 'status'])
     request.audit_district = user.district
     request.audit_object_repr = user.username
@@ -863,7 +993,13 @@ def business_supervision(request):
         for t in qs:
             item = serialize_instance(t)
             item['district_name'] = t.district.name if t.district else ''
-            item['ledger_no'] = f'TRE-{t.id:06d}'
+            # 单号一律用**真实** `ledger_no`：监管台账与纸质 A4 单据、溯源二维码
+            # 对账就靠这一个钩子。原先在这里覆盖成 `f'TRE-{t.id:06d}'`
+            # （编号规则上线前的占位残留），格式与 `DOC_PREFIXES` 的
+            # `TRE260001` 根本不是一个东西 —— 拿台账去核打印件永远核不上，
+            # 而且看上去像「系统里有这么一张单」。
+            # 历史空号用读得懂的文案，不编一个像真号的东西。
+            item['ledger_no'] = item['ledger_no'] or f'历史单 #{t.id}'
             # 聚合诊疗项目为可读字段
             item['treatment_items'] = _treatment_items(t)
             item['items'] = {
@@ -920,7 +1056,11 @@ def business_supervision(request):
             adoptions.append(item)
         result['adoptions'] = adoptions
 
-    if business_type is None or business_type == 'checkin':
+    # 打卡是「领养回访监管」这一屏的附属数据：政府端按 `business_type=adoption`
+    # 拉取，若这里只认 `checkin`/`None`，返回体里根本没有 `checkins` 键，
+    # 前端 `sup.checkins || []` 静默变成空表 —— 「回访打卡」列**恒为 0 次**、
+    # 详情抽屉里的打卡时间线**永不出现**，机构驳回过的回访在监管端看不见。
+    if business_type in (None, 'checkin', 'adoption'):
         # CheckIn 无 district 字段，通过 pet 关联过滤
         qs = CheckIn.objects.all()
         scope = get_district_scope(request)
@@ -1133,6 +1273,20 @@ def ledger_center(request):
             | (Q(**{f'{date_field}__isnull': True}) & _range_q(fallback_field))
         )
 
+    def _row_date(obj, *fields):
+        """台账行的「日期」= 第一个有值的业务时间；全都没有则为空串。
+
+        ⚠ 兜底口径必须与 `_date_filter` 一致：筛选已经按 `created_at` 把这行
+        放进了用户圈的时间区间，行里的 `date` 却仍是空串，界面上就成了
+        「筛出来了却一排日期空白、按日期排序全排最后」，用户以为数据坏了。
+        所以业务时间为空的行，`date` 一并退到创建时间。
+        """
+        for f in fields:
+            val = getattr(obj, f, None)
+            if val:
+                return val.isoformat()
+        return ''
+
     # 一宠一档（按宠物档案聚合全生命周期数据）
     # 聚合逻辑下沉到 business.services.pet_archive_records，与捕捉端
     # 「全量台账 → 一宠一档」共用同一份实现，两端字段/口径天然一致。
@@ -1214,7 +1368,8 @@ def ledger_center(request):
         for t in qs:
             records.append({
                 'business_type': 'treatment',
-                'ledger_no': f'TRE-{t.id:06d}',
+                # 同上：用真实单号，历史空号给可读文案而不是伪号
+                'ledger_no': t.ledger_no or f'历史单 #{t.id}',
                 'id': t.id,
                 'date': t.created_at.isoformat() if t.created_at else '',
                 'pet_code': t.pet_code,
@@ -1296,7 +1451,7 @@ def ledger_center(request):
                 'business_type': 'release',
                 'ledger_no': r.ledger_no,
                 'id': r.id,
-                'date': r.released_at.isoformat() if r.released_at else '',
+                'date': _row_date(r, 'released_at', 'created_at'),
                 'pet_code': r.pet_code,
                 'pet_count': 1,
                 'community_name': r.community_name,
@@ -1322,7 +1477,7 @@ def ledger_center(request):
                 'business_type': 'adoption',
                 'ledger_no': a.ledger_no,
                 'id': a.id,
-                'date': a.adopted_at.isoformat() if a.adopted_at else '',
+                'date': _row_date(a, 'adopted_at', 'created_at'),
                 'pet_code': a.pet_code,
                 'adopter_name': a.adopter_name,
                 'adopter_phone': a.adopter_phone,
@@ -1331,7 +1486,8 @@ def ledger_center(request):
                 'operator_name': a.operator_name,
                 'district_name': a.district.name if a.district else '',
                 'detail': {
-                    'adopter_id_card': a.adopter_id_card,
+                    # 批量台账只下发脱敏号（实现见 core.privacy）。
+                    'adopter_id_card': mask_id_card(a.adopter_id_card),
                     'adopter_address': a.adopter_address,
                     'qualification': a.qualification,
                     'pet': _pet_brief(a.pet),
@@ -1349,7 +1505,7 @@ def ledger_center(request):
                 'business_type': 'euthanasia',
                 'ledger_no': e.ledger_no,
                 'id': e.id,
-                'date': e.euthanized_at.isoformat() if e.euthanized_at else '',
+                'date': _row_date(e, 'euthanized_at', 'created_at'),
                 'pet_code': e.pet_code,
                 'hospital_name': e.hospital_name,
                 'reason': e.reason,
@@ -1622,7 +1778,7 @@ def _notice_recipients(target_role, scope):
 
     `scope is None`（全市）不做收敛：全市领养人都是受众。
     """
-    qs = User.objects.filter(role=target_role, is_active=True, status='active')
+    qs = User.objects.filter(role=target_role, is_active=True, status=STATUS_ACTIVE)
     if scope is None:
         return qs
     if is_empty_scope(scope):

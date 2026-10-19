@@ -223,19 +223,24 @@ class HospitalWriteOwnRecordsTest(HospitalWriteScopeBase):
         resp = self.post_as(self.me, f'/api/business/transfers/{self.o_transfer.id}/receive/')
         self.assert_ok(resp, 'transfer receive 本院')
 
-    def test_gov_district_can_still_edit_in_district(self):
-        """政府端的口径**不变**：区级仍可按区县编辑（不能为了修医院把区级一起收紧）。"""
-        resp = self.post_as(self.gov_a,
-                            f'/api/business/adoptions/{self.v_pet.id}/edit-info/',
-                            {'intro': '区级可改'})
-        self.assert_ok(resp, '区级 edit-info')
-        self.assertEqual(AdoptionHallListing.objects.get(pet=self.v_pet).intro, '区级可改')
+    def test_gov_cannot_edit_info(self):
+        """政府端只读（第四十九轮）：区级/市级都不能改领养上架信息。
 
-    def test_gov_city_can_still_edit_anywhere(self):
-        resp = self.post_as(self.gov_city,
-                            f'/api/business/adoptions/{self.v_pet.id}/edit-info/',
-                            {'intro': '市级可改'})
-        self.assert_ok(resp, '市级 edit-info')
+        这两条以前是**正向**断言（「不能为了修医院把区级一起收紧」）。口径由
+        磊哥改为只读后翻成拒绝 —— 危害不是抽象的：`edit-info` 带 `is_active`，
+        监管账号能把**任意区县**的动物上架到公开领养大厅或把在架的下架。
+        「收紧别过头」这条约束由 `test_edit_info_own_pet_ok`（医院改本院）钉住。
+
+        断言「没写出上架记录」而不是只断 403：`adoption_info_edit` 里有
+        `get_or_create`，先落库再报错的半截写只有这样才能抓到。
+        """
+        for user, label in ((self.gov_a, '区级'), (self.gov_city, '市级')):
+            resp = self.post_as(user,
+                                f'/api/business/adoptions/{self.v_pet.id}/edit-info/',
+                                {'intro': '监管代改', 'is_active': True})
+            self.assertEqual(resp.status_code, 403, f'{label} edit-info 应被角色闸门拦下')
+        self.assertFalse(AdoptionHallListing.objects.filter(pet=self.v_pet).exists(),
+                         '被拒的 edit-info 仍然创建了上架记录')
 
 
 # 机构判据的两种合法形态（源码级）：

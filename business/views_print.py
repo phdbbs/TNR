@@ -113,6 +113,9 @@ RELEASE_FIELDS = [
     ('单据号', _v('ledger_no')), ('所属区县', _district_name),
     ('动物编号', _v('pet_code')), ('放归小区', _v('community_name')),
     ('接收人', _v('receiver_name')), ('接收人电话', _v('receiver_phone')),
+    # 放归是两段：送回小区与物业签字各有一个时间。纸质单据只印「放归日期」，
+    # 未办结那张打出来两个时间都是空（或只有登记日），归档时说不清动物哪天回的社区。
+    ('转运回小区', _v('transferred_at')),
     ('放归日期', _v('released_at', 'date')), ('状态', _choice('status')),
     ('操作员', _v('operator_name')),
 ]

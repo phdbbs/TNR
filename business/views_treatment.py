@@ -14,9 +14,11 @@
 `items_*` 列；
 ②「诊疗完成即时投递自动转待领养」的快路径只挂在它身上
 （`_schedule_auto_promote()` 随之下线）—— 新流程 `dispose()` 同步落
-`Treatment.status='completed'` 与 `Pet.status=去向`，不再出现
-「诊疗已完成、动物还在院」的中间态，那条快路径没有触发对象，
-周期调度（`0016` 迁移，每天 03:00）负责兜底存量与历史行。
+`Treatment.status='completed'` 与 `Pet.status=去向`，正常办结不再出现
+「诊疗已完成、动物还在院」的中间态；**但放归两段用
+`defer_pet_status=True` 会刻意造出这个中间态**，所以周期调度
+（`0016` 迁移，每天 03:00）的判据必须按 `disposal` 排除已定非领养去向的动物，
+详见 `business/tasks.py::auto_promote_to_adoptable`。
 
 三步流程由 `services_treatment.sync_legacy_item_flags()` 回写
 `items_*` 布尔列，语义与旧口径一致 —— 所以打印页 / 监管统计 /
@@ -122,12 +124,19 @@ def _item_data(item):
     }
 
 
+def _disposal_label(key):
+    """去向 key → 中文。空 key 返回空串（前端据此判断「有没有建议」）。"""
+    return dict(Treatment.DISPOSAL_CHOICES).get(key, '') if key else ''
+
+
 def _treatment_detail_data(treatment):
     """诊疗单完整出参：三步流程需要的一切（前端一次拿全，不再逐项请求）。"""
     pet = treatment.pet
     data = serialize_instance(treatment)
     data['stage'] = treatment.stage
     data['is_disposed'] = treatment.is_disposed
+    data['disposal_label'] = _disposal_label(treatment.disposal)
+    data['disposal_advised_label'] = _disposal_label(treatment.disposal_advised)
     # 顿号分隔的文本快照 → 数组，供前端 chips 回显
     data['common_findings_list'] = [v for v in (treatment.common_findings or '').split('、') if v]
     data['infectious'] = _load_infectious(treatment)
@@ -165,31 +174,32 @@ def _load_infectious(treatment):
 @role_required('hospital', 'shelter', 'gov_city', 'gov_district')
 @login_required
 def treatment_board(request):
-    """诊疗看板：待检 / 待诊 / 诊疗中 / 待出院 / 已出院（第四十八轮五态）。
+    """诊疗看板：待接诊 / 待诊断 / 诊疗中 / 待出院 / 已出院（第四十八轮五态）。
 
     五态**全部由时间戳派生**，不存列（存列必然有一处写入路径忘了同步）：
 
     | 状态 | 判据 |
     |---|---|
-    | 待检 | `checked_at` 为空（还没提交检查单） |
-    | 待诊 | `checked_at` 有、`diagnosed_at` 为空 |
+    | 待接诊 | `checked_at` 为空（还没提交检查单） |
+    | 待诊断 | `checked_at` 有、`diagnosed_at` 为空 |
     | 诊疗中 | `diagnosed_at` 有、`done_at` 为空 |
     | 待出院 | `done_at` 有、`disposed_at` 为空 |
     | 已出院 | `disposed_at` 有 |
 
-    原先只有三态（pending / treating / done），把「待诊」和「诊疗中」合并
+    原先只有三态（pending / treating / done），把「待诊断」和「诊疗中」合并
     成 treating、把「待出院」和「已出院」合并成 done —— 界面上看不出
     「下一步该点哪个按钮」，也分不清「还在治」和「治完了等人接走」。
 
-    「待检」的主体是**本院待诊疗的动物**（不管有没有开单）—— 原型里点动物
+    「待接诊」的主体是**本院待诊疗的动物**（不管有没有开单）—— 原型里点动物
     才进流程，所以「还没开单」是常态，不能只列已有诊疗单的动物，
     否则新收治的动物在看板上根本不出现（看不到 = 接不了诊）。
+
+    取值顺序见 `Treatment.BOARD_STAGES`，界面文案见 `TNR_UI.BOARD_STAGE`。
     """
     user = request.user
     if user.role == 'hospital':
         if not user.institution_id:
-            return json_ok({'checking': [], 'pending_diagnose': [], 'treating': [],
-                            'pending_discharge': [], 'discharged': [], 'counts': {}})
+            return json_ok({**_board_buckets(), 'counts': {}})
         treatments = Treatment.objects.filter(hospital_id=user.institution_id)
         pets = Pet.objects.filter(hospital_id=user.institution_id, is_deleted=False)
     else:
@@ -199,8 +209,7 @@ def treatment_board(request):
 
     treatments = treatments.select_related('pet').order_by('-id')
 
-    buckets = {'checking': [], 'pending_diagnose': [], 'treating': [],
-               'pending_discharge': [], 'discharged': []}
+    buckets = _board_buckets()
     seen_pet_ids = set()
 
     for t in treatments:
@@ -208,9 +217,9 @@ def treatment_board(request):
         seen_pet_ids.add(t.pet_id)
         buckets[_board_stage(t)].append(row)
 
-    # 还没开单、但已在院待诊疗的动物 —— 它们是「待检」的主体。
+    # 还没开单、但已在院待诊疗的动物 —— 它们是「待接诊」桶的主体。
     # ⚠ `status='in_treatment'` 是唯一口径：`pending_adopt` 的动物虽然也允许
-    #   开单（复查），但它们已经出院了，不该出现在待检列表里。
+    #   开单（复查），但它们已经出院了，不该出现在待接诊列表里。
     orphan_pets = pets.filter(status='in_treatment').exclude(id__in=seen_pet_ids)
     for pet in orphan_pets.order_by('-id'):
         buckets['checking'].append(_pet_board_row(pet))
@@ -218,6 +227,15 @@ def treatment_board(request):
     counts = {k: len(v) for k, v in buckets.items()}
     buckets['counts'] = counts
     return json_ok(buckets)
+
+
+def _board_buckets():
+    """看板五态的空桶。桶名唯一取自 `Treatment.BOARD_STAGES`。
+
+    以前空桶字面量在「账号没绑机构」的兜底和正常分桶两处各写一遍，加一态要改两处；
+    漏一处的表现是那一态在看板上**永远空白**，前端页签也点不出数据。
+    """
+    return {k: [] for k in Treatment.BOARD_STAGES}
 
 
 def _board_stage(treatment):
@@ -251,8 +269,10 @@ def _board_row(treatment):
         'board_stage': _board_stage(treatment),
         'is_disposed': treatment.is_disposed,
         'disposal': treatment.disposal,
-        'disposal_label': (dict(Treatment.DISPOSAL_CHOICES).get(treatment.disposal, '')
-                           if treatment.disposal else ''),
+        'disposal_label': _disposal_label(treatment.disposal),
+        # 去向建议：诊疗完成那一刻选的，待出院时按它预选出院单据
+        'disposal_advised': treatment.disposal_advised,
+        'disposal_advised_label': _disposal_label(treatment.disposal_advised),
         'checked_at': treatment.checked_at.isoformat() if treatment.checked_at else '',
         'diagnosed_at': treatment.diagnosed_at.isoformat() if treatment.diagnosed_at else '',
         'done_at': treatment.done_at.isoformat() if treatment.done_at else '',
@@ -280,6 +300,8 @@ def _pet_board_row(pet):
         'is_disposed': False,
         'disposal': '',
         'disposal_label': '',
+        'disposal_advised': '',
+        'disposal_advised_label': '',
         'checked_at': '',
         'diagnosed_at': '',
         'done_at': '',
@@ -383,6 +405,29 @@ def treatment_plan(request, pk):
 @csrf_exempt
 @role_required('hospital')
 @login_required
+def treatment_sterilization(request, pk):
+    """提交绝育手术病历 —— 与「医嘱与处方」分开的独立入口。
+
+    病历要等手术做完才写得出来，而 `save_plan()` 在已诊断后一律拒绝
+    （改处方会让按处方扣掉的库存账实不符），所以这一步必须有自己的写入口；
+    判据仍然只有 `services_treatment.save_sterilization()` 那一份。
+    """
+    data = parse_json_body(request)
+    treatment = _own_treatment(pk, request.user)
+    if treatment is None:
+        return json_fail('诊疗单不存在或无权访问', status=404)
+
+    try:
+        with transaction.atomic():
+            st.submit_sterilization(treatment, data)
+    except ValueError as e:
+        return json_fail(str(e))
+    return json_ok(_treatment_detail_data(treatment), message='绝育手术病历已保存')
+
+
+@csrf_exempt
+@role_required('hospital')
+@login_required
 def treatment_diagnose(request, pk):
     """诊断完成 —— 进入执行阶段。"""
     treatment = _own_treatment(pk, request.user)
@@ -469,17 +514,27 @@ def treatment_item_undo(request, pk, item_id):
 @role_required('hospital')
 @login_required
 def treatment_done(request, pk):
-    """诊疗完成 —— 全部必执行项目都做完才能点。"""
+    """诊疗完成 —— 全部必执行项目都做完才能点。
+
+    可带 `disposal_advised`（去向**建议**，可空）：此刻记下医生判断的出院方向，
+    待出院弹窗按它预选单据。只写 `disposal_advised`，**不写 `disposal`** ——
+    后者与 `disposed_at` 同时落，一落动物就进终态，六个出院单据全部 400。
+    """
     treatment = _own_treatment(pk, request.user)
     if treatment is None:
         return json_fail('诊疗单不存在或无权访问', status=404)
 
+    data = parse_json_body(request)
+    advised = str(body_str(data, 'disposal_advised') or '').strip()
     try:
         with transaction.atomic():
-            st.mark_done(treatment)
+            st.mark_done(treatment, disposal_advised=advised)
     except ValueError as e:
         return json_fail(str(e))
-    return json_ok(_treatment_detail_data(treatment), message='诊疗完成，请选择办结去向')
+    treatment.refresh_from_db()
+    return json_ok(_treatment_detail_data(treatment),
+                   message='诊疗完成，请选择办结去向'
+                   if not treatment.disposal_advised else '诊疗完成')
 
 
 @csrf_exempt
@@ -580,14 +635,13 @@ def treatment_list(request):
 
     stage = request.GET.get('stage')
     if stage:
-        if stage == 'checking':
-            qs = qs.filter(checked_at__isnull=True)
-        elif stage == 'treating':
-            qs = qs.filter(checked_at__isnull=False, done_at__isnull=True)
-        elif stage == 'done':
-            qs = qs.filter(done_at__isnull=False)
-        else:
+        # 判据与 `Treatment.stage` 属性同源（`Treatment.STAGE_FILTERS`）：以前这里手写
+        # 一份时间戳 isnull 组合、属性里再推一遍，两处一漂就出现
+        # 「按阶段筛出 3 条，点开其中一条却显示另一个阶段」。
+        stage_kwargs = Treatment.STAGE_FILTERS.get(stage)
+        if stage_kwargs is None:
             return json_fail(f'未知的诊疗阶段：{stage}')
+        qs = qs.filter(**dict(stage_kwargs))
 
     # 列表**不**返回完整详情：`_treatment_detail_data()` 会为每行带上
     # 处置项目、处方、选项表、入院信息 —— 在列表上就是 N+1 查询

@@ -13,13 +13,14 @@ from django.views.decorators.csrf import csrf_exempt
 from accounts.decorators import role_required
 from business.models import (
     Pet, AdoptionHallListing, Adoption, Message,
-    Capture, Transfer, Treatment, Release, Euthanasia, OwnerReturn,
+    Transfer, Treatment, Release, Euthanasia, OwnerReturn,
 )
 from business.services import (
-    json_ok, json_fail, parse_json_body, serialize_instance,
+    json_ok, json_fail, serialize_instance,
     get_district_filtered_queryset, get_scoped_object, hospital_pet_scope,
     pet_archive_records, pet_brief, pet_photo_list, is_city_shelter,
 )
+from core.privacy import mask_id_card, mask_phone
 
 
 def _portal_user_data(user):
@@ -35,6 +36,9 @@ def _portal_user_data(user):
         'name': user.get_full_name() or user.username,
         'role': user.role,
         'role_display': user.get_role_display(),
+        # 个人中心的「账号状态」徽章读它；以前没这个键，三端的写法是
+        # 直接硬编码绿色「启用」，账号被平台停用后仍显示启用。
+        'status': user.status,
         'district_id': user.district_id,
         'district_name': user.district.name if user.district else '',
         'institution_id': user.institution_id,
@@ -53,10 +57,18 @@ def _render_portal(request, template):
 # 捕捉点门户页面
 # ============================================
 @never_cache  # 门户页面禁用缓存，避免手机浏览器缓存旧版本页面
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def shelter_portal(request):
-    """捕捉点端门户页面。"""
+    """捕捉点端门户页面。
+
+    ⚠ **政府角色不能进**（第四十九轮收口）。这里整套 UI 是围绕「能操作」做的：
+    建单、审核、黑名单、物料出入库。原先放行 gov 只是为了让监管能"看一眼现场
+    列表"，代价是政府账号拿到了同一个端的**全部写接口**（本文件所在 app 的
+    `/api/business/**` 当时都对 gov 开放），"政府端只保留查看"（`accounts/
+    models.py` 角色表注释）只剩一句口头承诺。监管所需的现场数据在
+    `/gov/` 的台账中心与 `/api/supervision/**` 同源提供。
+    """
     return _render_portal(request, 'portal/shelter/portal.html')
 
 
@@ -64,10 +76,14 @@ def shelter_portal(request):
 # 医院门户页面
 # ============================================
 @never_cache
-@role_required('hospital', 'gov_city', 'gov_district')
+@role_required('hospital')
 @login_required
 def hospital_portal(request):
-    """宠物医院端门户页面。"""
+    """宠物医院端门户页面。
+
+    政府角色不能进 —— 口径与 ``shelter_portal`` 一致（第四十九轮）：
+    诊疗三步流程、出院四类单据、物料出库的写入口全在这里。
+    """
     return _render_portal(request, 'portal/hospital/portal.html')
 
 
@@ -78,7 +94,23 @@ def hospital_portal(request):
 @role_required('gov_city', 'gov_district')
 @login_required
 def gov_portal(request):
-    """政府监管端门户页面（只查看业务，主数据维护已在平台端）。"""
+    """政府监管端门户页面（**只读**：查看业务 + 监管台账）。
+
+    「只读」不是页面中不渲染写按钮就完事，第四十九轮起落在两处：
+
+    1. **接口层**：`business/views_*.py` 里所有会改库的 view 的 `@role_required`
+       都不再包含 `gov_city` / `gov_district`（25 个写接口）。判据见
+       `core/tests_gov_readonly.py` —— 政府会话把 GET 和 POST 各打一遍，
+       断言**业务表指纹零变化**（含行内容，不只行数；按角色而非按方法封，
+       因为本项目普遍不判 `request.method`）。
+    2. **入口层**：`shelter_portal` / `hospital_portal` / `adopter_portal` 也不再
+       放行政府角色，政府账号点不进那套围绕「能操作」做的 UI。
+
+    ⚠ 摘角色前逐个核对过：**每一个被关掉政府入口的写接口都还有非政府角色
+    能用**（捕捉/转运/打卡/黑名单/物料 → `shelter`，诊疗/安乐死/领养信息
+    → `hospital`，领养申请 → `adopter`）。若某个接口只有政府能写，那它就是
+    真实的「监管代录」需求，只能另开口子、不能这样一关了之。
+    """
     return _render_portal(request, 'portal/gov/portal.html')
 
 
@@ -236,23 +268,11 @@ def hospital_hall_listings(request):
 # 领养人门户页面
 # ============================================
 @never_cache
-@role_required('adopter', 'gov_city', 'gov_district')
+@role_required('adopter')
 @login_required
 def adopter_portal(request):
     """领养人端门户页面（登录后全功能）。"""
-    user = request.user
-    user_data = {
-        'id': user.id,
-        'username': user.username,
-        'name': user.get_full_name() or user.username,
-        'role': user.role,
-        'role_display': user.get_role_display(),
-        'district_id': user.district_id,
-        'district_name': user.district.name if user.district else '',
-        'institution_id': user.institution_id,
-        'institution_name': user.institution.name if user.institution else '',
-        'phone': user.phone,
-    }
+    user_data = _portal_user_data(request.user)
     return render(request, 'portal/adopter/portal.html', {
         'user_data': json.dumps(user_data, ensure_ascii=False),
         'public_mode': False,
@@ -263,9 +283,14 @@ def adoption_hall_public(request):
     """领养大厅公开页面（无需登录）。
 
     未登录或非领养人角色时仅展示领养大厅；
-    已登录的领养人/政府角色直接进入完整门户。
+    已登录的领养人直接进入完整门户。
+
+    ⚠ 这里**只把 `adopter` 转进 `adopter_portal`**（第四十九轮）。政府角色以前
+    也在白名单里，而 `adopter_portal` 现在不再放行 gov —— 沿用旧条件会让政府
+    账号访问这个**公开页**时被 `@role_required` 踢到 `/`：想看看大厅长什么样，
+    结果被自己的门户页面弹走。公开页对政府就是公开页，按未登录渲染即可。
     """
-    if request.user.is_authenticated and request.user.role in ('adopter', 'gov_city', 'gov_district'):
+    if request.user.is_authenticated and request.user.role == 'adopter':
         return adopter_portal(request)
 
     user_data = None
@@ -314,7 +339,7 @@ def my_messages(request):
 
 
 @csrf_exempt
-@role_required('adopter', 'gov_city', 'gov_district')
+@role_required('adopter')
 @login_required
 def mark_message_read(request, pk):
     """领养人 - 标记消息已读。"""
@@ -371,6 +396,31 @@ def pet_lifecycle(request, pet_id):
     if pet is None:
         return json_fail('宠物不存在或无权访问', status=404)
 
+    # PII 最小化（第五十七轮）：同一份时间线，不同角色看到的主人字段不同。
+    # 领养人只需要「这只动物经历过什么」，不需要前任主人的电话、住址、
+    # 身份证与签名；监管端保留脱敏号用于比对；捕捉点/医院要执行领回与
+    # 回访，保留完整联系方式。
+    is_adopter = user.role == 'adopter'
+    is_regulator = user.role in ('gov_city', 'gov_district')
+
+    def owner_contact(record):
+        if is_adopter:
+            return {'owner_phone': '', 'owner_id_card': '',
+                    'owner_address': '', 'signature': ''}
+        if is_regulator:
+            return {
+                'owner_phone': mask_phone(record.owner_phone),
+                'owner_id_card': mask_id_card(record.owner_id_card),
+                'owner_address': record.owner_address,
+                'signature': record.signature or '',
+            }
+        return {
+            'owner_phone': record.owner_phone,
+            'owner_id_card': record.owner_id_card,
+            'owner_address': record.owner_address,
+            'signature': record.signature or '',
+        }
+
     events = []
 
     # 捕捉记录
@@ -389,8 +439,9 @@ def pet_lifecycle(request, pet_id):
             'community_name': cap.community_name,
             'address': cap.address,
             'property_name': cap.property_name,
-            'contact_person': cap.contact_person,
-            'contact_phone': cap.contact_phone,
+            # 物业交接人是捕捉点/监管端的操作联系人；领养人不需要。
+            'contact_person': '' if is_adopter else cap.contact_person,
+            'contact_phone': '' if is_adopter else cap.contact_phone,
             'operator_name': cap.operator_name,
             'photos': capture_photos,
         })
@@ -490,12 +541,9 @@ def pet_lifecycle(request, pet_id):
             'date': timezone.localdate(r.return_time).isoformat() if r.return_time else (timezone.localdate(r.created_at).isoformat() if r.created_at else ''),
             'ledger_no': r.ledger_no,
             'owner_name': r.owner_name,
-            'owner_phone': r.owner_phone,
-            'owner_id_card': r.owner_id_card,
-            'owner_address': r.owner_address,
+            # 签字是 base64 data URL；领养人拿到空串，前端据此不渲染。
+            **owner_contact(r),
             'reason': r.reason,
-            # 签字是 base64 data URL，前端 <img> 直接展示即可
-            'signature': r.signature or '',
             'operator_name': r.operator_name,
             'created_at': r.created_at.isoformat() if r.created_at else '',
         })

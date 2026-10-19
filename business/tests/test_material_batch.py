@@ -17,6 +17,7 @@
 只测拦截不测放行，拦过头了测试照样全绿。
 """
 from datetime import timedelta
+from unittest import mock
 
 from django.test import TestCase
 from django.utils import timezone
@@ -282,6 +283,76 @@ class BatchViewTests(BusinessTestBase):
         # 重复签收（点另一笔兄弟行）→ 仍被整单判据拦住
         resp3 = self.post_json('/api/business/materials/%d/receive/' % dis.last().id, {})
         self.expect_fail(resp3, 400, message='已签收')
+
+    def test_receive_concurrent_double_sign_is_rejected(self):
+        """两个窗口同时点签收时，库存只能加一次。
+
+        ⚠ 竞写必须注入在**读与写之间**：顺序执行的双击用例已经被
+        `already_received` 那句友好判据拦住了，把 CAS 变异回盲 `save()`
+        它照样全绿（这一族坑在转运签收、芯片使用上反复出现过）。
+        这里用一层薄壳 manager 在「读出兄弟行」的那一刻让对手先提交标记。
+
+        危害不是「多了一个响应」，而是**本院库存凭空翻倍**：两边各自
+        `adjust_stock(receive)` 建一整组流水，账实不符且不报错。
+        """
+        self.login_as(self.shelter_user_a)
+        resp = self.post_json('/api/business/materials/dispatch/', {
+            'material_id': self.m.id, 'hospital_id': self.hospital_a.id,
+            'quantity': 25, 'note': '下发',
+        })
+        dis = MaterialTransaction.objects.filter(
+            type='dispatch', ledger_no=resp.json()['data']['ledger_no'])
+        self.assertEqual(dis.count(), 2)
+        pks = [t.pk for t in dis]
+
+        class RivalClaimsManager:
+            """透传 manager，只在「兄弟行那次读」之后让对手抢先落标记。"""
+
+            def __init__(self, real):
+                self._real = real
+                self._fired = False
+
+            def filter(self, *args, **kwargs):
+                qs = self._real.filter(*args, **kwargs)
+                if (not self._fired and kwargs.get('type') == 'dispatch'
+                        and 'ledger_no' in kwargs):
+                    self._fired = True
+                    # 对手事务此刻已提交「已签收」标记（receive 还没建出来，
+                    # 正是两个请求同时通过预检的那个瞬间）
+                    MaterialTransaction.objects.filter(pk__in=pks).update(
+                        note='[已签收]')
+                return qs
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        self.login_as(self.hospital_user_a)
+        with mock.patch.object(MaterialTransaction, 'objects',
+                               RivalClaimsManager(MaterialTransaction.objects)):
+            resp2 = self.post_json(
+                '/api/business/materials/%d/receive/' % pks[0], {})
+        self.expect_fail(resp2, 400, message='刚刚被他人签收')
+
+        self.assertEqual(
+            MaterialTransaction.objects.filter(type='receive').count(), 0,
+            '被拒的签收不能留下任何流水（否则库存与流水各加一半）')
+        self.assertEqual(get_institution_stock(self.m, self.hospital_a), 0)
+
+        # 反向对照：同一件物料**另开一张下发单**照常能签 —— 闸门不是「一律禁止」
+        self.login_as(self.shelter_user_a)
+        resp3 = self.post_json('/api/business/materials/dispatch/', {
+            'material_id': self.m.id, 'hospital_id': self.hospital_a.id,
+            'quantity': 5, 'note': '再下发',
+        })
+        new_pk = MaterialTransaction.objects.filter(
+            type='dispatch',
+            ledger_no=resp3.json()['data']['ledger_no']).first().id
+        self.login_as(self.hospital_user_a)
+        self.assertEqual(
+            self.post_json(
+                '/api/business/materials/%d/receive/' % new_pk, {}).status_code,
+            200)
+        self.assertEqual(get_institution_stock(self.m, self.hospital_a), 5)
 
     def test_batches_endpoint_own_institution_fefo_order(self):
         """批次列表：本机构、FEFO 顺序、含过期/临期标记。"""

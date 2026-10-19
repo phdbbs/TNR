@@ -1,12 +1,30 @@
 from django.conf import settings
 from django.db import models
 
+# 「启用 / 停用」的取值域真源。
+#
+# `District.status`、`Institution.status`、`User.status` 三列都是
+# `CharField(default='active')` 且**没有 choices**：数据库不会拒绝任何字符串，
+# 而读取侧（停用守卫 `_active_institution()` / `inactive_district_error()`、
+# 列表筛选、状态开关）此前各自硬写 `'active'` —— 六份字面量。写侧一旦拼出
+# 第七种值（例如历史上的 `disabled`），界面会把它显示成「停用」、
+# 守卫却当成「启用」放行。现在写侧统一用这里的常量，读侧比较也统一，
+# 键集合由 `core.tests_frontend_consistency` 与前端 `TNR_UI.ENTITY_STATUS` 对齐。
+STATUS_ACTIVE = 'active'
+STATUS_INACTIVE = 'inactive'
+STATUS_VALUES = (STATUS_ACTIVE, STATUS_INACTIVE)
+STATUS_LABELS = {STATUS_ACTIVE: '启用', STATUS_INACTIVE: '停用'}
+
+
+def status_label(value):
+    return STATUS_LABELS.get(value, value)
+
 
 class District(models.Model):
     name = models.CharField('区县名称', max_length=50)
     code = models.CharField('区县代码', max_length=20, unique=True)
-    is_city = models.BooleanField('是否市级', default=False, help_text='市级区域用于市管理员/捕捉点操作员归属')
-    status = models.CharField('状态', max_length=10, default='active')
+    is_city = models.BooleanField('是否市级', default=False, help_text='市级区域用于市级政府管理员/捕捉点操作员归属')
+    status = models.CharField('状态', max_length=10, default=STATUS_ACTIVE)
     created_at = models.DateField('创建时间', auto_now_add=True)
 
     class Meta:
@@ -39,7 +57,7 @@ class Institution(models.Model):
     # 留空时前端按机构名兜底生成（`seal_text or name`），不强制每家机构都维护一遍
     # —— 强制维护的结果一定是「没人填、章是空白」，不如给一个合理的默认。
     seal_text = models.CharField('电子章文字', max_length=100, blank=True, default='')
-    status = models.CharField('状态', max_length=10, default='active')
+    status = models.CharField('状态', max_length=10, default=STATUS_ACTIVE)
     # 建档时间。写法与 `District.created_at` 保持一致（DateField + auto_now_add）。
     #
     # 为什么必须补：政府端「机构管理」列表要按起止时间筛选，而这个模型此前

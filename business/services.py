@@ -10,7 +10,7 @@ import re
 import socket
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 
 from django.db import IntegrityError, transaction
 from django.db.models import Q
@@ -24,7 +24,7 @@ from business.models import (
 from core.http import (body_dict, body_list, body_str,  # noqa: F401
                        json_fail, json_ok, read_json_body, to_camel_key,
                        with_camel_keys)
-from core.models import District, Institution
+from core.models import District, Institution, STATUS_ACTIVE
 # ⚠「谁能看到全部区县」的判据只有一份，在 core.scope —— 不要在这里再写一遍
 from core.scope import (EMPTY_DISTRICT_SCOPE, is_empty_scope,
                         resolve_user_district_scope)
@@ -726,38 +726,62 @@ def use_chip(chip_no, pet, institution=None):
     :param pet: 关联的宠物对象
     :param institution: 使用这颗芯片的机构（医院）。**传了才做归属校验**。
     :return: True 表示成功
-    :raises ValueError: 芯片不存在 / 不可用 / 不属于本机构
+    :raises ValueError: 芯片不存在 / 非「可用」态（已使用、在途、已作废、
+        或刚被他人抢用）/ 不属于本机构
 
     ⚠ 归属校验**只拦新引用、不拦存量**（第四十六轮）：
     重构前的 `Chip` 行没有机构归属（`institution` 为 NULL），
     它们的归属信息在数据里已经丢了，一律放行 —— 否则历史芯片一颗都用不出去。
     新入库的芯片一定带机构，所以「甲院的芯片被乙院用掉」会被拦住。
+
+    ⚠ 状态流转走**条件更新**（CAS），不是「读出来改字段再 save」
+    （第五十一轮）。`Chip.number` 是动物的法定身份，一颗芯片只能对应一只动物；
+    「读 → 判 → 写」在两家医院同时扫同一颗号时会**双双成功**：
+    `chip.pet` 落到后写的那只，而两只动物的档案上都写着同一个号 ——
+    追溯链当场断裂，且全程没有任何报错（要到领养或无害化对不上号才暴露）。
+    把判据写进 `WHERE status='available'`，「判可用」与「标已用」就是同一条语句。
+    这里**不用** `select_for_update()`：本仓库开发/测试库是 sqlite，
+    Django 的 SQLCompiler 用 `features.has_select_for_update` 门控 FOR UPDATE
+    子句，sqlite 上是 False → 该子句被**静默丢弃**（连「事务外使用」的报错都不抛），
+    于是锁只在生产 MySQL 生效、用例完全覆盖不到，等于加了一道没人验证过的保险。
+    CAS 在两种后端上都是原子的，所以判据选它。
+
+    ⚠ 白名单式 `WHERE` 顺带堵掉第四态 `void`（损坏/丢失，已随库存异动报废）：
+    原先只判 `used` 与 `in_transit`，**已作废的芯片照样能植进动物体内** ——
+    档案与实物不符，而 `chip_batch_void()` 那边「只作废 available」的判据
+    等于白写。合法转出状态只有 `available` 一个，就按这一个写。
     """
     try:
         chip = Chip.objects.get(number=chip_no)
     except Chip.DoesNotExist:
         raise ValueError(f'芯片 {chip_no} 不存在')
 
-    # 三态都要拦：`used` 是重复使用；`in_transit` 是「货还在路上、
-    # 对方没签收」—— 此时库存已经从发起方扣掉了，谁都不该能用它。
-    # 重构前只有两态，所以只判了 `used`，`in_transit` 是新增的漏洞面。
+    # 这几个分支只为了给出**可区分**的现场文案（该去查另一只动物的档案、
+    # 还是查那张未签收的下发单、还是查异动单，是三件不同的事）。
+    # 真正的拦截在下面的 CAS —— 少一个分支也不会放行，只是文案变笼统。
     if chip.status == 'used':
         raise ValueError(f'芯片 {chip_no} 已被使用')
     if chip.status == 'in_transit':
         raise ValueError(f'芯片 {chip_no} 在途（尚未签收），不能使用')
+    if chip.status == 'void':
+        raise ValueError(f'芯片 {chip_no} 已作废（损坏或报废），不能使用')
 
     if (institution is not None and chip.institution_id is not None
             and chip.institution_id != institution.id):
         raise ValueError(f'芯片 {chip_no} 不属于 {institution.name}，不能使用')
 
-    chip.status = 'used'
-    chip.pet = pet
-    chip.used_at = timezone.localdate()
-    chip.save(update_fields=['status', 'pet', 'used_at'])
+    # 「芯片标已用」与「宠物档案写号」是同一笔业务的两半：只落一半的话，
+    # 一颗芯片挂在芯片表上却没人认领（或宠物写着号、芯片表还说是可用的，
+    # 于是它还能被植给第二只）。调用方基本都在事务里，但 `use_chip()`
+    # 是公共 API，不能把「记得包事务」这件事交给每个调用点自觉。
+    with transaction.atomic():
+        if not Chip.objects.filter(number=chip_no, status='available').update(
+                status='used', pet=pet, used_at=timezone.localdate()):
+            raise ValueError(f'芯片 {chip_no} 已被他人使用，请核对后再植')
 
-    # 同步写入宠物档案
-    pet.chip_no = chip_no
-    pet.save(update_fields=['chip_no'])
+        # 同步写入宠物档案
+        pet.chip_no = chip_no
+        pet.save(update_fields=['chip_no'])
 
     return True
 
@@ -989,11 +1013,17 @@ def hospital_pet_write_error(pet, user):
 
 
 def pet_has_pending_release(pet):
-    """宠物是否已有「待放归」记录。
+    """宠物是否已有「待放归」记录（= 放归流程未办结）。
 
     用于防止同一只动物被放归流程与领养流程同时占用（双重承诺）。
+
+    ⚠ 必须含 `transferred`（已回小区、等签字）：第四十八轮把放归拆成
+    「转运回小区 → 小区确认」两段之后，只认 `pending` 的判据在动物一被
+    登记转运就立刻失效 —— 于是同一只动物能再开一张放归单，也能被领养流程
+    接手，两张单据都走到「已办结」后互相打架（先放归的狗被登记成已领养）。
     """
-    return Release.objects.filter(pet=pet, status='pending').exists()
+    return Release.objects.filter(
+        pet=pet, status__in=Release.OPEN_STATUSES).exists()
 
 
 def pet_has_active_adoption(pet):
@@ -1089,7 +1119,13 @@ def _pet_outbound(pet):
         if ad:
             unit = (ad.adopter_name or '') + (f'（{ad.hospital_name}确认）' if ad.hospital_name else '')
             return (ad.adopted_at.isoformat() if ad.adopted_at else '', '领养', unit)
-    elif pet.status == 'euthanized':
+    elif pet.status in ('euthanized', 'dead'):
+        # 一张安乐死登记表两种处置（`Euthanasia.KIND_CHOICES`）：
+        # `euthanasia` → `pet.status='euthanized'`，
+        # `dead`（自然死亡 / 无害化）→ `pet.status='dead'`。
+        # 原先只判 `euthanized`，死亡动物的「去向」列**空白且不报错** ——
+        # 一宠一档里「这只猫最后怎么样了」看不出来，正是本项目反复出现过的
+        # 「静默缺列」。档案口径里两者同属「死亡」去向，具体方式看登记表。
         eu = _first_matching(pet.euthanasia_records.all())
         if eu:
             return (eu.euthanized_at.isoformat() if eu.euthanized_at else '',
@@ -1567,6 +1603,92 @@ def validate_operator_district(role, district, institution):
     return None
 
 
+def is_valid_phone(value):
+    """联系电话的形状判据 —— 机构新建 / 机构编辑 / 账号新建 / 账号编辑共用一份。
+
+    原先这四处各写一遍 `phone.replace('-','').replace('+','').isdigit()`，
+    结果是「机构编辑补了校验、账号新建始终没补」——
+    同一个概念写多遍就会有一遍没人改。
+
+    空串返回 True：「没填」不是「填错了」，必填与否由字段自己决定。
+    """
+    s = str(value or '').strip()
+    if not s:
+        return True
+    stripped = s.replace('-', '').replace('+', '').replace(' ', '')
+    return stripped.isdigit() and any(ch.isdigit() for ch in stripped)
+
+
+def normalize_vet_license(value):
+    """执业证号原样规范化：去首尾空白、压掉换行，**不改写内容**。
+
+    故意不做「大写化 / 去空格 / 补前缀」这类美化：证号是要印在诊疗单上、
+    与农业农村部门的注册系统对照的字符串，任何自动改写都会让单上的号
+    和真实证件上的号**不是同一个**。
+    """
+    return ' '.join(str(value or '').split())
+
+
+def validate_vet_license(role, license_no):
+    """校验「这样一个角色，执业证号该不该有、有没有形状」。
+
+    口径（业务 2026-10-19 确认）：**平台端建医院登录账号时录入证号**，
+    用它验证操作人的执业兽医师身份。因此：
+
+    - `hospital` **必填**且至少含一位数字（真证号都带年份/流水数字，
+      纯汉字或纯字母的输入基本就是「随手敲了个名字」）。
+      这里**不套具体省份模板**：现行证号形态不止一种
+      （「鄂兽医执字第 20210356 号」「(鄂)20210356」「A0120190012345」…），
+      写死一个正则会把真人挡在外面，而挡出去的后果不是填对，
+      是现场共用一个账号 —— 那才是签名归属彻底失效。
+    - 非医院角色**不该有**：捕捉点操作员挂着证号，统计里「本院执业兽医师数」
+      会把外人算进来。
+    - **存量账号不追溯**：现网医院账号的证号目前 1/1 是空的。
+      所以证号只在「建号 / 改号」这两个写入点强制，不做「登录时必须补全」
+      的门禁 —— 一夜锁死全部医院的后果同样是共用账号。
+
+    :return: 错误信息；通过时为 None
+    """
+    if role != 'hospital':
+        if license_no:
+            return '该角色不是医院操作员，无需登记执业证号'
+        return None
+    if not license_no:
+        return '医院操作员必须登记执业兽医师证号（平台端建号时录入，诊疗签名靠它带出）'
+    if len(license_no) < 5:
+        return '执业证号过短（至少 5 个字符），请核对证件原文'
+    if len(license_no) > 100:
+        return '执业证号过长（不超过 100 个字符）'
+    if not any(ch.isdigit() for ch in license_no):
+        return '执业证号里没有任何数字，疑似填成了姓名，请核对证件原文'
+    return None
+
+
+def validate_vet_license_unique(license_no, *, exclude_pk=None):
+    """同一个证号只能挂在一个**启用中**的账号上。
+
+    两个启用账号用同一个证号 = 诊疗单上的签名**分不清是谁**，
+    而这张单子的法律意义恰恰是「哪位执业兽医师做的」。
+    现实里确实存在「一人多账号」（换手机、旧账号忘了），正确做法是**停用旧账号**，
+    所以报错文案直接给出这条出路，而不是让人去编一个新证号。
+
+    只比启用中的账号：已停用的历史账号仍要占着证号吗？不占 ——
+    停用账号的证号已经不再产生新单据，而「把旧账号删掉重建、证号复用」
+    是现场真实会做的操作，卡住它只会逼人把证号填错。
+    """
+    if not license_no:
+        return None
+    qs = User.objects.filter(vet_license=license_no, role='hospital', is_active=True)
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    other = qs.first()
+    if other is None:
+        return None
+    return (f'该执业证号已登记在启用中的账号「{other.username}」上；'
+            f'同一位执业兽医师请复用该账号，或先停用旧账号再建新的')
+
+
+
 def cascade_operator_district(institution, old_district_id):
     """机构换了区县时，把挂在它下面、区县随机构走的操作员一起搬过去。
 
@@ -1723,7 +1845,7 @@ def inactive_institution_error(institution, label='机构'):
     政府端早已过滤 `status === 'active'`（gov portal 三处），捕捉点端三处漏了
     —— 同一条规则只写了一半，就是跨端漂移。
     """
-    if institution is not None and institution.status != 'active':
+    if institution is not None and institution.status != STATUS_ACTIVE:
         return f'{label}「{institution.name}」已停用，不能用于新的业务记录'
     return None
 
@@ -1739,7 +1861,7 @@ def inactive_district_error(district):
 
     消息文案与 `user_create` 的历史文案保持一致（已有用例锁死该字符串）。
     """
-    if district is not None and district.status != 'active':
+    if district is not None and district.status != STATUS_ACTIVE:
         return '所选区县已停用'
     return None
 

@@ -11,7 +11,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
-from business.models import Euthanasia, Pet
+from business.models import Euthanasia
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
@@ -50,7 +50,7 @@ def euthanasia_list(request):
 
 
 @csrf_exempt
-@role_required('hospital', 'gov_city', 'gov_district')
+@role_required('hospital')
 @login_required
 def euthanasia_create(request):
     """登记死亡 / 安乐死记录（第四十八轮：合并为「死亡（含安乐死）」）。
@@ -107,14 +107,19 @@ def euthanasia_create(request):
     if not district_id:
         return json_fail('缺少区县信息')
 
-    # 解析日期
-    euthanized_at = None
+    # 处置日期**必填**（第五十二轮电脑端巡检发现）。
+    # 表单上标了「处置日期\*」，接口却把空值/解析失败一律落成 `None`：
+    # 一张没有日期的不可逆处置单据，台账按日期圈选时靠 `created_at` 兜底才没消失，
+    # 打印件（`views_print` 的「安乐死日期」）与政府端监管台账则是直接空着。
+    # `Euthanasia.euthanized_at` 字段本身仍允许为空，因为历史数据里有这种行；
+    # 收紧的是**新单据**的入口。
     date_str = data.get('euthanized_at')
-    if date_str:
-        try:
-            euthanized_at = datetime.strptime(str(date_str)[:10], '%Y-%m-%d').date()
-        except (ValueError, TypeError):
-            euthanized_at = None
+    if not date_str:
+        return json_fail(f'{kind_label}日期不能为空')
+    try:
+        euthanized_at = datetime.strptime(str(date_str)[:10], '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return json_fail(f'{kind_label}日期「{date_str}」格式不正确，应为 YYYY-MM-DD')
 
     record = Euthanasia.objects.create(
         pet=pet,
@@ -143,7 +148,7 @@ def euthanasia_create(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def body_receive(request, pk):
     """捕捉点领取遗体

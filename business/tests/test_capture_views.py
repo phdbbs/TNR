@@ -275,10 +275,17 @@ class CaptureCreateTest(BusinessTestBase):
             message='无权将记录归属到其他区县')
 
     def test_city_level_operator_can_choose_district(self):
-        """市级账号可以为任意具体区县登记捕捉单。"""
-        self.login_as(self.gov_city)
+        """挂在「全市（市级）」的捕捉点操作员可以为任意具体区县登记捕捉单。
+
+        第四十九轮起政府角色不再能写捕捉登记，这条能力只剩市级捕捉点 ——
+        也正是第四十五轮的现场形态（两个捕捉点都挂在市级下）。
+        """
+        city_shelter = make_institution(type='shelter', district=self.city,
+                                        name='市级捕捉点（自选区县）')
+        self.login_as(make_user(role='shelter', district=self.city,
+                                 institution=city_shelter))
         payload = self._payload(district_id=self.district_b.id,
-                                shelter_id=self.shelter_b.id)
+                                shelter_id=city_shelter.id)
         body = self.ok(self.post_json(f'{CAPTURES_URL}create/', payload))
         self.assertEqual(Capture.objects.get(id=body['data']['capture']['id']).district,
                          self.district_b)
@@ -949,8 +956,22 @@ class CaptureShelterDistrictConsistencyTest(BusinessTestBase):
         payload.update(kw)
         return payload
 
+    def setUp(self):
+        """能自由指定归属区县的操作员。
+
+        第四十九轮起政府角色不再能写捕捉登记，这里改用「挂在市级的捕捉点操作员」。
+        它是这条一致性判据**现实中唯一可达**的入口：用普通区县操作员提交他区
+        区县，会先被 `resolve_district_scope` 的「无权将记录归属到其他区县」拦掉
+        （`views_capture` 里明确写了范围校验在前、一致性在后），那就变成
+        拿另一个错误原因冒充本判据生效 —— 正向对照也会因此失去意义。
+        """
+        self.city_shelter = make_institution(type='shelter', district=self.city,
+                                             name='市级捕捉点（一致性）')
+        self.city_user = make_user(role='shelter', district=self.city,
+                                   institution=self.city_shelter)
+
     def test_create_rejects_district_mismatch_with_concrete_shelter(self):
-        self.login_as(self.gov_city)
+        self.login_as(self.city_user)
         self.expect_fail(self.post_json(
             f'{CAPTURES_URL}create/',
             self._payload(district_id=self.district_b.id)))
@@ -958,7 +979,7 @@ class CaptureShelterDistrictConsistencyTest(BusinessTestBase):
 
     def test_create_allows_matching_district(self):
         """正向对照：与捕捉点同区县照常放行。"""
-        self.login_as(self.gov_city)
+        self.login_as(self.city_user)
         body = self.ok(self.post_json(
             f'{CAPTURES_URL}create/',
             self._payload(district_id=self.district_a.id)))
@@ -974,12 +995,11 @@ class CaptureShelterDistrictConsistencyTest(BusinessTestBase):
 
     def test_create_allows_any_district_for_city_level_shelter(self):
         """正向对照：挂市级的捕捉点必须能指定具体区县（否则无法登记）。"""
-        city_shelter = make_institution(type='shelter', district=self.city,
-                                        name='市级捕捉点')
-        self.login_as(self.gov_city)
+        self.login_as(self.city_user)
         body = self.ok(self.post_json(
             f'{CAPTURES_URL}create/',
-            self._payload(shelter_id=city_shelter.id, district_id=self.district_b.id)))
+            self._payload(shelter_id=self.city_shelter.id,
+                          district_id=self.district_b.id)))
         capture = Capture.objects.get(id=body['data']['capture']['id'])
         self.assertEqual(capture.district_id, self.district_b.id)
 
@@ -987,7 +1007,7 @@ class CaptureShelterDistrictConsistencyTest(BusinessTestBase):
         self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(f'{CAPTURES_URL}create/', self._payload()))
         capture = Capture.objects.get(id=body['data']['capture']['id'])
-        self.login_as(self.gov_city)
+        self.login_as(self.city_user)
         self.expect_fail(self.post_json(
             f'{CAPTURES_URL}{capture.id}/update/',
             {'district_id': self.district_b.id}))
@@ -999,7 +1019,7 @@ class CaptureShelterDistrictConsistencyTest(BusinessTestBase):
         self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(f'{CAPTURES_URL}create/', self._payload()))
         capture = Capture.objects.get(id=body['data']['capture']['id'])
-        self.login_as(self.gov_city)
+        self.login_as(self.city_user)
         self.post_json(f'{CAPTURES_URL}{capture.id}/update/',
                        {'district_id': self.district_b.id})
         self.assertEqual(

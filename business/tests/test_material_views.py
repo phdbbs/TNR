@@ -418,21 +418,25 @@ class StockAdjustmentTest(BusinessTestBase):
         self.assertEqual(body['data']['type'], 'adjustment')
         self.assertEqual(get_hospital_stock(material, self.hospital_a), 7)
 
-    def test_gov_adjustment_reduces_shelter_stock(self):
-        material = make_material(district=self.district_a, shelter_stock=10)
-        self.login_as(self.gov_city)
-        self.ok(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 4, 'reason': '损耗',
-        }))
-        material.refresh_from_db()
-        self.assertEqual(material.shelter_stock, 6)
+    def test_gov_cannot_adjust_stock(self):
+        """政府端只读（第四十九轮）：监管不再异动库存。
 
-    def test_gov_adjustment_insufficient(self):
-        material = make_material(district=self.district_a, shelter_stock=2)
-        self.login_as(self.gov_city)
-        self.expect_fail(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 5, 'reason': '损耗',
-        }), message='库存不足')
+        减量、余额闸门、跨区县不暴露存在性这三条判据，原来是用政府角色跑的
+        （见 `test_gov_adjustment_*`），现在由 `test_shelter_adjustment_*` 用
+        合法角色逐条钉住。这里只补一条：**两个**政府角色都被挡在角色闸门外，
+        且断言库存与流水**一格没动** —— 角色闸门必须跑在建流水之前，
+        只断 403 抓不到「先落库再拒绝」这类半截写。
+        """
+        material = make_material(district=self.district_a, shelter_stock=10)
+        for user in (self.gov_city, self.gov_a):
+            self.login_as(user)
+            self.expect_fail(self.post_json(f'{URL}adjustment/', {
+                'material_id': material.id, 'quantity': 4, 'reason': '损耗',
+            }), status=403)
+        material.refresh_from_db()
+        self.assertEqual(material.shelter_stock, 10)
+        self.assertFalse(MaterialTransaction.objects.filter(
+            material=material, type='adjustment').exists())
 
     def test_adjustment_quantity_zero(self):
         material = make_material(district=self.district_a)
@@ -452,14 +456,6 @@ class StockAdjustmentTest(BusinessTestBase):
         self.assertEqual(get_hospital_stock(material, self.hospital_a), 3)
         self.assertFalse(MaterialTransaction.objects.filter(
             material=material, type='adjustment').exists())
-
-    def test_adjustment_cross_district_material_404(self):
-        material = make_material(district=self.district_b, shelter_stock=10)
-        # 异动接口限医院/监管部门/捕捉点；用甲区监管操作乙区物料应被拒
-        self.login_as(self.gov_a)
-        self.expect_fail(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 1, 'reason': '损耗',
-        }), status=404, message='无权访问')
 
     # ---------- 捕捉点库存异动（第三十七轮补的权限） ----------
     #

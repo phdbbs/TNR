@@ -230,6 +230,10 @@ class InactiveDistrictOnCaptureTest(BusinessTestBase):
         # 「捕捉点 ↔ 归属区县不一致」那条。
         self.city_shelter = make_institution(
             type='shelter', district=self.city, name='市级捕捉点')
+        # 第四十九轮起政府角色不再能写捕捉登记；市级捕捉点的操作员是本判据
+        # 唯一现实的入口（普通区县操作员会先被「无权归属到他区」拦住）。
+        self.city_user = make_user(role='shelter', district=self.city,
+                                   institution=self.city_shelter)
 
     def _payload(self, **kw):
         payload = {
@@ -247,7 +251,7 @@ class InactiveDistrictOnCaptureTest(BusinessTestBase):
 
     def test_create_capture_into_inactive_district_rejected(self):
         """显式提交停用区县 → 拒绝（`resolve_district_scope` 只看 `is_city`）。"""
-        self.login_as(self.gov_city)
+        self.login_as(self.city_user)
         before = Capture.objects.count()
         self.expect_fail(
             self.post_json(f'{CAPTURES_URL}create/', self._payload(
@@ -257,14 +261,14 @@ class InactiveDistrictOnCaptureTest(BusinessTestBase):
 
     def test_create_capture_into_active_district_allowed(self):
         """正向对照。"""
-        self.login_as(self.gov_city)
+        self.login_as(self.city_user)
         self.ok(self.post_json(f'{CAPTURES_URL}create/', self._payload(
             district_id=self.district_a.id)))
 
     def test_update_capture_into_inactive_district_rejected(self):
         """编辑换区县时目标区县也必须是启用状态。"""
         capture = make_capture(district=self.district_a, shelter=self.city_shelter)
-        self.login_as(self.gov_city)
+        self.login_as(self.city_user)
         self.expect_fail(self.post_json(
             f'{CAPTURES_URL}{capture.id}/update/',
             {'district_id': self.inactive_district.id}),

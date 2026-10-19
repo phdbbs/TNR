@@ -6,7 +6,7 @@ Django management command: seed_data
     python manage.py seed_data              # 填充数据（跳过已存在）
     python manage.py seed_data --flush      # 先清空再填充
 """
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
@@ -23,7 +23,7 @@ from business.stock_init import initialize as init_material_stock
 from business.stock_init import init_batch_rows
 from business.services import generate_doc_no
 from business.services_chip import parse_chip_numbers
-from core.models import District, Institution
+from core.models import District, Institution, STATUS_ACTIVE
 
 # ============================================
 # 区县（**单一来源**）
@@ -292,7 +292,7 @@ class Command(BaseCommand):
         for code_id, name, code, is_city in SEED_DISTRICTS:
             d, created = District.objects.get_or_create(
                 code=code,
-                defaults={'name': name, 'is_city': is_city, 'status': 'active'}
+                defaults={'name': name, 'is_city': is_city, 'status': STATUS_ACTIVE}
             )
             districts[code_id] = d
             if not created and d.name != name:
@@ -341,7 +341,7 @@ class Command(BaseCommand):
                     'address': address,
                     'contact': contact,
                     'phone': phone,
-                    'status': 'active',
+                    'status': STATUS_ACTIVE,
                 }
             )
             institutions[code_id] = inst
@@ -381,7 +381,7 @@ class Command(BaseCommand):
                 defaults={
                     'role': role,
                     'phone': phone,
-                    'status': 'active',
+                    'status': STATUS_ACTIVE,
                     'is_staff': role in ('platform_admin', 'gov_city', 'gov_district'),
                 }
             )
@@ -411,9 +411,9 @@ class Command(BaseCommand):
             if user.is_staff != want_staff:
                 user.is_staff = want_staff
                 changed.append('is_staff')
-            if not user.is_active or user.status != 'active':
+            if not user.is_active or user.status != STATUS_ACTIVE:
                 user.is_active = True
-                user.status = 'active'
+                user.status = STATUS_ACTIVE
                 changed.append('is_active')
             if created:
                 # 密码只在新建时设置。已存在账号的密码不自动重置——

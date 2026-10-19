@@ -58,6 +58,32 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+
+def _preflight_asset_gate():
+    """开跑前确认「静态资源缓存键」闸门还立在原地（第五十二轮重写）。
+
+    以前这里从 `templates/base.html` 抠手写 `?v=` 版本号，供 M11/M12/M47 拼锚点。
+    那套写法有两层病灶：
+      - 版本号写死在锚点里 → 每次升 `?v=` 都要同步改本文件，第二十四/二十五轮改过，
+        升到 `20261019a` 时漏改，两条变异**命中 0 次 → SKIP**，从此无人验证；
+      - 更根本的是：**手写日期串本身就是缺陷** —— 改了 `static/` 而忘了升版本，
+        浏览器继续跑旧文件，而源码判据全绿（它查的是磁盘）。
+    现已改为 `{% asset_url %}` 按内容哈希出键，模板里**不该再有任何 `?v=`**。
+    所以闸门从「版本号还在不在」换成「`base.html` 有没有走 `asset_url`」：
+    一旦有人退回手写版本或直接 `{% static %}`，这里立刻报错，
+    而不是让下面三条变异静默 SKIP。
+    """
+    src = (ROOT / 'templates' / 'base.html').read_text(encoding='utf-8')
+    if "{% asset_url 'js/tnr-common.js' %}" not in src:
+        raise SystemExit(
+            'templates/base.html 里的 tnr-common.js 不再走 {% asset_url %} '
+            '—— 内容哈希缓存闸门已失效，M11/M12/M47/M65–M67 无法验证')
+    if not (ROOT / 'core' / 'templatetags' / 'assets.py').exists():
+        raise SystemExit('core/templatetags/assets.py 不存在 —— 内容哈希闸门已失效')
+
+
+_preflight_asset_gate()
+
 # 测试目标：默认跑本轮新增的用例文件（跑全量会很慢）。
 # 可在命令行覆盖：`.venv/bin/python scripts/mutation_check.py 业务.用例 另一.用例`
 #
@@ -163,21 +189,22 @@ MUTATIONS += [
         'blacklist_check_does_not_use_silent_get',
     ),
     (
-        'M11 只升 4 个门户里的 1 处版本号（漏升 5 处）',
+        'M11 门户引入退回手写 ?v= 日期串（改了 JS 浏览器仍跑旧版）',
         'templates/portal/hospital/portal.html',
-        "js/tnr-api.js' %}?v=20260919c",
-        "js/tnr-api.js' %}?v=20260919a",
-        'all_version_query_params_are_identical',
+        "{% asset_url 'js/tnr-api.js' %}",
+        "{% static 'js/tnr-api.js' %}?v=20261019b",
+        'test_no_manual_version_stamp_survives_in_templates',
     ),
     (
-        # ⚠ M11 / M12 里写死了当前版本号 —— **每次升 `?v=` 都要同步改这两条**，
-        # 否则预检会报「命中 0 次」。第二十四轮升 `a → b`、第二十五轮升 `b → c`
-        # 时都踩到了。
-        'M12 某个门户的 tnr-api.js 去掉版本号',
+        # 原先这两条把 `?v=` 版本号写死在锚点里，靠 `_asset_version()` 从 base.html 派生；
+        # 版本号一到 20261019a 时锚点命中 0 次、静默 SKIP 过（见上面的历史说明）。
+        # 第五十二轮把缓存键换成内容哈希后，锚点不再含任何需要人维护的值，
+        # 判据也从「这些版本号彼此相等」换成「人工版本号必须绝迹」。
+        'M12 某个门户的 tnr-api.js 不带缓存键（直接 {% static %}）',
         'templates/portal/adopter/portal.html',
-        "js/tnr-api.js' %}?v=20260919c",
-        "js/tnr-api.js' %}",
-        'versioned_in_every_portal',
+        "{% asset_url 'js/tnr-api.js' %}",
+        "{% static 'js/tnr-api.js' %}",
+        'test_every_static_include_goes_through_asset_url',
     ),
     (
         'M13 侧栏去掉「黑名单管理」项（标签与 navMap 失配）',
@@ -190,7 +217,7 @@ MUTATIONS += [
     ),
     (
         'M14 navMap 去掉「黑名单管理」映射（标签点了没反应）',
-        'templates/portal/shelter/portal.html',
+        'static/js/portals/shelter.js',
         "      '黑名单管理': 'blacklist',\n",
         '',
         'sidebar_labels_and_navmap_are_in_sync',
@@ -206,7 +233,7 @@ MUTATIONS += [
         '      </a>\n',
         '',
         'every_page_view_is_reachable_from_navigation',
-        [('templates/portal/shelter/portal.html', "      '黑名单管理': 'blacklist',\n", '')],
+        [('static/js/portals/shelter.js', "      '黑名单管理': 'blacklist',\n", '')],
     ),
 ]
 
@@ -216,18 +243,22 @@ MUTATIONS += [
         # 原缺陷的**完整复现**：裸取 + 状态检查排在机构检查之前。
         # 于是「他院的单」会被状态分支接走，把**真实状态**写进错误文案。
         'M16 复现原缺陷：裸取 + 状态检查早于机构检查', 'business/views_transfer.py',
+        # 第四十八轮把 `transfer_receive` / `transfer_reject` 写成了同款，
+        # 取单那三行在文件里命中 2 次 —— 用**上一行注释**把它钉到签收那一处。
+        "    # 也不能按区县收敛：转运允许跨区县送医，那会打断正常路径。\n"
         "    transfer = get_own_institution_object(Transfer, pk, user, 'to_hospital_id')\n"
         "    if transfer is None:\n"
         "        return json_fail('转运记录不存在或无权访问', status=404)\n"
         "\n"
-        "    if transfer.status != 'pending':\n"
+        "    if transfer.status not in Transfer.OPEN_STATUSES:\n"
         "        return json_fail(f'当前状态({transfer.status})不可签收')\n",
+        "    # 也不能按区县收敛：转运允许跨区县送医，那会打断正常路径。\n"
         "    try:\n"
         "        transfer = Transfer.objects.get(id=pk)\n"
         "    except Transfer.DoesNotExist:\n"
         "        return json_fail('转运记录不存在', status=404)\n"
         "\n"
-        "    if transfer.status != 'pending':\n"
+        "    if transfer.status not in Transfer.OPEN_STATUSES:\n"
         "        return json_fail(f'当前状态({transfer.status})不可签收')\n"
         "\n"
         "    if user.institution_id != transfer.to_hospital_id:\n"
@@ -238,17 +269,20 @@ MUTATIONS += [
         # 修预言机时**最容易犯的错**：顺手把机构收敛换成区县收敛。
         # 转运本就允许跨区县送医 —— 这么改会掐断正常路径。
         'M17 机构收敛错换成区县收敛（会掐断跨区县送医）', 'business/views_transfer.py',
+        # 同 M16：取单三行在两处同款，用上一行注释钉住签收那处。
+        "    # 也不能按区县收敛：转运允许跨区县送医，那会打断正常路径。\n"
         "    transfer = get_own_institution_object(Transfer, pk, user, 'to_hospital_id')\n"
         "    if transfer is None:\n"
         "        return json_fail('转运记录不存在或无权访问', status=404)\n"
         "\n"
-        "    if transfer.status != 'pending':\n"
+        "    if transfer.status not in Transfer.OPEN_STATUSES:\n"
         "        return json_fail(f'当前状态({transfer.status})不可签收')\n",
+        "    # 也不能按区县收敛：转运允许跨区县送医，那会打断正常路径。\n"
         "    transfer = get_district_filtered_queryset(Transfer, user).filter(pk=pk).first()\n"
         "    if transfer is None:\n"
         "        return json_fail('转运记录不存在或无权访问', status=404)\n"
         "\n"
-        "    if transfer.status != 'pending':\n"
+        "    if transfer.status not in Transfer.OPEN_STATUSES:\n"
         "        return json_fail(f'当前状态({transfer.status})不可签收')\n",
         'test_cross_district_receive_succeeds',
     ),
@@ -344,13 +378,13 @@ MUTATIONS += [
     if material_id:
         qs = qs.filter(material_id=material_id)
 
-    if user.role == 'hospital':
+    data = [serialize_instance(t) for t in qs]
 """,
         """    material_id = request.GET.get('material_id')
     if material_id:
         qs = qs.filter(material_id=material_id)
 
-    if user.role == 'hospital':
+    data = [serialize_instance(t) for t in qs]
 """,
         'test_poison_material_id_rejected',
     ),
@@ -385,11 +419,11 @@ MUTATIONS += [
             # —— 那是**第四种**异常类型，`except ValueError` 兜不住，
             # 由 `date_upper_exclusive()` 统一处理（退回闭区间上界，语义等价）。
             upper, exclusive = date_upper_exclusive(end_date)
-            qs = qs.filter(**{f'{date_field}__{"lt" if exclusive else "lte"}': upper})
+            q &= Q(**{f'{date_field}__{"lt" if exclusive else "lte"}': upper})
 """,
         """        if end_date:
             from datetime import timedelta
-            qs = qs.filter(**{f'{date_field}__lt': end_date + timedelta(days=1)})
+            q &= Q(**{f'{date_field}__lt': end_date + timedelta(days=1)})
 """,
         'test_end_date_date_max_does_not_500',
     ),
@@ -516,19 +550,28 @@ MUTATIONS += [
         # 共用函数本体：库存判据挪到**建流水之后** —— 报错了，
         # 但那条流水已经落库，会出现在捕捉点台账里（孤儿记录）。
         'M30 库存判据挪到建流水之后（孤儿流水）',
-        'business/services.py',
-        """    if hospital is None and txn_type in ('dispatch', 'consume', 'adjustment'):
-        if material.shelter_stock < quantity:
+        'business/services_stock.py',
+        """    if (txn_type in OUTBOUND_TXN_TYPES
+            and (inst is None or inst.type == 'shelter')):
+        if inst is not None:
+            current = get_institution_stock(material, inst)
+            if current < quantity:
+                raise ValueError(
+                    f'{inst.name}库存不足（当前 {current}，需 {quantity}）')
+        elif material.shelter_stock < quantity:
             raise ValueError(f'捕捉点库存不足（当前 {material.shelter_stock}，需 {quantity}）')
 
-    txn = MaterialTransaction.objects.create(
+    # ---- 批次计划（B5）----
 """,
-        """    txn = MaterialTransaction.objects.create(
+        """    # ---- 批次计划（B5）----
 """,
         'test_insufficient_stock_leaves_no_orphan_transaction',
     ),
     (
-        # 数量校验挪到「按名称新建物料」之后 —— 报错了，但孤儿物料已经落库。
+        # 只把「数量必须大于 0」这条**业务拒绝**挪进事务、挪到建物料之后 ——
+        # 解析仍在前（不然芯片路径会 NameError，那是另一种错，抓的东西就不纯了）。
+        # `return json_fail()` 从 `with transaction.atomic():` 里**正常退出是不回滚的**，
+        # 于是物料已建、请求报错、台账里凭空多一条没有流水的物料。
         'M35 采购数量校验挪到建物料之后（孤儿物料）',
         'business/views_material.py',
         """    quantity, err = parse_int_param(data.get('quantity'), '采购数量', minimum=0)
@@ -536,10 +579,10 @@ MUTATIONS += [
         return json_fail(err)
     if not quantity:
         return json_fail('采购数量必须大于0')
-
-    material_id = data.get('material_id')
 """,
-        """    material_id = data.get('material_id')
+        """    quantity, err = parse_int_param(data.get('quantity'), '采购数量', minimum=0)
+    if err:
+        return json_fail(err)
 """,
         'test_purchase_zero_quantity_creates_no_orphan_material',
     ),
@@ -564,7 +607,7 @@ MUTATIONS += [
         # 服务端抛了，界面没接住 —— 表格区既没有数据也没有错误提示，
         # 表现为「卡住」或「空白」，同样属于静默失败。
         'M37 renderLedgerTable 去掉 try/catch（错误没人接）',
-        'templates/portal/gov/portal.html',
+        'static/js/portals/gov.js',
         """    let records = [];
     try {
       const result = await TNR_API.getLedger(params);
@@ -586,7 +629,7 @@ MUTATIONS += [
         # 前端 `max` 与服务端上限漂移：界面能填 200，提交必被 400 拒 ——
         # 「用户一改就撞错」（技能 5.14 的反向形态）。
         'M38 捕捉表单 max 与服务端上限漂移（界面能填、提交被拒）',
-        'templates/portal/shelter/portal.html',
+        'static/js/portals/shelter.js',
         'id="ca_petCount" min="1" max="100"',
         'id="ca_petCount" min="1" max="200"',
         'test_frontend_input_max_matches_backend_cap',
@@ -594,7 +637,7 @@ MUTATIONS += [
     (
         # 严格读退回软版本 —— catch 又变成「承诺了却兑现不了」。
         'M39 一宠一档退回静默读（死 catch 复现）',
-        'templates/portal/shelter/portal.html',
+        'static/js/portals/shelter.js',
         'data = await TNR_API.getPetLifecycleStrict(petId);',
         'data = await TNR_API.getPetLifecycle(petId);',
         'test_no_dead_catch_anywhere',
@@ -604,6 +647,10 @@ MUTATIONS += [
         'M40 getData 去掉抛错（严格读内核失效）',
         'static/js/tnr-api.js',
         """    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      this._handleUnauthorized(data.message);
+      throw new Error(data.message || '请先登录');
+    }
     if (!res.ok || !data.success) {
       throw new Error(data.message || `加载失败（HTTP ${res.status}）`);
     }
@@ -611,7 +658,11 @@ MUTATIONS += [
   },
   async getLedger(filters) {""",
         """    const data = await res.json().catch(() => ({}));
-    return data.success ? data.data : (Array.isArray(data.data) ? data.data : []);
+    if (res.status === 401) {
+      this._handleUnauthorized(data.message);
+      throw new Error(data.message || '请先登录');
+    }
+    return data.data;
   },
   async getLedger(filters) {""",
         'test_get_data_throws_with_server_message',
@@ -661,25 +712,1177 @@ MUTATIONS += [
     ),
 ]
 
+# ---- 第五十二轮 重构 B：外壳 block 的 `{{ block.super }}` 与门户自有 JS 的版本号 ----
+#
+# M45/M46 复现的是本轮**实测到**的缺陷：`portal.html` 覆写 `{% block extra_js %}`
+# 却没写 `{{ block.super }}`，把外壳那段移动端侧栏开关脚本整段顶掉 ——
+# 页面照样 200、电脑端照样能用，只有手机上侧栏再也展不开。
+# 判据 = `PortalShellTest.test_real_portals_keep_the_mobile_sidebar_toggle`。
+MUTATIONS += [
+    (
+        'M45 shelter 的 extra_js 丢掉 {{ block.super }}（移动端侧栏打不开）',
+        'templates/portal/shelter/portal.html',
+        '{% block extra_js %}\n{{ block.super }}',
+        '{% block extra_js %}',
+        'keep_the_mobile_sidebar_toggle',
+    ),
+    (
+        'M46 gov 的 extra_js 丢掉 {{ block.super }}（换一个端复现）',
+        'templates/portal/gov/portal.html',
+        '{% block extra_js %}\n{{ block.super }}',
+        '{% block extra_js %}',
+        'keep_the_mobile_sidebar_toggle',
+    ),
+    (
+        # 与 M12 的区别：M12 打的是公共的 `tnr-api.js`，这条打的是**门户自有 JS** ——
+        # 那两个引入点各写各的，漏升/漏键常常只发生在其中一处。
+        # 与 M65 的区别：M65 是「退回手写版本号」，这条是「整段不带缓存键」。
+        'M47 门户自有 JS 整段不带缓存键',
+        'templates/portal/shelter/portal.html',
+        "{% asset_url 'js/portals/shelter.js' %}",
+        "{% static 'js/portals/shelter.js' %}",
+        'test_every_static_include_goes_through_asset_url',
+    ),
+    # ---- M48–M54：物料流水类型「枚举单一来源」判据（第五十二轮 重构 B）----
+    # 抽表之前三端各有本地映射表，判据只能逐表查「这张全不全」；
+    # 抽成 `TNR_UI.MATERIAL_TXN_TYPES` 之后判据变成「只有一份，且它全」，
+    # 于是**每一条都要重新证明它抓得住** —— 尤其要防「表被搬走后判据空转」。
+    (
+        'M48 真源少一条 receive（界面漏英文码）',
+        'static/js/tnr-common.js',
+        "    receive:    { long: '签收入库', short: '签收', badge: 'cinnabar' },\n",
+        '',
+        'test_single_source_covers_all_material_types',
+    ),
+    (
+        'M49 purchase 少 short 字段（紧凑列渲染成 undefined）',
+        'static/js/tnr-common.js',
+        "purchase:   { long: '采购入库', short: '采购', badge: 'success' }",
+        "purchase:   { long: '采购入库', badge: 'success' }",
+        'test_single_source_entries_are_fully_populated',
+    ),
+    (
+        # 键名拼错**不会报错**，只会静默不生效 —— 医院端又显示成「下发出库」。
+        # 这类「改完看不出、下轮才被发现」的洞必须有用例钉着。
+        'M50 视角表键名写错成 dispath（静默不生效）',
+        'static/js/tnr-common.js',
+        "hospital: { dispatch: { long: '捕捉点下发', short: '捕捉点下发' } }",
+        "hospital: { dispath: { long: '捕捉点下发', short: '捕捉点下发' } }",
+        'test_perspective_override_only_renames_known_types',
+    ),
+    (
+        'M51 有人在监管端又抄一张本地类型表',
+        'static/js/portals/gov.js',
+        '      const shelterByDistrict = {};',
+        "      const shelterByDistrict = {};\n"
+        "      const typeMap = { purchase: '采购入库', dispatch: '下发出库',\n"
+        "        receive: '签收入库', consume: '消耗', adjustment: '调整',\n"
+        "        outbound: '出库' };",
+        'test_no_portal_redeclares_material_type_map',
+    ),
+    (
+        'M52 捕捉点筛选退回硬编码下拉',
+        'static/js/portals/shelter.js',
+        "options: TNR_UI.materialTxnOptions('long', 'shelter')",
+        "options: [{ value: 'purchase', label: '采购入库' },"
+        " { value: 'dispatch', label: '下发出库' },"
+        " { value: 'receive', label: '签收入库' }, { value: 'consume', label: '消耗' },"
+        " { value: 'adjustment', label: '调整' }, { value: 'outbound', label: '出库' }]",
+        'test_no_portal_redeclares_material_type_map',
+    ),
+    (
+        'M53 监管台账丢掉同源出口（退回裸列，显示枚举码）',
+        'static/js/portals/gov.js',
+        "{ title: '类型', render: r => TNR_UI.materialTxnBadge(r.type, 'long', 'gov') },",
+        "{ title: '类型', key: 'type' },",
+        'test_material_filter_uses_the_single_source',
+    ),
+    (
+        # `form` 打成 `'shot'` 时真源返回 null、界面退回枚举码：
+        # 靠「调用点参数必须合法」这条判据拦，而不是靠肉眼。
+        'M54 调用点 form 参数拼错成 shot',
+        'static/js/portals/shelter.js',
+        "TNR_UI.materialTxn(rec.type, 'short', 'shelter')",
+        "TNR_UI.materialTxn(rec.type, 'shot', 'shelter')",
+        'test_material_call_sites_pass_a_known_form_and_view',
+    ),
+
+    # ---- M55–M56：出院弹窗「医生已建议」映射与后端去向 key（第五十二轮）----
+    (
+        # 后端 `Treatment.DISPOSAL_CHOICES` 加一个 key、前端那张手写表没跟上，
+        # 表现不是报错而是静默：弹窗弹一句「诊疗完成时没记去向建议」。
+        'M55 去向映射漏一条 euthanized（建议静默丢掉）',
+        'static/js/portals/hospital.js',
+        "      pending_adopt: 'adopt', dead: 'dead', euthanized: 'dead',\n",
+        "      pending_adopt: 'adopt', dead: 'dead',\n",
+        'test_advised_kind_covers_every_backend_disposal_key',
+    ),
+    (
+        # 值写错成弹窗 OPTS 里不存在的 kind：`suggested` 永远匹配不上任何按钮，
+        # 高亮与标签一起失效，而且两处代码各自都「看起来没问题」。
+        'M56 去向映射的值拼成不存在的单据类型 died',
+        'static/js/portals/hospital.js',
+        "      owner_returned: 'owner', released: 'release'\n",
+        "      owner_returned: 'owner', released: 'died'\n",
+        'test_advised_kind_targets_a_real_discharge_option',
+    ),
+
+    # ---- M57–M58：首页待办「待诊疗 / 待出院」分流（第五十二轮电脑端巡检）----
+    (
+        # 退回到「按 `Pet.status` 一刀切」：放归两段的动物（诊疗单已办结、
+        # 动物还在院）会被重新挂成「待诊疗」，而诊疗看板里根本没有它。
+        # 这是本轮在浏览器里实测到的缺陷，不是假想。
+        'M57 首页待办退回按 Pet.status 一刀切（待诊疗/待出院不分）',
+        'static/js/portals/hospital.js',
+        "      pendTreatPets.forEach(p => {\n        todoItems.push({icon: '🔬', title: '待诊疗：'",
+        "      inHouse.forEach(p => {\n        todoItems.push({icon: '🔬', title: '待诊疗：'",
+        'test_pending_treatment_is_split_by_latest_record',
+    ),
+    (
+        # 卡片与列表分家：数字用一刀切的 `inHouse`，列表用分流后的数组 ——
+        # 「待诊疗任务 5」配三条待办，用户按数字行动就会扑空。
+        'M58 待诊疗卡片与待办列表不同源（数字与列表分家）',
+        'static/js/portals/hospital.js',
+        "      const pendTreat = pendTreatPets.length;",
+        "      const pendTreat = inHouse.length;",
+        'test_stat_card_shares_the_todo_source',
+    ),
+]
+
 # 把被删掉的判据插回**落库之后** —— 表达「判据晚于写库」这类变异
 MOVE_AFTER.update({
     'M30 库存判据挪到建流水之后（孤儿流水）': (
-        'business/services.py',
-        "        material.save(update_fields=['shelter_stock'])\n",
-        "\n    if hospital is None and txn_type in ('dispatch', 'consume', 'adjustment'):\n"
-        "        if material.shelter_stock < quantity:\n"
+        'business/services_stock.py',
+        "    # ---- 库存落账 ----\n",
+        "\n    if (txn_type in OUTBOUND_TXN_TYPES\n"
+        "            and (inst is None or inst.type == 'shelter')):\n"
+        "        if inst is not None:\n"
+        "            current = get_institution_stock(material, inst)\n"
+        "            if current < quantity:\n"
+        "                raise ValueError(\n"
+        "                    f'{inst.name}库存不足（当前 {current}，需 {quantity}）')\n"
+        "        elif material.shelter_stock < quantity:\n"
         "            raise ValueError(f'捕捉点库存不足（当前 {material.shelter_stock}，需 {quantity}）')\n",
     ),
     'M35 采购数量校验挪到建物料之后（孤儿物料）': (
         'business/views_material.py',
-        "    district_id = material.district_id\n",
-        "\n    quantity, err = parse_int_param(data.get('quantity'), '采购数量', minimum=0)\n"
-        "    if err:\n"
-        "        return json_fail(err)\n"
-        "    if not quantity:\n"
-        "        return json_fail('采购数量必须大于0')\n",
+        # ⚠ 锚点**必须落在事务里面**（`Material.objects.create()` 之后）。
+        # 早期版本打在「建物料」之前的 `district_id = material.district_id` 上，
+        # 后来采购把建物料整体挪进了 `transaction.atomic()`，那个位置**还在写库之前**，
+        # 于是这条变异变成纯位移、行为完全等价 → 判据全绿 = 空转（第五十二轮实测）。
+        # 现在这一行在事务内、物料已建好：`return json_fail()` 从 `with` 里正常退出
+        # **不回滚**，孤儿物料真的会落库，判据才有东西可抓。
+        "            institution = _receiving_institution(user, material)\n",
+        "\n            if not quantity:\n"
+        "                return json_fail('采购数量必须大于0')\n",
     ),
 })
+
+# ---- M59–M64：表格列的日期格式化 + 处置日期必填（第五十二轮电脑端巡检）----
+MUTATIONS += [
+    (
+        # 把列退回「直绑 DateTimeField」：界面上就是
+        # `2026-10-16T16:33:51.504093+00:00`。不报错、不 500，只是没人会念给它听。
+        'M59 领养登记时间列退回直绑 created_at',
+        'static/js/portals/hospital.js',
+        "{ title: '登记时间', key: 'created_at', render: r => this.formatDateTime(r.created_at) },",
+        "{ title: '登记时间', key: 'created_at' },",
+        'test_no_column_binds_a_datetime_field_raw',
+    ),
+    (
+        # 格式化写了，但用的是 `.slice(0, 10)` —— 拿的是 **UTC 日期**，
+        # 北京时间 00:00–08:00 的记录显示成前一天。肉眼看界面完全正常。
+        'M60 登记时间改用 slice(0,10) 取 UTC 日期',
+        'static/js/portals/hospital.js',
+        "{ title: '登记时间', key: 'created_at', render: r => this.formatDateTime(r.created_at) },",
+        "{ title: '登记时间', key: 'created_at', render: r => r.created_at.slice(0, 10) },",
+        'test_formatter_used_by_those_columns_is_the_shared_one',
+    ),
+    (
+        'M61 处置日期缺失再次静默落成 NULL',
+        'business/views_euthanasia.py',
+        "    if not date_str:\n        return json_fail(f'{kind_label}日期不能为空')",
+        "    if not date_str:\n        euthanized_at = None",
+        'test_create_missing_date_rejected',
+    ),
+    (
+        # 与 M61 分开的理由是判据不同：这条防的是**解析失败**被吞掉，
+        # 用户填 `2026-3-1` 这类错格式时单据照样创建、日期却是空的。
+        'M62 处置日期解析失败再次被吞成 NULL',
+        'business/views_euthanasia.py',
+        "    except (ValueError, TypeError):\n        return json_fail(f'{kind_label}日期「{date_str}」格式不正确，应为 YYYY-MM-DD')",
+        "    except (ValueError, TypeError):\n        euthanized_at = None",
+        'test_create_unparseable_date_rejected',
+    ),
+    (
+        'M63 安乐死列表处置日期空值不再显示破折号',
+        'static/js/portals/hospital.js',
+        "            { title: '原因', key: 'reason' },\n            { title: '处置日期', key: 'euthanized_at', render: r => this.formatDate(r.euthanized_at) },",
+        "            { title: '原因', key: 'reason' },\n            { title: '处置日期', key: 'euthanized_at' },",
+        'test_euthanasia_date_column_shows_dash_when_null',
+    ),
+    (
+        # 台账与列表是两处独立挂载，只补一边是常态 —— 所以两边各来一刀。
+        'M64 安乐死台账处置日期空值不再显示破折号',
+        'static/js/portals/hospital.js',
+        "          { title: '原因', key: 'reason' },\n          { title: '处置日期', key: 'euthanized_at', render: r => this.formatDate(r.euthanized_at) },",
+        "          { title: '原因', key: 'reason' },\n          { title: '处置日期', key: 'euthanized_at' },",
+        'test_euthanasia_date_column_shows_dash_when_null',
+    ),
+]
+
+# ---- M65–M67：静态资源缓存键交给内容哈希（第五十二轮电脑端巡检）----
+MUTATIONS += [
+    (
+        # 退回手写版本号：改了 `static/` 下的文件而忘了升这一处，
+        # 浏览器就继续跑旧文件 —— 而**源码判据全绿**，因为它查的是磁盘。
+        'M65 门户 JS 引入退回手写 ?v= 日期串',
+        'templates/portal/shelter/portal.html',
+        "<script src=\"{% asset_url 'js/portals/shelter.js' %}\"></script>",
+        "<script src=\"{% static 'js/portals/shelter.js' %}?v=20261019b\"></script>",
+        'test_no_manual_version_stamp_survives_in_templates',
+    ),
+    (
+        # 失效判据取整到**秒**：同一秒内连改两次（编辑器保存后立刻再存、
+        # 脚本批量写文件）会命中缓存里的旧哈希，「改了没生效」换个形式回来。
+        'M66 缓存判据退化到秒级 mtime（同秒改写命中旧哈希）',
+        'core/templatetags/assets.py',
+        "    marker = (st.st_mtime_ns, st.st_size)",
+        "    marker = (int(st.st_mtime), st.st_size)",
+        'test_stamp_tracks_file_content_not_a_hand_typed_date',
+    ),
+    (
+        # 忘 `{% load assets %}`：Django 把未知标签渲染成**空串**，
+        # `<script src="">` 指向当前页自己，门户逻辑整块消失而不报错。
+        'M67 模板忘了 load assets',
+        'templates/portal/shelter/portal.html',
+        "{% load static assets %}",
+        "{% load static %}",
+        'test_every_static_include_goes_through_asset_url',
+    ),
+]
+
+# ---- M68–M72：宠物状态显示真源（第五十二轮电脑端巡检）----
+# 同一个 `in_treatment` 曾在监管端 / 捕捉点端 / 医院端分别叫
+# 「待诊疗」「诊疗中」「待诊疗/诊疗中」，配色也各挑各的。
+# 收成 `TNR_UI.PET_STATUS` 之后，判据从「每张表各自全不全」变成
+# 「只有一份，且它跟后端 choices 逐项相等」—— 以下几刀逐条证明新判据有牙。
+MUTATIONS += [
+    (
+        # 文案漂移回老样子：后端 label 是「待诊疗」，前端多写「/诊疗中」。
+        # 这一处**没有**任何功能坏掉，纯粹靠元数据判据抓。
+        'M68 真源文案与后端 label 漂移（待诊疗/诊疗中）',
+        'static/js/tnr-common.js',
+        "    in_treatment:   { text: '待诊疗',        badge: 'info' },",
+        "    in_treatment:   { text: '待诊疗/诊疗中',  badge: 'info' },",
+        'test_pet_status_text_equals_backend_label',
+    ),
+    (
+        # 后端加了新状态而真源没跟：界面直接漏出 `owner_returned` 英文码。
+        'M69 真源少一条 owner_returned（漏出英文枚举码）',
+        'static/js/tnr-common.js',
+        "    owner_returned: { text: '主人领回',      badge: 'default' },\n",
+        None,
+        'test_pet_status_covers_every_backend_choice',
+    ),
+    (
+        # 配色名拼一个错字：CSS 里没有 `.badge-imfo`，徽章渲染成**没有底色**，
+        # 文案还在，所以肉眼看列表时最难发现。
+        'M70 配色名拼错（imfo，徽章没有底色）',
+        'static/js/tnr-common.js',
+        "    in_treatment:   { text: '待诊疗',        badge: 'info' },",
+        "    in_treatment:   { text: '待诊疗',        badge: 'imfo' },",
+        'test_pet_status_badge_exists_in_css',
+    ),
+    (
+        # 取值函数绕过真源：宠物状态又开始各写各的。
+        # 第五十二轮末 `Shelter.statusBadge` 的本地兜底表已删除，
+        # `TNR_API` 的两个取值函数也搬进了 `TNR_UI` —— 变异跟到真源旁边。
+        'M71 宠物状态取值函数绕开真源（退回本地表）',
+        'static/js/tnr-common.js',
+        "  petStatusText(status) {\n"
+        "    const m = TNR_UI.PET_STATUS[status];\n",
+        "  petStatusText(status) {\n"
+        "    const m = ({ in_treatment: { text: '诊疗中' } })[status];\n",
+        'test_shelter_pet_status_badge_covers_pet',
+    ),
+    (
+        # 别处再长一份表（回归到巡检时的三端三种叫法）。
+        'M72 捕捉点端重新写一份宠物状态表',
+        'static/js/portals/shelter.js',
+        "const Shelter = {\n",
+        "const Shelter = {\n"
+        "  petStatus: {\n"
+        "    in_treatment: ['诊疗中', 'info'],\n"
+        "  },\n",
+        'test_no_other_frontend_file_maps_pet_status',
+    ),
+]
+
+# ---- M73–M82：放归两段流程的「未办结」口径与显示真源（第五十二轮电脑端巡检）----
+# 这一组对应的缺陷是静默的：放归单进入 `transferred` 之后不报错、不红色，
+# 只是**从待放归页签和看板待办里一起消失**，办理人再也点不到「确认放归」。
+MUTATIONS += [
+    (
+        # 前端列表退回只筛 pending —— 中间态单子从界面消失（原缺陷本身）。
+        'M73 待放归页签只筛 pending（已回小区待签字的单子看不见）',
+        'static/js/portals/shelter.js',
+        "      const pendingReleases = releases.filter(r => openReleaseStatus.includes(r.status));",
+        "      const pendingReleases = releases.filter(r => r.status === 'pending');",
+        'test_release_lists_use_the_open_status',
+    ),
+    (
+        # 看板的「待放归」统计同样漏一段（动物送回小区登记转运后从待办消失）。
+        'M74 看板待放归数只数 pending',
+        'static/js/portals/shelter.js',
+        "    const openRelease = releases.filter(r => TNR_UI.OPEN_RELEASE_STATUS.includes(r.status));",
+        "    const openRelease = releases.filter(r => r.status === 'pending');",
+        'test_release_lists_use_the_open_status',
+    ),
+    (
+        # 监管端退回二值兜底：released 之外一律「待放归」，两段流程分不出来。
+        'M75 监管端放归状态退回「released/其余」二值兜底',
+        'static/js/portals/gov.js',
+        "{ key: 'status', title: '状态', width: '120px', render: r => TNR_UI.releaseStatusBadge(r.status) }",
+        "{ key: 'status', title: '状态', width: '120px', render: r => r.status === 'released' ? "
+        "`<span class=\"badge badge-success\">已放归</span>` : `<span class=\"badge badge-warning\">待放归</span>` }",
+        'test_no_binary_release_status_fallback',
+    ),
+    (
+        # 真源漏中间态（后端加一段、前端没跟上 —— 漏出英文枚举码）。
+        'M76 放归真源少 transferred 一条',
+        'static/js/tnr-common.js',
+        "    transferred: { text: '已回小区待放归', badge: 'info' },\n", None,
+        'test_release_status_covers_every_backend_choice',
+    ),
+    (
+        # 文案与后端 choices 的 label 漂移（单据与界面两种叫法）。
+        'M77 放归真源文案与后端 label 漂移',
+        'static/js/tnr-common.js',
+        "    transferred: { text: '已回小区待放归', badge: 'info' },",
+        "    transferred: { text: '已转运', badge: 'info' },",
+        'test_release_status_text_equals_backend_label',
+    ),
+    (
+        # 配色名拼错 —— 徽章渲染成没有底色。
+        'M78 放归真源配色名拼错',
+        'static/js/tnr-common.js',
+        "    pending:     { text: '待转运回小区',   badge: 'warning' },",
+        "    pending:     { text: '待转运回小区',   badge: 'wording' },",
+        'test_release_status_badge_exists_in_css',
+    ),
+    (
+        # 「未办结」数组少一段，与后端 Release.OPEN_STATUSES 口径分叉。
+        'M79 前端未办结数组漏 transferred',
+        'static/js/tnr-common.js',
+        "  OPEN_RELEASE_STATUS: ['pending', 'transferred'],",
+        "  OPEN_RELEASE_STATUS: ['pending'],",
+        'test_open_release_status_matches_backend',
+    ),
+    (
+        # 医院端重新自带一份（还带回那条后端根本不存在的 cancelled）。
+        'M80 医院端出院看板自带放归状态表（含幽灵 cancelled）',
+        'static/js/portals/hospital.js',
+        "        map: Object.fromEntries(Object.entries(TNR_UI.RELEASE_STATUS)\n"
+        "          .map(([k, v]) => [k, [v.text, 'badge-' + v.badge]])),",
+        "        map: { pending: ['待转运回小区', 'badge-warning'],\n"
+        "               transferred: ['已回小区待放归', 'badge-info'],\n"
+        "               released: ['已放归', 'badge-success'],\n"
+        "               cancelled: ['已撤销', 'badge-default'] },",
+        'test_no_other_frontend_file_maps_release_status',
+    ),
+    (
+        # 后端互斥判据退回只认 pending：动物一登记转运，同一只既能再开放归单
+        # 又能被领养 —— 双重承诺。
+        'M81 后端「放归占用」判据退回只认 pending',
+        'business/services.py',
+        "    return Release.objects.filter(\n        pet=pet, status__in=Release.OPEN_STATUSES).exists()",
+        "    return Release.objects.filter(pet=pet, status='pending').exists()",
+        'business.tests.test_adoption_views',
+    ),
+    (
+        # 发起放归处的重复单判据写回内联 pending 查询（与上面同源的另一处）。
+        'M82 发起放归的重复单判据只认 pending',
+        'business/views_release.py',
+        "    if pet_has_pending_release(pet):",
+        "    if Release.objects.filter(pet=pet, status='pending').exists():",
+        'business.tests.test_release_views',
+    ),
+    (
+        # 一宠一档时间线（捕捉点端与领养人端各一处）也中过同样的二值兜底：
+        # 放归两段在时间线上只显示「待放归」，看不出动物在车上还是在小区。
+        'M83 时间线放归状态退回二值兜底',
+        'static/js/portals/shelter.js',
+        "            + '<br>状态：' + esc(TNR_UI.releaseStatusText(ev.status));",
+        "            + '<br>状态：' + esc(ev.status === 'released' ? '已放归' : '待放归');",
+        'test_no_binary_release_status_fallback',
+    ),
+    (
+        # 台账筛选侧早有 created_at 兜底，行里的 `date` 却没有 —— 复现
+        # 「筛得出来、日期一栏空白、按日期排序全沉底」。
+        'M84 监管台账未办结行的日期留空（与筛选兜底口径分叉）',
+        'supervision/views.py',
+        "                'date': _row_date(r, 'released_at', 'created_at'),",
+        "                'date': r.released_at.isoformat() if r.released_at else '',",
+        'test_ledger_unfinished_rows_have_dates',
+    ),
+    # ---- M85–M92：回访打卡审核状态（CheckIn.status）的显示真源 ----
+    # 同一类缺陷在第五十二轮巡检（续）又抓到一个枚举：打卡的 `rejected`
+    # 在监管端时间线被二值兜底压成「待审核」，机构端还自创「未通过」叫法。
+    (
+        'M85 监管端打卡时间线退回二值兜底（已驳回显示成待审核）',
+        'static/js/portals/gov.js',
+        "                <div class=\"timeline-title\">${TNR_UI.escape(TNR_UI.checkinStatusText(c.status))}</div>",
+        "                <div class=\"timeline-title\">${c.status === 'approved' ? '已审核' : '待审核'}</div>",
+        'test_no_binary_checkin_status_fallback',
+    ),
+    (
+        'M86 打卡状态真源文案与后端 label 漂移',
+        'static/js/tnr-common.js',
+        "  CHECKIN_STATUS: {\n"
+        "    pending:  { text: '待审核', badge: 'warning' },\n",
+        "  CHECKIN_STATUS: {\n"
+        "    pending:  { text: '待处理', badge: 'warning' },\n",
+        'test_checkin_status_text_equals_backend_label',
+    ),
+    (
+        'M87 打卡状态真源缺 rejected 一档',
+        'static/js/tnr-common.js',
+        "    rejected: { text: '已驳回', badge: 'danger' },",
+        "    // rejected 这一档忘了补",
+        'test_checkin_status_covers_every_backend_choice',
+    ),
+    (
+        'M88 打卡状态配色名拼错（徽章渲染成无底色）',
+        'static/js/tnr-common.js',
+        "  CHECKIN_STATUS: {\n"
+        "    pending:  { text: '待审核', badge: 'warning' },\n"
+        "    approved: { text: '已通过', badge: 'success' },\n",
+        "  CHECKIN_STATUS: {\n"
+        "    pending:  { text: '待审核', badge: 'warning' },\n"
+        "    approved: { text: '已通过', badge: 'succcess' },\n",
+        'test_checkin_status_badge_exists_in_css',
+    ),
+    (
+        'M89 领养人端自带一份打卡状态表',
+        'static/js/portals/adopter.js',
+        "  return TNR_UI.checkinStatusBadge(status);",
+        "  const map = {\n"
+        "    'pending': '<span class=\"badge badge-warning\">待审核</span>',\n"
+        "    'approved': '<span class=\"badge badge-success\">已通过</span>',\n"
+        "    'rejected': '<span class=\"badge badge-danger\">已驳回</span>'\n"
+        "  };\n"
+        "  return map[status] || '<span class=\"badge badge-default\">未知</span>';",
+        'CheckInStatusSingleSourceTest.test_renderers_use_the_source',
+    ),
+    (
+        'M90 监管端回访打卡列只报条数（全驳回也绿）',
+        'static/js/portals/gov.js',
+        "          const detail = Object.keys(TNR_UI.CHECKIN_STATUS)\n"
+        "            .filter(k => cnt[k])\n"
+        "            .map(k => TNR_UI.CHECKIN_STATUS[k].text + cnt[k]);\n"
+        "          const allApproved = mine.length > 0 && detail.length === 1 && cnt.approved === mine.length;\n"
+        "          const cls = allApproved ? 'badge-success' : 'badge-warning';\n"
+        "          const tip = detail.length ? detail.join(' / ') : '尚无回访打卡';",
+        "          const cls = mine.length > 0 ? 'badge-success' : 'badge-warning';\n"
+        "          const tip = '';",
+        'test_gov_checkin_count_shows_review_result',
+    ),
+    (
+        'M91 监管端领养详情抽屉的打卡只报次数',
+        'static/js/portals/gov.js',
+        "            const parts = Object.keys(TNR_UI.CHECKIN_STATUS)\n"
+        "              .filter(k => by[k])\n"
+        "              .map(k => TNR_UI.CHECKIN_STATUS[k].text + by[k]);",
+        "            const parts = [];",
+        'test_gov_checkin_count_shows_review_result',
+    ),
+    (
+        'M92 机构端回访筛选写死一套文案（含自创的「未通过」）',
+        'static/js/portals/shelter.js',
+        "        options: Object.keys(TNR_UI.CHECKIN_STATUS).map(k => ({ value: k, label: TNR_UI.CHECKIN_STATUS[k].text })) }",
+        "        options: [ { value: 'pending', label: '待审核' },\n"
+        "          { value: 'approved', label: '已通过' }, { value: 'rejected', label: '未通过' } ] }",
+        'test_shelter_checkin_words_match_backend_label',
+    ),
+
+    # ---- M93–M102：领养单 / 领养申请单状态的显示真源 ----
+    # 同一格发现的是一整套四种叫法（后端 待领出/已完成/已取消、兜底表「已撤销」、
+    # 医院看板「已领出」、领养人卡片写死绿色「已领养」），另加两处放归显示盲区。
+    (
+        'M93 监管台账领养列退回写死徽章',
+        'static/js/portals/shelter.js',
+        "        { title: '医院', key: 'hospitalName' },\n"
+        "        { title: '状态', render: r => TNR_UI.adoptionStatusBadge(r.status) },",
+        "        { title: '医院', key: 'hospitalName' },\n"
+        "        { title: '状态', render: r => this.statusBadge(r.status) },",
+        'test_shelter_adoption_surfaces_use_the_source',
+    ),
+    (
+        'M94 台账放归列退回写死「已放归」',
+        'static/js/portals/shelter.js',
+        "        { title: '状态', render: r => TNR_UI.releaseStatusBadge(r.status) },",
+        "        { title: '状态', render: r => statusBadge('已放归', 'success') },",
+        'test_pet_archive_release_detail_shows_stage',
+    ),
+    (
+        'M95 一宠一档放归明细删掉状态与转运时间',
+        'static/js/portals/shelter.js',
+        "        { label: '状态', value: TNR_UI.releaseStatusBadge(rec.status) },\n"
+        "        { label: '转运回小区', value: TNR_UI.formatDateTime(rec.transferredAt || rec.transferred_at) },",
+        '',
+        'test_pet_archive_release_detail_shows_stage',
+    ),
+    (
+        'M96 医院出院看板自带领养状态表（旧叫法）',
+        'static/js/portals/hospital.js',
+        "        map: Object.fromEntries(Object.entries(TNR_UI.ADOPTION_STATUS)\n"
+        "          .map(([k, v]) => [k, [v.text, 'badge-' + v.badge]])),",
+        "        map: { pending_claim: ['待领养', 'badge-cinnabar'],\n"
+        "               completed: ['已领出', 'badge-success'],\n"
+        "               cancelled: ['已撤销', 'badge-default'] },",
+        'test_no_legacy_adoption_wording',
+    ),
+    (
+        'M97 领养人卡片写死绿色「已领养」（不看单据状态）',
+        'static/js/portals/adopter.js',
+        "              <div class=\"pet-card-name\">${TNR_UI.escape(petTitle)} ${TNR_UI.adoptionStatusBadge(adoption.status)}</div>",
+        "              <div class=\"pet-card-name\">${TNR_UI.escape(petTitle)} "
+        "<span class=\"badge badge-success\">已领养</span></div>",
+        'test_no_hardcoded_adoption_badge',
+    ),
+    (
+        'M98 领养单真源文案与后端 label 漂移',
+        'static/js/tnr-common.js',
+        "    completed:     { text: '已完成', badge: 'success' },",
+        "    completed:     { text: '已办结', badge: 'success' },",
+        'test_adoption_status_source_matches_backend',
+    ),
+    (
+        'M99 领养单真源配色名拼错（徽章渲染成无底色）',
+        'static/js/tnr-common.js',
+        "    pending_claim: { text: '待领出', badge: 'cinnabar' },",
+        "    pending_claim: { text: '待领出', badge: 'cinnabarr' },",
+        'test_adoption_status_source_matches_backend',
+    ),
+    (
+        'M100 申请单真源缺 cancelled 一档',
+        'static/js/tnr-common.js',
+        "    cancelled: { text: '已取消', badge: 'default' },\n",
+        '',
+        'test_apply_status_source_matches_backend',
+    ),
+    (
+        'M101 领养人端退回自带两张申请状态表',
+        'static/js/portals/adopter.js',
+        "function getApplyStatusText(status) {\n"
+        "  // 本文件曾自带两张申请状态表（文本一份、徽章一份），现在只剩调用点，\n"
+        "  // 文案/配色由 `TNR_UI.APPLY_STATUS` 给出（对齐 `AdoptionApplication.STATUS_CHOICES`）。\n"
+        "  return TNR_UI.applyStatusText(status);\n"
+        "}\n"
+        "\n"
+        "function getApplyStatusBadge(status) {\n"
+        "  return TNR_UI.applyStatusBadge(status);\n"
+        "}",
+        "const APPLY_TEXT = { pending: '待审核', approved: '已通过',\n"
+        "  rejected: '已拒绝', cancelled: '已撤销' };\n"
+        "const APPLY_BADGE = { pending: 'warning', approved: 'success',\n"
+        "  rejected: 'danger', cancelled: 'default' };\n"
+        "function getApplyStatusText(status) { return APPLY_TEXT[status] || status; }\n"
+        "function getApplyStatusBadge(status) {\n"
+        "  return `<span class=\"badge badge-${APPLY_BADGE[status] || 'default'}\">`\n"
+        "    + TNR_UI.escape(getApplyText(status)) + '</span>';\n"
+        "}",
+        'AdoptionStatusSingleSourceTest.test_renderers_use_the_source',
+    ),
+    # 原 M102「机构端领养筛选下拉自创文案」锚的是手写字面量选项。
+    # 第五十二轮末筛选条改为 `TNR_UI.adoptionStatusOptions()` 生成，
+    # 该变异已由 M141（退回手写字面量）等价接管，故删除。
+
+    # ---- M103–M114：捕捉 / 转运 / 诊疗三张状态表与「待签收」口径 ----
+    # 监管端三张转运表**都漏 partial**（状态列印出英文码）、文案写「待接收/已接收」，
+    # 诊疗列拿阶段词「诊疗中」当状态名；后端签收/驳回门禁写了两遍字面量。
+    (
+        'M103 监管端全业务转运列退回自带表（漏 partial + 待接收）',
+        'static/js/portals/gov.js',
+        "        { key: 'status', title: '状态', render: r => TNR_UI.transferStatusBadge(r.status) }",
+        "        { key: 'status', title: '状态', render: r => {\n"
+        "          const m = { pending: { t: '待接收', b: 'badge-warning' }, received: { t: '已接收', b: 'badge-success' }, rejected: { t: '已驳回', b: 'badge-danger' }, void: { t: '已撤回', b: 'badge-default' } };\n"
+        "          const s = m[r.status] || { t: r.status, b: 'badge-default' };\n"
+        "          return `<span class=\"badge ${s.b}\">${s.t}</span>`;\n"
+        "        } }",
+        'test_no_legacy_transfer_wording_in_status_maps',
+    ),
+    (
+        'M104 监管端台账转运列退回自带表（状态列印出 partial）',
+        'static/js/portals/gov.js',
+        "        { key: 'status', title: '状态', width: '90px', render: r => TNR_UI.transferStatusBadge(r.status) },",
+        "        { key: 'status', title: '状态', width: '90px', render: r => {\n"
+        "          const m = { pending: { t: '待接收', b: 'badge-warning' }, received: { t: '已接收', b: 'badge-success' }, rejected: { t: '已驳回', b: 'badge-danger' }, void: { t: '已撤回', b: 'badge-default' } };\n"
+        "          const v = m[r.status] || { t: r.status || '—', b: 'badge-default' };\n"
+        "          return `<span class=\"badge ${v.b}\">${v.t}</span>`;\n"
+        "        } },",
+        'test_no_legacy_transfer_wording_in_status_maps',
+    ),
+    (
+        'M105 监管端诊疗列拿阶段文案「诊疗中」当状态名',
+        'static/js/portals/gov.js',
+        "        { key: 'status', title: '状态', render: r => TNR_UI.treatmentStatusBadge(r.status) }",
+        "        { key: 'status', title: '状态', render: r => {\n"
+        "          const m = { in_progress: { t: '诊疗中', b: 'badge-info' }, completed: { t: '已完成', b: 'badge-success' } };\n"
+        "          const s = m[r.status] || { t: r.status, b: 'badge-default' };\n"
+        "          return `<span class=\"badge ${s.b}\">${s.t}</span>`;\n"
+        "        } }",
+        'test_treatment_status_not_labelled_by_stage',
+    ),
+    (
+        'M106 监管端捕捉详情退回本地状态表',
+        'static/js/portals/gov.js',
+        "        { label: '状态', value: TNR_UI.captureStatusText(r.status) },",
+        "        { label: '状态', value: ({ pending: '待转运', partial: '部分转运', completed: '已完成', void: '已作废' })[r.status] || r.status || '—' },",
+        'test_renderers_use_the_sources',
+    ),
+    (
+        'M107 领养人端时间线漏 partial 并兜底成「待签收」',
+        'static/js/portals/adopter.js',
+        "${TNR_UI.escape(TNR_UI.transferStatusText(ev.status))}",
+        "${TNR_UI.escape({ received: '已签收', rejected: '已驳回', void: '已撤回' }[ev.status] || '待签收')}",
+        'test_no_status_fallback_invents_a_state',
+    ),
+    (
+        'M108 转运状态真源缺 partial 一档',
+        'static/js/tnr-common.js',
+        "    partial:  { text: '部分签收', badge: 'info' },",
+        "    // partial 这一档忘了补",
+        'test_sources_cover_backend_choices',
+    ),
+    (
+        'M109 捕捉状态真源文案与后端 label 漂移',
+        'static/js/tnr-common.js',
+        "    pending:   { text: '待转运',   badge: 'warning' },",
+        "    pending:   { text: '待送医',   badge: 'warning' },",
+        'test_source_texts_equal_backend_labels',
+    ),
+    (
+        'M110 诊疗状态配色名拼错（徽章渲染成无底色）',
+        'static/js/tnr-common.js',
+        "    in_progress: { text: '进行中', badge: 'info' },",
+        "    in_progress: { text: '进行中', badge: 'infoo' },",
+        'test_source_badges_exist_in_css',
+    ),
+    (
+        'M111 「待签收」口径退回只认 pending（部分签收的单从待办消失）',
+        'static/js/tnr-common.js',
+        "  OPEN_TRANSFER_STATUS: ['pending', 'partial'],",
+        "  OPEN_TRANSFER_STATUS: ['pending'],",
+        'test_open_transfer_status_matches_backend',
+    ),
+    (
+        'M112 医院端标签页筛选回退字面量 pending+partial',
+        'static/js/portals/hospital.js',
+        "    const transfers = allTransfers.filter(t => tab === 'pending'\n"
+        "      ? TNR_UI.isOpenTransferStatus(t.status)\n"
+        "      : t.status === tab);",
+        "    const transfers = allTransfers.filter(t => tab === 'pending'\n"
+        "      ? (t.status === 'pending' || t.status === 'partial')\n"
+        "      : t.status === tab);",
+        'test_no_frontend_reimplements_open_transfer',
+    ),
+    (
+        'M113 捕捉点可选动物回退字面量判定',
+        'static/js/portals/shelter.js',
+        "      if (TNR_UI.isOpenTransferStatus(t.status)) (t.petCodes || []).forEach(c => busy.add(c));",
+        "      if (t.status === 'pending' || t.status === 'partial') (t.petCodes || []).forEach(c => busy.add(c));",
+        'test_no_frontend_reimplements_open_transfer',
+    ),
+    (
+        'M114 后端驳回门禁回退字面量（与前端真源分叉）',
+        'business/views_transfer.py',
+        "    if transfer.status not in Transfer.OPEN_STATUSES:\n"
+        "        return json_fail(f'当前状态({transfer.status})不可驳回')",
+        "    if transfer.status not in ('pending', 'partial'):\n"
+        "        return json_fail(f'当前状态({transfer.status})不可驳回')",
+        'test_backend_open_statuses_is_the_only_predicate',
+    ),
+    (
+        'M115 看板五态把 checking 叫回「待检」（同一时刻两种文案）',
+        'static/js/tnr-common.js',
+        "    checking:          { text: '待接诊',  badge: 'warning' },",
+        "    checking:          { text: '待检',  badge: 'warning' },",
+        'test_shared_stage_code_has_one_name',
+    ),
+    (
+        'M116 页签顺序被打乱（诊疗中排到待诊断前面）',
+        'static/js/tnr-common.js',
+        "  BOARD_STAGE_ORDER: ['checking', 'pending_diagnose', 'treating',",
+        "  BOARD_STAGE_ORDER: ['checking', 'treating', 'pending_diagnose',",
+        'test_board_stage_order_matches_backend_stages',
+    ),
+    (
+        'M117 五态表漏 pending_diagnose（页签漏出英文码）',
+        'static/js/tnr-common.js',
+        "    pending_diagnose:  { text: '待诊断',  badge: 'info' },\n",
+        '',
+        'test_board_stage_keys_and_badges_are_complete',
+    ),
+    (
+        'M118 三态 done 文案与后端 label 脱钩（诊疗完毕→已办结）',
+        'static/js/tnr-common.js',
+        "    done:     { text: '诊疗完毕', badge: 'success' },",
+        "    done:     { text: '已办结', badge: 'success' },",
+        'test_treatment_stage_matches_backend_labels',
+    ),
+    (
+        'M119 看板配色名拼错（待出院徽章渲染成无底色）',
+        'static/js/tnr-common.js',
+        "    pending_discharge: { text: '待出院',  badge: 'warning' },",
+        "    pending_discharge: { text: '待出院',  badge: 'warningg' },",
+        'test_board_stage_keys_and_badges_are_complete',
+    ),
+    (
+        'M120 医院端页签又自写一份阶段文案表',
+        'static/js/portals/hospital.js',
+        "      k: k, t: TNR_UI.boardStageText(k), tip: TIPS[k] || ''",
+        "      k: k, t: { checking: '待接诊', treating: '诊疗中' }[k] || '', tip: TIPS[k] || ''",
+        'test_no_portal_restates_stage_labels',
+    ),
+    (
+        'M121 详情抽屉「当前阶段」回退本地三态表',
+        'static/js/portals/hospital.js',
+        "    return TNR_UI.treatmentStageText(stage);",
+        "    const map = { checking: '待接诊', treating: '诊疗中', done: '诊疗完毕' };\n"
+        "    return map[stage] || this.escape(stage || '—');",
+        'test_no_portal_restates_stage_labels',
+    ),
+    (
+        'M122 看板页签改回硬编码五态列表（不再读顺序真源）',
+        'static/js/portals/hospital.js',
+        "    const FILTERS = TNR_UI.BOARD_STAGE_ORDER.map(k => ({",
+        "    const FILTERS = ['checking', 'pending_diagnose', 'treating', "
+        "'pending_discharge', 'discharged'].map(k => ({",
+        'test_hospital_board_reads_the_stage_source',
+    ),
+    (
+        'M123 看板空桶退回五键字面量（与后端桶名两处各写一遍）',
+        'business/views_treatment.py',
+        "    buckets = _board_buckets()",
+        "    buckets = {'checking': [], 'pending_diagnose': [], 'treating': [],\n"
+        "               'pending_discharge': [], 'discharged': []}",
+        'test_backend_buckets_and_filter_read_the_tables',
+    ),
+    (
+        'M124 ?stage= 筛选退回手写时间戳判据（与 stage 属性两份真源）',
+        'business/views_treatment.py',
+        "        stage_kwargs = Treatment.STAGE_FILTERS.get(stage)\n"
+        "        if stage_kwargs is None:\n"
+        "            return json_fail(f'未知的诊疗阶段：{stage}')\n"
+        "        qs = qs.filter(**dict(stage_kwargs))",
+        "        if stage == 'checking':\n"
+        "            qs = qs.filter(checked_at__isnull=True)\n"
+        "        elif stage == 'treating':\n"
+        "            qs = qs.filter(checked_at__isnull=False, done_at__isnull=True)\n"
+        "        elif stage == 'done':\n"
+        "            qs = qs.filter(done_at__isnull=False)\n"
+        "        else:\n"
+        "            return json_fail(f'未知的诊疗阶段：{stage}')",
+        'test_backend_buckets_and_filter_read_the_tables',
+    ),
+    (
+        'M125 STAGE_FILTERS 里 treating 少算 done_at（筛出的单点开是另一阶段）',
+        'business/models.py',
+        "        STAGE_TREATING: (('checked_at__isnull', False), ('done_at__isnull', True)),",
+        "        STAGE_TREATING: (('checked_at__isnull', False),\n"
+        "                         ('diagnosed_at__isnull', False)),",
+        'test_stage_filter_and_property_agree',
+    ),
+    (
+        'M126 后端 BOARD_STAGES 漏掉待出院（看板整列动物消失）',
+        'business/models.py',
+        "    BOARD_STAGES = ('checking', 'pending_diagnose', 'treating',\n"
+        "                    'pending_discharge', 'discharged')",
+        "    BOARD_STAGES = ('checking', 'pending_diagnose', 'treating',\n"
+        "                    'discharged')",
+        'test_board_stage_order_matches_backend_stages',
+    ),
+    (
+        'M127 实体状态徽章「启用」文案改写（与后端 STATUS_LABELS 脱节）',
+        'static/js/tnr-common.js',
+        "    active:   { text: '启用', badge: 'success' },",
+        "    active:   { text: '启用中', badge: 'success' },",
+        'test_entity_status_matches_backend_domain',
+    ),
+    (
+        'M128 幽灵态 disabled 重回 ENTITY_STATUS（后端从不产出）',
+        'static/js/tnr-common.js',
+        "    inactive: { text: '停用', badge: 'danger' },",
+        "    inactive: { text: '停用', badge: 'danger' },\n"
+        "    disabled: { text: '停用', badge: 'danger' },",
+        'test_entity_status_matches_backend_domain',
+    ),
+    (
+        'M129 角色名退回「市级管理员」（后端 label 是市级政府管理员）',
+        'static/js/tnr-common.js',
+        "    gov_city:       { text: '市级政府管理员', badge: 'ink' },",
+        "    gov_city:       { text: '市级管理员', badge: 'ink' },",
+        'test_role_keys_and_labels_match_backend_choices',
+    ),
+    (
+        'M130 机构类型文案改写（与 Institution.TYPE_CHOICES 脱节）',
+        'static/js/tnr-common.js',
+        "    shelter:   { text: '捕捉点', badge: 'cinnabar' },",
+        "    shelter:   { text: '收容点', badge: 'cinnabar' },",
+        'test_inst_type_matches_backend_choices',
+    ),
+    (
+        'M131 芯片「已使用」退回旧称「已植入」',
+        'static/js/tnr-common.js',
+        "    used:       { text: '已使用', badge: 'cinnabar' },",
+        "    used:       { text: '已植入', badge: 'cinnabar' },",
+        'test_chip_status_matches_backend_choices',
+    ),
+    (
+        'M132 平台端状态筛选下拉退回字面量选项',
+        'static/js/portals/platform.js',
+        "      { key: 'role', label: '角色', type: 'select', options: TNR_UI.roleOptions(['adopter']) },\n"
+        "      { key: 'status', label: '状态', type: 'select', options: TNR_UI.entityStatusOptions() },",
+        "      { key: 'role', label: '角色', type: 'select', options: TNR_UI.roleOptions(['adopter']) },\n"
+        "      { key: 'status', label: '状态', type: 'select', options: [{ value: 'active', label: '启用' }, { value: 'inactive', label: '停用' }] },",
+        'test_platform_portal_reads_the_enum_sources',
+    ),
+    (
+        'M133 账号列表角色列不再走徽章真源',
+        'static/js/portals/platform.js',
+        "      { key: 'role', title: '角色', render: r => TNR_UI.roleBadge(r.role) },",
+        "      { key: 'role', title: '角色', render: r => TNR_UI.roleText(r.role) },",
+        'test_platform_portal_reads_the_enum_sources',
+    ),
+    (
+        'M134 捕捉点端账号状态写死绿色「启用」',
+        'static/js/portals/shelter.js',
+        "              { label: '账号状态', value: TNR_UI.entityStatusBadge(user?.status) }",
+        "              { label: '账号状态', value: '<span class=\"badge badge-success\">启用</span>' }",
+        'test_shelter_account_status_reads_the_source',
+    ),
+    (
+        'M135 机构创建写回裸字符串 status=\'active\'',
+        'supervision/views.py',
+        "        phone=phone,\n"
+        "        status=STATUS_ACTIVE,\n"
+        "    )",
+        "        phone=phone,\n"
+        "        status='active',\n"
+        "    )",
+        'test_backend_status_writes_use_the_constants',
+    ),
+    (
+        'M136 STATUS_ACTIVE 取值改成后端永不产出的 enabled',
+        'core/models.py',
+        "STATUS_ACTIVE = 'active'",
+        "STATUS_ACTIVE = 'enabled'",
+        'test_backend_status_writes_use_the_constants',
+    ),
+    (
+        'M137 ROLE_ORDER 漏掉领养人（筛选/建号下拉少一个角色）',
+        'static/js/tnr-common.js',
+        "  ROLE_ORDER: ['platform_admin', 'gov_city', 'gov_district',\n"
+        "               'shelter', 'hospital', 'adopter'],",
+        "  ROLE_ORDER: ['platform_admin', 'gov_city', 'gov_district',\n"
+        "               'shelter', 'hospital'],",
+        'test_role_keys_and_labels_match_backend_choices',
+    ),
+    (
+        'M138 流转时间线转运状态退回本地表（漏 partial，印英文码）',
+        'static/js/portals/shelter.js',
+        "            + '<br>状态：' + esc(TNR_UI.transferStatusText(ev.status))",
+        "            + '<br>状态：' + esc(({ pending: '待签收', received: '已签收',"
+        " rejected: '已驳回' })[ev.status] || ev.status)",
+        'test_shelter_lifecycle_timeline_uses_the_sources',
+    ),
+    (
+        'M139 流转时间线诊疗状态退回「已完成 / 进行中」二分',
+        'static/js/portals/shelter.js',
+        "            + '<br>状态：' + esc(TNR_UI.treatmentStatusText(ev.status))",
+        "            + '<br>状态：' + esc(ev.status === 'completed' ? '已完成' : '进行中')",
+        'test_shelter_lifecycle_timeline_uses_the_sources',
+    ),
+    (
+        'M140 捕捉单状态筛选退回手写字面量（漏作废档）',
+        'static/js/portals/shelter.js',
+        "      { key: 'status', label: '状态', type: 'select', options: TNR_UI.captureStatusOptions() },",
+        "      { key: 'status', label: '状态', type: 'select', options: [\n"
+        "        { value: 'pending', label: '待捕捉' },\n"
+        "        { value: 'completed', label: '已完成' },\n"
+        "      ] },",
+        'test_shelter_status_filters_use_generators',
+    ),
+    (
+        'M141 领养单状态筛选退回手写字面量',
+        'static/js/portals/shelter.js',
+        "      { key: 'status', label: '状态', type: 'select', options: TNR_UI.adoptionStatusOptions() }",
+        "      { key: 'status', label: '状态', type: 'select', options: [\n"
+        "        { value: 'pending_claim', label: '待领出' },\n"
+        "        { value: 'completed', label: '已完成' },\n"
+        "      ] },",
+        'test_shelter_adoption_filter_uses_source',
+    ),
+    (
+        'M142 statusOptions 把英文枚举码当文案（下拉漏出 status code）',
+        'static/js/tnr-common.js',
+        "      value, label: TNR_UI[table][value].text,",
+        "      value, label: value,",
+        'test_status_options_reads_text_in_key_order',
+    ),
+    (
+        'M143 领养人端手拼宠物状态徽章（把类名前缀拆回来）',
+        'static/js/portals/adopter.js',
+        '  html += `<div style="margin-top:8px;">${TNR_UI.petStatusBadge(pet.status)}</div>`;',
+        '  html += `<div style="margin-top:8px;">${TNR_UI.statusBadge('
+        'TNR_UI.petStatusText(pet.status), '
+        "TNR_UI.PET_STATUS[pet.status].badge.replace('badge-',''))}</div>`;",
+        'test_portals_use_the_badge_helper',
+    ),
+    (
+        'M144 医院物料页退回静默读（加载失败伪装成没有数据）',
+        'static/js/portals/hospital.js',
+        '        TNR_API.getMaterialTransactionsStrict(),\n'
+        '        TNR_API.getMaterialsStrict()',
+        '        TNR_API.getMaterialTransactions(),\n'
+        '        TNR_API.getMaterialsStrict()',
+        'test_material_page_uses_strict_reads_only',
+    ),
+    (
+        'M146 物料页签点击丢掉物料缓存（实时库存显示暂无物料）',
+        'static/js/portals/hospital.js',
+        '        this.renderMaterialTab(txns, materials);',
+        '        this.renderMaterialTab(txns);',
+        'test_material_tab_switch_passes_the_cached_materials',
+    ),
+    (
+        'M147 平台机构页退回静默读（加载失败伪装成暂无数据）',
+        'static/js/portals/platform.js',
+        '  async renderInstitutionsContent() {\n'
+        '    const contentEl = document.getElementById(\'instContent\');\n'
+        '    let districts;\n'
+        '    try {\n'
+        '      districts = (await TNR_API.getDistrictsStrict()) || [];',
+        '  async renderInstitutionsContent() {\n'
+        '    const contentEl = document.getElementById(\'instContent\');\n'
+        '    let districts;\n'
+        '    try {\n'
+        '      districts = (await TNR_API.getDistricts()) || [];',
+        'test_platform_lists_use_strict_reads_only',
+    ),
+    (
+        'M148 平台编辑机构在记录缺失时退化成新增（重复建机构）',
+        'static/js/portals/platform.js',
+        "      if (!inst) { TNR_UI.toast('机构不存在或已被删除，请刷新列表', 'warning'); return; }\n",
+        '',
+        'test_edit_modals_abort_instead_of_falling_back_to_create',
+    ),
+    (
+        'M149 平台建号前端回退默认口令 123456',
+        'static/js/portals/platform.js',
+        '          username, password, name, role,',
+        "          username, password: password || '123456', name, role,",
+        'test_account_creation_has_no_default_password',
+    ),
+    (
+        # 前端不再预填默认口令，但接口若还允许空口令，
+        # 直接 POST 就能建出一个「口令为空」的管理账号。
+        'M150 建号接口放弃口令必填与强度校验',
+        'supervision/views.py',
+        '    if not password:\n'
+        "        return json_fail('请设置初始密码')\n"
+        '    if len(password) < 6:\n'
+        "        return json_fail('密码长度不能少于6位')\n"
+        '    # 传一个未落库的 User 给校验器：`UserAttributeSimilarityValidator`\n'
+        '    # 只有在拿到 user 时才比对用户名/姓名。不传会让「口令=用户名」在建号\n'
+        '    # 这一侧放行，而改密接口（传 request.user）却拒绝 —— 同一套判据两个结果。\n'
+        '    probe = User(username=username, first_name=name)\n'
+        '    try:\n'
+        '        validate_password(password, probe)\n'
+        '    except ValidationError as e:\n'
+        "        return json_fail('；'.join(e.messages))\n",
+        '',
+        'test_create_without_password_rejected',
+    ),
+    (
+        # 读失败后筛选框仍绑着渲染函数，缓存不置空就会把错误态换成过期名单。
+        'M151 账号读失败后保留旧缓存（筛选覆盖错误态）',
+        'static/js/portals/platform.js',
+        '      this._users = null;\n',
+        '',
+        'test_filter_after_load_error_does_not_overwrite_error_state',
+    ),
+    (
+        # 标签栏 4–6 个标签时内容 497–707px，容器只有 336–342px；
+        # 去掉 overflow-x 后右侧标签直接被裁掉、永远点不到。
+        'M152 移动端标签栏退回不可横向滚动（右侧标签点不到）',
+        'static/css/tnr-traditional.css',
+        '  body .page-view .tabs {\n'
+        '    overflow-x: auto;\n',
+        '  body .page-view .tabs {\n',
+        'test_tabs_scroll_horizontally_on_mobile',
+    ),
+    (
+        # 日志描述不换行时只剩 ~70px 宽，单条日志实测 217–255px 高。
+        'M153 移动端日志描述不独占一行（单条日志撑到 200px+）',
+        'templates/portal/platform/portal.html',
+        '    .log-detail{flex:1 1 100%;min-width:0;word-break:break-word}',
+        '    .log-detail{flex:1;min-width:0;word-break:break-word}',
+        'test_mobile_log_rows_stack_detail',
+    ),
+    (
+        # 日期不成对时手机端筛选条多占一整行 ~78px，首屏列表被挤没。
+        'M154 起止日期不再成对渲染（筛选条多占一整行）',
+        'static/js/tnr-common.js',
+        "      if (f && f.type === 'date' && all[i + 1] && all[i + 1].type === 'date') {",
+        '      if (false) {',
+        'test_date_filters_are_rendered_as_a_pair',
+    ),
+    (
+        'M155 移动端分页按钮退回 32px（触控点不准）',
+        'static/css/tnr-traditional.css',
+        '  .pagination-btn { min-width: 44px; height: 44px; }',
+        '  .pagination-btn { min-width: 32px; height: 32px; }',
+        'test_pagination_targets_are_touch_sized_on_mobile',
+    ),
+    (
+        'M156 领养人端「清空」退回 25px 小热区',
+        'templates/portal/adopter/portal.html',
+        '    min-width: 44px; min-height: 44px;\n'
+        '    display: inline-flex; align-items: center; justify-content: center;',
+        '    min-width: 0; min-height: 0;\n'
+        '    display: inline-flex; align-items: center; justify-content: center;',
+        'test_adopter_date_clear_is_touch_sized',
+    ),
+    (
+        # 内联三列会盖掉移动端的两列 stat-grid，390px 下每列只有 111px。
+        'M157 政府端统计卡退回内联三列（移动端挤成 111px）',
+        'static/js/portals/gov.js',
+        '            <div class="stat-grid stat-grid-3" style="margin-bottom:var(--sp-5);">',
+        '            <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:var(--sp-5);">',
+        'test_gov_stat_grid_does_not_pin_three_columns_inline',
+    ),
+    (
+        # 日志读失败只剩一行红字，没有重试入口，只能切页签碰运气。
+        'M158 操作日志失败态退回不可重试（只有一行红字）',
+        'static/js/portals/platform.js',
+        "        this.showLoadError(el, '操作日志加载失败', e, () => this.renderSettingsContent());\n",
+        "        el.innerHTML = '<div class=\"table-empty\">加载失败</div>';\n",
+        'test_settings_failures_are_visible_and_retryable',
+    ),
+    (
+        'M159 公告失败态退回不可重试（只有一行红字）',
+        'static/js/portals/platform.js',
+        "        this.showLoadError(el, '公告数据加载失败', e, () => this.renderSettingsContent());\n",
+        "        el.innerHTML = '<div class=\"table-empty\">加载失败</div>';\n",
+        'test_settings_failures_are_visible_and_retryable',
+    ),
+    (
+        # 动物档案读失败曾被静默成「未知」；去掉警告与重试入口后，
+        # 用户只会看到一串没有姓名/性别的编号。
+        'M160 交接页档案读失败退回静默（只剩「未知」编号）',
+        'static/js/portals/hospital.js',
+        '        + \'<button type="button" class="btn btn-secondary btn-sm" data-reload-pets>重新加载</button></div>\');',
+        '        + \'</div>\');',
+        'test_hospital_transfer_pages_surface_pet_read_failure',
+    ),
+    (
+        # 第五十六轮桌面复核：把 min-width:0 写回基础规则，1366px 下日期输入只剩 121px。
+        'M161 成对日期在桌面端被压窄（基础规则加 min-width:0）',
+        'static/css/tnr-traditional.css',
+        '.filter-date-pair .filter-item .form-input { width: 100%; }',
+        '.filter-date-pair .filter-item .form-input { width: 100%; min-width: 0; }',
+        'test_date_pair_inputs_keep_desktop_width',
+    ),
+    (
+        # 移动端三列卡每张只有 111px；去掉断点回退后，手机端会退回三列。
+        'M162 三列统计区在移动端不回退两列',
+        'static/css/tnr-traditional.css',
+        '  body .stat-grid.stat-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n',
+        '',
+        'test_gov_stat_grid_does_not_pin_three_columns_inline',
+    ),
+    (
+        # 领养人本来只该看到流转事实；退回完整 PII 后端点判据必须报出来。
+        'M163 生命周期把前任主人完整联系方式下发给领养人',
+        'business/views_portal.py',
+        '        if is_adopter:\n'
+        "            return {'owner_phone': '', 'owner_id_card': '',\n"
+        "                    'owner_address': '', 'signature': ''}",
+        '        if is_adopter and False:\n'
+        "            return {'owner_phone': '', 'owner_id_card': '',\n"
+        "                    'owner_address': '', 'signature': ''}",
+        'test_adopter_gets_no_previous_owner_contact',
+    ),
+    (
+        'M164 电话脱敏退回原文（监管端拿到完整号码）',
+        'core/privacy.py',
+        "        return s[:3] + '*' * (len(s) - 7) + s[-4:]",
+        '        return s',
+        'test_regulator_gets_masked_owner_contact',
+    ),
+    (
+        'M165 监管批量台账退回明文身份证号',
+        'supervision/views.py',
+        "                    'adopter_id_card': mask_id_card(a.adopter_id_card),",
+        "                    'adopter_id_card': a.adopter_id_card,",
+        'test_ledger_masks_adopter_id_card',
+    ),
+    (
+        # 第五十八轮移动端：退回单列后 5 个筛选条件要占满整屏。
+        'M166 移动端筛选条退回单列堆叠',
+        'static/css/tnr-traditional.css',
+        '  body .filter-bar {\n'
+        '    display: grid;\n'
+        '    grid-template-columns: repeat(2, minmax(0, 1fr));',
+        '  body .filter-bar {\n'
+        '    display: grid;\n'
+        '    grid-template-columns: minmax(0, 1fr);',
+        'test_mobile_filter_bar_uses_two_columns',
+    ),
+    (
+        # 日期对不跨列时，「开始/结束」各占一格、各占一行，反而比单列更高。
+        'M167 日期对不再跨列（开始/结束被拆到两行）',
+        'static/css/tnr-traditional.css',
+        '  .filter-date-pair, .filter-actions { grid-column: 1 / -1; }\n',
+        '',
+        'test_mobile_filter_bar_uses_two_columns',
+    ),
+    (
+        # 取消右侧吸附后，7–9 列的宽表必须滑到最右才能点操作。
+        'M168 移动端操作列不再固定在右侧',
+        'static/css/tnr-traditional.css',
+        '    position: sticky;\n    right: 0;\n    z-index: 2;',
+        '    position: sticky;\n    right: auto;\n    z-index: 2;',
+        'test_mobile_table_actions_stay_visible',
+    ),
+    (
+        # 低频列不隐藏：9 列账号表在 390px 下仍要横滑 664px。
+        'M169 移动端低频列不再隐藏',
+        'static/css/tnr-traditional.css',
+        '  body .dt-table col.dt-col-mobile-hide { display: none; }',
+        '  body .dt-table col.dt-col-mobile-hide { display: table-column; }',
+        'test_mobile_wide_tables_collapse_low_priority_columns',
+    ),
+    (
+        # 主列不再补回：低频列隐藏后，姓名/角色/状态在手机上彻底消失。
+        'M170 账号表主列不再补回手机端详情',
+        'static/js/portals/platform.js',
+        "{ key: 'username', title: '用户名', mobileRender: mobileCard },",
+        "{ key: 'username', title: '用户名' },",
+        'test_mobile_wide_tables_collapse_low_priority_columns',
+    ),
+    (
+        # 捕捉记录主列不再补回：小区/数量/转运状态在手机上消失。
+        'M171 捕捉记录主列不再补回手机端详情',
+        'static/js/portals/shelter.js',
+        "{ title: '捕捉单号', key: 'ledgerNo', mobileRender: mobileCard, render:",
+        "{ title: '捕捉单号', key: 'ledgerNo', render:",
+        'test_mobile_wide_tables_collapse_low_priority_columns',
+    ),
+]
 
 # 允许 5 元组（单文件变异）与 6 元组（+ 附加改动，用于「复现原缺陷」这类跨文件变异）
 MUTATIONS = [m if len(m) == 6 else m + ([],) for m in MUTATIONS]
@@ -746,6 +1949,37 @@ def main():
         _sig = getattr(signal, _name, None)
         if _sig is not None:
             signal.signal(_sig, _on_signal)
+
+    # ---- 预检：先把「打不准的锚点」一次性列出来 ----
+    # 主循环里也有命中数检查，但那是**每条变异各查各的**：一条失效锚点要等到
+    # 它排到的时候才现形，而前面每条都得先跑完一遍测试（本轮 52 条 ≈ 十几分钟）。
+    # 更糟的是「⚠️ SKIP」和「✅ PASS」在收尾日志里长得几乎一样，
+    # 而第五十二轮实测发现 12 条锚点因**代码搬家/改写法**集体失配 ——
+    # 那 12 条上一轮根本没被跑到（只跑了新增判据相关的模块）。
+    # 所以这里在任何测试启动之前先扫一遍全表，异常直接点名，避免「结论过期还读着像有效」。
+    stale = []
+    for label, rel, old, _new, _expect, extras in MUTATIONS:
+        n = originals[rel].count(old)
+        if n != 1:
+            stale.append(f'{label}  [{rel}] 命中 {n} 次')
+        for erel, eold, _enew in extras:
+            en = originals[erel].count(eold)
+            if en != 1:
+                stale.append(f'{label} 的附加改动 [{erel}] 命中 {en} 次')
+    for label in (m[0] for m in MUTATIONS if m[0] in MOVE_AFTER):
+        arel, anchor, _payload = MOVE_AFTER[label]
+        if arel not in originals:
+            continue
+        n = originals[arel].count(anchor)
+        if n != 1:
+            stale.append(f'{label} 的 MOVE_AFTER 锚点 [{arel}] 命中 {n} 次')
+    if stale:
+        print('!' * 76)
+        print(f'预检发现 {len(stale)} 处锚点与当前代码不符（这些变异会 SKIP，'
+              f'即对应判据的判别力**本轮未被验证**）：')
+        for s in stale:
+            print('  -', s)
+        print('!' * 76)
 
     results = []
     try:
@@ -814,3 +2048,4 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+

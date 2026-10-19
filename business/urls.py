@@ -61,6 +61,8 @@ urlpatterns = [
     path('treatments/open/', views_treatment.treatment_open, name='treatment_open'),
     path('treatments/<int:pk>/check/', views_treatment.treatment_check, name='treatment_check'),
     path('treatments/<int:pk>/plan/', views_treatment.treatment_plan, name='treatment_plan'),
+    path('treatments/<int:pk>/sterilization/',
+         views_treatment.treatment_sterilization, name='treatment_sterilization'),
     path('treatments/<int:pk>/diagnose/', views_treatment.treatment_diagnose, name='treatment_diagnose'),
     path('treatments/<int:pk>/undiagnose/', views_treatment.treatment_undiagnose, name='treatment_undiagnose'),
     path('treatments/<int:pk>/items/<int:item_id>/execute/',

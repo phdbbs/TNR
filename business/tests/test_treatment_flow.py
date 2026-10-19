@@ -10,14 +10,17 @@
 凡是有「拦住」的用例，都配一条「正常路径能过」的对照。
 """
 import io
+from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import transaction
 from django.test import TestCase
 from PIL import Image
 
 from business import services_treatment as st
 from business.models import (
-    AdoptionHallListing, Chip, MaterialStock, Pet, Treatment, TreatmentItem,
+    AdoptionHallListing, Chip, MaterialStock, MaterialTransaction, Pet,
+    Treatment, TreatmentItem,
 )
 from business.services import get_hospital_stock
 from business.tests.base import (
@@ -106,9 +109,21 @@ class ItemMetaTest(TestCase):
             self.assertIn(key, pet_status)
 
     def test_test_options_cover_both_species(self):
+        """两个物种都要有传染病项，且**人畜共患病必须两边都在**。
+
+        原来这条只断言「每项 3 个」—— 一个数量断言既抓不到「把狂犬删了」，
+        也抓不到「把猫瘟换成了猫传腹」，改一次清单就得跟着改一次数字。
+        现在断言的是**内容**：狂犬病（法定报告的人畜共患疫病）猫狗都得有，
+        弓形虫只有猫有（终末宿主是猫）。
+        """
         for species in ('猫', '狗'):
-            options = st.check_options(species)
-            self.assertEqual(len(options['infectious_tests']), 3, species)
+            keys = [t['key'] for t in st.check_options(species)['infectious_tests']]
+            self.assertTrue(keys, f'{species} 没有传染病检查项')
+            self.assertIn('rabies', keys, f'{species} 缺狂犬病 —— 人畜共患、法定报告')
+            self.assertEqual('toxoplasma' in keys, species == '猫',
+                             f'弓形虫只应出现在{species}的清单里' if species == '狗'
+                             else '弓形虫应出现在猫的清单里')
+            self.assertEqual(len(keys), len(set(keys)), f'{species} 有重复项')
 
     def test_options_expose_fever_threshold(self):
         """发烧线随选项表下发 —— 前端「手改数值自动判定」与后端交叉校验
@@ -200,6 +215,28 @@ class CheckStepTest(FlowBase):
         detail = self._open()
         resp = self.post_json(f'{URL}{detail["id"]}/check/', {'temperature': 38.5})
         self.expect_fail(resp, 400, '体温判定')
+
+    def test_other_required_checks_may_stay_empty(self):
+        """常见病 / 传染病 / 皮肤黏膜**允许全空**也能提交（业务 2026-10-19 口径）。
+
+        这条是**口径的守卫**，不是「顺手测个正常路径」：
+        把这三项也加进 `submit` 门禁看起来是让数据更完整，实际后果是
+        「都填阴性」—— 假阴性会流进疫病监测统计，比空白更危险。
+        三态里的 `none`（未检）就是为这个现场留的诚实档位。
+        如果将来真要收口，先改这条用例并说明**怎么防止逼出假数据**。
+        """
+        detail = self._open()
+        body = self.ok(self._check(detail['id'], temperature=38.5,
+                                   temperature_flag='normal'))['data']
+        self.assertEqual(body['stage'], 'treating', '必检项全空却提交不了 —— 口径变了')
+        self.assertEqual(body['commonFindings'] or [], [],
+                         '没填的常见病检查不该被兜底成某一项')
+        # 整节没填 ⇒ **不落任何键**：打印出来是「—」（这一节没做），
+        # 而不是 5 个「未检」。两者含义不同：前者是「医生没勾这张表」，
+        # 后者是「逐项确认过都没检」。逐项确认的口径由
+        # `test_infectious_tests_filled_with_none` 锁（传了就把未传的项补 none）。
+        self.assertEqual(body['infectious'], {},
+                         '一次都没提交传染病检查的单据，不该被写入一串 none —— 那是伪造勾选')
 
     def test_non_numeric_temperature_rejected(self):
         detail = self._open()
@@ -750,6 +787,54 @@ class UndoStepTest(FlowBase):
         resp = self.post_json(f'{URL}{tid}/items/{item_id}/undo/', {})
         self.expect_fail(resp, 400, '已绑定其它动物')
 
+    def test_undo_chip_changed_after_our_read_is_not_resurrected(self):
+        """芯片在「读」与「写回」之间被作废时，撤销不能把它复活。
+
+        ⚠ 直接调私有服务函数而不是走接口：这条要盯的是**读后写前的竞态窗口**，
+        顺序执行的接口用例永远撞不进去（上一那条款例已经被友好判据拦住了，
+        把 CAS 变异回盲 `chip.save()` 它照样通过）。这里用一层薄壳把竞写
+        注入到那次读之后。
+
+        旧实现读完只判 `pet`，随后整行覆盖：作废（已随库存异动扣过一次）
+        会被撤销改回 `available`，「可用芯片数」比库存多出一颗 ——
+        `count_available_chips()` 与 `MaterialStock` 的对账当场错开，且不报错。
+        """
+        chip = make_chip(number='CHIPUNDO0004', institution=self.hospital_a,
+                         pet=self.pet, status='used')
+        self.pet.chip_no = chip.number
+        self.pet.save(update_fields=['chip_no'])
+
+        class RacingQuerySet:
+            def __init__(self, qs):
+                self._qs = qs
+
+            def first(self):
+                row = self._qs.first()
+                # 竞手在这一瞬间走「库存异动」把这颗号作废
+                Chip.objects.filter(pk=row.pk).update(status='void')
+                return row
+
+            def update(self, *args, **kwargs):
+                return self._qs.update(*args, **kwargs)
+
+        class RacingManager:
+            def filter(self, *args, **kwargs):
+                return RacingQuerySet(Chip.objects.filter(*args, **kwargs))
+
+        class RacingChip:
+            objects = RacingManager()
+
+        with mock.patch.object(st, 'Chip', RacingChip):
+            with self.assertRaises(ValueError) as ctx:
+                st._release_chip(chip.number, self.pet)
+        self.assertIn('刚刚被他人改动', str(ctx.exception))
+
+        chip.refresh_from_db()
+        self.pet.refresh_from_db()
+        self.assertEqual(chip.status, 'void', '撤销不能把已作废的芯片改回可用')
+        self.assertEqual(self.pet.chip_no, chip.number,
+                         '退回没成功时宠物档案也不该被清空（两半同生同死）')
+
     def test_undo_not_executed_rejected(self):
         detail = self._open()
         tid = detail['id']
@@ -757,6 +842,114 @@ class UndoStepTest(FlowBase):
         item_id = self._first_item_id(detail)
         resp = self.post_json(f'{URL}{tid}/items/{item_id}/undo/', {})
         self.expect_fail(resp, 400, '尚未执行')
+
+
+# ============================================================
+# 执行/撤销的并发窗口（第五十二轮 CAS）
+# ============================================================
+class ItemClaimRaceTest(FlowBase):
+    """同一张单的「执行」与「撤销」各自只能生效一次 —— 判据在 UPDATE 里。
+
+    ⚠ 为什么必须直接调服务函数并传**两个不同的内存对象**：
+    `ExecuteStepTest.test_repeat_execute_...` 那条顺序双击的用例走的是
+    「第二次重新读库」，`is_done` 已经是 True，友好判据就把它拦下了 ——
+    把 CAS 变异回盲 `item.save()` 它照样通过。真实的竞态是**两个请求都在
+    对方写库之前读到了 `is_done=False`**（两人同开一张单、手机端卡顿重试），
+    所以这里用两个独立加载的行来表示这两笔请求。
+
+    ⚠ 断言落在库存与流水条数上，不停在报错文案：这条竞态的后果是
+    「同一张处方扣两遍药、生成两条 CON 流水，两次都返回成功」，
+    只有把账摊开才看得出来。
+
+    反向对照 = 上面各条正常路径用例（另开一张单执行/撤销都照旧成功）。
+    """
+
+    def _started(self):
+        """开单 → 检查 → 医嘱（一条药）→ 诊断，返回 (treatment, item_id)。"""
+        detail = self._open()
+        tid = detail['id']
+        diagnosed = self._diagnosed(tid)      # 处置项目要读**这一步**返回的 detail
+        return Treatment.objects.get(pk=tid), self._first_item_id(diagnosed)
+
+    def test_second_execute_with_a_stale_row_consumes_once(self):
+        treatment, item_id = self._started()
+        before = self._stock(self.med_a)
+        mine = TreatmentItem.objects.get(pk=item_id)
+        rival = TreatmentItem.objects.get(pk=item_id)   # 同一瞬间的第二笔请求
+        user = self.hospital_user_a
+
+        with transaction.atomic():
+            st.execute_item(treatment, mine, user)
+        self.assertEqual(self._stock(self.med_a), before - 1)
+
+        with self.assertRaises(ValueError) as ctx:
+            with transaction.atomic():
+                st.execute_item(treatment, rival, user)
+        self.assertIn('刚刚被他人执行', str(ctx.exception))
+        self.assertEqual(
+            self._stock(self.med_a), before - 1,
+            '抢输的一方把同一张处方又扣了一遍 —— 账实不符且不报错')
+        self.assertEqual(
+            MaterialTransaction.objects.filter(
+                type='consume', note__contains=self.pet.code).count(), 1,
+            '同一次执行生成了两条消耗流水')
+
+    def test_second_undo_with_a_stale_row_returns_stock_once(self):
+        treatment, item_id = self._started()
+        before = self._stock(self.med_a)
+        user = self.hospital_user_a
+        with transaction.atomic():
+            st.execute_item(treatment, TreatmentItem.objects.get(pk=item_id), user)
+        self.assertEqual(self._stock(self.med_a), before - 1)
+
+        mine = TreatmentItem.objects.get(pk=item_id)
+        rival = TreatmentItem.objects.get(pk=item_id)   # 都读到 is_done=True
+
+        with transaction.atomic():
+            st.undo_item(treatment, mine, user)
+        self.assertEqual(self._stock(self.med_a), before)
+
+        with self.assertRaises(ValueError) as ctx:
+            with transaction.atomic():
+                st.undo_item(treatment, rival, user)
+        self.assertIn('刚刚被他人处理', str(ctx.exception))
+        self.assertEqual(
+            self._stock(self.med_a), before,
+            '抢输的一方把药又退了一遍 —— 库存凭空多出一倍')
+        self.assertEqual(
+            MaterialTransaction.objects.filter(
+                type='adjustment', note__contains='撤销').count(), 1,
+            '一次撤销生成了两条退回流水')
+
+    def test_execute_failure_after_claim_rolls_the_claim_back(self):
+        """抢下项目之后半截炸了，`is_done` 必须跟着回滚。
+
+        否则单据显示「已执行」而药没扣、芯片没植 —— 用户不会再点第二次
+        （界面说已经做完了），这一笔永远补不回来。
+
+        ⚠ 这条用例顺手钉住一个**测试写法**的坑：`assertRaises` 必须套在
+        `atomic()` **外面**。写在里面等于把异常吞在事务块内，块正常退出 →
+        savepoint 提交 → 「回滚」判据恒假（本条第一版就是这么写的，
+        于是它把「抢下项目后炸了、`is_done` 留着 True」误判成通过）。
+        """
+        treatment, item_id = self._started()
+        before = self._stock(self.med_a)
+        item = TreatmentItem.objects.get(pk=item_id)
+        with mock.patch.object(st, 'adjust_stock',
+                               side_effect=RuntimeError('库存服务挂了')):
+            with self.assertRaises(RuntimeError):
+                with transaction.atomic():
+                    st.execute_item(treatment, item, self.hospital_user_a)
+
+        fresh = TreatmentItem.objects.get(pk=item_id)
+        self.assertFalse(fresh.is_done, '回滚后项目应仍是未执行，可以重做')
+        self.assertIsNone(fresh.done_at)
+        self.assertEqual(self._stock(self.med_a), before)
+        # 正向对照：同一条项目随后正常执行成功
+        with transaction.atomic():
+            st.execute_item(treatment, TreatmentItem.objects.get(pk=item_id),
+                            self.hospital_user_a)
+        self.assertEqual(self._stock(self.med_a), before - 1)
 
 
 # ============================================================
@@ -787,6 +980,58 @@ class DoneAndDisposeTest(FlowBase):
         self._diagnosed(tid)
         resp = self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'pending_adopt'})
         self.expect_fail(resp, 400, '诊疗完成')
+
+    def test_done_records_advice_without_disposing(self):
+        """「去向建议」只记建议，**不能**碰 `disposal` / 动物状态。
+
+        反向对照：若这里顺手写了 `disposal`（= 已办结），`disposed_at` 一到
+        动物进终态，六张出院单据全部 400「当前状态不可办理」，诊疗单还会印出
+        「办结去向：领养」而动物明明还在院 —— 界面承诺的事没发生。
+        """
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+        body = self.ok(self.post_json(
+            f'{URL}{tid}/done/', {'disposal_advised': 'pending_adopt'}))['data']
+
+        self.assertEqual(body['disposal_advised_label'], '领养')
+        self.assertEqual(body['disposal_label'], '', '建议不得写成办结去向')
+        self.assertFalse(body['is_disposed'])
+        t = Treatment.objects.get(id=tid)
+        self.assertEqual(t.disposal_advised, 'pending_adopt')
+        self.assertEqual(t.disposal, '')
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'in_treatment')
+        # 动物还在院 → 出院单据必须还开得出来
+        self.assertTrue(self.post_json(
+            f'{URL}{tid}/dispose/', {'disposal': 'released',
+                                     'defer_pet_status': True}).status_code == 200)
+
+    def test_done_rejects_unknown_advice(self):
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+        resp = self.post_json(f'{URL}{tid}/done/', {'disposal_advised': 'adopt_me'})
+        self.expect_fail(resp, 400, '不合法')
+        t = Treatment.objects.get(id=tid)
+        self.assertIsNone(t.done_at, '非法建议不得把单子推进到待出院')
+
+    def test_board_carries_advice_for_pending_discharge(self):
+        """待出院行要带出建议，下一班的人一眼知道该开哪张单。"""
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/done/', {'disposal_advised': 'released'}))
+        body = self.ok(self.get_json(URL + 'board/'))['data']
+        row = next(r for r in body['pending_discharge'] if r['treatment_id'] == tid)
+        self.assertEqual(row['disposal_advised'], 'released')
+        self.assertEqual(row['disposal_advised_label'], '放回原小区')
 
     def test_dispose_changes_pet_status(self):
         """**业务结果判据**：动物的状态真的变成了所选去向。"""
@@ -894,13 +1139,13 @@ class DoneAndDisposeTest(FlowBase):
 class BoardTest(FlowBase):
     """看板分组（第四十八轮：三态 → 五态）。
 
-    旧口径只有 pending / treating / done 三个桶，把「待诊」和「诊疗中」
+    旧口径只有 pending / treating / done 三个桶，把「待诊断」和「诊疗中」
     合并成 treating、把「待出院」和「已出院」合并成 done —— 界面上看不出
     「下一步该点哪个按钮」，也分不清「还在治」和「治完了等人接走」。
     """
 
     def test_board_lists_unopened_pets_as_checking(self):
-        """还没开单的在院动物必须出现在「待检」—— 不出现 = 接不了诊。"""
+        """还没开单的在院动物必须出现在「待接诊」—— 不出现 = 接不了诊。"""
         body = self.ok(self.get_json(URL + 'board/'))['data']
         codes = [r['petCode'] for r in body['checking']]
         self.assertIn(self.pet.code, codes)
@@ -955,6 +1200,36 @@ class ListStageFilterTest(FlowBase):
         self.assertEqual([r['id'] for r in body], [tid])
         body = self.ok(self.get_json(f'{URL}?stage=checking'))['data']
         self.assertEqual(body, [])
+
+    def test_stage_filter_and_property_agree(self):
+        """`?stage=` 的判据必须与 `Treatment.stage` 属性同源（`STAGE_FILTERS` 一张表）。
+
+        两处各写一遍时间戳组合时，表现是「按阶段筛出 3 条，点开其中一条显示另一个阶段」。
+        这里造四种时间戳组合各一张单，逐个阶段码比对「属性说的」与「接口筛出的」。
+        """
+        from django.utils import timezone
+        now = timezone.now()
+        combos = [{}, {'checked_at': now},
+                  {'checked_at': now, 'diagnosed_at': now},
+                  {'checked_at': now, 'diagnosed_at': now, 'done_at': now}]
+        rows = []
+        for ts in combos:
+            pet = make_pet(status='in_treatment', district=self.district_a,
+                           hospital=self.hospital_a, species='猫')
+            t = Treatment.objects.get(id=self._open(pet=pet)['id'])
+            for field, value in ts.items():
+                setattr(t, field, value)
+            t.save(update_fields=list(ts) or None)
+            rows.append(t)
+
+        for code in Treatment.STAGE_FILTERS:
+            with self.subTest(stage=code):
+                expect = sorted(t.id for t in rows if t.stage == code)
+                got = sorted(r['id'] for r in
+                             self.ok(self.get_json(f'{URL}?stage={code}'))['data'])
+                self.assertEqual(
+                    got, expect,
+                    f'?stage={code} 接口筛出 {got}，但 Treatment.stage 属性说是 {expect}')
 
     def test_unknown_stage_rejected(self):
         """非法筛选值必须 4xx，**不能静默忽略**（静默忽略 = 用户以为筛了）。"""
@@ -1145,8 +1420,8 @@ class BoardStageTest(FlowBase):
 
         now = timezone.now()
         cases = [
-            ({}, 'checking', '无 checked_at → 待检'),
-            ({'checked_at': now}, 'pending_diagnose', '有检查无诊断 → 待诊'),
+            ({}, 'checking', '无 checked_at → 待接诊'),
+            ({'checked_at': now}, 'pending_diagnose', '有检查无诊断 → 待诊断'),
             ({'checked_at': now, 'diagnosed_at': now},
              'treating', '有诊断无完成 → 诊疗中'),
             ({'checked_at': now, 'diagnosed_at': now, 'done_at': now},
@@ -1158,6 +1433,10 @@ class BoardStageTest(FlowBase):
             with self.subTest(why=why):
                 self.assertEqual(
                     views_treatment._board_stage(Treatment(**ts)), expect, why)
+        # 判据返回的五个取值必须就是 `BOARD_STAGES` 那五个 —— 少一个，
+        # 看板就没有对应的桶（动物在界面上整列消失）
+        self.assertEqual({c[1] for c in cases}, set(Treatment.BOARD_STAGES),
+                         '五态判据用例与 Treatment.BOARD_STAGES 不同源')
 
     def test_board_buckets_follow_stage(self):
         """看板分组必须与 `_board_stage` 同口径 —— 两处各算一遍必然漂移。"""
@@ -1168,12 +1447,11 @@ class BoardStageTest(FlowBase):
                  for k, v in board.items() if k != 'counts'}
         self.assertIn(self.pet.code, codes['pending_diagnose'])
         self.assertNotIn(self.pet.code, codes['checking'],
-                         '已提交检查单的动物不能还留在「待检」')
+                         '已提交检查单的动物不能还留在「待接诊」')
         self.assertEqual(board['counts']['pending_diagnose'],
                          len(codes['pending_diagnose']))
         # 五个桶必须**同时存在**：少一个键，前端那个页签就永远空白
-        for k in ('checking', 'pending_diagnose', 'treating',
-                  'pending_discharge', 'discharged'):
+        for k in Treatment.BOARD_STAGES:
             self.assertIn(k, board, f'看板缺 {k} 桶')
 
 

@@ -41,12 +41,17 @@ from jslex import (  # noqa: E402
 from dead_catch_probe import (  # noqa: E402
     API_PATH, PORTALS, api_methods, classify, survey,
 )
+from frontend_sources import js_path, template_path  # noqa: E402
 
-PORTAL_FILES = {n: ROOT / 'templates' / 'portal' / n / 'portal.html' for n in PORTALS}
-FRONTEND_FILES = list(PORTAL_FILES.values()) + [
-    ROOT / 'static' / 'js' / 'tnr-api.js',
-    ROOT / 'static' / 'js' / 'tnr-common.js',
-]
+#: `survey()` 扫的是 **JS** —— 第五十二轮 重构 B 之后门户逻辑住在
+#: `static/js/portals/<role>.js`，模板里只剩引导脚本。
+#: ⚠ 这里如果还指回模板，`survey` 只会看见 `window.TNR_USER = …` 那一行，
+#: 全部门户判据立刻空转（`test_planted_*` 两条就是专门抓这件事的）。
+PORTAL_FILES = {n: js_path(n) for n in PORTALS}
+FRONTEND_FILES = (list(PORTAL_FILES.values())
+                  + [template_path(n) for n in PORTALS]
+                  + [ROOT / 'static' / 'js' / 'tnr-api.js',
+                     ROOT / 'static' / 'js' / 'tnr-common.js'])
 
 
 def read(p):
@@ -61,6 +66,22 @@ class LexerSelfCheckTest(SimpleTestCase):
             with self.subTest(file=p.name):
                 ok, why = audit(read(p))
                 self.assertTrue(ok, f'{p} 剥离自检失败：{why}')
+
+    def test_js_files_carry_no_script_marker(self):
+        """门户 JS 里**不得**出现 `<script` 字样 —— 否则剥离器会认错文件类型。
+
+        `jslex.stripped_kinds()` 用「文本里有没有 `<script`」来猜这是 HTML 还是
+        纯 JS。第五十二轮 重构 B 把逻辑搬进 `static/js/portals/*.js` 之后，
+        这些文件是**纯 JS**：谁哪天往里面塞一段 `'<script src=…>'` 字符串，
+        整个文件立刻被当成 HTML、只有 `<script>` 体被剥，
+        于是 `try{…}` 匹配到的是**没剥注释**的原文 —— 判据不会红，
+        它只是开始把注释里的方法名当成代码来数。
+        """
+        for p in list(PORTAL_FILES.values()) + [API_PATH]:
+            with self.subTest(file=p.name):
+                self.assertNotIn('<script', read(p).lower(),
+                                 f'{p.name} 含 `<script` 字样，'
+                                 'jslex 的类型自动判断会认错，判据随之失真')
 
     def test_audit_is_not_vacuous(self):
         """正向对照：自检必须能**报出**问题，否则它只是个恒真式。"""
@@ -163,14 +184,13 @@ class ApiMethodClassificationTest(SimpleTestCase):
         self.assertEqual(self.api.get('getData'), 'throwing')
 
     def test_pure_helpers_are_not_api_reads(self):
-        """`getPetStatusText` 之类是**纯函数**，不发起请求。
+        """`petAttrText` 之类是**纯函数**，不发起请求。
 
         它们曾被误判成「抛错调用」，把「半死」的判定带偏
-        （`try { …getHospitalPets()…; TNR_API.getPetStatusText(x) } catch {}`
+        （`try { …getHospitalPets()…; TNR_API.petAttrText(x) } catch {}`
         看起来像「有抛错调用」，其实一个请求都没有）。
         """
-        for name in ('getPetStatusText', 'getPetStatusBadge', 'petAttrText',
-                     'getMaterialCategoryText'):
+        for name in ('petAttrText', 'getMaterialCategoryText'):
             self.assertEqual(self.api.get(name), 'pure', f'{name} 不该被当成请求方法')
 
     def test_every_strict_method_delegates_to_getdata(self):
@@ -275,12 +295,14 @@ class SilentReadInventoryTest(SimpleTestCase):
         ('shelter', 'showCaptureEdit'),
         # 回收登记弹窗：取不到捕捉单时用默认值
         ('shelter', 'showRecoverModal'),
-        # 医院端：失败时置空/降级，行内显示「未知」或「暂无」
-        ('hospital', 'renderReceiveTab'),
+        # 第五十五轮：`renderReceiveTab` / `viewTransferDetail` 的动物档案
+        # 已改为严格读 + 可见警告（失败时行内「未知」会被误读成档案缺失，
+        # 签收名单也跟着失真），故从本清单移除。
         # 第四十七轮：`renderTreatmentForm`（快速登记表单）随「快速登记」整块删除，
         # 它的降级点一并消失 —— 不是被「修掉」的，是本功能不存在了。
-        ('hospital', 'render_material'),
-        ('hospital', 'renderMaterialAdjustment'),
+        # 第五十三轮：`render_material` / `renderMaterialAdjustment` /
+        # `renderMaterialOutbound` 已改为严格读 + 页面级错误态（加载失败会被
+        # 伪装成「本院没有物料」，不能算有意降级），故从本清单移除。
         # 领养人端：失败时只展示领养记录
         ('adopter', 'showLifecycle'),
     }
@@ -301,3 +323,18 @@ class SilentReadInventoryTest(SimpleTestCase):
             with self.subTest(site=item):
                 self.assertIn(item, self.deliberate,
                               f'{item} 不在「有意降级」里了，判据可能被改坏了')
+
+    def test_hospital_transfer_pages_surface_pet_read_failure(self):
+        """交接列表/详情不能把「档案读失败」伪装成「未知 / 待补全」。
+
+        `getHospitalPets()` 非 2xx 时静默返回 `[]`，行内逐只显示「未知」，
+        看起来像宠物档案真的缺资料；详情里签收名单也因此拿不到姓名/性别，
+        医院只能凭编号盲签。改法：严格读 + 常驻警告 + 重试入口。
+        """
+        js = read(PORTAL_FILES['hospital'])
+        self.assertNotIn('TNR_API.getHospitalPets()', js,
+                         '交接页又退回静默读 —— 失败会被显示成「未知」')
+        for text in ('动物档案加载失败', '列表仅显示编号', '以下仅显示编号'):
+            self.assertIn(text, js, f'交接页缺少失败提示元素：{text}')
+        self.assertIn('data-reload-pets>重新加载</button>', js,
+                      '交接页的档案失败态没有重新加载入口')

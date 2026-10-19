@@ -90,6 +90,10 @@ def api_me(request):
         'institution_id': u.institution_id,
         'institution_name': u.institution.name if u.institution else '',
         'phone': u.phone,
+        # 账号状态：界面（个人中心「账号状态」）要**读数据**显示，
+        # 不能写死「启用」—— 停用判据在 `user_toggle_status` 那边，
+        # 值域见 `core.models.STATUS_VALUES`。
+        'status': u.status,
         'is_superuser': u.is_superuser,
     })
 

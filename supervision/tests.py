@@ -1,9 +1,10 @@
 """supervision 应用测试：政府监管端接口与权限边界。"""
+import hashlib
 import json
 
 from accounts.models import User
 from business.models import (
-    Adoption, Capture, Euthanasia, Material, MaterialTransaction, Pet,
+    Adoption, Capture, CheckIn, Euthanasia, Material, MaterialTransaction, Pet,
     Release, Treatment,
 )
 from business.tests.base import (
@@ -419,9 +420,18 @@ class UserApiTest(SupervisionBase):
 
     def _create_payload(self, **kw):
         payload = {'username': 'new_user_1', 'name': '新用户',
+                   'password': 'TnrTest!2026',
                    'role': 'shelter', 'district_id': self.district_a.id,
                    'institution_id': self.shelter_a.id}
         payload.update(kw)
+        # 医院操作员建号必须登记执业兽医师证号（诊疗签名的来源），这里按用户名
+        # 自动补一个，好让「区县/机构」那批用例不必每条都重复填。需要故意留空/
+        # 造错的用例显式传 vet_license。
+        # 用用户名摘要而不是随手一个常量：一个类里会连建好几个医院账号，
+        # 全都填同一个号会先撞上「证号重复」，把要测的区县/机构断言挡掉。
+        if payload['role'] == 'hospital':
+            digest = int(hashlib.md5(str(payload['username']).encode()).hexdigest()[:5], 16)
+            payload.setdefault('vet_license', f'鄂兽医执字2021{digest:05d}号')
         return payload
 
     def test_create_shelter_operator(self):
@@ -430,7 +440,7 @@ class UserApiTest(SupervisionBase):
         user = User.objects.get(id=body['data']['id'])
         self.assertEqual(user.role, 'shelter')
         self.assertEqual(user.institution, self.shelter_a)
-        self.assertTrue(user.check_password('123456'), '默认密码 123456')
+        self.assertTrue(user.check_password('TnrTest!2026'), '建号时必须按管理员设置的口令落库')
         self.assertEqual(user.status, 'active')
 
     def test_create_duplicate_username(self):
@@ -456,6 +466,30 @@ class UserApiTest(SupervisionBase):
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(password='123')),
                          message='密码长度不能少于6位')
+
+    def test_create_without_password_rejected(self):
+        """不再回退到统一默认口令：每个后台账号的初始口令必须显式设置。"""
+        self.client.force_login(self.platform_admin)
+        payload = self._create_payload()
+        payload.pop('password')
+        self.expect_fail(self.post_json(f'{API}/users/create/', payload),
+                         message='请设置初始密码')
+        self.assertFalse(User.objects.filter(username='new_user_1').exists())
+
+    def test_create_weak_password_rejected(self):
+        """与改密接口同一套 Django 校验器：纯数字/常见口令不能建号。"""
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.post_json(f'{API}/users/create/',
+                                        self._create_payload(password='123456')),
+                         message='密码')
+
+    def test_create_password_similar_to_username_rejected(self):
+        """「口令=用户名」在建号口也必须拒 —— 与改密接口传 user 的判据一致。"""
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.post_json(f'{API}/users/create/',
+                                        self._create_payload(password='new_user_1')),
+                         message='密码')
+        self.assertFalse(User.objects.filter(username='new_user_1').exists())
 
     def test_create_gov_city_requires_city_district(self):
         self.client.force_login(self.platform_admin)
@@ -489,6 +523,109 @@ class UserApiTest(SupervisionBase):
         self.ok(self.post_json(f'{API}/users/create/',
                                self._create_payload(role='hospital',
                                                     institution_id=self.hospital_a.id)))
+
+    # ---------- 执业兽医师证号（平台端建号录入口） ----------
+    def test_create_hospital_requires_vet_license(self):
+        """医院账号必须登记执业证号 —— 它是诊疗单签名归属的唯一来源。
+
+        形状判据（全空 / 过短 / 无数字）都放在**接口层**测：
+        前端那个输入框只挡手滑，直接 POST 能把空串写进 `vet_license`，
+        而签名一旦丢了证号，这张单子就无法向农业农村部门追溯到执业人。
+        """
+        self.client.force_login(self.platform_admin)
+        cases = (
+            ('', '医院操作员必须登记执业兽医师证号'),
+            ('  \n\t ', '医院操作员必须登记执业兽医师证号'),
+            ('鄂执2', '执业证号过短'),
+            ('张三李四王', '没有任何数字'),
+        )
+        for license_no, message in cases:
+            with self.subTest(license_no=license_no):
+                self.expect_fail(self.post_json(f'{API}/users/create/',
+                                                self._create_payload(
+                                                    role='hospital',
+                                                    institution_id=self.hospital_a.id,
+                                                    vet_license=license_no)),
+                                 message=message)
+        self.assertFalse(User.objects.filter(username='new_user_1').exists(),
+                         '被拒的建号请求不能留下半个账号')
+
+    def test_create_non_hospital_rejects_vet_license(self):
+        """非医院角色填了证号要拒绝：否则「本院执业兽医师数」会把外人算进来。"""
+        self.client.force_login(self.platform_admin)
+        for role, district_id, institution_id in (
+            ('shelter', self.district_a.id, self.shelter_a.id),
+            ('gov_district', self.district_a.id, None),
+            ('gov_city', self.city.id, None),
+        ):
+            with self.subTest(role=role):
+                self.expect_fail(self.post_json(f'{API}/users/create/',
+                                                self._create_payload(
+                                                    role=role, username=f'lic_{role}',
+                                                    district_id=district_id,
+                                                    institution_id=institution_id,
+                                                    vet_license='鄂兽医执字20210356号')),
+                                 message='该角色不是医院操作员')
+        self.assertFalse(User.objects.filter(username__startswith='lic_').exists())
+
+    def test_create_hospital_stores_normalized_vet_license(self):
+        """原样保存、只压掉多余空白：证件上有空格，单子上就要有空格。"""
+        self.client.force_login(self.platform_admin)
+        body = self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='lic_norm', role='hospital',
+            institution_id=self.hospital_a.id,
+            vet_license='  鄂兽医执字\n2021  0356 号 ')))
+        self.assertEqual(body['data']['vet_license'], '鄂兽医执字 2021 0356 号')
+        self.assertEqual(User.objects.get(id=body['data']['id']).vet_license,
+                         '鄂兽医执字 2021 0356 号')
+
+    def test_create_rejects_vet_license_used_by_active_account(self):
+        """同一个证号挂在两个**启用中**账号 = 签名分不清是谁。"""
+        self.client.force_login(self.platform_admin)
+        self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='lic_owner', role='hospital',
+            district_id=self.district_a.id, institution_id=self.hospital_a.id,
+            vet_license='鄂兽医执字20210001号')))
+        self.expect_fail(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='lic_clone', role='hospital',
+            district_id=self.district_b.id, institution_id=self.hospital_b.id,
+            vet_license='鄂兽医执字20210001号')),
+            message='该执业证号已登记在启用中的账号')
+        self.assertFalse(User.objects.filter(username='lic_clone').exists())
+
+    def test_vet_license_reusable_after_old_account_disabled(self):
+        """正向对照：旧账号停用后证号要能复用 —— 现场「换手机号重建账号」是真需求。
+
+        只拦启用中的重号、把停用账号也拦住的后果不是「一人一号」，
+        而是让人随手编一个号，那比重复更糟。
+        """
+        self.client.force_login(self.platform_admin)
+        body = self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='lic_old', role='hospital',
+            institution_id=self.hospital_a.id,
+            vet_license='鄂兽医执字20210002号')))
+        self.ok(self.post_json(f'{API}/users/{body["data"]["id"]}/toggle/'))
+        self.ok(self.post_json(f'{API}/users/create/', self._create_payload(
+            username='lic_new', role='hospital',
+            institution_id=self.hospital_a.id,
+            vet_license='鄂兽医执字20210002号')))
+
+    def test_create_rejects_bad_phone(self):
+        """电话的形状判据与机构新建共用一份，接口必须真的调它。"""
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.post_json(f'{API}/users/create/',
+                                        self._create_payload(phone='138-abc-0000')),
+                         message='联系电话格式不正确')
+        self.ok(self.post_json(f'{API}/users/create/',
+                               self._create_payload(phone='+86 138 0000 0000')))
+
+    def test_user_list_exposes_vet_license(self):
+        """列表要回显证号：平台端靠它核对「这个账号到底是哪位执业兽医师」。"""
+        self.client.force_login(self.platform_admin)
+        data = self.ok(self.client.get(f'{API}/users/?role=hospital'))['data']
+        row = next(u for u in data if u['id'] == self.hospital_user.id)
+        self.assertIn('vet_license', row)
+        self.assertEqual(row['vet_license'], '')
 
     def test_create_shelter_requires_shelter_institution(self):
         self.client.force_login(self.platform_admin)
@@ -661,6 +798,159 @@ class UserApiTest(SupervisionBase):
         self.assertEqual(body['data']['is_active'], True)
 
 
+class UserEditApiTest(SupervisionBase):
+    """`users/<pk>/edit/`：平台端唯一的账号纠错入口（姓名 / 电话 / 执业证号）。
+
+    这个接口存在的理由是「抄错的证件号必须有地方改」，但它同时把「改字段」
+    和「改权限」混在同一个 URL 上的风险也最大 —— 所以本类的重点不是能不能改对，
+    而是**改不动**角色、区县、机构与启停。
+    """
+
+    def _hospital(self, username, license_no, institution=None):
+        return make_user(username, role='hospital', district=self.district_a,
+                         institution=institution or self.hospital_a,
+                         vet_license=license_no, first_name='张三',
+                         last_name='')
+
+    def test_edit_changes_only_scoped_fields(self):
+        target = self._hospital('edit_scope', '鄂兽医执字20210101号')
+        self.client.force_login(self.platform_admin)
+        body = self.ok(self.post_json(f'{API}/users/{target.id}/edit/', {
+            'name': '周兽医', 'phone': '13800000000',
+            'vet_license': '鄂兽医执字20210999号',
+            # 下面这些键**必须被忽略**：它们改变的是「能看什么、能代表谁」。
+            'role': 'platform_admin', 'district_id': self.district_b.id,
+            'institution_id': self.shelter_a.id, 'is_active': False,
+            'password': 'hacked',
+        }))
+        self.assertEqual(body['data']['changed'], ['姓名', '电话', '执业证号'])
+        target.refresh_from_db()
+        self.assertEqual(target.first_name, '周兽医')
+        self.assertEqual(target.vet_license, '鄂兽医执字20210999号')
+        self.assertEqual(target.role, 'hospital')
+        self.assertEqual(target.district_id, self.district_a.id)
+        self.assertEqual(target.institution_id, self.hospital_a.id)
+        self.assertTrue(target.is_active)
+        self.assertTrue(target.check_password('123456'), '口令不能被这个接口改')
+
+    def test_edit_rejects_empty_or_bad_values(self):
+        target = self._hospital('edit_bad', '鄂兽医执字20210102号')
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.post_json(f'{API}/users/{target.id}/edit/', {'name': '  '}),
+                         message='姓名不能为空')
+        self.expect_fail(self.post_json(f'{API}/users/{target.id}/edit/',
+                                        {'phone': '不存在的电话'}),
+                         message='联系电话格式不正确')
+        # 医院账号清空证号 = 以后的诊疗单没有签名归属，必须拒
+        self.expect_fail(self.post_json(f'{API}/users/{target.id}/edit/',
+                                        {'vet_license': ''}),
+                         message='医院操作员必须登记执业兽医师证号')
+        target.refresh_from_db()
+        self.assertEqual(target.vet_license, '鄂兽医执字20210102号')
+
+    def test_edit_rejects_license_on_non_hospital(self):
+        shelter = make_user('edit_shelter', role='shelter',
+                            district=self.district_a, institution=self.shelter_a)
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.post_json(f'{API}/users/{shelter.id}/edit/',
+                                        {'vet_license': '鄂兽医执字20210103号'}),
+                         message='该角色不是医院操作员')
+
+    def test_edit_rejects_duplicate_license_but_allows_own(self):
+        """`exclude_pk` 漏传的后果：把「只改姓名」的那次提交也判成重号。"""
+        a = self._hospital('edit_dup_a', '鄂兽医执字20210104号')
+        self._hospital('edit_dup_b', '鄂兽医执字20210105号', self.hospital_b)
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.post_json(f'{API}/users/{a.id}/edit/',
+                                        {'vet_license': '鄂兽医执字20210105号'}),
+                         message='该执业证号已登记在启用中的账号')
+        body = self.ok(self.post_json(f'{API}/users/{a.id}/edit/', {
+            'name': '还是张三', 'vet_license': '鄂兽医执字20210104号'}))
+        self.assertEqual(body['data']['changed'], ['姓名'],
+                         '证号没变就不该进 changed（也不该写审计）')
+
+    def test_edit_is_platform_admin_only(self):
+        """第四十九轮口径：政府端只读，连账号纠错也不能碰。"""
+        target = self._hospital('edit_gov', '鄂兽医执字20210106号')
+        for user in (self.gov_city, self.gov_a, self.shelter_user, self.hospital_user):
+            self.client.force_login(user)
+            self.expect_fail(self.post_json(f'{API}/users/{target.id}/edit/',
+                                            {'name': '越权改名'}), status=403)
+        target.refresh_from_db()
+        self.assertNotEqual(target.first_name, '越权改名')
+
+    def test_edit_unknown_user_404(self):
+        self.client.force_login(self.platform_admin)
+        resp = self.post_json(f'{API}/users/999999/edit/', {'name': '不存在'})
+        self.expect_fail(resp, status=404, message='用户不存在或无权访问')
+
+    def test_edit_noop_reports_without_touching_row(self):
+        target = self._hospital('edit_noop', '鄂兽医执字20210107号')
+        self.client.force_login(self.platform_admin)
+        body = self.ok(self.post_json(f'{API}/users/{target.id}/edit/', {
+            'name': target.first_name, 'vet_license': target.vet_license}))
+        self.assertEqual(body['message'], '没有需要保存的修改')
+
+    def test_license_change_does_not_rewrite_history(self):
+        """改账号证号**不回写**历史诊疗单 —— 单据上的证号是当时那一串。
+
+        反向对照（下面那条）证明这个「通过」不是假绿：
+        如果谁把签名改成「实时读账号」，历史单据会跟着变，这条就该红。
+        """
+        from business.services_treatment import open_treatment
+
+        doc = self._hospital('edit_hist', '鄂兽医执字20210108号')
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a, status='in_treatment')
+        treatment = open_treatment(pet, self.hospital_a, doc, self.district_a.id)
+        self.assertEqual(treatment.vet_license, '鄂兽医执字20210108号',
+                         '开单时要把账号证号快照进单据')
+
+        self.client.force_login(self.platform_admin)
+        self.ok(self.post_json(f'{API}/users/{doc.id}/edit/',
+                               {'vet_license': '换证之后的新号20250001'}))
+
+        treatment.refresh_from_db()
+        doc.refresh_from_db()
+        self.assertEqual(doc.vet_license, '换证之后的新号20250001')
+        self.assertEqual(
+            treatment.vet_license, '鄂兽医执字20210108号',
+            '历史单据的证号跟着账号改了 —— 这张单子将无法向农业农村部门'
+            '证明「当时是谁签的字」')
+
+    def test_new_treatment_after_edit_uses_new_license(self):
+        """正向对照：改号之后**新开的单**要用新证号，否则上面那条只是没同步。
+
+        没有这条，「历史不变」可以由「签名压根没读账号」实现 —— 那是假绿。
+        """
+        from business.services_treatment import open_treatment
+
+        doc = self._hospital('edit_fwd', '鄂兽医执字20210109号')
+        self.client.force_login(self.platform_admin)
+        self.ok(self.post_json(f'{API}/users/{doc.id}/edit/',
+                               {'vet_license': '鄂兽医执字20250109号'}))
+        # 重新取实例：线上每个请求的 `request.user` 都是新读的，
+        # 内存里的旧对象不代表接口写进去的值。
+        doc.refresh_from_db()
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a, status='in_treatment')
+        treatment = open_treatment(pet, self.hospital_a, doc, self.district_a.id)
+        self.assertEqual(treatment.vet_license, '鄂兽医执字20250109号')
+        self.assertEqual(treatment.vet_name, doc.get_full_name() or doc.username)
+
+    def test_license_change_is_audited_with_old_and_new_value(self):
+        """审计里必须留旧号：只记「改了」无法回答「从哪个号改成的」。"""
+        target = self._hospital('edit_audit', '鄂兽医执字20210110号')
+        self.client.force_login(self.platform_admin)
+        self.ok(self.post_json(f'{API}/users/{target.id}/edit/',
+                               {'vet_license': '鄂兽医执字20250110号'}))
+        log = AuditLog.objects.filter(user=self.platform_admin,
+                                      object_repr='edit_audit').order_by('-id').first()
+        self.assertIsNotNone(log, '账号纠错没有进审计日志')
+        self.assertIn('鄂兽医执字20210110号', log.detail, '审计里查不到旧证号')
+        self.assertIn('鄂兽医执字20250110号', log.detail, '审计里查不到新证号')
+
+
 class SupervisionDataTest(SupervisionBase):
     def test_business_supervision_all_types(self):
         pet = make_pet(district=self.district_a, shelter=self.shelter_a,
@@ -690,6 +980,84 @@ class SupervisionDataTest(SupervisionBase):
         alert = next(a for a in alerts if a['id'] == material.id)
         self.assertEqual(alert['shortage'], 8)
 
+    def test_ledger_unfinished_rows_have_dates(self):
+        """业务时间可空的单据，台账行的 `date` 必须退到创建时间。
+
+        `_date_filter` 已经按 `created_at` 兜底把这些行放进用户圈的时间区间，
+        但行里的 `date` 仍写「业务时间有值才给」—— 结果是**筛得出来、日期一栏空白**，
+        按日期排序还会全部沉底，用户以为数据坏了。放归（待转运/待签字）、
+        领养（待领出）、安乐死（未回填执行时间）三张表都有这个可空业务时间。
+        """
+        import datetime
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a)
+        Release.objects.create(pet=pet, pet_code=pet.code, status='pending',
+                               community_name='甲区某小区',
+                               ledger_no='REL-LDG-1', district=self.district_a)
+        Adoption.objects.create(pet=pet, pet_code=pet.code,
+                                adopter_name='待领出领养人',
+                                adopter_phone='13800001111',
+                                hospital=self.hospital_a, status='pending_claim',
+                                ledger_no='ADP-LDG-1', district=self.district_a)
+        Euthanasia.objects.create(pet=pet, pet_code=pet.code,
+                                  hospital=self.hospital_a, reason='疾病终末期',
+                                  ledger_no='EUT-LDG-1', district=self.district_a)
+        today = datetime.date.today().isoformat()
+        self.client.force_login(self.gov_city)
+        data = self.ok(self.client.get(
+            f'{API}/ledger/?start_date={today}&end_date={today}'))['data']
+        by_no = {r['ledger_no']: r for r in data['records']}
+        for no in ('REL-LDG-1', 'ADP-LDG-1', 'EUT-LDG-1'):
+            self.assertIn(no, by_no, f'{no} 应被时间区间筛出（筛选侧已有 created_at 兜底）')
+            self.assertTrue(by_no[no]['date'],
+                            f'{no} 业务时间为空，台账行日期必须退到创建时间，不能留空白')
+
+    def test_business_adoption_payload_carries_checkins(self):
+        """「领养回访监管」这一屏必须拿到打卡数据。
+
+        政府端按 `business_type=adoption` 单类型拉取，而 `checkins` 以前只在
+        `business_type` 为空或 `checkin` 时装进返回体 —— 前端
+        `sup.checkins || []` 于是静默变空表：领养列表的「回访打卡」列**恒为 0 次**，
+        详情抽屉里的打卡时间线**永不出现**。机构驳回过的回访，监管端完全看不见，
+        且接口不报错、页面不红。
+        """
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a)
+        adoption = Adoption.objects.create(
+            pet=pet, pet_code=pet.code, adopter=self.adopter,
+            adopter_name='回访领养人', adopter_phone='13800002222',
+            hospital=self.hospital_a, status='completed',
+            ledger_no='ADP-CHK-1', district=self.district_a)
+        for status in ('pending', 'approved', 'rejected'):
+            CheckIn.objects.create(pet=pet, pet_code=pet.code, adopter=self.adopter,
+                                   adopter_name='回访领养人', month='2026-09',
+                                   status=status, note=f'回访-{status}')
+        self.client.force_login(self.gov_city)
+        data = self.ok(self.client.get(f'{API}/business/?business_type=adoption'))['data']
+        self.assertEqual([a['ledger_no'] for a in data['adoptions']], ['ADP-CHK-1'])
+        checkins = data.get('checkins')
+        self.assertIsNotNone(checkins,
+                             'adoption 载荷里没有 checkins 键 —— 回访打卡列会恒为 0 次')
+        self.assertEqual({c['status'] for c in checkins}, {'pending', 'approved', 'rejected'},
+                         '三种审核结果都要下发，否则监管看不出回访是否合格')
+        self.assertTrue(all(c['pet_id'] == adoption.pet_id for c in checkins),
+                        '打卡必须能按 pet_id 关联回领养行')
+
+    def test_business_checkin_scope_follows_district(self):
+        """按类型下发打卡时，区县范围过滤不能失效（打卡表无 district 字段，走 pet 关联）。"""
+        other_pet = make_pet(district=self.district_b, shelter=self.shelter_a,
+                             hospital=self.hospital_b)
+        mine = make_pet(district=self.district_a, shelter=self.shelter_a,
+                        hospital=self.hospital_a)
+        CheckIn.objects.create(pet=mine, pet_code=mine.code, adopter=self.adopter,
+                               adopter_name='甲区领养人', month='2026-09', status='approved')
+        CheckIn.objects.create(pet=other_pet, pet_code=other_pet.code, adopter=self.adopter,
+                               adopter_name='乙区领养人', month='2026-09', status='approved')
+        self.client.force_login(self.gov_a)
+        data = self.ok(self.client.get(f'{API}/business/?business_type=adoption'))['data']
+        self.assertEqual({c['pet_code'] for c in data['checkins']}, {mine.code},
+                         '区县级监管账号只能看到本区宠物的回访打卡')
+
     def test_ledger_center(self):
         pet = make_pet(district=self.district_a)
         Capture.objects.create(district=self.district_a, shelter=self.shelter_a,
@@ -699,6 +1067,25 @@ class SupervisionDataTest(SupervisionBase):
         self.assertGreaterEqual(body['data']['total'], 1)
         records = body['data']['records']
         self.assertEqual(records[0]['ledger_no'], 'CAP-SV-1')
+
+    def test_ledger_masks_adopter_id_card(self):
+        """批量台账不得下发完整身份证号（`core.privacy.mask_id_card`）。"""
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a)
+        Adoption.objects.create(
+            pet=pet, pet_code=pet.code, adopter_name='脱敏领养人',
+            adopter_phone='13800001234',
+            adopter_id_card='110101199001011234',
+            hospital=self.hospital_a, status='completed',
+            ledger_no='ADP-MASK-1', district=self.district_a)
+        self.client.force_login(self.gov_city)
+        data = self.ok(self.client.get(
+            f'{API}/ledger/?business_type=adoption'))['data']
+        rec = next(r for r in data['records'] if r['ledger_no'] == 'ADP-MASK-1')
+        self.assertEqual(rec['detail']['adopter_id_card'],
+                         '110101********1234')
+        self.assertNotIn('110101199001011234', json.dumps(data, ensure_ascii=False),
+                         '台账响应里仍能搜到完整身份证号')
 
     def test_ledger_pet_archive(self):
         """一宠一档：按宠物聚合档案字段（分类/芯片/绝育/驱虫/免疫/出库）"""
@@ -883,7 +1270,10 @@ class SystemConfigPageContractTest(SupervisionBase):
 
     def test_frontend_gates_write_and_surfaces_read_failure(self):
         # 第四十二轮：系统配置页迁至 platform/portal.html，政府端不再含配置页
-        src = self._read('templates/portal/platform/portal.html')
+        # 系统配置页的代码在 `static/js/portals/platform.js`（重构 B），
+        # 模板里只剩页面骨架，两边都要读才不会判据空转。
+        src = (self._read('templates/portal/platform/portal.html')
+               + '\n' + self._read('static/js/portals/platform.js'))
         self.assertIn("const canEdit = this.isGlobalScope();", src)
         # 输入框只读门禁
         self.assertIn("canEdit ? '' : ' readonly'", src)
@@ -891,7 +1281,7 @@ class SystemConfigPageContractTest(SupervisionBase):
         self.assertIn('${canEdit ? `<div class="card-header"', src)
         # 读失败必须显式报错，不得静默渲染空值
         self.assertIn("await TNR_API.get('/api/supervision/config/')", src)
-        self.assertIn('加载配置失败', src)   # 失败要显式渲染，不能只是吞掉
+        self.assertIn('编号规则加载失败', src)   # 失败要显式渲染，不能只是吞掉
         # 反向断言：整个平台端都不得再用静默封装读配置。
         self.assertNotIn(
             'TNR_API.getSystemConfig()', src,

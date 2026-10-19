@@ -21,7 +21,7 @@ from business.services import (
     adjust_stock, get_hospital_stock,
     get_own_institution_object, parse_int_param, parse_signed_int_param,
     # 第四十五轮：市级捕捉点 + 机构库存
-    can_dispatch_across_districts, get_institution_stock, get_shelter_stock,
+    get_institution_stock,
     inactive_institution_error, is_city_shelter,
     # B5：物料批次
     batch_expiry_state, fefo_sorted, get_material_batches,
@@ -33,7 +33,7 @@ from business.services_chip import (
     chip_batch_create, chip_batch_dispatch, chip_batch_precheck,
     chip_batch_receive, chip_batch_void, parse_chip_numbers,
 )
-from core.models import Institution
+from core.models import Institution, STATUS_ACTIVE
 
 
 # ============================================
@@ -68,7 +68,7 @@ def dispatch_scope_district(user, material):
 def dispatch_targets(user, material):
     """该用户对该物料**可下发到的接收机构**（医院 + 捕捉点）。"""
     district = dispatch_scope_district(user, material)
-    qs = Institution.objects.filter(type__in=('hospital', 'shelter'), status='active')
+    qs = Institution.objects.filter(type__in=('hospital', 'shelter'), status=STATUS_ACTIVE)
     if district is not None:
         qs = qs.filter(district=district)
     # 不能下发给自己
@@ -174,7 +174,7 @@ def material_list(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def purchase_create(request):
     """采购入库
@@ -365,7 +365,7 @@ def purchase_create(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def dispatch_create(request):
     """下发至医院**或**捕捉点（第四十五轮起接收方不限于医院）
@@ -581,13 +581,31 @@ def material_receive(request, pk):
     # B5：每笔兄弟行各建一条 receive（同 RCV 单号、ref_no 同指下发单号），
     # 批号随行、效期取**发起方批次表**里该批号的效期 —— 接收方的批次行
     # 因此带着正确效期诞生，FEFO/过期拦截在接收侧从第一笔起就是对的。
+    #
+    # ⚠ 「签收」这个事实**只有一个落点**：`note` 里的 `[已签收]` 标记。
+    #   两端门户的「待签收 / 已办」过滤读的就是它（hospital/portal.html 的
+    #   `pendingDisp`、shelter/portal.html 的签收状态列），所以并发闸门也必须
+    #   压在同一个标记上 —— 判据写在 `UPDATE ... WHERE note NOT LIKE '%[已签收]%'`，
+    #   「没签过」与「标为已签」就是同一条语句。
+    #   上面的 `already_received` 只是**读**（给重复点击一个好文案），
+    #   它在两个请求同时进来时双双通过：两边都会建出一整组 receive 流水，
+    #   本院库存凭空翻倍，而且全程不报错（要等到月末对账才发现）。
+    #   这里**不用** `select_for_update()`：开发/测试库是 sqlite，Django 用
+    #   `features.has_select_for_update` 门控 FOR UPDATE 子句，sqlite 上是 False
+    #   → 子句被静默丢弃，锁只在生产 MySQL 生效、用例完全覆盖不到
+    #   （与 `use_chip()` 同一族论证，第五十一轮）。
+    marker = '[已签收]'
     receive_ledger_no = generate_doc_no('RCV')
     total_qty = sum(s.quantity for s in siblings)
     try:
         with transaction.atomic():
             for s in siblings:
-                s.note = (s.note + ' [已签收]' if s.note else '[已签收]').strip()
-                s.save(update_fields=['note'])
+                new_note = (s.note + ' ' + marker if s.note else marker).strip()
+                if not MaterialTransaction.objects.filter(
+                        pk=s.pk, type='dispatch',
+                ).exclude(note__contains=marker).update(note=new_note):
+                    raise ValueError('本单刚刚被他人签收，请刷新后查看库存')
+                s.note = new_note        # 内存行同步（后面的批次循环按 s 取值）
 
             receive_txns = []
             for s in siblings:
@@ -634,7 +652,7 @@ def material_receive(request, pk):
 
 
 @csrf_exempt
-@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@role_required('shelter', 'hospital')
 @login_required
 def stock_adjustment(request):
     """库存异动（过期/损坏/丢失）
@@ -761,7 +779,7 @@ def stock_adjustment(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'hospital', 'gov_city', 'gov_district')
+@role_required('shelter', 'hospital')
 @login_required
 def material_outbound(request):
     """物料出库（报废 / 退回 / 调拨 / 盘点；**数量可负**）。
@@ -1134,7 +1152,7 @@ def material_batches(request, pk):
     # 政府端：全部持有机构的批次，按机构分组（FEFO 顺序）
     groups = []
     qs = MaterialBatch.objects.filter(
-        material=material, institution__status='active'
+        material=material, institution__status=STATUS_ACTIVE
     ).select_related('institution').order_by('institution__id')
     by_inst = {}
     for b in qs:

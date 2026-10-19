@@ -27,6 +27,8 @@ urlpatterns = [
     # 用户管理
     path('users/', views.user_list, name='user_list'),
     path('users/create/', views.user_create, name='user_create'),
+    # 只改「姓名 / 电话 / 执业证号」三个抄错类字段 —— 见 `views.user_update` 的说明。
+    path('users/<int:pk>/edit/', views.user_update, name='user_update'),
     path('users/<int:pk>/toggle/', views.user_toggle_status, name='user_toggle_status'),
 
     # 监管

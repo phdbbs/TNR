@@ -1,13 +1,14 @@
 """
 TNR 业务系统 - 定时任务
-- 诊疗完成5天后宠物自动转'待领养'并上架领养大厅。
+- 诊疗完成5天后宠物自动转'待领养'并上架领养大厅（存量兜底；新流程由办结当场上架）。
 - 每月给「已领养但尚未回访打卡」的领养人发回访提醒（第三十七轮）。
 """
 from datetime import timedelta
 
+from django.db.models import Q
 from django.utils import timezone
 
-from business.models import Treatment, Pet, AdoptionHallListing
+from business.models import Treatment, AdoptionHallListing
 
 
 def auto_promote_to_adoptable(force=False):
@@ -15,15 +16,24 @@ def auto_promote_to_adoptable(force=False):
 
     此函数可由 django-q2 定时调度执行，也可通过 management command 手动触发。
     :param force: True 时跳过5天时间限制，处理所有已完成诊疗记录（用于测试或补偿）
+
+    第四十七轮起，本函数只是**存量兜底**：新流程里「领养」由 `dispose()` 当场
+    上架，不再等这里。所以判据必须避开已被出院流程接管的动物 ——
+    `dispose(defer_pet_status=True)`（放归两段）正是「`status='completed'`
+    且 `Pet.status='in_treatment'`」的新造者：动物已经医生判定要回原小区、
+    只是还在院内等转运，命中旧判据就会被改成「待领养」并上架领养大厅。
+    去向（`disposal`）一旦落到非领养的路子上，就不再是这里能碰的动物。
     """
     if force:
-        treatments = Treatment.objects.filter(status='completed')
+        treatments = Treatment.objects.filter(
+            status='completed', disposal__in=['', 'pending_adopt'])
     else:
         cutoff = timezone.now() - timedelta(days=5)
+        # 「诊疗完成」5 天后 —— 新口径看 `done_at`；
+        # 该列 0027 才有，之前的历史行回落到建档时间。
         treatments = Treatment.objects.filter(
-            status='completed',
-            created_at__lte=cutoff
-        )
+            status='completed', disposal__in=['', 'pending_adopt'],
+        ).filter(Q(done_at__lte=cutoff) | Q(done_at__isnull=True, created_at__lte=cutoff))
     count = 0
     for t in treatments:
         pet = t.pet

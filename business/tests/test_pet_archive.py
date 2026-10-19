@@ -396,6 +396,17 @@ class PetArchiveOutboundTest(BusinessTestBase):
         self.assertEqual(row['outbound_reason'], '死亡')
         self.assertEqual(row['delivery_unit'], '甲区医院')
 
+    def test_dead_kind_maps_to_outbound(self):
+        """`kind='dead'`（死亡 / 无害化）把动物置成 `pet.status='dead'` ——
+        这条终态在「去向」推导里漏判过，死亡动物的一宠一档去向列空白且不报错。"""
+        pet = make_pet(code='TNRGO05', status='dead', district=self.district_a)
+        Euthanasia.objects.create(
+            pet=pet, pet_code=pet.code, kind='dead', hospital_name='乙区医院',
+            reason='救助时已死亡', district=self.district_a)
+        row = self._row(pet)
+        self.assertEqual(row['outbound_reason'], '死亡')
+        self.assertEqual(row['delivery_unit'], '乙区医院')
+
     def test_owner_returned(self):
         pet = make_pet(code='TNRGO04', status='owner_returned', district=self.district_a)
         OwnerReturn.objects.create(

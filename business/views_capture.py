@@ -17,7 +17,7 @@ from business.models import Capture, Pet, OwnerReturn
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
-    generate_pet_codes, generate_doc_no, get_district_scope,
+    generate_pet_codes, generate_doc_no,
     get_district_filtered_queryset, check_blacklist, amap_regeo,
     amap_ip_location, client_ip, capture_transfer_state, capture_states_bulk,
     recalc_capture_status, get_active_pet, validate_uploaded_images,
@@ -26,7 +26,7 @@ from business.services import (
     inactive_district_error, inactive_institution_error,
     parse_int_param, parse_date_param, MAX_CAPTURE_BATCH,
 )
-from core.models import District, Institution
+from core.models import Institution
 
 
 # 列表接口剔除体积巨大的签字 base64，详情接口才返回
@@ -441,7 +441,7 @@ def geocode_ip(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def capture_create(request):
     """创建捕捉登记（批量生成宠物档案）。
@@ -605,7 +605,7 @@ def capture_create(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def capture_update(request, pk):
     """编辑捕捉登记。
@@ -772,7 +772,7 @@ def capture_update(request, pk):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def capture_delete(request, pk):
     """逻辑删除捕捉登记（数据库记录保留，仅打删除标记）。
@@ -927,7 +927,7 @@ def owner_return_list(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district', 'hospital')
+@role_required('shelter', 'hospital')
 @login_required
 def owner_return_create(request, pk=None):
     """主人领回登记

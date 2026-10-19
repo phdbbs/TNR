@@ -29,9 +29,15 @@ class CheckDataIntegrityCommandTest(BusinessTestBase):
         self.assertIn('未发现一致性问题', output)
 
     def test_consistent_accounts_are_not_reported(self):
-        """误报守卫：区县与机构一致的账号一个都不该被列出来。"""
+        """误报守卫：区县与机构一致的账号一个都不该被列出来。
+
+        带上证号：这条测的是「区县一致性」，而没填证号的医院账号会被
+        **待补录提示**列出（见 `test_hospital_without_license_is_listed_as_advisory`），
+        那样 `assertNotIn` 抓到的就不是本用例要判的东西了。
+        """
         user = make_user('di_ok_t', role='hospital',
-                         district=self.district_a, institution=self.hospital_a)
+                         district=self.district_a, institution=self.hospital_a,
+                         vet_license='鄂兽医执字20210001号')
         output, code = self._run()
         self.assertEqual(code, 0, output)
         self.assertNotIn(user.username, output)
@@ -87,6 +93,41 @@ class CheckDataIntegrityCommandTest(BusinessTestBase):
         self.assertEqual(code, 1)
         self.assertIn('其余 2 条未列出', output)
 
+    # ---------- 待补录提示（不阻断） ----------
+    def test_hospital_without_license_is_listed_as_advisory(self):
+        """存量医院账号没证号 → 只提示，**不把退出码改成 1**。
+
+        口径是「不追溯」（`services.validate_vet_license`：只在建号/改号强制）。
+        把待补录算成失败，后果不是有人去补，而是部署脚本天天红、
+        大家开始忽略巡检输出 —— 那时真问题也会被一起忽略掉。
+        """
+        user = make_user('di_lic_t', role='hospital',
+                         district=self.district_a, institution=self.hospital_a)
+        output, code = self._run()
+        self.assertIn(user.username, output, '没证号的医院账号没被列出来')
+        self.assertIn('不阻断', output)
+        self.assertEqual(code, 0, f'待补录提示不该让巡检失败：\n{output}')
+
+    def test_hospital_with_license_not_listed(self):
+        """正向对照：填了证号的账号不能被报（否则这条提示永远是一堆噪音）。"""
+        user = make_user('di_lic_ok_t', role='hospital',
+                         district=self.district_a, institution=self.hospital_a,
+                         vet_license='鄂兽医执字20210356号')
+        output, _ = self._run()
+        self.assertNotIn(user.username, output)
+
+    def test_disabled_or_non_hospital_accounts_are_not_listed(self):
+        """只提示**启用中的医院账号**：捕捉点操作员本就不该有证号，
+        停用账号不再产生新单据，列出来只会淹没真正要补的那几个。"""
+        shelter = make_user('di_lic_sh_t', role='shelter',
+                            district=self.district_a, institution=self.shelter_a)
+        gone = make_user('di_lic_off_t', role='hospital', is_active=False,
+                         district=self.district_a, institution=self.hospital_a)
+        output, code = self._run()
+        self.assertNotIn(shelter.username, output)
+        self.assertNotIn(gone.username, output)
+        self.assertEqual(code, 0, output)
+
     # ---------- 只读 ----------
     def test_command_does_not_write_anything(self):
         """巡检命令**永远**只读 —— 发现问题的下一步是人工确认，不是自动改库。"""
@@ -118,8 +159,15 @@ class SyncOperatorDistrictCommandTest(BusinessTestBase):
         return out.getvalue()
 
     def _mismatched(self, username='sync_bad_t'):
+        """区县与机构不一致、**其余字段干净**的医院账号。
+
+        证号要填上：本类的断言只看「区县修没修好」，而空证号会让这个账号
+        同时出现在巡检的待补录提示里，`test_repair_closes_the_loop_with_check`
+        的「修完就不该再出现在输出里」会被无关的一行顶掉。
+        """
         return make_user(username, role='hospital',
-                         district=self.district_b, institution=self.hospital_a)
+                         district=self.district_b, institution=self.hospital_a,
+                         vet_license=f'鄂兽医执字2021{username}号')
 
     def test_dry_run_does_not_write(self):
         """默认必须是预演 —— 这条命令是给运维在生产上跑的。"""

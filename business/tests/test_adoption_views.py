@@ -143,17 +143,37 @@ class AdoptionRegisterTest(BusinessTestBase):
 
 
 class AdoptionConfirmClaimTest(BusinessTestBase):
-    def _pending_claim(self):
-        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+    def _pending_claim(self, district=None, hospital=None, user=None):
+        district = district or self.district_a
+        hospital = hospital or self.hospital_a
+        pet = make_pet(district=district, hospital=hospital,
                        status='pending_claim')
-        adopter = User.objects.create_user(username='claim_adopter', password='x',
-                                           role='adopter')
+        adopter = User.objects.create_user(username=f'claim_adopter_{pet.id}',
+                                           password='x', role='adopter')
         adoption = Adoption.objects.create(
             pet=pet, pet_code=pet.code, adopter=adopter,
             adopter_name='领养人', adopter_phone='13800001111',
-            hospital=self.hospital_a, status='pending_claim',
-            ledger_no='ADP-T1', district=self.district_a)
+            hospital=hospital, status='pending_claim',
+            ledger_no=f'ADP-{pet.id}', district=district)
         return pet, adopter, adoption
+
+    def test_confirm_cross_district_hospital(self):
+        """跨区县送医：甲区的动物由乙区医院受理领养，乙区医院必须能确认领出。
+
+        `Adoption.district` 是**动物**的区县，取单按区县收敛时，出院流程里
+        「开领养单 → 当场确认领出」（医院端同一个函数连着调）第二步永远 404，
+        单据开出来了、动物领不出去，领养记录永久卡在 `pending_claim`。
+        与 `test_confirm_wrong_hospital_rejected` 成对：放宽的是机构归属，
+        不是隔离。
+        """
+        pet, _, adoption = self._pending_claim(
+            district=self.district_a, hospital=self.hospital_b)
+        self.login_as(self.hospital_user_b)
+        body = self.ok(self.post_json(
+            f'/api/business/adoptions/{adoption.id}/confirm-claim/', {}))
+        self.assertEqual(body['data']['status'], 'completed')
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'adopted')
 
     def test_confirm_success(self):
         pet, adopter, adoption = self._pending_claim()
@@ -618,15 +638,40 @@ class AdoptionScopeGuardTest(BusinessTestBase):
         }), status=404, message='无权访问')
 
     def test_register_blocked_when_pending_release(self):
+        """放归单未办结（两段任一态）的动物不接受领养登记 —— 双重承诺。
+
+        两段都要测：判据原先只认 `pending`，动物一登记「转运回小区」进入
+        `transferred`，放归单还没签字就能把同一只动物领养出去 —— 先放归、
+        后领养的台账互相打架。
+        """
+        for status in ('pending', 'transferred'):
+            with self.subTest(status=status):
+                pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                               hospital=self.hospital_a, status='pending_adopt')
+                Release.objects.create(pet=pet, pet_code=pet.code,
+                                       community=self.community_a,
+                                       community_name=self.community_a.name,
+                                       status=status, district=self.district_a)
+                self.login_as(self.shelter_user_a)
+                self.expect_fail(self.post_json('/api/business/adoptions/register/', {
+                    'pet_id': pet.id, 'adopter_name': '甲', 'adopter_phone': '13800000012',
+                }), message='未办结')
+
+    def test_register_allowed_after_release_finished(self):
+        """反向对照：已办结（released）的放归单不算占用，不能一律拒绝。
+
+        把判据写成「这张动物只要有放归记录就拒绝」也能让上一条用例变绿，
+        但放归之后转领养（小区猫回站再找领养）就全堵死了。
+        """
         pet = make_pet(district=self.district_a, shelter=self.shelter_a,
                        hospital=self.hospital_a, status='pending_adopt')
         Release.objects.create(pet=pet, pet_code=pet.code, community=self.community_a,
-                               community_name=self.community_a.name, status='pending',
+                               community_name=self.community_a.name, status='released',
                                district=self.district_a)
         self.login_as(self.shelter_user_a)
-        self.expect_fail(self.post_json('/api/business/adoptions/register/', {
-            'pet_id': pet.id, 'adopter_name': '甲', 'adopter_phone': '13800000012',
-        }), message='待放归')
+        self.ok(self.post_json('/api/business/adoptions/register/', {
+            'pet_id': pet.id, 'adopter_name': '甲', 'adopter_phone': '13800000013',
+        }))
 
     def test_register_blocked_when_already_pending_claim(self):
         pet = make_pet(district=self.district_a, shelter=self.shelter_a,

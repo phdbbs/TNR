@@ -29,6 +29,7 @@ C. **数量上限** —— 「合法但荒谬」的数量不得让服务端真�
 import ast
 import inspect
 import re
+import sys
 import textwrap
 import warnings
 from datetime import date, datetime, timedelta
@@ -37,6 +38,13 @@ from pathlib import Path
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase
 from django.utils import timezone
+
+_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPTS = _ROOT / 'scripts'
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from frontend_sources import read_portal  # noqa: E402
 
 from business import services
 from business.models import Capture, Material, MaterialTransaction, OwnerReturn
@@ -658,8 +666,9 @@ class PetCodesPreviewBoundTest(ParamContractMixin, BusinessTestBase):
         就会出现「界面能填 200、提交被拒 400」—— 用户一改就撞错。
         反向（界面收窄到 50 而服务端收 100）则会让用户以为上限是 50。
         """
-        src = (ROOT / 'templates' / 'portal' / 'shelter' / 'portal.html').read_text(
-            encoding='utf-8')
+        # 捕捉表单是 JS 生成的（`static/js/portals/shelter.js`），
+        # 所以读「模板 + 本端 JS」的合并视图，别只读模板。
+        src = read_portal('shelter')
         m = re.search(r'id="ca_petCount"[^>]*?\bmax="(\d+)"', src)
         self.assertIsNotNone(m, '找不到捕捉表单的数量输入框 ca_petCount 或其 max')
         self.assertEqual(
@@ -823,9 +832,10 @@ class MaterialQuantityBodyTest(ParamContractMixin, BusinessTestBase):
     def test_adjustment_non_numeric_quantity_rejected(self):
         """三个「数量」参数口径一致：异动也走共用解析器。
 
-        （异动接口只对医院/政府开放，捕捉点不在其列，所以这里用 gov_city。）
+        操作者用捕捉点：第四十九轮政府端转只读后，`stock_adjustment` 的
+        写角色只剩医院与捕捉点。
         """
-        self.login_as(self.gov_city)
+        self.login_as(self.shelter_user_a)
         resp = self.post_json(ADJUSTMENT, {
             'material_id': self._fresh_material().id, 'quantity': 'abc',
         })
@@ -833,7 +843,7 @@ class MaterialQuantityBodyTest(ParamContractMixin, BusinessTestBase):
         self.assertIn('异动数量', resp.json()['message'])
 
     def test_adjustment_valid_quantity_still_works(self):
-        self.login_as(self.gov_city)
+        self.login_as(self.shelter_user_a)
         mat = self._fresh_material()
         self.ok(self.post_json(ADJUSTMENT, {
             'material_id': mat.id, 'quantity': 4, 'reason': '盘点',
@@ -996,7 +1006,8 @@ class ParamParserContractTest(BusinessTestBase):
 # 修法成对做：`getLedger` 状态感知（失败抛错）+ `renderLedgerTable` 接住并渲染。
 ROOT = Path(__file__).resolve().parents[2]
 API_JS = ROOT / 'static' / 'js' / 'tnr-api.js'
-GOV_PORTAL = ROOT / 'templates' / 'portal' / 'gov' / 'portal.html'
+# 政府端的台账渲染在 `static/js/portals/gov.js`（重构 B），
+# 统一走 `read_portal('gov')` 的「模板 + 本端 JS」视图，别再抄死路径。
 
 
 def extract_js_block(src, header):
@@ -1080,7 +1091,7 @@ class LedgerApiSurfacesErrorsTest(SimpleTestCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.api_src = API_JS.read_text(encoding='utf-8')
-        cls.gov_src = GOV_PORTAL.read_text(encoding='utf-8')
+        cls.gov_src = read_portal('gov')
         # ⚠ 一律在**剥掉注释之后**的源码上断言（见 strip_js_comments 的说明）
         cls.ledger = strip_js_comments(
             extract_js_block(cls.api_src, 'async getLedger(filters)'))
@@ -1113,9 +1124,29 @@ class LedgerApiSurfacesErrorsTest(SimpleTestCase):
         self.assertIn('data.success', self.getdata, 'getData 没有判 success')
 
     def test_get_data_throws_with_server_message(self):
-        """必须把**服务端文案**带出来，否则界面只能显示「加载失败」。"""
-        self.assertIn('throw new Error', self.getdata)
-        self.assertIn('data.message', self.getdata)
+        """必须把**服务端文案**带出来，否则界面只能显示「加载失败」。
+
+        ⚠ 断言必须打在**泛化失败那一个分支**里，不能只在全块上 `assertIn`：
+        `getData` 里还有一段 401 分支，它也写着 `throw new Error` + `data.message`。
+        整块级断言会被那段**顶包** —— 把泛化分支的 `throw` 删掉、只留 401 分支，
+        全块里两个串照样都在（M40 实测就是这么漏的，报 WEAK 而不是命中本条）。
+        """
+        branch = self._generic_fail_branch()
+        self.assertIn('throw new Error', branch,
+                      '泛化失败分支不抛错了 —— 严格读内核失效，调用方的 catch 收不到东西')
+        self.assertIn('data.message', branch,
+                      '抛出去的错误没带服务端文案')
+        self.assertIn('${res.status}', branch,
+                      '文案里必须带上 HTTP 状态码，否则排障时只能靠猜')
+
+    def _generic_fail_branch(self):
+        """截出 `getData` 里「非 2xx / success=false」那一段（不含 401 分支）。"""
+        header = 'if (!res.ok || !data.success) {'
+        self.assertIn(
+            header, self.getdata,
+            'getData 里找不到泛化失败分支 —— 整段被删了，'
+            '本条判据不能靠 401 分支里的 `throw new Error` 顶包')
+        return extract_js_block(self.getdata, header)
 
     def test_render_ledger_table_catches_and_shows_error(self):
         """`renderLedgerTable` 必须接住异常并渲染错误 —— 不能只是空表。"""
@@ -1191,8 +1222,12 @@ class MalformedBodyRejectedTest(BusinessTestBase):
 
         修法在 `core.http.read_json_body`（归一化只有一份）—— 约 30 处
         调用点因此自动受益。本用例锁住这个约定。
+
+        ⚠ 操作者必须是**有写权限**的角色（第四十九轮起政府端只读，
+        拿 gov_city 打这里只会得到 403，而 403 同样「不是 500」——
+        那条断言会因此恒真，用例彻底失去意义）。
         """
-        self.login_as(self.gov_city)
+        self.login_as(self.shelter_user_a)
         for payload in ('[1,2,3]', '"just a string"', 'null', '123'):
             with self.subTest(body=payload):
                 resp = self.post(ADJUSTMENT, payload)

@@ -87,7 +87,7 @@ class ReleaseCreateTest(BusinessTestBase):
         self.login_as(self.hospital_user_a)
         self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id}))
         self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
-                  message='已有待放归记录')
+                  message='未办结的放归记录')
 
 
 class ReleaseConfirmTest(BusinessTestBase):
@@ -157,6 +157,9 @@ class ReleaseStageTest(BusinessTestBase):
             community_name=self.community_a.name, status=status,
             # 区县跟着**动物**走（与 `release_create` 的 `pet.district_id` 同口径）——
             # 写死 district_a 的话，「跨区县取不到」这条用例会假绿。
+            # 归属机构同样照 `release_create` 落（`pet.hospital_id or pet.shelter_id`），
+            # 否则夹具与真实写入口径不同，跨区县送医那条正常路径就测不到。
+            institution=pet.hospital or pet.shelter,
             ledger_no=f'REL-STG-{status}', district=pet.district)
 
     def test_transfer_moves_pending_to_transferred(self):
@@ -170,6 +173,22 @@ class ReleaseStageTest(BusinessTestBase):
         release.pet.refresh_from_db()
         self.assertEqual(release.pet.status, 'in_treatment',
                          '只是转运回小区、还没放归，动物状态不能提前变成已放归')
+
+    def test_create_blocked_while_transferred(self):
+        """转运之后（`transferred`）同样不许再开一张放归单。
+
+        拆两段之前，重复放归的判据是「有没有 pending 单」；拆段之后动物一登记
+        转运，`pending` 就没了，于是同一只动物能同时挂两张未办结的放归单，
+        两张都能走到「已放归」，台账上同一只动物放归两次。
+        口径统一在 `Release.OPEN_STATUSES`。
+        """
+        release = self._release()
+        pet = release.pet
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{URL}{release.id}/transfer/', {}))
+        self.assertEqual(pet.status, 'in_treatment')
+        self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
+                         message='未办结的放归记录')
 
     def test_transfer_twice_rejected(self):
         release = self._release()
@@ -230,3 +249,20 @@ class ReleaseStageTest(BusinessTestBase):
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json(f'{URL}{release.id}/transfer/', {}),
                          status=404, message='无权访问')
+
+    def test_owning_hospital_can_transfer_across_district(self):
+        """跨区县送医：甲区捕捉的动物在乙区医院，乙区医院必须能「转运回小区」。
+
+        `Release.district` 是**动物**的区县、`institution` 才是本院，所以出院页
+        （按机构收口，见 `release_list`）看得见这一行，取单若只按区县就永远 404
+        —— 单据卡在「待放归」，动物还在院里出不去。
+        与上面那条成对：放行的是**归属机构**，不是所有医院。
+        """
+        pet = make_pet(district=self.district_a, hospital=self.hospital_b,
+                       status='in_treatment')
+        release = self._release(pet=pet)
+        self.login_as(self.hospital_user_b)
+        body = self.ok(self.post_json(f'{URL}{release.id}/transfer/', {}))
+        self.assertEqual(body['data']['status'], 'transferred')
+        release.refresh_from_db()
+        self.assertEqual(release.status, 'transferred')

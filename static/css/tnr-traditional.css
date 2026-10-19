@@ -822,6 +822,16 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
   margin-left: auto;
 }
 
+/* 起止日期成对占据一格：桌面端仍是一行里的两个控件，
+   手机端（筛选条为纵向堆叠）两列并排，省掉一整行 ~70px 屏高。 */
+.filter-date-pair {
+  display: flex;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.filter-date-pair .filter-item { flex: 1 1 0; min-width: 0; }
+.filter-date-pair .filter-item .form-input { width: 100%; }
+
 /* 搜索框 */
 .search-input {
   position: relative;
@@ -1531,12 +1541,15 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
     grid-template-columns: 1fr;
   }
 
-  /* 触屏优化：手机上增大按钮/操作链接的触控目标（推荐 ≥44px） */
+  /* 触屏优化：手机上增大按钮/操作链接的触控目标（推荐 ≥44px）
+     ⚠ 原来是 36px —— 注释写着 44、代码给 36，等于这条承诺没兑现。
+     44px 是 WCAG 2.5.5 / iOS HIG / Material 的共同下限，医护人员
+     在院内戴手套或单手操作时更吃这个尺寸。 */
   .btn-sm,
   .btn-link {
-    min-height: 36px;
-    min-width: 36px;
-    padding: 8px 12px;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 10px 12px;
   }
 
   .table .btn-link {
@@ -1709,6 +1722,16 @@ body .page-view .std-page-head .filter-bar { position: static; }
 .dt-actions-td .btn-link { padding: 4px 8px; }
 .dt-pagesize { appearance: auto; }
 
+/* 移动端列压缩（第五十九轮续）：`mobile:'hide'` 的列只在 ≤768px 隐藏，
+   被隐藏的信息由主列 `mobileRender` 带回 —— 两段规则必须成对存在：
+   只隐藏不补回 = 手机上信息消失；只补回不隐藏 = 文字在桌面上重复一遍。 */
+.dt-table .dt-mobile-only { display: none; }
+.dt-mobile-line { display: flex; gap: 6px; line-height: 1.6; }
+.dt-mobile-label { flex: 0 0 auto; min-width: 4em; color: var(--ink-light); font-size: var(--fs-xs); }
+.dt-mobile-value { min-width: 0; word-break: break-word; }
+.dt-mobile-more { margin-top: 2px; }
+.dt-mobile-more > summary { cursor: pointer; color: var(--cinnabar); font-size: var(--fs-xs); }
+
 /* 分页条布局 */
 .dt-pagination { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; padding: var(--sp-3); justify-content: flex-end; }
 
@@ -1803,6 +1826,9 @@ body.tnr-side-collapsed .portal-sidebar .sidebar-user { justify-content: center;
 
 /* --- 统计卡栅格（自适应换行，移动端 2 列） --- */
 body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--sp-4); }
+/* 明确要求三张卡并排的统计区（如政府端物料流转）：
+   桌面三列，移动端仍回到两列 —— 390px 下三列每张只有 ~111px。 */
+body .stat-grid.stat-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
 /* --- 筛选栏规范 --- */
 .filter-bar { display: flex; align-items: flex-end; gap: var(--sp-3); flex-wrap: wrap; }
@@ -1814,12 +1840,24 @@ body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(
   .std-page-head { flex-direction: column; align-items: stretch; }
   .std-page-actions { width: 100%; }
   .std-page-actions .btn { flex: 1; }
-  .filter-bar { flex-direction: column; align-items: stretch; }
+  /* 纵向堆叠时 5 个条件要吃掉 5×70px 屏高，列表首屏被筛选条挤没；
+     两列栅格把短条件并排，日期对与操作按钮仍独占整行。 */
+  .filter-bar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: end;
+  }
   .filter-item, .filter-item .form-input, .filter-item .form-select { width: 100%; min-width: 0; }
+  .filter-date-pair, .filter-actions { grid-column: 1 / -1; }
   .filter-actions { display: flex; width: 100%; }
   .filter-actions .btn { flex: 1; }
   body .stat-grid { grid-template-columns: repeat(2, 1fr); gap: var(--sp-2); }
-  body .filter-bar { flex-direction: column; align-items: stretch; }
+  body .stat-grid.stat-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body .filter-bar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: end;
+  }
   body .filter-item, body .filter-item .form-input, body .filter-item .form-select { width: 100%; min-width: 0; }
   body .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   body .portal-content { padding: var(--sp-3); }
@@ -1828,6 +1866,15 @@ body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(
   .data-table { font-size: 13px; }
   .data-table th, .data-table td { padding: 8px 10px; }
   .dt-actions-td .btn-link { padding: 8px 10px; }   /* 触控热区 */
+  /* 9 列账号表 390px 实测宽 996px、可视 332px（横滑 664px）。低频列在
+     手机上隐藏、内容并入主列的「更多信息」，行内不再左右找信息。 */
+  body .dt-table th.dt-col-mobile-hide,
+  body .dt-table td.dt-col-mobile-hide,
+  body .dt-table col.dt-col-mobile-hide { display: none; }
+  body .dt-table .dt-mobile-only { display: block; margin-top: 4px; }
+  /* 触屏没有「拖列宽」手势，7px 手柄还会从表格右缘探出 3px，
+     让本已收进可视宽的表格多出一条细横滑。 */
+  body .dt-table .dt-colresizer { display: none; }
   .modal { width: 92vw !important; max-width: 92vw !important; }
   .modal-lg, .modal-xl { width: 96vw !important; }
   .drawer { width: 92vw !important; }
@@ -1842,9 +1889,44 @@ body .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(
   .sig-modal-actions { flex-wrap: wrap; }
   .sig-modal-actions .btn { flex: 1 1 30%; }
   .sig-modal-actions .sig-spacer { flex: 1 1 100%; margin-right: 0; order: 3; }
-  .btn { min-height: 38px; }
-  .form-input, .form-select { min-height: 38px; font-size: 16px; }  /* 16px 防 iOS 聚焦缩放 */
+  .btn { min-height: 44px; }
+  .form-input, .form-select { min-height: 44px; font-size: 16px; }  /* 16px 防 iOS 聚焦缩放 */
   .pagination { justify-content: center; }
+  /* 分页按钮 32px 在手机上点不准，统一抬到 44px 触控热区。 */
+  .pagination-btn { min-width: 44px; height: 44px; }
+  .filter-date-pair { width: 100%; }
+  .filter-date-pair .filter-item .form-input { min-width: 0; }
+  /* 宽表横向滚动时把操作列钉在右侧 —— 否则用户要一路滑到最右才能点
+     「详情 / 编辑」，而这几列恰恰是每行最先要用的操作。 */
+  body .table-wrapper .data-table th.dt-actions-th,
+  body .table-wrapper .data-table td.dt-actions-td {
+    position: sticky;
+    right: 0;
+    z-index: 2;
+    background: var(--white);
+    box-shadow: -8px 0 8px -8px rgba(0, 0, 0, .2);
+  }
+  body .table-wrapper .data-table th.dt-actions-th {
+    z-index: 4;
+    background: var(--rice-warm);
+    box-shadow: inset 0 -1px 0 var(--border-ink),
+                -8px 0 8px -8px rgba(0, 0, 0, .2);
+  }
+  body .table-wrapper .data-table tbody tr:hover td.dt-actions-td {
+    background: var(--rice-light);
+  }
+  /* 标签栏在 390px 宽屏上放不下 4–6 个标签（实测 497–707px），
+     原先直接被裁掉、右侧标签永远点不到；改为横向滑动而不是换行，
+     保持钉住高度 46px，表头冻结的偏移量不受影响。 */
+  body .page-view .tabs {
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+  }
+  body .page-view .tabs::-webkit-scrollbar { display: none; }
+  body .page-view .tabs .tab-item { flex: 0 0 auto; }
 }
 
 /* 移动端：筛选条不锁定（堆叠换行会占满屏幕），仅顶栏与标签锁定。

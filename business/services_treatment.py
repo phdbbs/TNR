@@ -24,11 +24,10 @@
 
 import json
 
-from django.db import transaction
 from django.utils import timezone
 
 from .models import (
-    AdoptionHallListing, Chip, Material, MaterialStock, Pet, Treatment,
+    AdoptionHallListing, Chip, Material, Pet, Treatment,
     TreatmentItem, TreatmentRx,
 )
 from .services import (
@@ -43,9 +42,19 @@ from .services import (
 # 那样「后端改了病种、前端还在用旧的」会静默漂移 —— 两边都能跑，
 # 只是列表里少一项、而且没人发现。这里由 `check_options()` 下发。
 INFECTIOUS_TESTS = {
-    '猫': [('fpv', '猫瘟 FPV'), ('fhv', '猫鼻支 FHV'), ('fcv', '猫杯状 FCV')],
-    '狗': [('cdv', '犬瘟热 CDV'), ('cpv', '犬细小 CPV'), ('ccv', '犬冠状病毒 CCV')],
+    '猫': [('fpv', '猫瘟 FPV'), ('fhv', '猫鼻支 FHV'), ('fcv', '猫杯状 FCV'),
+           ('rabies', '狂犬病'), ('toxoplasma', '弓形虫')],
+    '狗': [('cdv', '犬瘟热 CDV'), ('cpv', '犬细小 CPV'), ('ccv', '犬冠状病毒 CCV'),
+           ('rabies', '狂犬病')],
 }
+# 狂犬病是**人畜共患、法定报告**疫病（《动物防疫法》名录），猫狗都必须给项；
+# 弓形虫的终末宿主是猫，所以只在猫的清单里出现 —— 给狗列它等于让医生
+# 面对一个临床上无意义的三态选择，反而降低整张检查单的可信度。
+#
+# ⚠ 口径（业务 2026-10-19 确认）：这些项目**允许全空**，服务端不加
+# 「必须检完才能办结」的硬门禁。原因是 TNR 现场是群体绝育、不做逐只隔离观察，
+# 加门禁的结果不会是「都检了」，而是「都填阴性」—— 用假数据换一张合规外观的表，
+# 比空着更危险。三态里的 `none`（未检）就是为此保留的**诚实档位**。
 # 三态必须分开存：「未检」与「阴性」在 BooleanField 里都是 False，
 # 而它们是完全不同的临床事实（没做 vs 做了没病）。
 TEST_RESULTS = [('none', '未检'), ('neg', '阴性'), ('pos', '阳性')]
@@ -118,6 +127,37 @@ STERILIZATION_LABELS = {
     'anesthesia': '麻醉方式', 'diagnosis': '诊断',
     'procedure': '手术过程', 'recovery': '恢复情况',
 }
+
+
+def sterilization_draft_filled(ster):
+    """这份病历草稿**填了没有**（任一栏有值即算）。
+
+    「0 栏 = 没填」与「1~5 栏 = 填了一半」在两条规则里意义不同：
+    计划阶段允许 0 栏（手术还没做），但 1~5 栏要拒绝（半途病历会印成
+    「做了手术、日期空着」的归档单）。判据只有这一份，
+    `save_plan()` 的 `record_keys` 与 `save_sterilization()` 的放行都用它。
+    """
+    if not isinstance(ster, dict):
+        return False
+    return any(str(ster.get(k) or '').strip()
+               for k in STERILIZATION_REQUIRED + ('surgery_date',))
+
+
+def sterilization_record_missing(treatment):
+    """诊疗单上**已落库**的病历缺哪几栏（返回中文栏名列表，齐全时为空）。
+
+    执行「绝育」项目时的闸门用它 —— 判据只看这六列（真源），不看前端草稿，
+    否则「界面说填了、库里没有」会放行。
+    """
+    missing = []
+    for key, col in STERILIZATION_FIELDS:
+        if key == 'surgery_date':
+            empty = getattr(treatment, col) is None
+        else:
+            empty = not (getattr(treatment, col) or '').strip()
+        if empty:
+            missing.append(STERILIZATION_LABELS[key])
+    return missing
 ANESTHESIA_CHOICES = ('吸入麻醉', '注射麻醉', '复合麻醉')
 # 病历必填项（手术日期走 `_parse_date()` 另做格式校验，不在此列）
 STERILIZATION_REQUIRED = ('surgeon', 'diagnosis', 'procedure', 'recovery')
@@ -297,6 +337,12 @@ def apply_check(treatment, body, submit=False):
                 f'按发烧线 {FEVER_THRESHOLD}℃ 应判「{expect_label}」，请修正')
 
     if submit:
+        # 提交门禁**只卡体温**这两项，其它检查项（常见病 / 传染病 / 皮肤黏膜）
+        # 允许全空 —— 业务 2026-10-19 确认的口径。
+        # 为什么不给它们加「必须检完才能办结」：加门禁的结果不会是「都检了」，
+        # 而是「都填阴性」—— 假阴性比空白更糟，它会进入疫病监测的统计。
+        # 体温不一样：数值是客观读数、后续（发烧判定、趋势）都要用它，
+        # 空着会让下游算错，所以只有这一项卡死。
         if treatment.temperature is None:
             raise ValueError('请先完成「体温检测」再提交')
         if not treatment.temperature_flag:
@@ -415,10 +461,7 @@ def save_plan(treatment, body):
     # 把刚填好的六列清空。表现为「病历填完、保存成功、再打开是空的」，
     # 打印页也印不出手术信息（第四十七轮实测）。所以「病历填了」本身要算「要做」。
     ster_body = body.get('sterilization')
-    ster_filled = isinstance(ster_body, dict) and any(
-        str(ster_body.get(k) or '').strip()
-        for k in STERILIZATION_REQUIRED + ('surgery_date',))
-    record_keys = {'sterilization'} if ster_filled else set()
+    record_keys = {'sterilization'} if sterilization_draft_filled(ster_body) else set()
 
     if items:
         _replace_items(treatment, items, hospital, record_keys=record_keys)
@@ -426,7 +469,8 @@ def save_plan(treatment, body):
     # 绝育病历：必须在 `_replace_items()` **之后**判 —— 「本单有没有勾绝育」
     # 要以替换后的子表为准，否则先撤勾再保存会漏清空旧病历。
     has_ster = treatment.items.filter(item_key='sterilization').exists()
-    updated.extend(save_sterilization(treatment, has_ster, body))
+    updated.extend(save_sterilization(treatment, has_ster, body,
+                                      allow_blank=True))
 
     if updated:
         treatment.save(update_fields=sorted(set(updated)))
@@ -434,19 +478,28 @@ def save_plan(treatment, body):
     return updated
 
 
-def save_sterilization(treatment, has_item, body):
+def save_sterilization(treatment, has_item, body, allow_blank=False):
     """把绝育手术病历写进诊疗单的六个旧口径列。
 
     ⚠ 第四十七轮起这是**唯一**的写入路径：旧的「快速登记」整块删掉了，
     病历入口并到了三步流程的「绝育」项目卡片里。
 
-    两条规则，都不报错的那种错最需要注意：
-    1. 勾了绝育就必须填全病历 —— 否则打出来的单子「绝育手术：是、
-      手术日期：—」，归档时看不出来漏没漏。
+    三条规则，都不报错的那种错最需要注意：
+    1. **交了病历就必须交全**（0/6 放行、6/6 放行、3/6 拒绝）—— 半途病历
+      落库等于「绝育手术：是、手术日期：—」的归档单据。
     2. **没勾绝育就清空病历**。留着的话会出现「没勾绝育却印得出手术日期」
        的单子，而打印页与政府端详情都在读这几列。
+    3. `allow_blank=True`（第五十一轮，只给「医嘱与处方」这一步用）：
+       病历**整体为空**时直接放过、六列**原样不动**。
+       理由是一条时间顺序问题 —— 医生在「医嘱与处方」阶段只**安排**手术，
+       主刀/麻醉/手术过程/术后恢复这四栏在**手术做完之前根本不存在**，
+       硬要当时填全就只能编一份假病历（而假病历比空白更糟：它进了归档、
+       进了政府端统计）。真正的「必须填全」挪到**执行绝育项目**那一刻
+       （见 `execute_item()` 的 `needs_record` 闸门）—— 那时手术已完成，
+       六栏都填得出来，而「诊疗完成」又必然要求该项目已执行。
 
     :param has_item: 本单是否勾选了「绝育」处置项目（按替换后的子表判）
+    :param allow_blank: 见规则 3；默认 False = 交了就须交全且不能整体为空
     :return: 被更新的**列名**列表（可直接并入 `update_fields`）
     """
     ster = body.get('sterilization')
@@ -467,6 +520,9 @@ def save_sterilization(treatment, has_item, body):
                 setattr(treatment, col, blank)
                 cleared.append(col)
         return cleared
+
+    if allow_blank and not sterilization_draft_filled(ster):
+        return []
 
     values = {}
     for key in STERILIZATION_REQUIRED:
@@ -495,6 +551,33 @@ def save_sterilization(treatment, has_item, body):
         if getattr(treatment, col) != val:
             setattr(treatment, col, val)
             updated.append(col)
+    return updated
+
+
+def submit_sterilization(treatment, body):
+    """单独提交绝育手术病历 —— 术后补录 / 执行阶段填写的入口。
+
+    ⚠ 为什么必须有这个入口（第五十一轮）：`save_plan()` 在**已诊断**时一律拒绝
+    （否则前端漏禁用就能改处方、而执行阶段按处方扣库存，账实不符且不报错）。
+    病历的填写时机恰恰在手术之后 = 已诊断之后，所以「医嘱与处方」那条路
+    对它来说是关着的 —— 界面上按钮写着「查看 / 修改病历」，点完却提交不了，
+    等于「手术做完了也没法把病历记进系统」，只能撤回诊断（会把已执行项目一起打乱）。
+
+    校验一律走 `save_sterilization()` 那一份判据，不在这里再写一遍。
+
+    :param body: **就是病历本身**（六栏平铺），不再套一层 `sterilization` ——
+        这条接口的整个请求体只可能是病历，两种形状只会让前端发错包。
+    """
+    if treatment is None:
+        raise ValueError('诊疗单不存在')
+    if treatment.disposed_at:
+        raise ValueError('本单已办结，不能再补录手术病历')
+    if not treatment.items.filter(item_key='sterilization').exists():
+        raise ValueError('本单没有「绝育」处置项目，不需要手术病历')
+
+    updated = save_sterilization(treatment, True, {'sterilization': body})
+    if updated:
+        treatment.save(update_fields=sorted(set(updated)))
     return updated
 
 
@@ -546,9 +629,15 @@ def _replace_items(treatment, items, hospital, record_keys=()):
 
         planned_date = _parse_date(raw.get('planned_date'))
         has_rx = bool(rx_ids) or bool(rx_other) or bool(chip_no)
-        # 「病历类」项目（当前只有绝育）：填了病历就算「要做」——
-        # 它本来就没有处方、没有芯片号，按 `has_rx` 判会永远被跳过。
-        has_record = key in record_keys
+        # 「病历类」项目（当前只有绝育）没有处方、也没有芯片号，
+        # 「要做」有两种表达（第五十一轮）：
+        #  ① 填了手术病历 —— 旧口径，留着给 admin / 历史导入的半成品；
+        #  ② 只排了预计执行时间 —— 新口径，计划阶段的标准用法：
+        #     医生此刻决定的是「这台手术要做」，病历要等术后才写得出来。
+        # 少了 ②，「勾绝育」在计划阶段就只剩「当场编一份病历」这一条路。
+        has_record = key in record_keys or (
+            planned_date is not None
+            and _item_meta(key).get('needs_record'))
 
         # 芯片项目：**填了预计执行时间就必须填芯片号**。
         # 只填时间不填号的话 `has_rx` 为假、整项会被下面静默跳过 ——
@@ -697,8 +786,19 @@ def execute_item(treatment, item, user):
 
     rx_rows = list(item.rx_rows.select_related('material'))
 
+    # 病历类项目（绝育）：**手术做完了才允许确认执行**，所以病历必须已经落库。
+    # 第五十一轮把这道闸从「医嘱与处方」挪到这里 —— 计划阶段医生只是在排手术，
+    # 主刀 / 麻醉 / 过程 / 恢复那时候根本还不存在；原先在那一步硬要求填全，
+    # 实际结果只能是术前编一份假病历（假病历会进归档、进政府端统计，
+    # 而空白不会 —— 它一眼就看得出没填）。
+    # 「诊疗完成」不必再加一遍：它本来就要求所有必执行项目先执行完。
+    if _item_meta(item.item_key).get('needs_record'):
+        missing = sterilization_record_missing(treatment)
+        if missing:
+            raise ValueError('绝育手术病历不完整，请补全：' + '、'.join(missing))
+
     # 芯片项目：号码必须有，且**在这里就把行取出来** —— 落库段不再做
-    # 可能失败的查询（「写库后还可能 raise」会留半截行）。
+    # 可能失败的查询（「写库后还可能 raise」会留半截子）。
     chip_row = None
     if item.item_key == 'chip':
         chip_no = (item.chip_no or '').strip()
@@ -744,6 +844,24 @@ def execute_item(treatment, item, user):
     # `use_chip()` 里且**只有那一份**，这里再写一遍就是孪生判据。
 
     # ---- 第二段：落库 ----
+    # ⚠ 先抢项目，再扣库存（第五十二轮）。上面那句 `if item.is_done` 是**读**：
+    #   两个人同开一张单、或手机端双击/卡顿重试「治疗完成」时，两笔请求都从
+    #   `is_done=False` 出发、双双通过校验，于是**同一张处方扣两遍库存、生成两条
+    #   CON 流水，两次都返回成功**。账实不符只能等月末对账才发现 —— 这类缺陷
+    #   不报错，所以判据必须写在同一条 UPDATE 的 WHERE 里：只有把 `is_done`
+    #   从 False 抢成 True 的那一方继续往下走，抢输的一方 raise 让整块回滚
+    #   （调用方 `views_treatment.py:471` 已经把本函数包在 `atomic()` 里）。
+    #   不用 `select_for_update()`：开发/测试库是 sqlite，Django 在该后端会
+    #   **静默丢弃** FOR UPDATE 子句（`features.has_select_for_update` 为 False），
+    #   锁只在生产 MySQL 生效、用例一行都覆盖不到（与 `use_chip()` 同族论证）。
+    done_at = timezone.now()
+    if not TreatmentItem.objects.filter(
+            pk=item.pk, is_done=False).update(is_done=True, done_at=done_at):
+        raise ValueError(
+            f'{item.get_item_key_display()}刚刚被他人执行，请刷新后查看')
+    item.is_done = True
+    item.done_at = done_at
+
     for rx in rx_rows:
         adjust_stock(
             material=rx.material,
@@ -780,9 +898,8 @@ def execute_item(treatment, item, user):
                 ledger_no=generate_doc_no('CON'),
             )
 
-    item.is_done = True
-    item.done_at = timezone.now()
-    item.save(update_fields=['is_done', 'done_at'])
+    # `is_done` / `done_at` 已在第二段开头由那条 CAS 写库，这里**不再 save**：
+    # 再写一次等于用一个新的 `done_at` 覆盖刚抢到的那一版。
     return len(rx_rows)
 
 
@@ -810,6 +927,18 @@ def undo_item(treatment, item, user):
     hospital = treatment.hospital
     if hospital is None:
         raise ValueError('诊疗单缺少医院信息')
+
+    # ⚠ 与 `execute_item()` 对称的并发闸门（第五十二轮）：上面那句 `if not
+    #   item.is_done` 是**读**。两人同点「撤销」（或撤销与执行交错）时，两笔都
+    #   通过判据、各自把药品数量**加回一遍** —— 库存凭空翻倍，且两次都返回成功。
+    #   判据压在条件更新上：抢下「已执行 → 未执行」这一变的人才有资格退库存，
+    #   抢输的一方 raise，整块回滚（调用方 `views_treatment.py:495` 的 `atomic()`）。
+    if not TreatmentItem.objects.filter(
+            pk=item.pk, is_done=True).update(is_done=False, done_at=None):
+        raise ValueError(
+            f'{item.get_item_key_display()}刚刚被他人处理，请刷新后重试')
+    item.is_done = False
+    item.done_at = None
 
     for rx in item.rx_rows.select_related('material'):
         if rx.material is None:
@@ -854,9 +983,7 @@ def undo_item(treatment, item, user):
         treatment.chip_date = None
         treatment.save(update_fields=['chip_no', 'chip_date'])
 
-    item.is_done = False
-    item.done_at = None
-    item.save(update_fields=['is_done', 'done_at'])
+    # `is_done` / `done_at` 已由开头那条 CAS 写库，这里不再 save。
     return True
 
 
@@ -866,26 +993,40 @@ def _release_chip(chip_no, pet):
     ⚠ 只在「这颗芯片确实挂在本宠物名下」时退回：若中途被别的诊疗单
     重新用掉（`chip.pet` 已经不是它了），退回会把别人正在用的芯片
     变成「可用」，随后被第三只动物植走 —— 一颗芯片两条档案，且不报错。
+
+    ⚠ 这道判据必须写在**同一条 UPDATE 的 WHERE 里**（第五十一轮）。
+    原先「读出来判一下、再 `chip.save()`」在撤销与另一笔植入并发时，
+    两半都会通过各自的判据、后写的把先写的覆盖掉，于是上面那段注释
+    描述的事故照样发生 —— 判据只是**看起来**存在。
+    `pet_id` 一并进 WHERE 而不是只判 `status`：存量行的 `pet` 可能是 NULL
+    （宠物档案被删过，`on_delete=SET_NULL`），那种仍然允许退回，与旧行为一致。
     """
     chip = Chip.objects.filter(number=chip_no).first()
     if chip is None:
         return False
     if chip.pet_id is not None and chip.pet_id != pet.id:
         raise ValueError(f'芯片 {chip_no} 已绑定其它动物档案，不能退回')
-    chip.status = 'available'
-    chip.pet = None
-    chip.used_at = None
-    chip.save(update_fields=['status', 'pet', 'used_at'])
+
+    released = Chip.objects.filter(
+        number=chip_no, status=chip.status, pet_id=chip.pet_id).update(
+        status='available', pet=None, used_at=None)
+    if not released:
+        raise ValueError(f'芯片 {chip_no} 刚刚被他人改动，请刷新后重试')
+
     if pet.chip_no == chip_no:
         pet.chip_no = ''
         pet.save(update_fields=['chip_no'])
     return True
 
 
-def mark_done(treatment):
+def mark_done(treatment, disposal_advised=''):
     """「诊疗完成」—— 落 `done_at`，宠物进入「待出院」。
 
-    :raises ValueError: 还有必执行项目没做完
+    :param disposal_advised: 去向**建议**（`Treatment.DISPOSAL_CHOICES` 的 key）。
+        可空 —— 医生没拿准时可以先不选，待出院弹窗会按此建议预选去向。
+        它只写 `disposal_advised`：此刻动物还在院，六个出院单据都开得出来，
+        一旦顺手写了 `disposal`（最终去向 = 已办结），单据全部会 400。
+    :raises ValueError: 还有必执行项目没做完 / 建议值不合法
     """
     if treatment is None:
         raise ValueError('诊疗单不存在')
@@ -901,8 +1042,13 @@ def mark_done(treatment):
         names = '、'.join(i.item_name or i.get_item_key_display() for i in left)
         raise ValueError(f'还有 {len(left)} 项未完成：{names}')
 
+    advised = (disposal_advised or '').strip()
+    if advised and advised not in dict(Treatment.DISPOSAL_CHOICES):
+        raise ValueError(f'去向建议「{advised}」不合法')
+
     treatment.done_at = timezone.now()
-    treatment.save(update_fields=['done_at'])
+    treatment.disposal_advised = advised
+    treatment.save(update_fields=['done_at', 'disposal_advised'])
     return treatment
 
 

@@ -4,6 +4,7 @@ Task 5: 转运拆分下发
 - 支持拆分至多家医院
 """
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -74,7 +75,7 @@ def transfer_list(request):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def transfer_create(request):
     """创建转运记录（支持拆分至多家医院 / 简单单医院两种格式）
@@ -324,7 +325,7 @@ def transfer_receive(request, pk):
     if transfer is None:
         return json_fail('转运记录不存在或无权访问', status=404)
 
-    if transfer.status not in ('pending', 'partial'):
+    if transfer.status not in Transfer.OPEN_STATUSES:
         return json_fail(f'当前状态({transfer.status})不可签收')
 
     all_codes = _codes(transfer.pet_codes)
@@ -354,17 +355,38 @@ def transfer_receive(request, pk):
 
     new_done = done + [c for c in selected if c not in done]
     all_received = len(new_done) >= len(all_codes)
-    transfer.received_codes = ','.join(new_done)
-    transfer.received_at = timezone.localdate()
-    transfer.status = 'received' if all_received else 'partial'
-    transfer.save(update_fields=['received_codes', 'received_at', 'status'])
+    new_codes = ','.join(new_done)
+    new_status = 'received' if all_received else 'partial'
 
-    # 只有本次签收的动物进入待诊疗；未签收的仍停在 in_transit
-    Pet.objects.filter(code__in=selected).update(status='in_treatment')
+    # ⚠ 签收写库必须是「**条件更新** + 一个事务」，不能是原来的
+    #   「读旧值 → 拼新值 → 整列覆盖、且视图不在事务里」（第五十一轮）。
+    #   两个现场各自手机上签同一张单的不同几只（一车 8 只、两人分点）时，
+    #   两笔都从 `received_codes=''` 出发：后写的那笔把自己那几只写进去，
+    #   **把前一笔整段覆盖掉** —— 前一批动物已经是 `in_treatment`（躺在医院里），
+    #   单据却不认它们，剩余数、状态、捕捉单重算全部跟着错，且不报错。
+    #   把「我读到的那一版」写进 WHERE，抢输的一方拿到 409 去刷新重签。
+    # 判据不用 `select_for_update()`：开发/测试库是 sqlite，Django 在该后端
+    #   会**静默丢弃** FOR UPDATE 子句（`features.has_select_for_update` 为 False），
+    #   锁只在生产 MySQL 生效、用例一行都覆盖不到；条件更新两种后端都原子。
+    new_received_at = timezone.localdate()
+    with transaction.atomic():
+        claimed = Transfer.objects.filter(
+            pk=transfer.pk, status=transfer.status,
+            received_codes=transfer.received_codes,
+        ).update(received_codes=new_codes, received_at=new_received_at,
+                 status=new_status)
+        if not claimed:
+            return json_fail('本单刚刚被他人签收，请刷新后重新勾选', status=409)
 
-    # 本单可能装有多张捕捉单的动物，按宠物归属逐张重算
-    recalc_captures_for_transfer(transfer)
+        # 只有本次签收的动物进入待诊疗；未签收的仍停在 in_transit
+        Pet.objects.filter(code__in=selected).update(status='in_treatment')
 
+        # 本单可能装有多张捕捉单的动物，按宠物归属逐张重算
+        recalc_captures_for_transfer(transfer)
+
+    transfer.received_codes = new_codes
+    transfer.received_at = new_received_at
+    transfer.status = new_status
     message = ('签收成功' if all_received
                else f'已签收 {len(new_done)}/{len(all_codes)} 只，剩余 {len(all_codes) - len(new_done)} 只可继续签收')
     return json_ok(serialize_instance(transfer), message=message)
@@ -383,7 +405,7 @@ def transfer_reject(request, pk):
     if transfer is None:
         return json_fail('转运记录不存在或无权访问', status=404)
 
-    if transfer.status not in ('pending', 'partial'):
+    if transfer.status not in Transfer.OPEN_STATUSES:
         return json_fail(f'当前状态({transfer.status})不可驳回')
 
     all_codes = _codes(transfer.pet_codes)
@@ -393,18 +415,33 @@ def transfer_reject(request, pk):
     # 而它明明已经躺在医院里了。
     remaining = [c for c in all_codes if c not in done]
 
+    reason = body_str(data, 'reason')
+    # 与 `transfer_receive` 同一条竞态：驳回与签收是两个人同时在点的动作。
+    # 「状态仍是我在判的那一版」**并且**「已签收清单也还是我读到的那一版」一起
+    # 进 WHERE（第五十二轮补上后半条）。只钉 `status` 是漏的：一车 8 只、已签 3 只，
+    # A 判到的是 `partial`，B 在同一瞬间又签了 5 只 —— 状态**仍然是** `partial`
+    # （还没签满），A 的 WHERE 照样成立，于是 A 按**陈旧的** `remaining`
+    # 把那 5 只已经进了 `in_treatment`、已经开了诊疗单的动物改回 `in_transit`
+    # 且 `hospital=None`。A 收到「已驳回」、B 收到「签收成功」，全程没有一行报错。
+    with transaction.atomic():
+        claimed = Transfer.objects.filter(
+            pk=transfer.pk, status=transfer.status,
+            received_codes=transfer.received_codes).update(
+            status='rejected', reject_reason=reason)
+        if not claimed:
+            return json_fail('本单刚刚被他人处理，请刷新后重试', status=409)
+
+        # 医院退回：宠物回退为在途，并解除医院归属，
+        # 使其真正回到「未转运」状态（可被领回、可编辑/删除捕捉单）
+        Pet.objects.filter(code__in=remaining).update(
+            status='in_transit', hospital=None)
+
+        # 若该捕捉单还存在其它未退回的转运单，则保持已转运，不重复回退
+        # （本单可能装有多张捕捉单的动物，按宠物归属逐张重算）
+        recalc_captures_for_transfer(transfer)
+
     transfer.status = 'rejected'
-    transfer.reject_reason = body_str(data, 'reason')
-    transfer.save(update_fields=['status', 'reject_reason'])
-
-    # 医院退回：宠物回退为在途，并解除医院归属，
-    # 使其真正回到「未转运」状态（可被领回、可编辑/删除捕捉单）
-    Pet.objects.filter(code__in=remaining).update(status='in_transit', hospital=None)
-
-    # 若该捕捉单还存在其它未退回的转运单，则保持已转运，不重复回退
-    # （本单可能装有多张捕捉单的动物，按宠物归属逐张重算）
-    recalc_captures_for_transfer(transfer)
-
+    transfer.reject_reason = reason
     return json_ok(serialize_instance(transfer), message='已驳回')
 
 
@@ -419,7 +456,7 @@ def transfer_reject(request, pk):
 
 
 @csrf_exempt
-@role_required('shelter', 'gov_city', 'gov_district')
+@role_required('shelter')
 @login_required
 def transfer_withdraw(request, pk):
     """捕捉点撤回转运单（医院未签收时才可撤回）。

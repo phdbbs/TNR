@@ -480,15 +480,23 @@ class OutboundViewTest(BusinessTestBase):
         }))
         self.assertEqual(get_institution_stock(m, self.shelter_a), 4)
 
-    def test_gov_city_can_outbound(self):
-        """政府端同样有出库入口（与库存异动同一张角色白名单）。"""
+    def test_gov_cannot_outbound(self):
+        """政府端只读（第四十九轮）：监管不出库。
+
+        出库的四条正向能力（捕捉点侧、医院侧、负数盘盈、零库存盘盈）都由
+        `shelter` / `hospital` 角色各自钉住；这里钉政府角色被挡在门外，
+        并且**物料一格没少** —— 只断 403 的话，「先扣库存再拒绝」看不出来。
+        """
         m = make_material(district=self.district_a, shelter_stock=10)
-        self.login_as(self.gov_city)
-        self.ok(self.post_json(OUTBOUND_URL, {
-            'material_id': m.id, 'quantity': 4, 'reason': 'transfer',
-        }))
+        for user in (self.gov_city, self.gov_a):
+            self.login_as(user)
+            self.expect_fail(self.post_json(OUTBOUND_URL, {
+                'material_id': m.id, 'quantity': 4, 'reason': 'transfer',
+            }), status=403)
         m.refresh_from_db()
-        self.assertEqual(m.shelter_stock, 6)
+        self.assertEqual(m.shelter_stock, 10)
+        self.assertFalse(MaterialTransaction.objects.filter(
+            material=m, type='outbound').exists())
 
     def test_outbound_shows_in_hospital_ledger(self):
         """出库单必须出现在医院台账里 —— 否则它就是一条看得见摸不着的流水。"""

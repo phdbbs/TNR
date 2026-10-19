@@ -27,6 +27,7 @@ import secrets
 from django.core.management.base import BaseCommand
 
 from accounts.models import User
+from core.models import STATUS_ACTIVE
 
 #: 供部署脚本提取凭据的机器可读标记行
 CREDENTIALS_PREFIX = 'PLATFORM_ADMIN_CREDENTIALS='
@@ -91,7 +92,7 @@ class Command(BaseCommand):
         user.institution = None
         user.is_staff = True
         user.is_active = True
-        user.status = 'active'
+        user.status = STATUS_ACTIVE
         if not user.first_name:
             user.first_name = '平台管理员'
         user.set_password(password)

@@ -311,10 +311,16 @@ class AdoptionApplicationReviewOracleTest(OracleMixin, BusinessTestBase):
         self.assert_indistinguishable(APP_REVIEW_URL, self.app_a.id,
                                       self.hospital_user_b, '审核·跨机构医院')
 
-    def test_other_district_gov_cannot_review(self):
-        """乙区市/区级账号审甲区的申请 —— 必须与「不存在」不可区分。"""
+    def test_other_district_shelter_cannot_review(self):
+        """乙区捕捉点审甲区的申请 —— 必须与「不存在」不可区分。
+
+        原来这条用 `gov_b` 打，第四十九轮政府端转只读后它会拿到 403；
+        403 与 404 的**文案/状态码本来也不同**，但那属于「角色闸门」这一层，
+        不再是本用例要钉的「同一角色内的归属收敛」。改用同区县级判据的
+        捕捉点角色，判据本身不变。
+        """
         self.assert_indistinguishable(APP_REVIEW_URL, self.app_a.id,
-                                      self.gov_b, '审核·跨区县区级')
+                                      self.shelter_user_b, '审核·跨区县捕捉点')
 
     def test_own_hospital_can_review(self):
         """正向对照：本院审本院的申请，必须成功。"""
@@ -325,14 +331,20 @@ class AdoptionApplicationReviewOracleTest(OracleMixin, BusinessTestBase):
         self.app_a.refresh_from_db()
         self.assertEqual(self.app_a.status, 'approved')
 
-    def test_own_district_gov_can_review(self):
-        """正向对照：本区县区级账号审本区县的申请，必须成功。"""
-        self.login_as(self.gov_a)
-        self.ok(self.post_json(APP_REVIEW_URL.format(pk=self.app_a2.id),
-                               {'action': 'approve'}),
-                '本区县审核被拦了')
+    def test_gov_cannot_review_even_own_district(self):
+        """政府端只读（第四十九轮）：本区县监管也不能审领养申请。
+
+        正向对照由 `test_own_hospital_can_review` 用合法角色承担；这里补的是
+        「被拒之后申请还是 pending」—— 只断 403 抓不到「先落库再拒绝」。
+        """
+        for user in (self.gov_a, self.gov_city):
+            self.login_as(user)
+            self.expect_fail(self.post_json(
+                APP_REVIEW_URL.format(pk=self.app_a2.id), {'action': 'approve'}),
+                status=403)
         self.app_a2.refresh_from_db()
-        self.assertEqual(self.app_a2.status, 'approved')
+        self.assertEqual(self.app_a2.status, 'pending',
+                         '被拒的审核把申请改成了 ' + self.app_a2.status)
 
 
 class OwnInstitutionHelperTest(BusinessTestBase):

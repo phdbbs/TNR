@@ -199,7 +199,14 @@ const TNR_API = {
   async treatmentUndiagnose(id) { return this._post('/api/business/treatments/' + id + '/undiagnose/', {}); },
   async treatmentExecuteItem(id, itemId) { return this._post('/api/business/treatments/' + id + '/items/' + itemId + '/execute/', {}); },
   async treatmentUndoItem(id, itemId) { return this._post('/api/business/treatments/' + id + '/items/' + itemId + '/undo/', {}); },
-  async treatmentDone(id) { return this._post('/api/business/treatments/' + id + '/done/', {}); },
+  /* 绝育手术病历单独提交（第五十一轮）。⚠ 不能改走 `treatmentPlan()` ——
+     那条接口在**已诊断**后一律拒绝（防绕过前端改处方），而病历恰恰是
+     术后才写得出来的东西。没有这个入口，「手术做完 → 病历无处可录」。 */
+  async treatmentSterilization(id, data) { return this._post('/api/business/treatments/' + id + '/sterilization/', data); },
+  async treatmentDone(id, disposalAdvised) {
+    return this._post('/api/business/treatments/' + id + '/done/',
+      { disposal_advised: disposalAdvised || '' });
+  },
   async treatmentDispose(id, disposal, opts) {
     return this._post('/api/business/treatments/' + id + '/dispose/',
       Object.assign({ disposal: disposal }, opts || {}));
@@ -372,6 +379,9 @@ const TNR_API = {
     return this._get(url);
   },
   async createUser(data) { return this._post('/api/supervision/users/create/', data); },
+  // 只能改「抄错」的三类字段：姓名 / 电话 / 执业兽医师证号（服务端 `user_update`
+  // 收了范围，传别的键会被忽略）；角色、区县、机构、口令与启停各有专属入口。
+  async updateUser(id, data) { return this._post(`/api/supervision/users/${id}/edit/`, data); },
   async toggleUser(id) { return this._post(`/api/supervision/users/${id}/toggle/`, {}); },
   async getBusinessSupervision(type) {
     const url = type ? `/api/supervision/business/?business_type=${type}` : '/api/supervision/business/';
@@ -481,6 +491,10 @@ const TNR_API = {
     return this.getData(url);
   },
   async getDistrictsStrict() { return this.getData('/api/supervision/districts/'); },
+  async getUsersStrict(role) {
+    const url = role ? `/api/supervision/users/?role=${role}` : '/api/supervision/users/';
+    return this.getData(url);
+  },
   async getInstitutionsStrict(type) {
     const url = type ? `/api/supervision/institutions/?type=${type}` : '/api/supervision/institutions/';
     return this.getData(url);
@@ -490,14 +504,6 @@ const TNR_API = {
     const url = limit ? `/api/supervision/logs/?limit=${limit}` : '/api/supervision/logs/';
     return this.getData(url);
   },
-  getPetStatusText(status) {
-    // ⚠ `euthanized` 与 `dead` 是**两个**状态，不能合并（第四十六轮拆开）：
-    //   前者=安乐死（另开安乐死单）、后者=死亡/无害化（另开无害化单），
-    //   是两张要分开报的表。历史上 `euthanized` 的文案曾是「已死亡」，
-    //   若这里不同步改，界面上会同时出现两个「已死亡」，看不出区别。
-    const map = {'in_transit':'在途','in_treatment':'待诊疗/诊疗中','pending_adopt':'待领养','pending_claim':'待领出','adopted':'已领养','released':'已放归','euthanized':'已安乐死','dead':'已死亡/无害化','owner_returned':'主人领回'};
-    return map[status] || status;
-  },
   // 一宠一档：把动物的物种/品种/性别拼成一行可读文案（如「猫 · 中华田园犬 · 公」）。
   // 转运/回收/诊疗/领养/放归/死亡各环节共用，保证全流程展示口径一致。
   petAttrText(pet, sep) {
@@ -505,10 +511,6 @@ const TNR_API = {
     const parts = [pet.species, pet.breed, pet.gender]
       .filter(v => v && String(v).trim());
     return parts.length ? parts.join(sep || ' · ') : '—';
-  },
-  getPetStatusBadge(status) {
-    const map = {'in_transit':'badge-warning','in_treatment':'badge-info','pending_adopt':'badge-cinnabar','pending_claim':'badge-cinnabar','adopted':'badge-success','released':'badge-success','euthanized':'badge-danger','dead':'badge-danger','owner_returned':'badge-default'};
-    return map[status] || 'badge-default';
   },
   getMaterialCategoryText(cat) {
     // 与后端 `Material.CATEGORY_CHOICES` 逐项对齐。`medicine`（药品）是

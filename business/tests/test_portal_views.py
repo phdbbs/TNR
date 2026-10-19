@@ -1,5 +1,7 @@
 """门户页面、门户辅助 API 与宠物全生命周期溯源测试。"""
+import os
 import re
+import sys
 from datetime import datetime, timezone as dt_timezone
 
 from business.models import (
@@ -10,6 +12,16 @@ from business.tests.base import (
     BusinessTestBase, make_capture, make_district, make_institution, make_pet,
     make_user,
 )
+
+# 门户 JS 的唯一登记处（重构 B 之后控件住在 `static/js/portals/<role>.js`，
+# 判据必须和它同一份清单，别在这里再硬编码一次路径）。
+_SCRIPTS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), 'scripts')
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+
+from frontend_sources import read_js  # noqa: E402
 
 
 class PortalPageTest(BusinessTestBase):
@@ -57,27 +69,61 @@ class PortalPageTest(BusinessTestBase):
         「服务端读的是旧模板」。Django 5.0 起 `Engine.__init__` 无条件包
         `cached.Loader`，`--noreload` 下改了模板不重启进程就不生效，
         表现是**页面 200、内容却是旧的** —— 只能靠读实际下发的字节发现。
+
+        第五十二轮 重构 B 把内联脚本抽成 `static/js/portals/<role>.js` 之后，
+        这条判据**必须拆成两半**，否则会一边倒：
+          - 页面实际下发的字节里现在有 `<script src=…>`，没有那些控件本身 ——
+            继续只在 HTML 上找 6 个标记，它们全灭（这正是本轮跑出来的 2 条红）；
+          - 反过来只去读磁盘上的 JS 文件，又丢掉了这条用例的**独有价值**
+            （读渲染结果 ≠ 读源码）。
+        所以：HTML 侧断言「页面确实把本端 JS 带上了」，JS 侧断言控件标记。
+        ⚠ 残留盲区：浏览器**实际取到**的那份 JS（collectstatic 产物、CDN 缓存）
+        不在判据覆盖范围内 —— 测试客户端的 `/static/` 指向 `STATIC_ROOT`，
+        本地没跑过 `collectstatic` 时它是空的，拿它当断言会假失败。
         """
         self.client.force_login(self.shelter_user_a)
         html = self.client.get('/shelter/').content.decode()
+        self.assertRegex(
+            html, r'src="/static/js/portals/shelter\.js\?v=[0-9a-z]+"',
+            '捕捉点页面没有下发本端应用 JS —— 下面的标记就算全在文件里，'
+            '浏览器也拿不到')
+        src = read_js('shelter')
+        found = 0
         for marker in ('data-tab="pending"',       # 待签收标签
                        'ob_target_type',           # 接收方类型下拉
                        'ob_target_hint',           # 「当前范围内没有可下发机构」提示位
                        'getDispatchTargets(',      # 下拉数据源走服务端
                        'renderMatPending',         # 列表实现
                        'institutionStock'):        # 库存口径改本机构
-            self.assertIn(marker, html, f'捕捉点端没有下发 `{marker}`')
+            self.assertIn(marker, src, f'捕捉点端 JS 里没有 `{marker}`')
+            found += src.count(marker)
+        # 反向自守：读到的文件里没有这些标记 = JS 路径写错或整段丢了，
+        # 那 6 条 assertIn 会一起红，但这条先红更省事。
+        self.assertGreater(found, 6, f'捕捉点 JS 里这些标记只命中 {found} 次，判据可疑')
+        # 而且它们确实**不再**在 HTML 里 —— 证明抽取是搬走而不是复制了一份
+        self.assertNotIn('renderMatPending', html,
+                         '内联脚本没抽干净：同一份逻辑在模板和 JS 里各有一份')
 
     def test_platform_portal_allows_city_level_shelter(self):
         """平台端机构管理必须**放行**市级捕捉点（第四十五轮）。
 
         后端 `institution_create` 从来允许捕捉点挂市级，前端却一律滤掉 ——
         于是「市级捕捉点」只能靠改库造出来。这条盯的就是那个下拉。
+
+        重构 B 之后下拉在 `static/js/portals/platform.js` 里，
+        判据同 `test_shelter_portal_serves_new_material_controls`：
+        页面负责「把 JS 带上」，JS 负责「有这一个选项」。
         """
         self.client.force_login(self.platform_admin)
         html = self.client.get('/platform/').content.decode()
-        self.assertIn('inst-district-hint', html)
-        self.assertIn('市级捕捉点', html)
+        self.assertRegex(
+            html, r'src="/static/js/portals/platform\.js\?v=[0-9a-z]+"',
+            '平台端页面没有下发本端应用 JS')
+        src = read_js('platform')
+        self.assertIn('inst-district-hint', src,
+                      '平台端机构表单没有「可挂市级」的提示位（下拉被改回一律滤掉？）')
+        self.assertIn('市级捕捉点', src,
+                      '平台端机构管理的区县下拉里不再有「市级捕捉点」这一档')
 
     def test_adoption_hall_public_page_adopter_gets_full_portal(self):
         self.client.force_login(self.adopter)
@@ -301,6 +347,72 @@ class PetLifecycleTest(BusinessTestBase):
         pet = make_pet(district=self.district_a)
         self.expect_fail(self.get_json(f'/api/business/pets/{pet.id}/lifecycle/'),
                   status=401)
+
+    # ---------- 第五十七轮：时间线的 PII 按角色最小化 ----------
+
+    def _pii_history_pet(self, code):
+        """带物业联系人与前任主人完整信息的动物。"""
+        capture = make_capture(
+            district=self.district_a, shelter=self.shelter_a,
+            pet_codes=[code], contact_person='物业张三',
+            contact_phone='13900001111')
+        pet = make_pet(code=code, district=self.district_a,
+                       shelter=self.shelter_a, capture=capture)
+        OwnerReturn.objects.create(
+            pet=pet, pet_code=pet.code, owner_name='原主人',
+            owner_phone='13800001234', owner_id_card='110101199001011234',
+            owner_address='甲区幸福路 12 号 3 单元 501', reason='走失',
+            signature='data:image/png;base64,AAAA',
+            district=self.district_a)
+        return pet
+
+    def _event(self, pet, event_type):
+        body = self.ok(self.get_json(
+            f'/api/business/pets/{pet.id}/lifecycle/'))
+        return next(e for e in body['data']['events'] if e['type'] == event_type)
+
+    def test_adopter_gets_no_previous_owner_contact(self):
+        """领养人只应看到流转事实，不应拿到前任主人/物业的联系方式与签名。"""
+        pet = self._pii_history_pet('LIFE-PII-1')
+        self._link_adopter(pet, ledger_no='ADP-PII-1')
+        self.login_as(self.adopter)
+
+        owner_return = self._event(pet, 'owner_return')
+        for key in ('owner_phone', 'owner_id_card',
+                    'owner_address', 'signature'):
+            self.assertEqual(owner_return[key], '',
+                             f'领养人拿到了前任主人的 {key}')
+        capture = self._event(pet, 'capture')
+        self.assertEqual(capture['contact_person'], '')
+        self.assertEqual(capture['contact_phone'], '')
+
+    def test_regulator_gets_masked_owner_contact(self):
+        """监管端保留可比对的前后位，但不下发完整证件号/电话。"""
+        pet = self._pii_history_pet('LIFE-PII-2')
+        self.login_as(self.gov_city)
+
+        owner_return = self._event(pet, 'owner_return')
+        self.assertEqual(owner_return['owner_phone'], '138****1234')
+        self.assertEqual(owner_return['owner_id_card'],
+                         '110101********1234')
+        self.assertEqual(owner_return['owner_address'],
+                         '甲区幸福路 12 号 3 单元 501')
+        self.assertEqual(self._event(pet, 'capture')['contact_phone'],
+                         '13900001111')
+
+    def test_shelter_keeps_full_owner_contact(self):
+        """捕捉点要执行领回核对，完整联系方式不能一并收走。"""
+        pet = self._pii_history_pet('LIFE-PII-3')
+        self.login_as(self.shelter_user_a)
+
+        owner_return = self._event(pet, 'owner_return')
+        self.assertEqual(owner_return['owner_phone'], '13800001234')
+        self.assertEqual(owner_return['owner_id_card'],
+                         '110101199001011234')
+        self.assertEqual(owner_return['signature'],
+                         'data:image/png;base64,AAAA')
+        self.assertEqual(self._event(pet, 'capture')['contact_phone'],
+                         '13900001111')
 
 
 class PetLifecycleEventDateTest(BusinessTestBase):

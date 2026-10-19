@@ -20,6 +20,7 @@ import secrets
 from django.core.management.base import BaseCommand
 
 from accounts.models import User
+from core.models import STATUS_ACTIVE
 
 # 供 deploy.sh 提取凭据的机器可读标记行
 CREDENTIALS_PREFIX = 'ADMIN_CREDENTIALS='
@@ -76,7 +77,7 @@ class Command(BaseCommand):
         user.is_superuser = True
         user.is_staff = True
         user.is_active = True
-        user.status = 'active'
+        user.status = STATUS_ACTIVE
         user.set_password(password)
         user.save()
 
