@@ -19,7 +19,7 @@ from django.utils import timezone
 from accounts.models import User
 from business.models import (
     Pet, Chip, Blacklist, Transfer, Capture,
-    Release, Adoption, MaterialBatch,
+    Release, Adoption, AdoptionApplication, ReturnOrder, MaterialBatch,
 )
 from core.http import (body_dict, body_list, body_str,  # noqa: F401
                        json_fail, json_ok, read_json_body, to_camel_key,
@@ -38,6 +38,7 @@ from business.services_stock import (  # noqa: E402,F401
     get_hospital_stock, get_institution_ledger_total, get_institution_stock,
     get_material_batches, get_shelter_stock, is_city_shelter,
     materialize_initial_batches, plan_fefo_deduction, stock_delta,
+    validate_adjustment_reason, ADJUSTMENT_REASON_LABELS,
     validate_outbound_reason,
 )
 
@@ -621,6 +622,7 @@ DOC_PREFIXES = {
     'TRF': '转运单',
     'RET': '领回单',
     'REL': '放归单',
+    'RTN': '运回单',
     'ADP': '领养单',
     'EUT': '安乐死单',
     'TRE': '诊疗单',
@@ -639,6 +641,7 @@ DOC_CONFIG_KEY = {
     'TRF': 'transfer_prefix',
     'RET': 'owner_return_prefix',
     'REL': 'release_prefix',
+    'RTN': 'return_prefix',
     'ADP': 'adoption_prefix',
     'EUT': 'euthanasia_prefix',
     'TRE': 'treatment_prefix',
@@ -1029,6 +1032,42 @@ def pet_has_pending_release(pet):
 def pet_has_active_adoption(pet):
     """宠物是否存在未完结的领养记录（待领出视为占用中）。"""
     return Adoption.objects.filter(pet=pet, status='pending_claim').exists()
+
+
+def pet_has_approved_application(pet):
+    """宠物是否已被一张「已批准、未出库」的线上领养申请预留。
+
+    `AdoptionApplication.status='approved'` 不会写 `Pet.status`（动物仍是
+    `pending_adopt`），所以只看 `pet_has_active_adoption` 的判据看不见这种
+    预留：已批准申请的动物会同时出现在「已预约」与运回/放归/死亡的可选
+    名单里，两条路径都办结后同一只动物有了两个归宿。
+
+    线下改登记领养人不受此限（捕捉点本就可换人），故不在 `adoption_register`
+    里调用；出库时按申请补建领养单，届时由领养记录接管占用。
+    """
+    return AdoptionApplication.objects.filter(pet=pet, status='approved').exists()
+
+
+def pet_has_pending_return(pet):
+    """宠物是否已在一张未办结的运回单上（待捕捉点确认）。
+
+    与 `pet_has_pending_release` 同一原则：运回单开出后动物仍挂在医院，
+    如果只改 `Pet.status` 而不校验单据，另一条出院路径仍能把它领养/放归，
+    同一只动物会被两张单据同时承诺。
+
+    ⚠ `pet_codes` 是逗号分隔的快照文本，**不能用 `__contains`**：
+    `TNR001` 是 `TNR0011` 的子串，前者有单据时后者的领养/死亡会被误拦。
+    与 `_pet_chain` 一样按逗号切分后做精确比对。
+    """
+    code = (pet.code or '').strip()
+    if not code:
+        return False
+    open_orders = ReturnOrder.objects.filter(
+        status__in=ReturnOrder.OPEN_STATUSES).values_list('pet_codes', flat=True)
+    return any(
+        code in {c.strip() for c in (codes or '').split(',') if c.strip()}
+        for codes in open_orders
+    )
 
 
 # ============================================
@@ -1489,7 +1528,8 @@ def get_district_scope(request):
     return EMPTY_DISTRICT_SCOPE
 
 
-def resolve_district_scope(user, anchor, submitted, extra_anchors=()):
+def resolve_district_scope(user, anchor, submitted, extra_anchors=(),
+                           allow_cross_district=False):
     """解析并校验业务记录的归属区县。
 
     :param user: 当前操作员
@@ -1500,6 +1540,9 @@ def resolve_district_scope(user, anchor, submitted, extra_anchors=()):
         典型场景：**市级捕捉点**（第四十五轮）—— 它的 `district` 是「全市（市级）」，
         拿它当归属会把记录落到市级、击穿区县隔离（Q2 已确认：归属**实际捕捉区县**）。
         此时调用方把「本次业务实际涉及的动物/捕捉单」传进来，由它们给出区县。
+    :param allow_cross_district: 允许操作员把记录归属到其账号区县之外的具体区县。
+        只给**市级捕捉点发起转运**用（第五十轮）：它按需求可全市转运，
+        操作员账号挂在哪个区县都不该成为限制。默认 False，其余落库点口径不变。
     :return: (District 实例, 错误信息)；成功时错误信息为 None
 
     规则：
@@ -1510,7 +1553,7 @@ def resolve_district_scope(user, anchor, submitted, extra_anchors=()):
     2. 必须是具体区县，不能是「全市（市级）」。
        ⚠ 这条**不因为市级捕捉点而放宽**：放宽等于让市级归属渗进业务记录，
        区县政府直接看不到本区数据。只放宽「**由谁发起**」，不放宽「归属到哪」。
-    3. 非市级操作员只能归属到自己的区县。
+    3. 非市级操作员只能归属到自己的区县（`allow_cross_district=True` 时豁免）。
 
     这个函数原本只写在 `views_capture` 里，导致转运单与黑名单各自散落一份
     「`data.get('district_id') or user.district_id`」的写法——前端并不提交
@@ -1539,7 +1582,8 @@ def resolve_district_scope(user, anchor, submitted, extra_anchors=()):
         return None, '归属区县不能是市级，请选择具体区县'
 
     user_district = getattr(user, 'district', None)
-    if user_district and not user_district.is_city and district.id != user_district.id:
+    if (not allow_cross_district and user_district and not user_district.is_city
+            and district.id != user_district.id):
         return None, '无权将记录归属到其他区县'
     return district, None
 

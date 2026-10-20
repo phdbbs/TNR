@@ -115,6 +115,43 @@ class BatchServiceTests(BusinessTestBase):
         self.assertEqual(txns[0].batch_no, 'B1')
         self.assertEqual(get_institution_stock(m, self.shelter_a), 0)
 
+    def test_adjustment_can_target_a_specific_batch(self):
+        """异动定向批号：只扣指定批次，不按 FEFO 改扣别的批次。
+
+        过期报废常按批处理 —— 同一药品不同批号效期不同，操作员在下拉里
+        选的是哪一批，扣的就必须是哪一批，否则台账批号与实际报废的货对不上。
+        """
+        m = make_material(district=self.district_a, shelter_stock=0)
+        _purchase(m, self.shelter_a, 10, '临期批', timezone.localdate() + timedelta(days=5))
+        _purchase(m, self.shelter_a, 30, '远期批', timezone.localdate() + timedelta(days=300))
+
+        txns = adjust_stock(
+            m, None, 10, 'adjustment', institution=self.shelter_a,
+            operator=self.shelter_user_a, ledger_no='ADJ-T', note='定向报废',
+            batch_no='远期批')
+        self.assertEqual([(t.batch_no, t.quantity) for t in txns],
+                         [('远期批', 10)])
+        qtys = {b.batch_no: b.quantity for b in MaterialBatch.objects.filter(material=m)}
+        self.assertEqual(qtys, {'临期批': 10, '远期批': 20})
+        self.assertEqual(get_institution_stock(m, self.shelter_a), 30)
+
+    def test_adjustment_targeted_batch_insufficient_does_not_fall_back(self):
+        """指定批余量不足必须报错，不能悄悄改扣另一批。"""
+        m = make_material(district=self.district_a, shelter_stock=0)
+        _purchase(m, self.shelter_a, 5, '小批', timezone.localdate() + timedelta(days=5))
+        _purchase(m, self.shelter_a, 30, '大批', timezone.localdate() + timedelta(days=300))
+
+        with self.assertRaises(ValueError) as ctx:
+            adjust_stock(
+                m, None, 6, 'adjustment', institution=self.shelter_a,
+                operator=self.shelter_user_a, ledger_no='ADJ-T2',
+                batch_no='小批')
+        self.assertIn('余量不足', str(ctx.exception))
+        qtys = {b.batch_no: b.quantity for b in MaterialBatch.objects.filter(material=m)}
+        self.assertEqual(qtys, {'小批': 5, '大批': 30})
+        self.assertFalse(MaterialTransaction.objects.filter(
+            material=m, type='adjustment').exists(), '被拒的定向异动不该留下流水')
+
     def test_same_batch_reentry_accumulates_and_updates_expiry(self):
         """同批号再次入库 = 同一批货：累加 + 效期随之更新。"""
         m = make_material(district=self.district_a, shelter_stock=0)
@@ -405,6 +442,18 @@ class BatchViewTests(BusinessTestBase):
         data2 = resp2.json()['data']
         self.assertEqual([(p['batch_no'], p['take']) for p in data2['plan']],
                          [('B0', 20)])
+        self.assertEqual(data2['expired_skipped'], 0,
+                         '下发/异动不跳过过期批，不能再报「已跳过」')
+
+        # 定向批号：只预览该批；选中的就是过期批时也不该说「跳过」
+        resp4 = self.post_json('/api/business/materials/%d/batch-preview/' % self.m.id,
+                               {'quantity': 5, 'txn_type': 'adjustment',
+                                'batch_no': 'B0'})
+        data4 = resp4.json()['data']
+        self.assertEqual([(p['batch_no'], p['take']) for p in data4['plan']],
+                         [('B0', 5)])
+        self.assertEqual(data4['expired_skipped'], 0)
+        self.assertTrue(data4['enough'])
 
         # 不足：预览与落库同判据（plan 为空 + 文案）
         resp3 = self.post_json('/api/business/materials/%d/batch-preview/' % self.m.id,

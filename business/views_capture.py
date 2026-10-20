@@ -14,6 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
 from business.models import Capture, Pet, OwnerReturn
+from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
@@ -22,6 +23,7 @@ from business.services import (
     amap_ip_location, client_ip, capture_transfer_state, capture_states_bulk,
     recalc_capture_status, get_active_pet, validate_uploaded_images,
     get_hospital_scoped_pet, hospital_pet_write_error,
+    pet_has_approved_application, pet_has_pending_return,
     resolve_district_scope, resolve_community,
     inactive_district_error, inactive_institution_error,
     parse_int_param, parse_date_param, MAX_CAPTURE_BATCH,
@@ -957,10 +959,17 @@ def owner_return_create(request, pk=None):
         err = hospital_pet_write_error(pet, request.user)
         if err:
             return json_fail(err)
+        # 先于状态校验：运回单上的动物状态已是 `return_pending`，
+        # 先说「状态不可领回」会让操作员漏掉「去撤回运回单」这个动作。
+        if pet_has_pending_return(pet):
+            return json_fail('该宠物已在运回捕捉点的单据上，请先撤回或等待捕捉点处理')
         if pet.status not in ('in_treatment', 'pending_adopt'):
             return json_fail(
                 f'宠物当前状态({pet.get_status_display()})不可领回，'
                 '仅诊疗中/待领养宠物可在医院办理领回')
+        if pet_has_approved_application(pet):
+            return json_fail('该宠物已有已批准的领养申请（待出库），'
+                             '请先处理后再办理领回')
     else:
         # 按区县范围取宠物，并排除已逻辑删除的档案
         pet = get_active_pet(pet_id, request.user)
@@ -1003,27 +1012,30 @@ def owner_return_create(request, pk=None):
         if err:
             return json_fail(err)
 
-    record = OwnerReturn.objects.create(
-        pet=pet,
-        pet_code=pet.code,
-        owner_name=owner_name,
-        owner_phone=owner_phone,
-        owner_id_card=owner_id_card,
-        owner_address=body_str(data, 'owner_address').strip(),
-        return_time=_parse_return_time(data.get('return_time')),
-        reason=body_str(data, 'reason'),
-        signature=body_str(data, 'signature'),
-        operator=request.user,
-        operator_name=request.user.get_full_name() or request.user.username,
-        ledger_no=generate_doc_no('RET'),
-        district=district,
-        # 归属机构 = 动物当时所在的机构（业务对象推导，不取操作员机构）
-        institution_id=pet.hospital_id or pet.shelter_id,
-    )
+    with transaction.atomic():
+        record = OwnerReturn.objects.create(
+            pet=pet,
+            pet_code=pet.code,
+            owner_name=owner_name,
+            owner_phone=owner_phone,
+            owner_id_card=owner_id_card,
+            owner_address=body_str(data, 'owner_address').strip(),
+            return_time=_parse_return_time(data.get('return_time')),
+            reason=body_str(data, 'reason'),
+            signature=body_str(data, 'signature'),
+            operator=request.user,
+            operator_name=request.user.get_full_name() or request.user.username,
+            ledger_no=generate_doc_no('RET'),
+            district=district,
+            # 归属机构 = 动物当时所在的机构（业务对象推导，不取操作员机构）
+            institution_id=pet.hospital_id or pet.shelter_id,
+        )
 
-    # 更新宠物状态
-    pet.status = 'owner_returned'
-    pet.save(update_fields=['status'])
+        # 更新宠物状态
+        pet.status = 'owner_returned'
+        pet.save(update_fields=['status'])
+        # 领回单当场完成交接 = 出院终态，诊疗单此刻办结。
+        dispose_for_discharge(pet, 'owner_returned', request.user)
 
     # 领回后本单宠物减少，捕捉单状态需要重算
     if pet.capture_id:

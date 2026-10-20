@@ -571,8 +571,11 @@ class CaptureTransferTreatmentSingleSourceTest(SimpleTestCase):
         `partial` 落到兜底直接印出英文码。诊疗则是写死二分
         `completed ? '已完成' : '进行中'`，与后端 choices 平行维护。
         两处都不报错 —— 状态错了只是「看着不对」。
+
+        第五十六轮：时间线随 `showPetArchive` 从捕捉点端迁到了
+        `TNR_UI.showPetArchive`（`tnr-common.js`），四处门户共用一份。
         """
-        src = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        src = strip_js_comments(_read_raw('static/js/tnr-common.js'))
         self.assertIn('TNR_UI.transferStatusText(ev.status)', src,
                       '流转时间线的转运状态不再取真源 —— 部分签收又会印出英文 partial')
         self.assertIn('TNR_UI.treatmentStatusText(ev.status)', src,
@@ -580,7 +583,7 @@ class CaptureTransferTreatmentSingleSourceTest(SimpleTestCase):
         for banned in ("const transferStatus = {", "? '已完成' : '进行中'"):
             self.assertNotIn(
                 banned, src,
-                f'捕捉点端又出现了本地状态表（应走 TNR_UI.*StatusText）：{banned!r}')
+                f'公共时间线又出现了本地状态表（应走 TNR_UI.*StatusText）：{banned!r}')
 
     def test_no_legacy_transfer_wording_in_status_maps(self):
         """「待接收 / 已接收」这两个自创叫法不许回到状态映射里。
@@ -1410,7 +1413,7 @@ class AdoptionStatusSingleSourceTest(SimpleTestCase):
     def test_renderers_use_the_source(self):
         """领养单的三个展示点位都必须取真源。"""
         for rel, token in (('static/js/portals/shelter.js', 'adoptionStatusBadge'),
-                           ('static/js/portals/hospital.js', 'ADOPTION_STATUS'),
+                           ('static/js/portals/hospital.js', 'adoptionStatusBadge'),
                            ('static/js/portals/adopter.js', 'adoptionStatusBadge')):
             src = strip_js_comments(_read_raw(rel))
             self.assertIn(token, src,
@@ -2575,7 +2578,7 @@ class PageReachabilityTest(SimpleTestCase):
     # 已知不可达但**有意保留**的页面 → 理由。加进这里必须写清原因。
     EXEMPT = {
         ('shelter', 'owner-return'):
-            '主人领回已改为「动物去向 → 回收」标签（首页快捷操作指向 '
+            '主人领回已改为「动物去向 → 领回」标签（首页快捷操作指向 '
             'navigate("release","recovery")），独立页保留为死代码，删留待业务确认',
     }
 
@@ -2828,7 +2831,12 @@ FLOW_ENTRY_POINTS = {
     '放归确认': 'confirmRelease(',
     '领养登记': 'registerAdoption(',
     '领养资料编辑/上下架': 'editAdoptionInfo(',
-    '领养确认领出': 'confirmAdoptionClaim(',
+    # 第五十六轮：系统照片从捕捉/诊疗档案自动带入、只决定显隐；
+    # 医院新补拍的说明类照片走 multipart 的 saveAdoptionInfo。
+    '领养补充照片维护': 'saveAdoptionInfo(',
+    # 第五十五轮：领养不再「确认领出」即改动物状态，必须走「领养出库单」，
+    # 留下领养人交接签字与出库日期。判据也跟着换成出库入口。
+    '领养出库交接': 'outboundAdoption(',
     '领养撤销': 'reclaimAdoption(',
     # 第四十六轮新增。`AdoptionApplication.status` 里的 `cancelled` 此前
     # **没有任何产生端**（模型声明了、领养人端也映射了标签与徽章，但没有
@@ -3854,6 +3862,29 @@ class VetLicenseEntryContractTest(SimpleTestCase):
             '打印模板不再读单据快照字段。如果它改成实时读 `User.vet_license`，\n'
             '历史单据会跟着账号一起变 —— 那张单子就无法再证明当时是谁签的字。')
 
+    def test_hospital_profile_shows_license_readonly_and_changes_own_password(self):
+        """医院个人中心：证号只读展示（平台维护）+ 自助改密（第五十轮）。
+
+        证号在个人中心若做成可编辑输入框，医院就能自证执业身份；而「改密请
+        联系管理员」在只有平台一个管理员时会把人锁死 —— 两者各自钉一条。
+        """
+        body = self._js(PORTALS['hospital'], r'render_profile\(\)\s*\{',
+                        'hospital.render_profile')
+        self.assertIn('vet_license', body, '个人中心没有读取执业证号')
+        self.assertNotRegex(
+            body, r'<input[^>]*vet',
+            '个人中心把执业证号做成了输入框 —— 证号只能由平台端维护')
+        self.assertIn('/api/me/password/', body,
+                      '个人中心没有自助改密入口 —— 用户只能找平台管理员')
+        self.assertNotIn('联系系统管理员', body,
+                         '个人中心仍在提示「联系系统管理员」改密')
+        self.assertRegex(
+            read('business/views_portal.py'), r"'vet_license':\s*user\.vet_license",
+            '门户载荷没下发 vet_license —— 个人中心只能显示空值')
+        self.assertRegex(
+            read('accounts/views.py'), r"'vet_license':\s*u\.vet_license",
+            '/api/me/ 没下发 vet_license —— 接口与门户载荷两套口径')
+
 
 class NarrowedOptionContractTest(SimpleTestCase):
     """「前端把选项收窄了、后端不校验」这一类（第十七轮）。
@@ -4055,7 +4086,8 @@ class InactiveEntityContractTest(SimpleTestCase):
         # 反向对照：把接收医院那句过滤拆掉，计数器必须跟着归零。
         # 不然这条判据可能是「数字恰好等于 1」的空转 —— 比如两种写法都被
         # 改成 `status !== 'inactive'`，数量不变而口径已经变了。
-        planted = html.replace("filter(h => h.status === 'active')", 'filter(h => true)')
+        # 锚点只认判据本身（第五十轮后过滤器还叠了区县条件，整句匹配会失效）。
+        planted = html.replace("h.status === 'active'", 'true')
         self.assertNotEqual(html, planted, '反向对照的锚点字符串失效了（模板里那句话被改写）')
         self.assertEqual(
             0, planted.count("i.status === 'active'") + planted.count("h.status === 'active'"),
@@ -4145,6 +4177,61 @@ class ShelterStockAdjustmentEntryTest(SimpleTestCase):
         self.assertIn(
             'TNR_API.adjustStock(', html,
             '捕捉点门户没有真正调用异动接口')
+
+
+class InventoryAdjustmentBatchPickerTest(SimpleTestCase):
+    """库存异动必须能按批选择（过期报废按批处理）。
+
+    同一药品不同批号效期不同。只给「不指定」时，异动按 FEFO 扣减 ——
+    想报废过期批，系统可能先扣了另一批还有效的货，过期批反而留在账上。
+    因此两端的异动表单都要列出**所有仍有库存的批次**，选中后只扣该批。
+    """
+
+    def test_hospital_adjustment_lists_batches_with_stock(self):
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('async renderMaterialAdjustment(c, txns, materials) {')
+        self.assertGreater(start, 0, '找不到医院端库存异动渲染函数')
+        end = js.find('\n  async saveStockAdjustment(', start)
+        self.assertGreater(end, start, '找不到 renderMaterialAdjustment 的结尾')
+        body = js[start:end]
+        self.assertIn('id="adjBatch"', body, '异动表单没有批号下拉')
+        self.assertIn('getMaterialBatches(m.id)', body,
+                      '异动表单没有拉取该物料的批次')
+        self.assertIn('(b.quantity || 0) > 0', body,
+                      '批次下拉必须过滤掉零库存批次')
+        self.assertIn("'adjustment',", body,
+                      '批次预览没有按 adjustment 口径（过期批不跳过）')
+
+        start = js.find('async saveStockAdjustment(materials) {')
+        self.assertGreater(start, 0, '找不到医院端异动提交函数')
+        end = js.find('\n  async renderMaterialOutbound(', start)
+        save = js[start:end]
+        self.assertIn('batch_no: batchNo', save,
+                      '异动提交没有把选中的批号发给服务端')
+        self.assertIn('adjBatch', save, '异动提交没有读取批号下拉')
+
+    def test_shelter_adjustment_lists_batches_with_stock(self):
+        js = strip_js_comments(read_js('shelter'))
+        start = js.find("tab === 'adjustment'")
+        self.assertGreater(start, 0, '找不到捕捉点库存异动页签')
+        end = js.find("tab === 'outboundDecl'", start)
+        self.assertGreater(end, start, '找不到 adjustment 页签的结尾')
+        body = js[start:end]
+        self.assertIn('id="adjBatch"', body, '异动表单没有批号下拉')
+        self.assertIn('getMaterialBatches(m.id)', body,
+                      '异动表单没有拉取该物料的批次')
+        self.assertIn('(b.quantity || 0) > 0', body,
+                      '批次下拉必须过滤掉零库存批次')
+        self.assertIn("'adjustment',", body,
+                      '批次预览没有按 adjustment 口径（过期批不跳过）')
+
+        start = js.find('async saveStockAdjustment() {')
+        self.assertGreater(start, 0, '找不到捕捉点异动提交函数')
+        end = js.find('\n  async saveMaterialOutbound(', start)
+        save = js[start:end]
+        self.assertIn('batch_no: batchNo', save,
+                      '异动提交没有把选中的批号发给服务端')
+        self.assertIn('adjBatch', save, '异动提交没有读取批号下拉')
 
 
 class TemplateCommentLeakTest(SimpleTestCase):
@@ -5660,7 +5747,8 @@ class DischargeAdviceKeyCoverageTest(SimpleTestCase):
         `suggested` 永远匹配不上任何按钮，高亮与「医生已建议」标签静默失效。
         """
         js = read_js('hospital')
-        start = js.find('openDischargeChoice(petId, tid, advised)')
+        # 第五十六轮起诊疗单不再由前端办结，弹窗不再需要 `tid`。
+        start = js.find('openDischargeChoice(petId, advised)')
         self.assertGreater(start, 0, '医院端找不到出院去向选择弹窗')
         opts_end = js.find('];', start)
         self.assertGreater(opts_end, start, '出院弹窗的 OPTS 数组找不到结尾')
@@ -5800,29 +5888,205 @@ class HospitalMaterialLoadTest(SimpleTestCase):
                           f'物料页少了带缓存参数的渲染调用：{call!r}')
 
 
-class HospitalAdoptionInfoFilterTest(SimpleTestCase):
-    """领养维护的筛选条必须真的可用（第五十三轮电脑端巡检）。
+class HospitalDischargeSecondaryMenuTest(SimpleTestCase):
+    """出院四种去向收进页内二级菜单（第五十四轮）。
 
-    「无待领养动物」的两条分支各自提前 `return`，**没有调用 `bindFilter`**：
-    筛选条看得见、输入没反应（日期由 `renderFilterBar` 自动追加，本来就在）。
-    现在三条分支合并成一次渲染，并在末尾统一挂表、绑筛选。
+    领养 / 死亡出库 / 领回 / 放归是出院的四个**子状态**，不是四个独立
+    业务模块，因此侧栏不再保留「领养信息维护」「安乐死处置」两个一级页。
+    判据同时看模板与渲染函数：只删导航不删页面会留下不可达的死页面；
+    只删页面不删导航则点进去是空白。
     """
 
-    def _body(self):
-        js = strip_js_comments(read_js('hospital'))
-        start = js.find('async render_adoption_info()')
-        self.assertGreater(start, 0, '医院端领养信息维护入口不在了')
-        end = js.find('\n  renderPhotoSlot', start)
-        self.assertGreater(end, start, '找不到 render_adoption_info 的结尾')
-        return js[start:end]
+    def test_sidebar_and_page_shell_drop_the_two_standalone_pages(self):
+        nav = _read_raw('templates/portal/hospital_base.html')
+        for gone in ('data-nav="adoption-info"', 'data-nav="euthanasia"'):
+            self.assertNotIn(gone, nav,
+                             f'医院侧栏仍有独立入口 {gone} —— 四个去向应只在出院页内')
+        portal = _read_raw('templates/portal/hospital/portal.html')
+        for gone in ('id="page-adoption-info"', 'id="page-euthanasia"'):
+            self.assertNotIn(gone, portal,
+                             f'医院端仍保留独立页面容器 {gone}，与二级菜单重复')
+        self.assertIn('id="page-discharge"', portal, '出院页容器被误删')
 
-    def test_filters_are_bound_and_no_early_return_skips_them(self):
-        body = self._body()
-        self.assertIn('TNR_UI.bindFilter(() => { mountClaims(); mountAppl(); }, page);',
-                      body, '领养维护没有绑定筛选 —— 搜索框会没反应')
-        self.assertEqual(body.count('page.innerHTML = infoBarHtml'), 1,
-                         '领养维护又拆出了多条渲染分支 —— 提前 return 的分支会跳过'
-                         ' mountTable/bindFilter，搜索与日期筛选静默失效')
+    def test_discharge_shell_renders_four_secondary_tabs(self):
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('renderDischargeShell()')
+        self.assertGreater(start, 0, '医院端找不到出院页二级菜单渲染函数')
+        end = js.find('\n  renderDspTab()', start)
+        self.assertGreater(end, start, '找不到 renderDischargeShell 的结尾')
+        body = js[start:end]
+        for key in ("k: 'adopt'", "k: 'dead'", "k: 'owner'", "k: 'release'"):
+            self.assertIn(key, body,
+                          f'出院二级菜单缺少去向 {key} —— 四个去向必须同屏可选')
+        self.assertIn("'data-dspmod'", body,
+                      '二级菜单没有事件委托 —— 重渲染后按钮会点不动')
+        self.assertIn("'discharge'", body,
+                      '二级菜单委托没有用稳定 tag，多次渲染会重复绑定')
+
+    def test_adoption_three_states_all_bind_their_filters(self):
+        """待领养 / 已预约 / 已出库 三个子页签都必须挂筛选。
+
+        任何一条分支提前 return 或忘了 `bindFilter`，搜索框都看得见却没反应
+        （第五十三轮领养维护页踩过同一个坑）。
+        """
+        js = strip_js_comments(read_js('hospital'))
+        bounds = {
+            'renderDspAdoptReady(body) {': '\n  renderDspAdoptReserved(body) {',
+            'renderDspAdoptReserved(body) {': '\n  renderDspAdoptOutbound(body) {',
+            'renderDspAdoptOutbound(body) {': '\n  renderDspDeath(',
+        }
+        for fn, next_marker in bounds.items():
+            start = js.find(fn)
+            self.assertGreater(start, 0, f'找不到领养子页签 {fn}')
+            end = js.find(next_marker, start + 1)
+            self.assertGreater(end, start, f'找不到 {fn} 的结尾')
+            self.assertIn('bindFilter(mount, document.getElementById(', js[start:end],
+                          f'{fn} 没有绑定筛选 —— 搜索框会没反应')
+
+    def test_adoption_ready_excludes_reserved_animals(self):
+        """捕捉点批准线上申请后不改 `Pet.status`，待领养列表必须按申请单排除。
+
+        不排除的话，同一只动物会同时出现在「待领养」和「已预约」，
+        数量、操作入口和「已预约」的业务含义全部失真。
+        """
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('dspReservedPetIds()')
+        self.assertGreater(start, 0, '找不到「已被领养流程预留」的共用判据')
+        end = js.find('\n  },', start)
+        helper = js[start:end]
+        self.assertIn("a.status === 'pending_claim'", helper,
+                      '预留集合没有包含已有领养单的动物')
+        self.assertIn("a.status === 'approved'", helper,
+                      '预留集合没有包含已批准线上申请的动物')
+
+        start = js.find('dspReadyPets()')
+        self.assertGreater(start, 0, '找不到待领养动物筛选函数')
+        end = js.find('\n  },', start)
+        body = js[start:end]
+        self.assertIn('dspReservedPetIds()', body,
+                      '待领养没有排除已被领养流程预留的动物')
+
+    def test_other_discharge_candidates_exclude_reserved_animals(self):
+        """运回 / 放归 / 领回 / 死亡登记的可选动物同样要排除已预留的动物。
+
+        这些列表都按 `Pet.status` 筛选，而「已批准申请」不写状态；
+        不共用预留集合，动物会在「已预约」之外再出现在其他去向里。
+        """
+        js = strip_js_comments(read_js('hospital'))
+        for fn in ('dspOwnerPets', 'dspReleaseCandidates', 'dspOpenEuthCreate'):
+            start = js.find(f'\n  {fn}() {{')
+            self.assertGreater(start, 0, f'找不到 {fn}')
+            end = js.find('\n  },', start)
+            self.assertIn('dspReservedPetIds()', js[start:end],
+                          f'{fn} 没有排除已被领养流程预留的动物')
+
+    def test_adoption_outbound_carries_handover_evidence(self):
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('dspOpenAdoptionOutbound(source, id)')
+        self.assertGreater(start, 0, '找不到领养出库单入口')
+        end = js.find('\n  dspViewAdoption(', start)
+        self.assertGreater(end, start, '找不到领养出库单的结尾')
+        body = js[start:end]
+        for field in ('outbound_at', 'handover_name', 'signature', 'handover_photo'):
+            self.assertIn(field, body,
+                          f'领养出库单缺少交接字段 {field} —— 出库必须有可追溯凭证')
+        self.assertIn('initSignatureField', body, '领养出库单没有领养人签字')
+
+    def test_death_outbound_carries_handover_evidence(self):
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('dspOpenEuthOutbound(id)')
+        self.assertGreater(start, 0, '找不到死亡出库单入口')
+        end = js.find('\n  dspViewEuth(', start)
+        self.assertGreater(end, start, '找不到死亡出库单的结尾')
+        body = js[start:end]
+        for field in ('receiving_org', 'receiver_name',
+                      'signature', 'photo', 'outbound_at'):
+            self.assertIn(field, body,
+                          f'死亡出库单缺少交接字段 {field} —— 无害化交接必须可追溯')
+        # 「接收机构」与「接收单位」是同一件事，出库单上只留前者；
+        # 两个输入框并排会让交接员不知道该把厂名填在哪一个。
+        self.assertNotIn('接收单位', body, '死亡出库单仍保留重复的「接收单位」字段')
+        self.assertNotIn("fd.append('receiver_unit'", body,
+                         '死亡出库单仍在提交重复的 receiver_unit')
+        self.assertIn('initSignatureField', body, '死亡出库单没有接收人签字')
+
+    def test_outbound_photos_offer_camera_and_library_on_mobile(self):
+        """出库照片在手机上要能直接拍照，也能从相册 / 本地文件选。
+
+        单个 `<input type=file>` 在部分手机浏览器里只弹文件管理器，现场拍的
+        照片反而找不到；两个入口选完统一本地压缩再上传。
+        """
+        js = strip_js_comments(read_js('hospital'))
+        self.assertIn('data-photo-cam="', js)
+        self.assertIn('data-photo-lib="', js)
+        self.assertIn('capture="environment"', js)
+        self.assertIn('TNR_UI.compressImage(raw)', js)
+        for key, label in (('out', '领养出库'), ('eo', '死亡出库')):
+            self.assertIn(f"dspPhotoPickHtml('{key}'", js,
+                          f'{label}单没接手机照片选择器（拍照 / 相册）')
+            self.assertIn(f"dspBindPhotoPick(bodyEl, '{key}'", js,
+                          f'{label}单的照片选择器没有绑定')
+        for gone in ('id="dspOutPhoto"', 'id="dspEoPhoto"'):
+            self.assertNotIn(gone, js,
+                             f'仍是单个 file input（{gone}），手机端无法区分拍照/相册')
+
+    def test_discharge_modal_styles_are_not_scoped_to_the_page(self):
+        """弹层挂在 body 下，`#page-discharge .dsp-*` 在弹层里不生效。
+
+        照片格 / 摘要 / 复选框都只在弹层里使用；带页面前缀时它们会退化成
+        默认块级布局（照片竖排大图、两列摘要变一列），界面上看不出报错。
+        """
+        html = read_html('hospital')
+        for cls in ('.dsp-summary', '.dsp-photo-grid', '.dsp-photo-box',
+                    '.dsp-photo-label', '.dsp-check', '.dsp-return-pets',
+                    '.dsp-note', '.dsp-photo-pick', '.dsp-photo-picked'):
+            self.assertNotIn('#page-discharge ' + cls, html,
+                             f'{cls} 只在弹层里使用，不能加 #page-discharge 前缀')
+
+    def test_return_tab_exposes_every_order_status_and_withdraw(self):
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('renderDspRelease(c) {')
+        self.assertGreater(start, 0, '找不到放归页签')
+        end = js.find('\n  onDspAction(', start)
+        self.assertGreater(end, start, '找不到放归页签的结尾')
+        body = js[start:end]
+        for status in ('pending', 'received', 'rejected', 'withdrawn'):
+            self.assertIn("value: '" + status + "'", body,
+                          f'运回单筛选缺少状态 {status} —— 捕捉点驳回/撤回后查不到')
+        self.assertIn('return-withdraw', body, '待确认运回单没有撤回入口')
+
+
+class ShelterReturnOrderReceiveTest(SimpleTestCase):
+    """捕捉点必须能签收医院开出的运回单（放归第一段的反向物流）。
+
+    没有接收单，「医院运回 → 捕捉点放归」在捕捉点侧就断了：
+    动物状态停在 `return_pending`，医院放不出去、捕捉点也收不到。
+    """
+
+    def test_release_tab_lists_pending_orders_and_signs_receipt(self):
+        js = strip_js_comments(read_js('shelter'))
+        for token in ('data-return-receive', 'data-return-reject',
+                      'receiveReturnOrder', 'rejectReturnOrder',
+                      'showReturnReceiveModal', 'showReturnRejectModal'):
+            self.assertIn(token, js,
+                          f'捕捉点运回单接收缺少 {token}')
+        start = js.find('showReturnReceiveModal(id)')
+        self.assertGreater(start, 0, '找不到捕捉点接收单弹窗')
+        end = js.find('\n  showReturnRejectModal(', start)
+        self.assertGreater(end, start, '找不到接收单弹窗的结尾')
+        body = js[start:end]
+        self.assertIn('initSignatureField', body, '接收单没有接收人签字')
+        self.assertIn('receiver_name', body, '接收单没有接收人')
+
+    def test_pending_release_animals_are_releasable(self):
+        """捕捉点签收后动物是 `pending_release`，必须能继续发起放归。
+
+        只认 `in_treatment/pending_adopt` 时，刚签收的动物会从下拉里消失，
+        放归第二段永远办不了。
+        """
+        js = strip_js_comments(read_js('shelter'))
+        self.assertIn("p.status === 'pending_release'", js,
+                      '捕捉点放归页签没有纳入 pending_release 动物')
 
 
 # ============================================================
@@ -5984,3 +6248,83 @@ class PlatformAdminReadTest(SimpleTestCase):
                       '账号读取失败后仍保留旧缓存，筛选会把错误态换成过期名单')
         self.assertIn('if (!this._users) return;', js,
                       '未加载状态仍允许渲染账号表，错误态会被空表覆盖')
+
+
+class ChipTracePetArchiveLinkTest(SimpleTestCase):
+    """芯片追溯里「绑定宠物」必须能跳到一宠一档（第五十轮）。
+
+    原先追溯抽屉只把宠物编号当纯文本显示。现场看到一颗已使用的芯片后，
+    最自然的追问是「它打到哪只动物身上、之后去过哪」，而档案入口在另一处，
+    用户只能退出、再翻动物列表按编号找。三段链路各钉一条。
+    """
+
+    def test_backend_exposes_pet_id(self):
+        src = read('business/views_chip.py')
+        self.assertRegex(
+            src, r"'pet_id':\s*chip\.pet_id",
+            '追溯接口没下发 pet_id —— 前端拿到编号也无法打开档案（编号不是主键）')
+        self.assertRegex(
+            src, r"'pet_code':\s*chip\.pet\.code",
+            '追溯接口不再下发绑定动物编号')
+
+    def test_trace_drawer_links_to_archive(self):
+        js = strip_js_comments(read('static/js/tnr-common.js'))
+        self.assertIn('data-pet-archive=', js,
+                      '芯片追溯的绑定宠物没有做成可点击的档案入口')
+        self.assertIn('this.showPetArchive(petLink.dataset.petArchive)', js,
+                      '档案入口没绑到 TNR_UI.showPetArchive —— 点了没反应')
+
+    def test_archive_impl_is_shared(self):
+        """实现必须在公共层：捕捉点/医院两端的追溯抽屉都要跳同一份档案。"""
+        js = strip_js_comments(read('static/js/tnr-common.js'))
+        self.assertIn('async showPetArchive(petId)', js,
+                      '一宠一档实现不在 TNR_UI —— 两端会各写一份并漂移')
+        self.assertIn('getPetLifecycleStrict(petId)', js,
+                      '一宠一档没有走严格取数接口（失败会被静默当成空档案）')
+        shelter = strip_js_comments(read('static/js/portals/shelter.js'))
+        self.assertRegex(
+            shelter, r'async showPetArchive\(petId\)\s*\{\s*return TNR_UI\.showPetArchive\(petId\);',
+            '捕捉点端没有委派到公共实现 —— 两处实现迟早口径不一致')
+
+
+class DischargeClosesTreatmentContractTest(SimpleTestCase):
+    """第五十六轮：诊疗页只选「建议去向」，出院状态只由出院单据终态决定。
+
+    此前「诊疗完成 → 选去向 → 完成办结」会在诊疗页直接把 `disposed_at`
+    落掉：动物还没交到领养人 / 无害化厂 / 捕捉点手里，看板已经算「已出院」。
+    现在 `done_at` 只代表「待出院」，五条出院终态路径各自在单据完成时
+    调 `dispose_for_discharge()`。
+    """
+
+    def _hospital_js(self):
+        return strip_js_comments(read_js('hospital'))
+
+    def test_treatment_page_no_longer_disposes_directly(self):
+        js = self._hospital_js()
+        for gone in ('treatmentDispose', 'tx-finish', 'finishTreatment'):
+            self.assertNotIn(gone, js,
+                             f'诊疗页仍在调用 `{gone}` —— 会在出院单据办完前办结')
+        api = strip_js_comments(_read_raw('static/js/tnr-api.js'))
+        self.assertNotIn('treatmentDispose', api,
+                         '已无调用方的 `treatmentDispose` 仍留在 API 层')
+
+    def test_advice_wording_and_discharge_entry(self):
+        js = self._hospital_js()
+        self.assertIn('建议去向', js)
+        self.assertIn('data-act="tx-discharge"', js, '诊疗完成后没有去出院管理的入口')
+        self.assertIn('去出院管理', js)
+        self.assertIn('诊疗完成，动物进入待出院', js)
+        self.assertIn('诊疗完成，动物进入待出院',
+                      read('business/views_treatment.py'),
+                      '后端完成文案仍写着「请选择办结去向」')
+
+    def test_terminal_actions_close_treatment(self):
+        for path in ('business/views_adoption.py', 'business/views_euthanasia.py',
+                     'business/views_return.py', 'business/views_release.py',
+                     'business/views_capture.py'):
+            self.assertIn('dispose_for_discharge', read(path),
+                          f'{path} 的出院终态没有办结诊疗单')
+        services = read('business/services_treatment.py')
+        self.assertIn('def dispose_for_discharge(', services)
+        self.assertIn('promote_hall=False', services,
+                      '出院办结不得按建议去向重新上架领养大厅')

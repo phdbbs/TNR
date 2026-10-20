@@ -13,13 +13,14 @@ from django.views.decorators.csrf import csrf_exempt
 from accounts.decorators import role_required
 from business.models import (
     Pet, AdoptionHallListing, Adoption, Message,
-    Transfer, Treatment, Release, Euthanasia, OwnerReturn,
+    Transfer, Treatment, Release, Euthanasia, OwnerReturn, ReturnOrder,
 )
 from business.services import (
     json_ok, json_fail, serialize_instance,
     get_district_filtered_queryset, get_scoped_object, hospital_pet_scope,
     pet_archive_records, pet_brief, pet_photo_list, is_city_shelter,
 )
+from business.views_adoption import serialize_hall_listing
 from core.privacy import mask_id_card, mask_phone
 
 
@@ -29,7 +30,13 @@ def _portal_user_data(user):
     ⚠ 四个门户原本各抄了一份这段字典 —— 第四个（平台端）再加一份必然漂移：
     前端 `isCityLevel()` / 区县下拉 / 归属判断全靠这几个键，漏一个键就是
     「某个端看起来正常、某个字段恒为空」。
+
+    `institution_district_*`（第五十轮）：判断**机构**是市级还是区级，
+    不能用操作员账号的 `district` —— 现场区县捕捉点的操作员也可能挂在
+    「全市（市级）」下。市级捕捉点可全市转运，区级只能本区。
     """
+    inst = user.institution if user.institution_id else None
+    inst_district = getattr(inst, 'district', None) if inst else None
     return {
         'id': user.id,
         'username': user.username,
@@ -42,8 +49,14 @@ def _portal_user_data(user):
         'district_id': user.district_id,
         'district_name': user.district.name if user.district else '',
         'institution_id': user.institution_id,
-        'institution_name': user.institution.name if user.institution else '',
+        'institution_name': inst.name if inst else '',
+        'institution_district_id': inst_district.id if inst_district else None,
+        'institution_district_name': inst_district.name if inst_district else '',
+        'institution_district_is_city': bool(
+            inst_district and inst_district.is_city),
         'phone': user.phone,
+        # 医院端个人中心只读展示（平台端维护，本人不可改）。
+        'vet_license': user.vet_license,
     }
 
 
@@ -181,7 +194,12 @@ def hospital_pets(request):
     if status:
         qs = qs.filter(status=status)
 
-    data = [serialize_instance(p) for p in qs]
+    qs = qs.select_related('shelter')
+    data = []
+    for p in qs:
+        item = serialize_instance(p)
+        item['shelter_name'] = p.shelter.name if p.shelter_id else ''
+        data.append(item)
     return json_ok(data)
 
 
@@ -243,7 +261,7 @@ def hospital_hall_listings(request):
     GET /api/business/hall-listings/
     """
     user = request.user
-    qs = AdoptionHallListing.objects.all()
+    qs = AdoptionHallListing.objects.prefetch_related('extra_photos')
 
     if user.role == 'hospital':
         if user.institution_id:
@@ -256,11 +274,10 @@ def hospital_hall_listings(request):
     else:
         qs = get_district_filtered_queryset(AdoptionHallListing, user)
 
-    data = []
-    for listing in qs:
-        item = serialize_instance(listing)
-        item['pet'] = serialize_instance(listing.pet) if listing.pet_id else None
-        data.append(item)
+    # 隐藏照片只对**本院维护界面**可见；其他角色走公开口径，避免绕过显示开关
+    include_hidden = user.role == 'hospital'
+    data = [serialize_hall_listing(listing, include_hidden=include_hidden)
+            for listing in qs]
     return json_ok(data)
 
 
@@ -365,6 +382,49 @@ def _stage_photos(pet, *fields):
     """取动物的指定阶段照片（只返回确实有图的），供时间线内嵌展示。"""
     wanted = set(fields)
     return [p for p in pet_photo_list(pet) if p['field'] in wanted]
+
+
+def _return_order_pet_q(code):
+    """在逗号分隔的 `ReturnOrder.pet_codes` 里精确匹配一个编号。
+
+    直接 `pet_codes__contains=code` 会把 `TNR26101800` 当成
+    `TNR261018002` 的前缀命中 —— 一张单子会让另一只动物也显示「待运回」。
+    """
+    return (Q(pet_codes=code)
+            | Q(pet_codes__startswith=code + ',')
+            | Q(pet_codes__endswith=',' + code)
+            | Q(pet_codes__contains=',' + code + ','))
+
+
+def _pet_stage(pet):
+    """一宠一档的「当前状态」：按业务单据派生，不只看 `Pet.status`。
+
+    `Pet.status` 只在几个节点被改写，放归单创建 / 转运回小区两段都
+    不改它（`release_create`、`release_transfer`），于是动物已经回到小区
+    等签字、档案却还写着「待诊疗」/「待领养」——TNR261018002 就是这样：
+    诊疗早已办结、`Release` 停在 transferred，档案显示的却是 in_treatment。
+
+    派生顺序按「最具体的未办结单据」优先：
+      未办结运回单 → 待运回捕捉点
+      未办结放归单（pending / transferred）→ 待放归
+      诊疗已完成但未办结出院 → 待出院
+      其余仍以 `Pet.status` 为准（含全部终态）。
+    """
+    if pet.status in ('adopted', 'released', 'euthanized', 'dead', 'owner_returned'):
+        return pet.status, pet.get_status_display()
+
+    if ReturnOrder.objects.filter(status='pending').filter(
+            _return_order_pet_q(pet.code)).exists():
+        return 'return_pending', dict(Pet.STATUS_CHOICES)['return_pending']
+
+    if Release.objects.filter(pet=pet, status__in=Release.OPEN_STATUSES).exists():
+        return 'pending_release', dict(Pet.STATUS_CHOICES)['pending_release']
+
+    if Treatment.objects.filter(
+            pet=pet, done_at__isnull=False, disposed_at__isnull=True).exists():
+        return 'pending_discharge', '待出院'
+
+    return pet.status, pet.get_status_display()
 
 
 @csrf_exempt
@@ -523,13 +583,13 @@ def pet_lifecycle(request, pet_id):
             'operator_name': e.operator_name,
         })
 
-    # 主人领回（回收）记录
+    # 主人领回记录
     # 每只动物只可能有一条 OwnerReturn（owner_returned 状态互斥），但保留循环以兼容历史数据
     owner_returns = OwnerReturn.objects.filter(pet=pet).order_by('created_at')
     for r in owner_returns:
         events.append({
             'type': 'owner_return',
-            'type_display': '回收登记',
+            'type_display': '领回登记',
             # ⚠ `date` 字段一律是**本地日期**（前端当 `YYYY-MM-DD` 用）。
             # 本行原来写的是 `r.return_time.isoformat()` —— `return_time` 是
             # DateTimeField，`.isoformat()` 给的是 **UTC 带偏移**的时间串，于是：
@@ -551,12 +611,20 @@ def pet_lifecycle(request, pet_id):
     # 按日期排序（空日期排最后）
     events.sort(key=lambda x: x.get('date') or '', reverse=False)
 
+    # `stage` 是派生的**当前阶段**（见 `_pet_stage`）：放归单已开到一半、
+    # 诊疗完成待出院这类中间态，`Pet.status` 不会改，档案必须按单据算。
+    # 保留原始 `status` 供调用方核对，展示一律用 stage。
+    brief = pet_brief(pet)
+    stage, stage_display = _pet_stage(pet)
+    brief['stage'] = stage
+    brief['stage_display'] = stage_display
+
     return json_ok({
         'pet': serialize_instance(pet),
         # pet_brief / photos 为「一宠一档」详情抽屉补充：统一的中文字段标签 +
         # 按阶段排好序的照片列表（前端据此渲染照片墙并点击放大）。
         # 保留原有 pet/events 结构，领养人端的时间线不受影响。
-        'pet_brief': pet_brief(pet),
+        'pet_brief': brief,
         'photos': pet_photo_list(pet),
         'events': events,
     })

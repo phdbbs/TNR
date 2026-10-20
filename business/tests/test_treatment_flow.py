@@ -82,6 +82,11 @@ class FlowBase(BusinessTestBase):
     def _stock(self, material):
         return get_hospital_stock(material, self.hospital_a)
 
+    def _dispose(self, tid, disposal, **kwargs):
+        """直接调服务层办结 —— 第五十六轮起诊疗页不再有 HTTP 办结入口。"""
+        return st.dispose(Treatment.objects.get(id=tid), disposal,
+                          self.hospital_user_a, **kwargs)
+
 
 # ============================================================
 # 选项表：真源只有一份
@@ -422,7 +427,7 @@ class CheckStepTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
-        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'pending_adopt'}))
+        self._dispose(tid, 'pending_adopt')
         resp = self._check(tid)
         self.expect_fail(resp, 400, '已办结')
 
@@ -978,8 +983,8 @@ class DoneAndDisposeTest(FlowBase):
         detail = self._open()
         tid = detail['id']
         self._diagnosed(tid)
-        resp = self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'pending_adopt'})
-        self.expect_fail(resp, 400, '诊疗完成')
+        with self.assertRaisesMessage(ValueError, '诊疗完成'):
+            self._dispose(tid, 'pending_adopt')
 
     def test_done_records_advice_without_disposing(self):
         """「去向建议」只记建议，**不能**碰 `disposal` / 动物状态。
@@ -1004,10 +1009,13 @@ class DoneAndDisposeTest(FlowBase):
         self.assertEqual(t.disposal, '')
         self.pet.refresh_from_db()
         self.assertEqual(self.pet.status, 'in_treatment')
-        # 动物还在院 → 出院单据必须还开得出来
-        self.assertTrue(self.post_json(
-            f'{URL}{tid}/dispose/', {'disposal': 'released',
-                                     'defer_pet_status': True}).status_code == 200)
+        # 动物还在院 → 出院单据必须还开得出来；而且单据完成才办结诊疗单。
+        body = self.ok(self.post_json('/api/business/owner-returns/create/', {
+            'pet_id': self.pet.id, 'owner_name': '张领回'}))
+        self.assertTrue(body['data']['id'])
+        t.refresh_from_db()
+        self.assertTrue(t.disposed_at, '出院单据完成时才落 disposed_at')
+        self.assertEqual(t.disposal, 'owner_returned')
 
     def test_done_rejects_unknown_advice(self):
         detail = self._open()
@@ -1041,7 +1049,7 @@ class DoneAndDisposeTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
-        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'pending_adopt'}))
+        self._dispose(tid, 'pending_adopt')
 
         self.pet.refresh_from_db()
         self.assertEqual(self.pet.status, 'pending_adopt')
@@ -1065,7 +1073,7 @@ class DoneAndDisposeTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
-        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'pending_adopt'}))
+        self._dispose(tid, 'pending_adopt')
 
         listing = AdoptionHallListing.objects.get(pet=self.pet)
         self.assertTrue(listing.is_active, '待领养的动物必须在大厅里可见')
@@ -1081,7 +1089,7 @@ class DoneAndDisposeTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
-        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'pending_adopt'}))
+        self._dispose(tid, 'pending_adopt')
 
         self.assertTrue(AdoptionHallListing.objects.get(pet=self.pet).is_active)
 
@@ -1093,7 +1101,7 @@ class DoneAndDisposeTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
-        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'released'}))
+        self._dispose(tid, 'released')
 
         self.assertFalse(AdoptionHallListing.objects.filter(pet=self.pet).exists())
 
@@ -1106,7 +1114,7 @@ class DoneAndDisposeTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
-        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'dead'}))
+        self._dispose(tid, 'dead')
 
         self.pet.refresh_from_db()
         self.assertEqual(self.pet.status, 'dead')
@@ -1118,8 +1126,8 @@ class DoneAndDisposeTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
-        resp = self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'released_to_moon'})
-        self.expect_fail(resp, 400, '不合法')
+        with self.assertRaisesMessage(ValueError, '不合法'):
+            self._dispose(tid, 'released_to_moon')
 
     def test_dispose_twice_rejected(self):
         detail = self._open()
@@ -1128,9 +1136,9 @@ class DoneAndDisposeTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
-        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'pending_adopt'}))
-        resp = self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'released'})
-        self.expect_fail(resp, 400, '已办结')
+        self._dispose(tid, 'pending_adopt')
+        with self.assertRaisesMessage(ValueError, '已办结'):
+            self._dispose(tid, 'released')
 
 
 # ============================================================
@@ -1171,7 +1179,7 @@ class BoardTest(FlowBase):
         row = [r for r in body['pending_discharge'] if r['petCode'] == self.pet.code][0]
         self.assertFalse(row['isDisposed'])
 
-        self.ok(self.post_json(f'{URL}{tid}/dispose/', {'disposal': 'released'}))
+        self._dispose(tid, 'released')
         body = self.ok(self.get_json(URL + 'board/'))['data']
         row = [r for r in body['discharged'] if r['petCode'] == self.pet.code][0]
         self.assertTrue(row['isDisposed'])
@@ -1357,8 +1365,7 @@ class TreatmentPhotoTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{detail["id"]}/items/{item_id}/execute/', {}))
         self.ok(self.post_json(f'{URL}{detail["id"]}/done/', {}))
-        self.ok(self.post_json(f'{URL}{detail["id"]}/dispose/',
-                               {'disposal': 'released'}))
+        self._dispose(detail['id'], 'released')
         resp = self.client.post(f'{URL}{detail["id"]}/photo/',
                                 {'photo': self._png()})
         self.expect_fail(resp, 400, '已办结')
@@ -1475,9 +1482,7 @@ class DisposeDeferStatusTest(FlowBase):
         tid = self._to_done()
         self.pet.refresh_from_db()
         self.assertEqual(self.pet.status, 'in_treatment', '前置条件：还在院')
-        self.ok(self.post_json(f'{URL}{tid}/dispose/',
-                               {'disposal': 'pending_adopt',
-                                'defer_pet_status': True}))
+        self._dispose(tid, 'pending_adopt', defer_pet_status=True)
         self.pet.refresh_from_db()
         self.assertEqual(self.pet.status, 'in_treatment',
                          'defer 时动物状态交给单据，办结不能改')
@@ -1489,7 +1494,6 @@ class DisposeDeferStatusTest(FlowBase):
         也能让上面那条通过 —— 那就是假绿。
         """
         tid = self._to_done()
-        self.ok(self.post_json(f'{URL}{tid}/dispose/',
-                               {'disposal': 'pending_adopt'}))
+        self._dispose(tid, 'pending_adopt')
         self.pet.refresh_from_db()
         self.assertEqual(self.pet.status, 'pending_adopt')

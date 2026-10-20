@@ -207,13 +207,9 @@ const TNR_API = {
     return this._post('/api/business/treatments/' + id + '/done/',
       { disposal_advised: disposalAdvised || '' });
   },
-  async treatmentDispose(id, disposal, opts) {
-    return this._post('/api/business/treatments/' + id + '/dispose/',
-      Object.assign({ disposal: disposal }, opts || {}));
-  },
-  /* 诊疗后照片（B2）：multipart 走诊疗单独立接口。⚠ 不能复用
-     `uploadPetPhoto()`（领养 edit-info）—— 它会顺带把动物挂进领养大厅，
-     给「放归 / 无害化」动物传照片等于意外上架。 */
+  /* 诊疗后照片（B2）：multipart 走诊疗单独立接口。⚠ 不能复用领养
+     edit-info —— 它会顺带把动物挂进领养大厅，给「放归 / 无害化」动物
+     传照片等于意外上架。 */
   async uploadTreatmentPhoto(id, file) {
     const fd = new FormData();
     fd.append('photo', file);
@@ -253,8 +249,9 @@ const TNR_API = {
   async receiveMaterial(id) { return this._post(`/api/business/materials/${id}/receive/`, {}); },
   async adjustStock(data) { return this._post('/api/business/materials/adjustment/', data); },
   /* 物料出库（报废 / 退回 / 调拨 / 盘点）。与 `adjustStock` 是**两件事**：
-     异动 = 纠正账实差异（数量只能正、原因自由文本、不选批号）；
-     出库 = 货物真的离库（原因四选一枚举、可选定向批号、数量可负）。
+     异动 = 纠正账实差异（原因六选一枚举：过期/失效/盘盈/盘亏/退回/其他，
+     数量正负与原因绑定）；
+     出库 = 货物真的离库（原因四选一枚举、可选定向批号、数量可负但不绑原因）。
      `quantity` 为负表示盘盈 / 退回入库（**加**库存），此时不要传 `batch_no`
      之外的任何方向假设 —— 服务端 `stock_delta('outbound', -n)` 返回正 delta。
      `batch_no` 可选：给了就只扣那一批，余量不足会 400 而**不会**改扣别的批。 */
@@ -299,6 +296,10 @@ const TNR_API = {
     const qs = status ? `?status=${encodeURIComponent(status)}` : '';
     return this._get('/api/business/adoptions/applications/' + qs);
   },
+  async getAdoptionApplicationsStrict(status) {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this.getData('/api/business/adoptions/applications/' + qs);
+  },
   /* 撤回自己的领养申请（`pending` → `cancelled`）。
      走 `_post`：返回**完整信封**（非 2xx 不抛错），调用方必须用
      `TNR_UI.assertOk(res)` 把 `success:false` 转成异常，否则失败会被
@@ -307,6 +308,8 @@ const TNR_API = {
     return this._post(`/api/business/adoptions/applications/${id}/cancel/`, {});
   },
   async registerAdoption(data) { return this._post('/api/business/adoptions/register/', data); },
+  async outboundAdoption(id, formData) { return this._postForm(`/api/business/adoptions/${id}/outbound/`, formData); },
+  async outboundAdoptionApplication(id, formData) { return this._postForm(`/api/business/adoptions/applications/${id}/outbound/`, formData); },
   async confirmAdoptionClaim(id, data) { return this._post(`/api/business/adoptions/${id}/confirm-claim/`, data || {}); },
   async reclaimAdoption(id, data) { return this._post(`/api/business/adoptions/${id}/reclaim/`, data || {}); },
   async getCheckins() { return this._get('/api/business/checkins/'); },
@@ -339,7 +342,15 @@ const TNR_API = {
   },
   async getEuthanasia() { return this._get('/api/business/euthanasia/'); },
   async createEuthanasia(data) { return this._post('/api/business/euthanasia/create/', data); },
+  async outboundEuthanasia(id, formData) { return this._postForm(`/api/business/euthanasia/${id}/outbound/`, formData); },
   async receiveBody(id) { return this._post(`/api/business/euthanasia/${id}/body-receive/`, {}); },
+  // === 运回单（医院 → 捕捉点）===
+  async getReturnOrders() { return this._get('/api/business/return-orders/'); },
+  async getReturnOrdersStrict() { return this.getData('/api/business/return-orders/'); },
+  async createReturnOrder(data) { return this._post('/api/business/return-orders/create/', data); },
+  async receiveReturnOrder(id, data) { return this._post(`/api/business/return-orders/${id}/receive/`, data); },
+  async rejectReturnOrder(id, data) { return this._post(`/api/business/return-orders/${id}/reject/`, data); },
+  async withdrawReturnOrder(id) { return this._post(`/api/business/return-orders/${id}/withdraw/`, {}); },
   // === 医院端专用 ===
   async getHospitalPets(status) {
     const url = status ? `/api/business/pets/?status=${status}` : '/api/business/pets/';
@@ -355,10 +366,8 @@ const TNR_API = {
   async getPetArchive() { return this._get('/api/business/pets/archive/'); },
   async getPetLifecycle(petId) { return this._get(`/api/business/pets/${petId}/lifecycle/`); },
   async editAdoptionInfo(petId, data) { return this._post(`/api/business/adoptions/${petId}/edit-info/`, data); },
-  async uploadPetPhoto(petId, photoField, file) {
-    const fd = new FormData();
-    fd.append(photoField, file);
-    return this._postForm(`/api/business/adoptions/${petId}/edit-info/`, fd);
+  async saveAdoptionInfo(petId, formData) {
+    return this._postForm(`/api/business/adoptions/${petId}/edit-info/`, formData);
   },
   async getInstitutions(type) {
     const url = type ? `/api/supervision/institutions/?type=${type}` : '/api/supervision/institutions/';

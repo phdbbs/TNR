@@ -533,34 +533,7 @@ def treatment_done(request, pk):
         return json_fail(str(e))
     treatment.refresh_from_db()
     return json_ok(_treatment_detail_data(treatment),
-                   message='诊疗完成，请选择办结去向'
-                   if not treatment.disposal_advised else '诊疗完成')
-
-
-@csrf_exempt
-@role_required('hospital')
-@login_required
-def treatment_dispose(request, pk):
-    """办结 —— 记录去向并变更动物状态。"""
-    data = parse_json_body(request)
-    treatment = _own_treatment(pk, request.user)
-    if treatment is None:
-        return json_fail('诊疗单不存在或无权访问', status=404)
-
-    disposal = str(body_str(data, 'disposal') or '').strip()
-    if not disposal:
-        return json_fail('请选择办结去向')
-
-    try:
-        with transaction.atomic():
-            # `defer_pet_status`：出院模块已开好单据（如放归单）时，
-            # 动物状态由单据流程接管，办结只记去向、不改状态。
-            st.dispose(treatment, disposal, request.user,
-                       defer_pet_status=bool(data.get('defer_pet_status')))
-    except ValueError as e:
-        return json_fail(str(e))
-    treatment.refresh_from_db()
-    return json_ok(_treatment_detail_data(treatment), message='已办结')
+                   message='诊疗完成，动物进入待出院')
 
 
 @csrf_exempt

@@ -330,8 +330,8 @@ class TreatmentFlowViewTest(BusinessTestBase):
         for item in detail['items']:
             self.ok(self.post_json(f'{URL}{tid}/items/{item["id"]}/execute/', {}))
         self.ok(self.post_json(f'{URL}{tid}/done/', {}))
-        self.ok(self.post_json(f'{URL}{tid}/dispose/',
-                               {'disposal': 'pending_adopt'}))
+        st.dispose(Treatment.objects.get(id=tid), 'pending_adopt',
+                   self.hospital_user_a)
 
         self.expect_fail(self._ster(tid, dict(self.STER_RECORD, surgeon='李医生')),
                          message='已办结')

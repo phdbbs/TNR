@@ -29,7 +29,7 @@ from django.utils import timezone
 
 from business.models import (
     Capture, Transfer, OwnerReturn, Release, Adoption, Euthanasia,
-    Treatment, MaterialTransaction,
+    ReturnOrder, Treatment, MaterialTransaction,
 )
 from business.services import get_printable_object
 from business import services_treatment as st
@@ -43,7 +43,7 @@ from accounts.decorators import role_required
 # `MaterialTransaction.institution` 是「对方机构」，语义不同。
 DOC_INSTITUTION_MODELS = frozenset({
     'Capture', 'Transfer', 'OwnerReturn', 'Release',
-    'Adoption', 'Euthanasia', 'Treatment',
+    'Adoption', 'Euthanasia', 'ReturnOrder', 'Treatment',
 })
 
 
@@ -124,7 +124,9 @@ ADOPTION_FIELDS = [
     ('动物编号', _v('pet_code')), ('领养人', _v('adopter_name')),
     ('联系电话', _v('adopter_phone')), ('身份证号', _v('adopter_id_card')),
     ('住址', _v('adopter_address')), ('领养医院', _v('hospital_name')),
-    ('领养日期', _v('adopted_at', 'date')), ('状态', _choice('status')),
+    ('领养日期', _v('adopted_at', 'date')),
+    ('出库日期', _v('outbound_at', 'date')), ('交接人', _v('handover_name')),
+    ('状态', _choice('status')),
     ('操作员', _v('operator_name')),
 ]
 EUTH_FIELDS = [
@@ -133,9 +135,21 @@ EUTH_FIELDS = [
     ('处置方式', _choice('kind')),
     ('安乐死原因', _v('reason')), ('动物状况', _v('condition')),
     ('安乐死日期', _v('euthanized_at', 'date')),
+    ('出库日期', _v('outbound_at', 'date')), ('交接人', _v('handover_name')),
+    ('接收机构（无害化处理厂）', _v('receiving_org')),
+    ('接收人', _v('receiver_name')),
     ('遗体领取', _v('body_received', 'bool')),
     ('领取日期', _v('body_received_at', 'date')),
     ('领取人', _v('body_received_by_name')), ('操作员', _v('operator_name')),
+]
+RETURN_ORDER_FIELDS = [
+    ('单据号', _v('ledger_no')), ('所属区县', _district_name),
+    ('发出医院', _v('hospital_name')), ('接收捕捉点', _v('shelter_name')),
+    ('动物数量', _v('pet_count')), ('动物编号', _v('pet_codes')),
+    ('状态', _choice('status')), ('接收日期', _v('received_at', 'date')),
+    ('接收人', _v('receiver_name')), ('接收人电话', _v('receiver_phone')),
+    ('驳回原因', _v('reject_reason')), ('备注', _v('note')),
+    ('操作员', _v('operator_name')), ('创建时间', _v('created_at')),
 ]
 TREATMENT_FIELDS = [
     ('单据号', _v('ledger_no')), ('所属区县', _district_name),
@@ -317,11 +331,15 @@ def _pet_chain(pet, exclude_pk=None):
             if getattr(row, 'ledger_no', ''):
                 chain.append((title, row.ledger_no, key, row.pk))
 
-    from business.models import Transfer
+    from business.models import Transfer, ReturnOrder
     for t in Transfer.objects.filter(pet_codes__contains=pet.code).order_by('id'):
         codes = [c.strip() for c in (t.pet_codes or '').split(',') if c.strip()]
         if pet.code in codes and getattr(t, 'ledger_no', ''):
             chain.append(('转运单', t.ledger_no, 'transfer', t.pk))
+    for t in ReturnOrder.objects.filter(pet_codes__contains=pet.code).order_by('id'):
+        codes = [c.strip() for c in (t.pet_codes or '').split(',') if c.strip()]
+        if pet.code in codes and getattr(t, 'ledger_no', ''):
+            chain.append(('运回单', t.ledger_no, 'return_order', t.pk))
     return chain
 
 
@@ -387,6 +405,8 @@ DOC_SPECS = {
                  'related': _get_pet_related},
     'euthanasia': {'model': Euthanasia, 'title': '安乐死单', 'fields': EUTH_FIELDS,
                    'related': _get_pet_related},
+    'return_order': {'model': ReturnOrder, 'title': '运回单',
+                     'fields': RETURN_ORDER_FIELDS, 'related': lambda obj: []},
     # ⚠ `fields_fn` 是**按单据对象动态**算字段清单的钩子（诊疗单要读子表，
     #   物料单要按 `type` 决定是否加「关联下发单号」）。静态 `fields` 留给
     #   字段固定的那几类；两者只能有一个非空，`fields_fn` 优先。

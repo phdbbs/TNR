@@ -1,7 +1,8 @@
 """全生命周期端到端集成测试：捕捉 → 转运 → 签收 → 诊疗（含库存与芯片）→
 自动转待领养 → 领养大厅 → 在线申请与线下登记 → 确认领出 / 放归闭环。"""
 from business.models import (
-    Adoption, AdoptionApplication, AdoptionHallListing, Capture, Message, Pet, Release,
+    Adoption, AdoptionApplication, AdoptionHallListing, Capture, Message, Pet,
+    Release, Treatment,
 )
 from business.services import get_hospital_stock
 from business.tests.base import BusinessTestBase, make_pet
@@ -114,21 +115,23 @@ class FullLifecycleTest(BusinessTestBase):
         for item in detail['items']:
             self.ok(self._post(
                 f'{API}/treatments/{tid}/items/{item["id"]}/execute/', {}))
-        self.ok(self._post(f'{API}/treatments/{tid}/done/', {}))
-        self.ok(self._post(f'{API}/treatments/{tid}/dispose/',
-                           {'disposal': 'pending_adopt'}))
+        self.ok(self._post(f'{API}/treatments/{tid}/done/',
+                           {'disposal_advised': 'pending_adopt'}))
 
         self.assertEqual(get_hospital_stock(self.vaccine, self.hospital_a),
                          stock_before - 1)
         chip.refresh_from_db()
         self.assertEqual(chip.status, 'used')
 
-        # 5. 办结去向「领养」必须**当场**进领养大厅（第四十七轮）。
-        #    旧口径靠 `auto_promote_to_adoptable()` 在 5 天后补这一步；
-        #    新流程 `dispose()` 同时落「诊疗单已完成」与「动物待领养」，
-        #    那个中间态不存在了，定时任务（`test_tasks.py` 覆盖存量行）命中不到。
+        # 5. 第五十六轮：诊疗完成只记「建议去向」，动物仍是待出院（在院）。
+        #    出院管理里把单据办完才算出院；进领养大厅要先维护领养资料。
         pet_a.refresh_from_db()
-        self.assertEqual(pet_a.status, 'pending_adopt')
+        self.assertEqual(pet_a.status, 'in_treatment')
+        treatment = Treatment.objects.get(id=tid)
+        self.assertIsNone(treatment.disposed_at, '诊疗完成不等于出院')
+        self.assertEqual(treatment.disposal_advised, 'pending_adopt')
+        self.ok(self._post(f'{API}/adoptions/{pet_a.id}/edit-info/',
+                           {'is_active': True, 'intro': '亲人待领养'}))
         self.assertTrue(AdoptionHallListing.objects.get(pet=pet_a).is_active)
 
         # 6a. 在线申请支线：领养人申请 → 医院审核通过
@@ -162,7 +165,19 @@ class FullLifecycleTest(BusinessTestBase):
         self.ok(self._post(f'{API}/treatments/{tid}/done/', {}))
 
         # 7. 放归闭环（宠物B 走放归而不是领养）
+        #    第五十八轮：捕捉点只能对「医院已运回、本站已签收」的动物开放归单，
+        #    先由医院开运回单、捕捉点签收，动物进入 pending_release。
+        self._login(self.hospital_user_a)
+        order = self.ok(self._post(f'{API}/return-orders/create/', {
+            'pet_ids': [pet_b.id], 'shelter_id': self.shelter_a.id,
+        }))['data']
         self._login(self.shelter_user_a)
+        self.ok(self._post(f'{API}/return-orders/{order["id"]}/receive/', {
+            'receiver_name': '捕捉点接收人',
+            'signature': 'data:image/png;base64,SIG',
+        }))
+        pet_b.refresh_from_db()
+        self.assertEqual(pet_b.status, 'pending_release')
         body = self.ok(self._post(f'{API}/releases/create/', {'pet_id': pet_b.id}))
         release_id = body['data']['id']
         self.ok(self._post(f'{API}/releases/{release_id}/confirm/', {

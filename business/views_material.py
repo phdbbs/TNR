@@ -28,6 +28,8 @@ from business.services import (
     plan_fefo_deduction, NEAR_EXPIRY_DAYS,
     # 出库（报废 / 退回 / 调拨 / 盘点）
     validate_outbound_reason,
+    # 库存异动（第五十轮：原因枚举 + 数量可负）
+    validate_adjustment_reason, ADJUSTMENT_REASON_LABELS,
 )
 from business.services_chip import (
     chip_batch_create, chip_batch_dispatch, chip_batch_precheck,
@@ -655,14 +657,21 @@ def material_receive(request, pk):
 @role_required('shelter', 'hospital')
 @login_required
 def stock_adjustment(request):
-    """库存异动（过期/损坏/丢失）
+    """库存异动（过期 / 失效 / 盘盈 / 盘亏 / 退回 / 其他）
 
-    请求体示例:
-    {
-        "material_id": 1,
-        "quantity": 5,
-        "reason": "过期报废"
-    }
+    请求体示例::
+
+        {
+            "material_id": 1,
+            "quantity": 5,          # 正 = 扣减库存；负 = 增加库存
+            "reason": "expired",    # 必填：expired/invalid/gain/loss/return/other
+            "batch_no": "B2",       # 可选，定向到某一批
+            "note": "外包装破损"     # 可选补充说明
+        }
+
+    **数量方向与原因绑定**（第五十轮）：过期 / 失效 / 盘亏只能填正数（减少），
+    盘盈 / 退回只能填负数（增加），「其他」两者皆可。判据在
+    `services_stock.validate_adjustment_reason()`，前端只负责提示。
 
     **芯片**另需「首号」（与入库 / 下发同一口径）—— 数量就是 `quantity`，
     这批号码必须**属于本机构且为可用状态**，作废后状态变 `void`
@@ -671,9 +680,12 @@ def stock_adjustment(request):
     {
         "material_id": 4,
         "quantity": 2,
-        "reason": "芯片损坏报废",
+        "reason": "invalid",
         "chip_start": "042060107000177"
     }
+
+    ⚠ 芯片异动**只支持正数（作废）**：号码是真源，负数「盘盈」不知道该把
+    哪些号码恢复成可用，硬加库存会让「可用芯片数」与库存对不上。
 
     ⚠⚠ **`shelter` 是本轮（第三十七轮）补上的，不是笔误**。
     在它之前，捕捉点**没有任何库存异动权限** —— 而 `shelter_stock` 的过期物料
@@ -708,16 +720,21 @@ def stock_adjustment(request):
     if material is None:
         return json_fail('物料不存在或无权访问', status=404)
 
-    # 与 `purchase_create` / `dispatch_create` 统一走共用解析器。
-    # 原先这里虽然包了 `try/except (TypeError, ValueError)`，但
-    # `int('9' * 24)` **不报错** —— 超大数要一路走到 `adjust_stock` 的库存
-    # 比较才被挡住，判据靠下游兜底。同一个「数量」参数，三个接口三种写法
-    # 就是孪生漂移，统一到共用解析器上。
-    quantity, err = parse_int_param(data.get('quantity'), '异动数量', minimum=0)
+    # 第五十轮起数量**可负**（负数 = 盘盈 / 退回入库，增加库存），
+    # 所以不能走只认非负的 `parse_int_param`。
+    quantity, err = parse_signed_int_param(data.get('quantity'), '异动数量')
     if err:
         return json_fail(err)
-    if not quantity:
-        return json_fail('异动数量必须大于0')
+    if quantity is None:
+        return json_fail('缺少异动数量')
+    if quantity == 0:
+        return json_fail('异动数量不能为0')
+
+    # 异动原因：六选一，**必填**；方向与原因绑定（见 services_stock）。
+    reason, err = validate_adjustment_reason(data.get('reason'), quantity)
+    if err:
+        return json_fail(err)
+    reason_label = ADJUSTMENT_REASON_LABELS.get(reason, reason)
 
     # 库存归属机构（第四十五轮）：医院 = 本院；捕捉点 = 本捕捉点。
     institution = getattr(user, 'institution', None)
@@ -728,20 +745,33 @@ def stock_adjustment(request):
             return json_fail('缺少医院机构信息')
         # 医院库存由流水累加得出，adjust_stock 对医院侧不做余额校验，
         # 这里必须自己把关，否则异动可以把库存扣成负数。
-        current = get_hospital_stock(material, hospital)
-        if current < quantity:
-            return json_fail(f'医院库存不足（当前 {current}，需 {quantity}）')
+        # 只在**正数**（真的扣减）时判：负数（盘盈 / 退回）是入库，不该被拦。
+        if quantity > 0:
+            current = get_hospital_stock(material, hospital)
+            if current < quantity:
+                return json_fail(f'医院库存不足（当前 {current}，需 {quantity}）')
 
     # 芯片异动：号码必须在**扣库存的同一步**里作废。
     #
     # ⚠ 第四十六轮补上的洞：库存异动会让 `MaterialStock` 减掉 N，而芯片行
     #   原来**不动** —— 「可用芯片数」于是比库存多出 N，且**没有任何报错**。
     #   芯片「按号码单独管理」的前提就是：每一次数量变化都有对应的号码变化。
-    #   兼容期读入旧参数名 `chip_range_start`（阶段 8 之后可去掉）。
+    # ⚠ 负数（盘盈）不知道要把哪些号码恢复成可用，硬加库存会让上面的等式
+    #   反向破掉 —— 芯片盘盈只能走采购 / 入库（有明确号段）。
+    if material.category == 'chip' and quantity < 0:
+        return json_fail('芯片异动只支持正数（按号码作废）；盘盈请通过采购 / 入库办理')
+
+    # 兼容期读入旧参数名 `chip_range_start`（阶段 8 之后可去掉）。
     chip_first_number = ''
+    batch_no = ''
     if material.category == 'chip':
         chip_first_number = (body_str(data, 'chip_start')
                              or body_str(data, 'chip_range_start'))
+    else:
+        # 异动也可以定向到某一批（过期报废最常见）：不选仍按 FEFO，
+        # 选了就只扣该批，余量不足由 `plan_fefo_deduction` 直接报错。
+        # 负数（盘盈 / 退回）时也认这个批号：记回用户申报的那一批。
+        batch_no = (body_str(data, 'batch_no') or '').strip()
 
     txn = None
     # 整块包事务 + try：`chip_batch_void()` 在号码不属于本机构 / 状态不对时
@@ -762,9 +792,12 @@ def stock_adjustment(request):
                 operator=user,
                 operator_name=user.get_full_name() or user.username,
                 from_to=hospital.name if hospital else '捕捉点',
-                note=data.get('reason', '库存异动'),
+                reason=reason,
+                # 备注留人话：历史行与打印都读 `note`，原因枚举另存 `reason`。
+                note=body_str(data, 'note') or reason_label,
                 ledger_no=generate_doc_no('ADJ'),
                 district_id=material.district_id,
+                batch_no=batch_no,
             )
             txn = txns[0]
             if material.category == 'chip':
@@ -772,10 +805,12 @@ def stock_adjustment(request):
     except ValueError as e:
         return json_fail(str(e))
 
+    direction = '扣减' if quantity > 0 else '增加'
     chip_note = (f'，芯片 {quantity} 颗（{chip_first_number} 起）已作废'
                  if material.category == 'chip' else '')
     return json_ok(serialize_instance(txn),
-                   message=f'异动登记成功，扣减 {quantity}{chip_note}')
+                   message=f'异动登记成功（{reason_label}），{direction} '
+                           f'{abs(quantity)}{chip_note}')
 
 
 @csrf_exempt
@@ -796,11 +831,11 @@ def material_outbound(request):
 
     **为什么不能复用 `stock_adjustment`**
     -----------------------------------
-    库存异动是「纠正账实差异」：数量只能正、原因是一句自由文本、
-    不选批号。出库是「货物真的离开仓库」：磊哥要求选批号、原因必须
-    是报废/退回/调拨/盘点四个枚举之一、而且**数量可以为负**
-    （负 = 实际入库或盘盈）。把三件事塞进异动接口 = 同一个接口四种语义，
-    改一处牵全身；单独一类流水（`outbound`）才能让台账按原因汇总。
+    库存异动是「纠正账实差异」：原因走异动白名单（过期 / 失效 / 盘盈 /
+    盘亏 / 退回 / 其他），数量方向与原因绑定。出库是「货物真的离开仓库」：
+    原因走出库白名单（报废 / 退回 / 调拨 / 盘点），不绑定方向
+    （负数量 = 盘盈 / 退回入库）。两套原因各自汇总，混成一张表的话
+    「本月报废多少 / 本月盘亏多少」会互相污染。
 
     **负数量的语义**：`-3` = 盘盈 / 退回，**加**库存。此时：
     - 不判余额（`adjust_stock` 里 `quantity > 0` 才判，见那里的注释）；
@@ -1183,8 +1218,8 @@ def material_batch_preview(request, pk):
     正是过期物料的出口）—— 不告诉服务端「这是哪类操作」，预览给出的批次
     顺序与实际落库就会错开，预检就成了新的孪生漂移源。
 
-    `batch_no` 可选：给了就只预览**那一个批次**（出库定向）。此时
-    `plan` 最多一项，且该批余量不足时 `enough=false` —— 与落库判据
+    `batch_no` 可选：给了就只预览**那一个批次**（出库 / 异动的定向扣减）。
+    此时 `plan` 最多一项，且该批余量不足时 `enough=false` —— 与落库判据
     `plan_fefo_deduction(batch_no=...)` 是同一份实现。
 
     判据与落库共用 `plan_fefo_deduction`（同一份实现）—— 预览说「这些批次
@@ -1208,8 +1243,8 @@ def material_batch_preview(request, pk):
     txn_type = body_str(data, 'txn_type') or 'consume'
     if txn_type not in ('consume', 'dispatch', 'adjustment', 'outbound'):
         return json_fail('txn_type 仅支持 consume/dispatch/adjustment/outbound')
-    # 定向批号：只对**出库**有意义（消耗/下发仍走 FEFO，选批号会与既有
-    # 「近效期先出」的判据打架）。给了但填错批号由计划阶段报错。
+    # 定向批号：出库与异动都可指定（过期报废按批处理）；消耗/下发仍走
+    # FEFO，选批号会与既有「近效期先出」的判据打架。给了但填错批号由计划阶段报错。
     batch_no = (body_str(data, 'batch_no') or '').strip()
 
     # 存量物料可能还没有批次行（shelter_stock 直写字段的形态）——
@@ -1233,10 +1268,11 @@ def material_batch_preview(request, pk):
 
     today = timezone.localdate()
     available, expired_qty = batch_expiry_state(material, inst, today)
+    skip_expired = (txn_type == 'consume')
     try:
         plan = plan_fefo_deduction(
             material, inst, quantity,
-            skip_expired=(txn_type == 'consume'), today=today,
+            skip_expired=skip_expired, today=today,
             batch_no=batch_no or None)
         message = '、'.join(
             f'批次「{b.batch_no}」扣 {take}'
@@ -1253,7 +1289,11 @@ def material_batch_preview(request, pk):
             'take': take,
         } for b, take in plan],
         'available': available,
-        'expired_skipped': expired_qty,
+        # 只有 consume 会真的跳过过期批次；下发 / 异动 / 出库的过期批
+        # 本身就是可扣对象，定向批号时更谈不上「跳过」—— 这里若照抄
+        # `expired_qty`，界面会显示「另有 N 已过期批次被跳过」，
+        # 而预计扣减里明明就写着那个过期批，自相矛盾。
+        'expired_skipped': expired_qty if (skip_expired and not batch_no) else 0,
         # plan 非空 = FEFO 计划成立（服务端同一份判据跑过、没抛错）；
         # 抛错时 plan 为空 + message 带原因。不要用「文案是否以某字开头」
         # 这类脆弱判断 —— 文案一改前端就跟着错。

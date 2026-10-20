@@ -7,7 +7,7 @@ from django.urls import path
 from . import (
     views_capture, views_transfer, views_treatment, views_material,
     views_release, views_adoption, views_checkin, views_euthanasia,
-    views_portal, views_chip,
+    views_portal, views_chip, views_return,
 )
 # ⚠ 单据打印视图（`views_print`）**不在这里注册** —— 它返回整页 HTML，
 #   而本文件下所有路由都在 `/api/business/` 前缀里（契约 = JSON 信封）。
@@ -70,7 +70,6 @@ urlpatterns = [
     path('treatments/<int:pk>/items/<int:item_id>/undo/',
          views_treatment.treatment_item_undo, name='treatment_item_undo'),
     path('treatments/<int:pk>/done/', views_treatment.treatment_done, name='treatment_done'),
-    path('treatments/<int:pk>/dispose/', views_treatment.treatment_dispose, name='treatment_dispose'),
     # 诊疗后照片（B2）：第三步办结环节的当场留证，独立接口见视图注释。
     path('treatments/<int:pk>/photo/', views_treatment.treatment_photo, name='treatment_photo'),
     path('treatments/<int:pk>/', views_treatment.treatment_detail, name='treatment_detail'),
@@ -121,6 +120,17 @@ urlpatterns = [
     path('releases/<int:pk>/transfer/', views_release.release_transfer, name='release_transfer'),
 
     # ============================================
+    # 运回单（第五十四轮：医院 → 捕捉点，放归的反向前半段）
+    # ============================================
+    path('return-orders/', views_return.return_order_list, name='return_order_list'),
+    path('return-orders/shelters/', views_return.return_order_shelter_options,
+         name='return_order_shelter_options'),
+    path('return-orders/create/', views_return.return_order_create, name='return_order_create'),
+    path('return-orders/<int:pk>/receive/', views_return.return_order_receive, name='return_order_receive'),
+    path('return-orders/<int:pk>/reject/', views_return.return_order_reject, name='return_order_reject'),
+    path('return-orders/<int:pk>/withdraw/', views_return.return_order_withdraw, name='return_order_withdraw'),
+
+    # ============================================
     # Task 9: 领养业务
     # ============================================
     path('adoptions/', views_adoption.adoption_list, name='adoption_list'),
@@ -128,6 +138,7 @@ urlpatterns = [
     path('adoptions/hall/<int:pk>/', views_adoption.adoption_hall_detail, name='adoption_hall_detail'),
     path('adoptions/<int:pk>/edit-info/', views_adoption.adoption_info_edit, name='adoption_info_edit'),
     path('adoptions/register/', views_adoption.adoption_register, name='adoption_register'),
+    path('adoptions/<int:pk>/outbound/', views_adoption.adoption_outbound, name='adoption_outbound'),
     path('adoptions/<int:pk>/confirm-claim/', views_adoption.adoption_confirm_claim, name='adoption_confirm_claim'),
     path('adoptions/<int:pk>/reclaim/', views_adoption.adoption_reclaim, name='adoption_reclaim'),
     # 在线领养申请
@@ -135,6 +146,7 @@ urlpatterns = [
     path('adoptions/my-applications/', views_adoption.my_applications, name='my_applications'),
     path('adoptions/applications/', views_adoption.adoption_application_list, name='adoption_application_list'),
     path('adoptions/applications/<int:pk>/review/', views_adoption.adoption_application_review, name='adoption_application_review'),
+    path('adoptions/applications/<int:pk>/outbound/', views_adoption.adoption_application_outbound, name='adoption_application_outbound'),
     # 领养人撤回自己的申请（`pending` → `cancelled`）。第四十六轮新增：
     # `AdoptionApplication.status` 里的 `cancelled` 此前没有任何产生端。
     path('adoptions/applications/<int:pk>/cancel/', views_adoption.adoption_application_cancel, name='adoption_application_cancel'),
@@ -156,6 +168,7 @@ urlpatterns = [
     # ============================================
     path('euthanasia/', views_euthanasia.euthanasia_list, name='euthanasia_list'),
     path('euthanasia/create/', views_euthanasia.euthanasia_create, name='euthanasia_create'),
+    path('euthanasia/<int:pk>/outbound/', views_euthanasia.euthanasia_outbound, name='euthanasia_outbound'),
     path('euthanasia/<int:pk>/body-receive/', views_euthanasia.body_receive, name='body_receive'),
 
     # ============================================

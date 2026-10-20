@@ -4,12 +4,14 @@ Task 8: 放归闭环
 - 匹配原捕捉小区
 """
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
 from business.models import Release
+from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
@@ -17,7 +19,8 @@ from business.services import (
     get_active_pet, get_hospital_scoped_pet, get_scoped_object,
     get_printable_object,
     hospital_pet_write_error, pet_has_active_adoption,
-    pet_has_pending_release,
+    pet_has_approved_application,
+    pet_has_pending_release, pet_has_pending_return,
     resolve_community,
 )
 
@@ -88,12 +91,24 @@ def release_create(request):
     if err:
         return json_fail(err)
 
-    if pet.status not in ('in_treatment', 'pending_adopt'):
+    if user.role == 'shelter':
+        # 捕捉点的放归备选 = 医院完成诊疗 + 运回单已被本站签收
+        # （签收时动物进入 `pending_release`）。诊疗中 / 待领养的动物
+        # 还没回到捕捉点，不能由捕捉点直接开放归单。
+        if pet.status != 'pending_release':
+            return json_fail(
+                f'宠物当前状态({pet.get_status_display()})不可放归，'
+                '放归备选须为医院已运回、且运回单经本站签收的动物')
+    elif pet.status not in ('in_treatment', 'pending_adopt', 'pending_release'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可放归')
 
     # 互斥校验：不能与未完结的领养流程同时占用同一只动物
     if pet_has_active_adoption(pet):
         return json_fail('该宠物已有未完结的领养记录，请先撤销领养后再办理放归')
+    if pet_has_approved_application(pet):
+        return json_fail('该宠物已有已批准的领养申请（待出库），请先处理后再办理放归')
+    if pet_has_pending_return(pet):
+        return json_fail('该宠物已在未办结的运回单上，请先由捕捉点确认接收后再放归')
 
     # 防止重复创建待放归记录（口径见 `Release.OPEN_STATUSES`：
     # 已登记转运、等签字的单同样未办结，不能再开第二张）
@@ -217,18 +232,21 @@ def release_confirm(request, pk):
     if release.pet_id and release.pet.is_deleted:
         return json_fail('该宠物档案已作废，无法确认放归')
 
-    release.receiver_name = body_str(data, 'receiver_name', release.receiver_name)
-    release.receiver_phone = body_str(data, 'receiver_phone', release.receiver_phone)
-    release.signature = body_str(data, 'signature')
-    release.status = 'released'
-    release.released_at = timezone.localdate()
-    release.save(update_fields=[
-        'receiver_name', 'receiver_phone', 'signature', 'status', 'released_at',
-    ])
+    with transaction.atomic():
+        release.receiver_name = body_str(data, 'receiver_name', release.receiver_name)
+        release.receiver_phone = body_str(data, 'receiver_phone', release.receiver_phone)
+        release.signature = body_str(data, 'signature')
+        release.status = 'released'
+        release.released_at = timezone.localdate()
+        release.save(update_fields=[
+            'receiver_name', 'receiver_phone', 'signature', 'status', 'released_at',
+        ])
 
-    # 更新宠物状态
-    pet = release.pet
-    pet.status = 'released'
-    pet.save(update_fields=['status'])
+        # 更新宠物状态
+        pet = release.pet
+        pet.status = 'released'
+        pet.save(update_fields=['status'])
+        # 小区签字确认放归 = 出院终态；已经由运回单签收办结过的单子这里不再命中。
+        dispose_for_discharge(pet, 'released', user)
 
     return json_ok(serialize_instance(release), message='放归确认成功')

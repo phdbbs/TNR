@@ -94,6 +94,37 @@ def validate_outbound_reason(reason):
     return None, '出库原因必填，且只能是报废 / 退回 / 调拨 / 盘点之一'
 
 
+# 异动原因白名单（第五十轮）：与 `MaterialTransaction.ADJUSTMENT_REASON_CHOICES` 同源。
+ADJUSTMENT_REASON_CHOICES = MaterialTransaction.ADJUSTMENT_REASON_CHOICES
+ADJUSTMENT_REASONS = tuple(r for r, _ in ADJUSTMENT_REASON_CHOICES)
+ADJUSTMENT_REASON_LABELS = dict(ADJUSTMENT_REASON_CHOICES)
+
+# 异动数量方向与原因的绑定：
+#   - 过期 / 失效 / 盘亏 = 库存**减少**（数量必须为正）；
+#   - 盘盈 / 退回 = 库存**增加**（数量必须为负）；
+#   - 其他 = 两者皆可。
+# 不绑的话，「盘盈 +5」会把库存扣掉 5 —— 台账上的原因与方向互相矛盾，
+# 而且不会有任何报错。
+ADJUSTMENT_DECREASE_REASONS = ('expired', 'invalid', 'loss')
+ADJUSTMENT_INCREASE_REASONS = ('gain', 'return')
+
+
+def validate_adjustment_reason(reason, quantity):
+    """异动原因 + 数量方向的联合判据。
+
+    返回 `(None, 消息)` 非法 / `(reason, None)` 合法。
+    `quantity` 已由调用方保证非 0（0 既不改变库存也不改变方向）。
+    """
+    if reason not in ADJUSTMENT_REASONS:
+        return None, '异动原因必填，且只能是过期 / 失效 / 盘盈 / 盘亏 / 退回 / 其他之一'
+    label = ADJUSTMENT_REASON_LABELS[reason]
+    if reason in ADJUSTMENT_DECREASE_REASONS and quantity < 0:
+        return None, f'「{label}」表示减少库存，数量必须为正数'
+    if reason in ADJUSTMENT_INCREASE_REASONS and quantity > 0:
+        return None, f'「{label}」表示增加库存，数量必须为负数'
+    return reason, None
+
+
 def stock_delta(txn_type, quantity):
     """这笔流水对「库存归属机构」那一行的影响（带符号）。"""
     if txn_type in INBOUND_TXN_TYPES:
@@ -417,9 +448,9 @@ def plan_fefo_deduction(material, institution, quantity, skip_expired=False,
       实际用在动物身上的药对不上，出了不良反应查不到源头；
     - dispatch / adjustment / outbound **不**跳过：过期物料的正规出口就是
       「下发退回供应商 / 异动报废 / 出库报废」，再拦就把死库存焊死在账上；
-    - `batch_no` 给定（出库定向）时**只扣这一个批次**，余量不足直接报错 ——
-      **绝不静默改扣别的批次**。用户在下拉里选的是「这一批」，扣了另一批
-      等于台账批号与实际出库的货对不上，而这个错不会报任何警；
+    - `batch_no` 给定（出库 / 异动定向）时**只扣这一个批次**，余量不足直接
+      报错 —— **绝不静默改扣别的批次**。用户在下拉里选的是「这一批」，扣了
+      另一批等于台账批号与实际出库的货对不上，而这个错不会报任何警；
     - 定向批号也不跳过过期：报废的入口之一正是过期批次。
 
     :raises ValueError: 可用量不足。文案区分三种成因（定向批次余量不足 /
@@ -575,8 +606,8 @@ def adjust_stock(material, hospital, quantity, txn_type, institution=None, **ext
     - 入库（purchase/receive）：按批号 get_or_create 批次行并累加，效期随之
       更新；效期从 extra['expiry_date'] 传入（采购 = 表单，签收 = 发起方批次）；
     - 出库（dispatch/consume/adjustment/outbound）：FEFO 扣减，consume 跳过已过期批次；
-    - **定向批号**：`extra['batch_no']` 给定（outbound）时只扣那一行，
-      余量不足直接报错，不改扣别的批次；
+    - **定向批号**：`extra['batch_no']` 给定（outbound / adjustment）时只扣
+      那一行，余量不足直接报错，不改扣别的批次；
     - 负数 outbound（退回 / 盘盈）：有明确批号时记回该批号，
       否则退 FEFO 最前排；
     - 负数 adjustment（撤销退回）：退回 FEFO 最前排批次。

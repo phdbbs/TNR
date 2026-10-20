@@ -6,18 +6,21 @@ Task 11: 安乐死处置
 from datetime import datetime
 
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
 from business.models import Euthanasia
+from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
     generate_doc_no, get_district_filtered_queryset,
     get_active_pet, get_hospital_scoped_pet, get_scoped_object,
-    hospital_pet_write_error,
+    hospital_pet_write_error, pet_has_approved_application,
+    pet_has_pending_return, validate_image_upload,
 )
 
 
@@ -90,10 +93,19 @@ def euthanasia_create(request):
     if err:
         return json_fail(err)
 
+    # 先于状态校验：运回单上的动物状态已是 `return_pending`，
+    # 先说「状态不可登记」会让操作员漏掉「去撤回运回单」这个动作。
+    if pet_has_pending_return(pet):
+        return json_fail('该宠物已在运回捕捉点的单据上，请先撤回或等待捕捉点处理')
+
     # 仅诊疗中/待领养的在院宠物可登记，防止误操作已领养、已放归等终态宠物
     if pet.status not in ('in_treatment', 'pending_adopt'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可{kind_label}，'
                          '仅诊疗中/待领养宠物可登记')
+    # 已批准的线上申请不写 Pet.status，状态校验拦不住这类预留
+    if pet_has_approved_application(pet):
+        return json_fail('该宠物已有已批准的领养申请（待出库），'
+                         f'请先处理后再登记{kind_label}')
 
     reason = body_str(data, 'reason').strip()
     if not reason:
@@ -145,6 +157,99 @@ def euthanasia_create(request):
     pet.save(update_fields=['status'])
 
     return json_ok(serialize_instance(record), message=f'{kind_label}登记成功')
+
+
+@csrf_exempt
+@role_required('hospital')
+@login_required
+def euthanasia_outbound(request, pk):
+    """死亡出库单：医院把遗体交给无害化处理厂（第五十四轮）。
+
+    登记死亡 / 安乐死只是临床处置；遗体离院还需要一张出库凭证，
+    记录交接人、接收机构（无害化处理厂）、接收人、接收单位、日期、签字，
+    照片为非必需。此前只有捕捉点的「领取遗体」，医院侧没有出口，
+    纸面上无法证明遗体由谁、何时、交给哪家单位。
+    """
+    data = parse_json_body(request)
+    if request.POST:
+        # multipart/form-data（含可选照片）走这里；JSON 与表单字段同名。
+        data = request.POST.dict()
+
+    user = request.user
+    qs = Euthanasia.objects.filter(pk=pk)
+    if user.institution_id:
+        qs = qs.filter(
+            Q(institution_id=user.institution_id)
+            | Q(institution_id__isnull=True,
+                pet__hospital_id=user.institution_id))
+    else:
+        qs = qs.none()
+    record = qs.first()
+    if record is None:
+        return json_fail('死亡记录不存在或无权访问', status=404)
+
+    if record.outbound_at:
+        return json_fail('该记录已完成死亡出库，请勿重复操作')
+
+    if record.pet_id and record.pet.is_deleted:
+        return json_fail('该宠物档案已作废，无法办理出库')
+
+    handover_name = body_str(data, 'handover_name').strip()
+    receiving_org = body_str(data, 'receiving_org').strip()
+    receiver_name = body_str(data, 'receiver_name').strip()
+    signature = body_str(data, 'signature')
+    reason = body_str(data, 'reason').strip() or (record.reason or '').strip()
+
+    if not handover_name:
+        return json_fail('请填写交接人')
+    if not receiving_org:
+        return json_fail('请填写接收机构（无害化处理厂）')
+    if not receiver_name:
+        return json_fail('请填写接收人')
+    if not signature:
+        return json_fail('请填写接收人签字')
+    if not reason:
+        return json_fail('请填写死亡 / 安乐死原因')
+
+    date_str = data.get('outbound_at')
+    if not date_str:
+        return json_fail('请选择出库日期')
+    try:
+        outbound_at = datetime.strptime(str(date_str)[:10], '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        return json_fail(f'出库日期「{date_str}」格式不正确，应为 YYYY-MM-DD')
+
+    photo_err = validate_image_upload(request.FILES.get('photo'), '出库照片')
+    if photo_err:
+        return json_fail(photo_err)
+
+    with transaction.atomic():
+        record.reason = reason
+        record.outbound_at = outbound_at
+        record.handover_name = handover_name
+        record.receiving_org = receiving_org
+        record.receiver_name = receiver_name
+        record.signature = signature
+        # 出库即「遗体已交接到接收单位」，旧字段同步落值，监管台账不必再分叉。
+        record.body_received = True
+        record.body_received_at = outbound_at
+        record.body_received_by = user
+        record.body_received_by_name = receiver_name
+        if request.FILES.get('photo'):
+            record.photo = request.FILES['photo']
+        record.save(update_fields=[
+            'reason', 'outbound_at', 'handover_name', 'receiving_org',
+            'receiver_name', 'signature', 'body_received',
+            'body_received_at', 'body_received_by', 'body_received_by_name',
+            'photo',
+        ])
+        # 遗体交出 = 出院终态，诊疗单此刻才算办结（诊疗页只记了建议去向）。
+        dispose_for_discharge(
+            record.pet,
+            'euthanized' if record.kind == 'euthanasia' else 'dead',
+            user)
+
+    return json_ok(serialize_instance(record), message='死亡出库登记成功')
 
 
 @csrf_exempt

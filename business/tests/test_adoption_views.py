@@ -1,7 +1,13 @@
 """领养业务视图测试：公开大厅、线下登记、在线申请、审核、信息编辑。"""
+import io
+import json
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from PIL import Image
+
 from accounts.models import User
 from business.models import (
-    Adoption, AdoptionApplication, AdoptionHallListing, Message,
+    Adoption, AdoptionApplication, AdoptionHallListing, AdoptionPhoto, Message,
     Blacklist, Release,
 )
 from business.tests.base import (
@@ -11,6 +17,13 @@ from business.tests.base import (
 from business.services import pet_has_active_adoption
 
 HALL_URL = '/api/business/adoptions/hall/'
+HALL_LISTINGS_URL = '/api/business/hall-listings/'
+
+
+def png_upload(name='photo.png'):
+    buf = io.BytesIO()
+    Image.new('RGB', (8, 8), (200, 120, 80)).save(buf, 'PNG')
+    return SimpleUploadedFile(name, buf.getvalue(), content_type='image/png')
 
 
 class AdoptionHallPublicTest(BusinessTestBase):
@@ -509,6 +522,132 @@ class AdoptionInfoEditTest(BusinessTestBase):
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json('/api/business/adoptions/999999/edit-info/', {}),
                   status=404, message='宠物不存在')
+
+    def test_edit_cross_district_pet_staying_here(self):
+        """跨区县送医的动物：列表看得见，资料维护也必须能在本院办。"""
+        pet = make_pet(district=self.district_b, shelter=self.shelter_b,
+                       hospital=self.hospital_a, status='pending_adopt')
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(
+            f'/api/business/adoptions/{pet.id}/edit-info/',
+            {'intro': '跨区县送医', 'is_active': True}))
+        listing = AdoptionHallListing.objects.get(pet=pet)
+        self.assertEqual(listing.intro, '跨区县送医')
+        self.assertTrue(listing.is_active)
+
+
+class AdoptionHallPhotoPolicyTest(BusinessTestBase):
+    """大厅照片：系统照片自动带入、医院控制显隐、只补拍说明类照片。"""
+
+    def _listing(self, code='TNRHALLPHOT01', hidden=None):
+        pet = make_pet(code=code, district=self.district_a,
+                       hospital=self.hospital_a, status='pending_adopt')
+        pet.photo_capture = png_upload('capture.png')
+        pet.photo_before = png_upload('before.png')
+        pet.photo_after = png_upload('after.png')
+        pet.photo_treatment = png_upload('treatment.png')
+        pet.save()
+        return pet, AdoptionHallListing.objects.create(
+            pet=pet, hospital=self.hospital_a,
+            hospital_name=self.hospital_a.name, is_active=True,
+            hidden_photos=hidden or [])
+
+    def test_system_photos_come_from_pet_archive(self):
+        """捕捉 / 诊疗环节已有的照片自动出现在大厅，不需要医院再传一遍。"""
+        pet, listing = self._listing()
+        data = self.client.get(f'{HALL_URL}{listing.id}/').json()['data']
+        self.assertEqual(
+            [p['field'] for p in data['photos']],
+            ['photo_capture', 'photo_before', 'photo_after',
+             'photo_treatment'])
+        self.assertEqual(data['photos'][0]['label'], '捕捉照片')
+        self.assertEqual(data['photos'][0]['url'], pet.photo_capture.url)
+        self.assertEqual(data['extra_photos'], [])
+
+    def test_hidden_system_photo_disappears_from_public_payload(self):
+        """隐藏不只是从清单里删掉：`pet` 上的同名字段也必须抹空。"""
+        _, listing = self._listing(hidden=['photo_before'])
+        data = self.client.get(f'{HALL_URL}{listing.id}/').json()['data']
+        self.assertEqual([p['field'] for p in data['photos']],
+                         ['photo_capture', 'photo_after', 'photo_treatment'])
+        self.assertEqual(data['pet']['photo_before'], '')
+        self.assertEqual(data['pet']['photoBefore'], '')
+        self.assertNotIn('hidden_photos', data)
+        self.assertNotIn('hiddenPhotos', data)
+
+    def test_hospital_view_keeps_hidden_photos_and_flags(self):
+        """本院维护界面要看得到全部系统照片，并带 visible 标记回显开关。"""
+        _, listing = self._listing(hidden=['photo_before'])
+        self.login_as(self.hospital_user_a)
+        rows = self.ok(self.get_json(HALL_LISTINGS_URL))['data']
+        row = next(r for r in rows if r['id'] == listing.id)
+        self.assertEqual(row['hidden_photos'], ['photo_before'])
+        flags = {p['field']: p['visible'] for p in row['photos']}
+        self.assertFalse(flags['photo_before'])
+        self.assertTrue(flags['photo_capture'])
+        self.assertTrue(row['pet']['photo_before'])
+
+    def test_extra_photo_upload_and_delete(self):
+        _, listing = self._listing()
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.client.post(
+            f'/api/business/adoptions/{listing.pet_id}/edit-info/',
+            {'extra_photos': [png_upload('a.png'), png_upload('b.png')]}))
+        self.assertEqual(len(body['data']['extra_photos']), 2)
+        self.assertEqual(AdoptionPhoto.objects.filter(listing=listing).count(), 2)
+
+        public = self.client.get(f'{HALL_URL}{listing.id}/').json()['data']
+        self.assertEqual([p['field'] for p in public['photos']].count('extra'), 2)
+
+        first = AdoptionPhoto.objects.filter(listing=listing).first()
+        self.ok(self.client.post(
+            f'/api/business/adoptions/{listing.pet_id}/edit-info/',
+            {'delete_photo_ids': json.dumps([first.id])}))
+        self.assertFalse(AdoptionPhoto.objects.filter(id=first.id).exists())
+        self.assertEqual(AdoptionPhoto.objects.filter(listing=listing).count(), 1)
+
+    def test_delete_cannot_touch_other_listings_photos(self):
+        _, listing = self._listing(code='TNRHALLPHOT02')
+        other_pet = make_pet(code='TNRHALLPHOT03', district=self.district_a,
+                             hospital=self.hospital_a, status='pending_adopt')
+        other = AdoptionHallListing.objects.create(
+            pet=other_pet, hospital=self.hospital_a,
+            hospital_name=self.hospital_a.name)
+        photo = AdoptionPhoto.objects.create(listing=other, image=png_upload())
+        self.login_as(self.hospital_user_a)
+        self.ok(self.client.post(
+            f'/api/business/adoptions/{listing.pet_id}/edit-info/',
+            {'delete_photo_ids': json.dumps([photo.id])}))
+        self.assertTrue(AdoptionPhoto.objects.filter(id=photo.id).exists())
+
+    def test_rejects_unknown_hidden_photo(self):
+        _, listing = self._listing()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(
+            f'/api/business/adoptions/{listing.pet_id}/edit-info/',
+            {'hidden_photos': ['photo_evil']}),
+            message='照片显示设置包含未知照片')
+        listing.refresh_from_db()
+        self.assertEqual(listing.hidden_photos, [])
+
+    def test_rejects_more_than_six_extra_photos(self):
+        _, listing = self._listing()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.client.post(
+            f'/api/business/adoptions/{listing.pet_id}/edit-info/',
+            {'extra_photos': [png_upload(f'{i}.png') for i in range(7)]}),
+            message='最多上传 6 张')
+        self.assertEqual(AdoptionPhoto.objects.filter(listing=listing).count(), 0)
+
+    def test_multipart_is_active_false_actually_unpublishes(self):
+        """form-data 里 `is_active=false` 是字符串，`bool('false')` 为真。"""
+        _, listing = self._listing()
+        self.login_as(self.hospital_user_a)
+        self.ok(self.client.post(
+            f'/api/business/adoptions/{listing.pet_id}/edit-info/',
+            {'is_active': 'false'}))
+        listing.refresh_from_db()
+        self.assertFalse(listing.is_active)
 
 
 class AdoptionListTest(BusinessTestBase):

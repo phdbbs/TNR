@@ -9,12 +9,12 @@ URL = '/api/business/releases/'
 
 
 class ReleaseCreateTest(BusinessTestBase):
-    def _pet(self, with_capture_community=True):
+    def _pet(self, with_capture_community=True, status='in_treatment'):
         capture = make_capture(
             district=self.district_a, shelter=self.shelter_a,
             community=self.community_a if with_capture_community else None)
         return make_pet(district=self.district_a, shelter=self.shelter_a,
-                        hospital=self.hospital_a, status='in_treatment',
+                        hospital=self.hospital_a, status=status,
                         capture=capture)
 
     def test_create_matches_capture_community(self):
@@ -29,7 +29,7 @@ class ReleaseCreateTest(BusinessTestBase):
         self.assertEqual(pet.status, 'in_treatment', '确认放归前状态不变')
 
     def test_create_with_explicit_community(self):
-        pet = self._pet(with_capture_community=False)
+        pet = self._pet(with_capture_community=False, status='pending_release')
         other_community = make_institution(type='community', district=self.district_a)
         self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(f'{URL}create/', {
@@ -40,7 +40,7 @@ class ReleaseCreateTest(BusinessTestBase):
                          other_community)
 
     def test_create_without_community_rejected(self):
-        pet = self._pet(with_capture_community=False)
+        pet = self._pet(with_capture_community=False, status='pending_release')
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id}),
                   message='无法匹配原小区')

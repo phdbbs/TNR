@@ -12,11 +12,17 @@ from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
+import json
+from datetime import datetime
+
 from accounts.decorators import role_required
 from accounts.models import User
+from core.http import to_camel_key
 from business.models import (
-    Adoption, AdoptionApplication, Pet, AdoptionHallListing, Message, Blacklist,
+    Adoption, AdoptionApplication, AdoptionPhoto, Pet, AdoptionHallListing,
+    Message, Blacklist,
 )
+from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
@@ -25,13 +31,75 @@ from business.services import (
     get_hospital_scoped_pet, get_own_institution_object,
     hospital_pet_write_error,
     pet_has_pending_release, pet_has_active_adoption,
-    validate_uploaded_images,
+    pet_has_approved_application,
+    pet_has_pending_return, validate_image_upload,
 )
 
 
 # ============================================
 # 领养大厅（公开接口，无需登录）
 # ============================================
+#: 领养大厅展示的系统照片：全部由捕捉 / 诊疗环节产生，医院只决定显不显示。
+HALL_SYSTEM_PHOTO_FIELDS = (
+    ('photo_capture', '捕捉照片'),
+    ('photo_group', '整体合影'),
+    ('photo_before', '术前照片'),
+    ('photo_after', '术后照片'),
+    ('photo_treatment', '诊疗后照片'),
+)
+HALL_EXTRA_PHOTO_MAX = 6
+
+
+def _photo_url(field_file):
+    return field_file.url if field_file and field_file.name else ''
+
+
+def serialize_hall_listing(listing, include_hidden=False):
+    """大厅上架信息 + 照片清单。
+
+    公开侧（`include_hidden=False`）只下发**显示中**的系统照片，并把隐藏
+    字段在 `pet` 里一并抹空 —— 否则隐藏只作用于新加的照片清单，前端或
+    爬虫直接读 `pet.photo_before` 仍能拿到不想公开的照片。
+
+    医院侧（`include_hidden=True`）保留全部照片与 `visible` 标记，供
+    「维护资料」渲染逐张显示开关。
+    """
+    data = serialize_instance(listing)
+    pet_data = serialize_instance(listing.pet) if listing.pet_id else None
+
+    hidden = set(listing.hidden_photos or ())
+    photos = []
+    for field, label in HALL_SYSTEM_PHOTO_FIELDS:
+        url = _photo_url(getattr(listing.pet, field, None)) if listing.pet_id else ''
+        if not url:
+            continue
+        photos.append({
+            'field': field, 'label': label, 'url': url,
+            'visible': field not in hidden,
+        })
+    extras = [serialize_instance(p) for p in listing.extra_photos.all()]
+    for photo in extras:
+        photos.append({
+            'field': 'extra', 'label': '补充照片',
+            'url': photo.get('image') or '', 'visible': True,
+        })
+
+    if pet_data is not None and not include_hidden:
+        for field, _ in HALL_SYSTEM_PHOTO_FIELDS:
+            if field in hidden:
+                pet_data[field] = ''
+                pet_data[to_camel_key(field)] = ''
+
+    data['photos'] = photos if include_hidden else [p for p in photos if p['visible']]
+    data['extra_photos'] = extras
+    data['extraPhotos'] = extras
+    if not include_hidden:
+        data.pop('hidden_photos', None)
+        data.pop('hiddenPhotos', None)
+    data['pet'] = pet_data
+    return data
+
+
 def adoption_hall_list(request):
     """领养大厅 - 公开列表（待领养宠物）
 
@@ -42,27 +110,21 @@ def adoption_hall_list(request):
         is_active=True,
         pet__is_deleted=False,
         pet__status__in=('pending_adopt', 'in_treatment'),
-    ).select_related('pet')
+    ).select_related('pet').prefetch_related('extra_photos')
 
-    data = []
-    for listing in qs:
-        item = serialize_instance(listing)
-        item['pet'] = serialize_instance(listing.pet)
-        data.append(item)
-    return json_ok(data)
+    return json_ok([serialize_hall_listing(listing) for listing in qs])
 
 
 def adoption_hall_detail(request, pk):
     """领养大厅 - 公开详情"""
     try:
-        listing = AdoptionHallListing.objects.select_related('pet').get(
-            id=pk, is_active=True, pet__is_deleted=False)
+        listing = (AdoptionHallListing.objects
+                   .select_related('pet').prefetch_related('extra_photos')
+                   .get(id=pk, is_active=True, pet__is_deleted=False))
     except AdoptionHallListing.DoesNotExist:
         return json_fail('领养信息不存在', status=404)
 
-    data = serialize_instance(listing)
-    data['pet'] = serialize_instance(listing.pet)
-    return json_ok(data)
+    return json_ok(serialize_hall_listing(listing))
 
 
 # ============================================
@@ -80,8 +142,15 @@ def adoption_info_edit(request, pk):
         "personality": "活泼亲人",
         "body_condition": "健康良好",
         "flow_doc": "领养流程...",
-        "is_active": true
+        "is_active": true,
+        "hidden_photos": ["photo_before"],       // 大厅里隐藏哪些系统照片
+        "delete_photo_ids": [3]                   // 删除哪些已上传的补充照片
     }
+    另可 multipart 上传 `extra_photos`（多张，仅补充说明照片）。
+
+    **照片口径**：捕捉 / 诊疗环节已经产生的照片（捕捉、合影、术前、术后、
+    诊疗后）自动从动物档案带入大厅，这里只设置「显不显示」，**不再重复上传**；
+    本接口只接收医院当下补拍的说明类照片。
 
     **数据权限（第二十一轮收口）**：`get_active_pet()` 只按**区县**收敛 ——
     对医院账号来说，同区县另一家医院名下的宠物也能取到，于是 A 院能改 B 院的
@@ -98,37 +167,67 @@ def adoption_info_edit(request, pk):
     data = parse_json_body(request)
 
     if not data and request.POST:
-        # 兼容 multipart/form-data 提交（照片上传）
+        # 兼容 multipart/form-data 提交（补充照片上传）
         data = request.POST.dict()
 
     user = request.user
-    # 按区县范围取宠物，并排除已逻辑删除的档案
-    pet = get_active_pet(pk, user)
+    # 与出院列表同口径：医院端按「本院在治 ∪ 本院诊疗过」取单。
+    # 不能沿用 `get_active_pet`（按区县收敛）—— 跨区县送医的动物在列表里
+    # 看得见，点「维护资料」却回 404「宠物不存在或无权访问」（本轮实测：
+    # TNR261016004 属于樊城区，被送到襄城区的爱心宠物医院）。
+    pet = get_hospital_scoped_pet(pk, user)
     if pet is None:
         return json_fail('宠物不存在或无权访问', status=404)
 
     # 医院只能动**当前挂在本院名下**的宠物 —— 与同类写接口口径一致。
     # 放在任何落库动作之前：否则会先建/改 listing 再报错，留下半截写入。
-    if user.role == 'hospital' and pet.hospital_id != user.institution_id:
+    if pet.hospital_id != user.institution_id:
         return json_fail('无权编辑此动物的领养信息')
 
     hospital = pet.hospital or user.institution
     if not hospital:
         return json_fail('缺少医院信息')
 
-    # 照片校验必须在**任何落库之前**。
-    # 原实现是先 `listing.save()` 再校验照片，于是上传一张假图片（.txt 改名 .png）时：
-    # 接口返回「不是有效的图片文件」→ 界面弹红色失败提示，但 listing 已经写进库了，
-    # 简介/性格/健康状况其实**已经改掉**。用户看到「失败」又去重试，
-    # 每次重试都在改数据 —— 界面说的和实际发生的不是一回事。
-    photo_err = validate_uploaded_images(request.FILES, {
-        'photo_group': '整体合照',
-        'photo_before': '捕捉前照片',
-        'photo_after': '捕捉后照片',
-        'photo_treatment': '诊疗后照片',
-    })
-    if photo_err:
-        return json_fail(photo_err)
+    def _json_list(value, label):
+        """form-data 里数组是 JSON 字符串，JSON 请求里已经是 list。"""
+        if value is None:
+            return None, None
+        if isinstance(value, str):
+            try:
+                value = json.loads(value) if value.strip() else []
+            except (TypeError, ValueError):
+                return None, f'{label}格式不正确'
+        if not isinstance(value, list):
+            return None, f'{label}格式不正确'
+        return value, None
+
+    hidden_photos = None
+    if 'hidden_photos' in data:
+        hidden_photos, err = _json_list(data.get('hidden_photos'), '照片显示设置')
+        if err:
+            return json_fail(err)
+        allowed = {field for field, _ in HALL_SYSTEM_PHOTO_FIELDS}
+        if any(not isinstance(x, str) or x not in allowed for x in hidden_photos):
+            return json_fail('照片显示设置包含未知照片')
+        hidden_photos = sorted(set(hidden_photos))
+
+    delete_ids = []
+    if data.get('delete_photo_ids'):
+        delete_ids, err = _json_list(data.get('delete_photo_ids'), '待删除照片')
+        if err:
+            return json_fail(err)
+        if any(not isinstance(x, int) for x in delete_ids):
+            return json_fail('待删除照片编号格式不正确')
+
+    # 照片校验必须在**任何落库之前**（与捕捉 / 诊疗上传同一约定）：
+    # 否则第 N 张非法时，前面的字段与照片已经写进库，界面却说「失败」。
+    extra_files = request.FILES.getlist('extra_photos')
+    if len(extra_files) > HALL_EXTRA_PHOTO_MAX:
+        return json_fail(f'补充照片一次最多上传 {HALL_EXTRA_PHOTO_MAX} 张')
+    for f in extra_files:
+        err = validate_image_upload(f, '补充照片')
+        if err:
+            return json_fail(err)
 
     with transaction.atomic():
         listing, created = AdoptionHallListing.objects.get_or_create(
@@ -148,24 +247,29 @@ def adoption_info_edit(request, pk):
         if 'flow_doc' in data:
             listing.flow_doc = data['flow_doc']
         if 'is_active' in data:
-            listing.is_active = bool(data['is_active'])
+            # form-data 传进来的是字符串，`bool('false')` 为 True —— 必须按字面量判
+            listing.is_active = str(data['is_active']).lower() not in (
+                '0', 'false', 'off', '')
+        if hidden_photos is not None:
+            listing.hidden_photos = hidden_photos
 
         if created or not listing.published_at:
             listing.published_at = timezone.localdate()
 
         listing.save()
 
-        for photo_field in ('photo_group', 'photo_before', 'photo_after',
-                            'photo_treatment'):
-            if request.FILES.get(photo_field):
-                setattr(pet, photo_field, request.FILES[photo_field])
-        pet.save()
+        if delete_ids:
+            AdoptionPhoto.objects.filter(
+                listing=listing, id__in=delete_ids).delete()
+        for f in extra_files:
+            AdoptionPhoto.objects.create(listing=listing, image=f)
 
     # 审计用上下文：`AdoptionHallListing` 没有 district 字段（沿 pet 派生），
     # 响应体里读不出归属区县。
     request.audit_district = pet.district
 
-    return json_ok(serialize_instance(listing), message='领养信息已更新')
+    return json_ok(serialize_hall_listing(listing, include_hidden=True),
+                   message='领养信息已更新')
 
 
 # ============================================
@@ -226,6 +330,8 @@ def adoption_register(request):
     if pet_has_pending_release(pet):
         return json_fail('该宠物已有未办结的放归单（待转运回小区或待小区签字），'
                          '请先走完放归两段确认后再办理领养')
+    if pet_has_pending_return(pet):
+        return json_fail('该宠物已在运回捕捉点的单据上，请先撤回或等待捕捉点处理')
     if pet_has_active_adoption(pet):
         return json_fail('该宠物已有未完结的领养记录，请勿重复登记')
 
@@ -311,6 +417,201 @@ def adoption_register(request):
 @csrf_exempt
 @role_required('hospital')
 @login_required
+def adoption_outbound(request, pk):
+    """领养出库：医院把动物交给已预约的领养人（第五十四轮）。
+
+    已预约（`pending_claim`）只代表捕捉点批了人、动物还在院；
+    真正的交接要有出库日期、医院交接人、领养人签字与可选照片。
+    完成后领养单 `completed`、动物 `adopted`，之后不可再操作。
+    """
+    data = parse_json_body(request)
+    if request.POST:
+        data = request.POST.dict()
+
+    user = request.user
+    qs = Adoption.objects.filter(pk=pk)
+    if user.institution_id:
+        qs = qs.filter(
+            Q(institution_id=user.institution_id)
+            | Q(institution_id__isnull=True,
+                hospital_id=user.institution_id))
+    else:
+        qs = qs.none()
+    adoption = qs.first()
+    if adoption is None:
+        return json_fail('领养记录不存在或无权访问', status=404)
+
+    if adoption.status != 'pending_claim':
+        return json_fail(f'当前领养状态({adoption.get_status_display()})不可出库')
+
+    if adoption.pet_id and adoption.pet.is_deleted:
+        return json_fail('该宠物档案已作废，无法出库')
+
+    err = _validate_outbound(request, data)
+    if err:
+        return json_fail(err)
+    outbound_at, handover_name, signature = _outbound_values(data)
+
+    with transaction.atomic():
+        adoption.status = 'completed'
+        adoption.adopted_at = adoption.adopted_at or outbound_at
+        adoption.outbound_at = outbound_at
+        adoption.handover_name = handover_name
+        adoption.signature = signature
+        if request.FILES.get('handover_photo'):
+            adoption.handover_photo = request.FILES['handover_photo']
+        adoption.save(update_fields=[
+            'status', 'adopted_at', 'outbound_at', 'handover_name',
+            'signature', 'handover_photo',
+        ])
+
+        pet = adoption.pet
+        pet.status = 'adopted'
+        pet.save(update_fields=['status'])
+        # 领养出库 = 出院终态，诊疗单此刻办结（诊疗页只记了建议去向）。
+        dispose_for_discharge(pet, 'pending_adopt', request.user)
+
+    if adoption.adopter:
+        Message.objects.create(
+            user=adoption.adopter,
+            type='approval',
+            title='领养完成',
+            content=f'医院已确认出库，{adoption.pet_code} 领养流程完成。',
+        )
+
+    return json_ok(serialize_instance(adoption), message='领养出库成功，流程已完成')
+
+
+@csrf_exempt
+@role_required('hospital')
+@login_required
+def adoption_application_outbound(request, pk):
+    """已批准申请的领养出库：把「已预约」直接办成领养出库单。
+
+    捕捉点审核通过后只写了 `AdoptionApplication.status='approved'`，
+    不会自动生成 `Adoption`（捕捉点仍可走线下登记改领养人）。
+    医院端「已预约」里这类行没有领养单，出库时按申请材料补建一张
+    已完成的领养单，保证台账里领养人与交接签字齐全。
+    """
+    data = parse_json_body(request)
+    if request.POST:
+        data = request.POST.dict()
+    user = request.user
+
+    application = AdoptionApplication.objects.filter(
+        pk=pk, hospital_id=user.institution_id).first() if user.institution_id else None
+    if application is None:
+        return json_fail('领养申请不存在或无权访问', status=404)
+    if application.status != 'approved':
+        return json_fail(f'该申请当前状态({application.get_status_display()})不可出库')
+
+    pet = application.pet
+    if pet is None or pet.is_deleted:
+        return json_fail('宠物档案已作废，无法出库')
+    if pet.hospital_id != user.institution_id:
+        return json_fail('该动物当前不在本院，无法办理出库')
+    if pet_has_active_adoption(pet):
+        return json_fail('该宠物已有未完结的领养记录，请到「已预约」领养单中办理出库')
+    # 申请单出库时动物仍挂在医院其他出院路径上 → 两边都办结会互相覆盖宠物状态
+    if pet_has_pending_return(pet):
+        return json_fail('该宠物已在运回捕捉点的单据上，请先撤回或等待捕捉点处理')
+    if pet_has_pending_release(pet):
+        return json_fail('该宠物已有未办结的放归单，请先处理后再出库')
+    # 申请单出库后本单仍是 `approved`（它只记录审核结论），重放请求时
+    # 领养记录已 `completed`，`pet_has_active_adoption` 不再拦得住 ——
+    # 不查历史已完成记录就会给同一只动物再建一张完成单。
+    if Adoption.objects.filter(pet=pet, status='completed').exists():
+        return json_fail('该宠物已完成领养出库，请勿重复操作')
+
+    err = _validate_outbound(request, data)
+    if err:
+        return json_fail(err)
+    outbound_at, handover_name, signature = _outbound_values(data)
+
+    hospital = pet.hospital or user.institution
+    if hospital is None:
+        return json_fail('缺少医院信息')
+    if not pet.district_id:
+        return json_fail('缺少区县信息')
+
+    adopter = application.applicant
+    if adopter is None:
+        adopter = _get_or_create_adopter(
+            name=application.applicant_name,
+            phone=application.applicant_phone,
+            id_card=application.applicant_id_card,
+        )
+
+    with transaction.atomic():
+        adoption = Adoption.objects.create(
+            pet=pet,
+            pet_code=pet.code,
+            adopter=adopter,
+            adopter_name=application.applicant_name,
+            adopter_phone=application.applicant_phone,
+            adopter_id_card=application.applicant_id_card,
+            adopter_address=application.applicant_address,
+            qualification=application.qualification,
+            hospital=hospital,
+            hospital_name=hospital.name,
+            institution=hospital,
+            status='completed',
+            adopted_at=outbound_at,
+            outbound_at=outbound_at,
+            handover_name=handover_name,
+            signature=signature,
+            operator=user,
+            operator_name=user.get_full_name() or user.username,
+            ledger_no=generate_doc_no('ADP'),
+            district=pet.district,
+        )
+        if request.FILES.get('handover_photo'):
+            adoption.handover_photo = request.FILES['handover_photo']
+            adoption.save(update_fields=['handover_photo'])
+
+        pet.status = 'adopted'
+        pet.save(update_fields=['status'])
+        # 领养出库 = 出院终态，诊疗单此刻办结（诊疗页只记了建议去向）。
+        dispose_for_discharge(pet, 'pending_adopt', user)
+
+    if adopter:
+        Message.objects.create(
+            user=adopter,
+            type='approval',
+            title='领养完成',
+            content=f'医院已确认出库，{pet.code} 领养流程完成。',
+        )
+
+    return json_ok(serialize_instance(adoption), message='领养出库成功，流程已完成')
+
+
+def _outbound_values(data):
+    outbound_at = datetime.strptime(str(data.get('outbound_at'))[:10], '%Y-%m-%d').date()
+    return (
+        outbound_at,
+        body_str(data, 'handover_name').strip(),
+        body_str(data, 'signature'),
+    )
+
+
+def _validate_outbound(request, data):
+    """校验领养出库 / 交接单的必填字段与可选照片，返回错误文案或 None。"""
+    if not body_str(data, 'handover_name').strip():
+        return '请填写交接人'
+    if not body_str(data, 'signature'):
+        return '请填写领养人签字'
+    if not data.get('outbound_at'):
+        return '请选择出库日期'
+    try:
+        datetime.strptime(str(data.get('outbound_at'))[:10], '%Y-%m-%d')
+    except (ValueError, TypeError):
+        return f"出库日期「{data.get('outbound_at')}」格式不正确，应为 YYYY-MM-DD"
+    return validate_image_upload(request.FILES.get('handover_photo'), '交接照片')
+
+
+@csrf_exempt
+@role_required('hospital')
+@login_required
 def adoption_confirm_claim(request, pk):
     """医院确认领出动物
 
@@ -353,6 +654,8 @@ def adoption_confirm_claim(request, pk):
     pet = adoption.pet
     pet.status = 'adopted'
     pet.save(update_fields=['status'])
+    # 旧口径的「当场领出」同样是出院终态；新前端走 `adoption_outbound`。
+    dispose_for_discharge(pet, 'pending_adopt', user)
 
     # 通知领养人
     if adoption.adopter:
@@ -679,8 +982,12 @@ def adoption_application_review(request, pk):
             return json_fail(f'该宠物当前状态({pet.get_status_display()})已不可领养，无法通过申请')
         if pet_has_active_adoption(pet):
             return json_fail('该宠物已有未完结的领养记录，无法重复通过申请')
+        if pet_has_approved_application(pet):
+            return json_fail('该宠物已有已批准的领养申请，无法重复批准')
         if pet_has_pending_release(pet):
             return json_fail('该宠物已有待放归记录，无法通过领养申请')
+        if pet_has_pending_return(pet):
+            return json_fail('该宠物已在运回捕捉点的单据上，无法通过领养申请')
 
     application.status = 'approved' if action == 'approve' else 'rejected'
     application.review_note = body_str(data, 'review_note')

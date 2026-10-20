@@ -283,11 +283,16 @@ async function renderHall() {
       const genderIcon = pet.gender === '公' ? '♂' : '♀';
       const genderColor = pet.gender === '公' ? 'var(--azurite)' : 'var(--cinnabar)';
       const desc = item.intro || pet.description || '暂无描述';
+      // 大厅封面用第一张「可见」照片（后端已按医院设置过滤）；没有则退回物种占位。
+      const cover = ((item.photos || [])[0] || {}).url || '';
+      const coverHtml = cover
+        ? `<img src="${TNR_UI.escape(cover)}" alt="${TNR_UI.escape(pet.name || pet.code || '')}">`
+        : emoji;
 
       html += `
         <div class="pet-card" onclick="showPetDetail('${item.id}')">
           <div class="pet-card-body">
-            <div class="pet-card-photo photo-placeholder ${photoClass}">${emoji}</div>
+            <div class="pet-card-photo photo-placeholder ${photoClass}">${coverHtml}</div>
             <div class="pet-card-info">
               <div class="pet-card-name">
                 ${TNR_UI.escape(pet.name || pet.code || '')}
@@ -353,28 +358,25 @@ async function showPetDetail(listingId) {
   const emoji = getPetEmoji(pet.species);
   const genderIcon = pet.gender === '公' ? '♂' : '♀';
 
+  // 照片区：系统照片（捕捉 / 诊疗环节自动带入）与医院补充照片都在
+  // `item.photos` 里，公开接口只下发医院勾选「大厅显示」的项。
+  const photos = item.photos || [];
+
   let html = '';
 
-  // 照片区
   html += '<div class="detail-section">';
   html += '<div class="detail-section-title">宠物照片</div>';
-  html += '<div class="detail-photo-grid">';
-  if (pet.photo_before) {
-    html += `<div class="detail-photo-item"><img src="${pet.photo_before}" style="width:100%;height:100%;object-fit:cover;" alt="捕捉前"><div class="detail-photo-label">捕捉前</div></div>`;
+  if (photos.length) {
+    html += '<div class="detail-photo-grid">';
+    photos.forEach(p => {
+      if (!p || !p.url) return;
+      const label = p.label || '照片';
+      html += `<div class="detail-photo-item"><img src="${TNR_UI.escape(p.url)}" style="width:100%;height:100%;object-fit:cover;" alt="${TNR_UI.escape(label)}"><div class="detail-photo-label">${TNR_UI.escape(label)}</div></div>`;
+    });
+    html += '</div>';
   } else {
-    html += `<div class="detail-photo-item"><div class="photo-placeholder ${photoClass}">${emoji}</div><div class="detail-photo-label">捕捉前</div></div>`;
+    html += `<div class="detail-photo-item" style="aspect-ratio:16/9;"><div class="photo-placeholder ${photoClass}" style="aspect-ratio:auto;height:100%;">${emoji}</div><div class="detail-photo-label">暂无照片</div></div>`;
   }
-  if (pet.photo_after) {
-    html += `<div class="detail-photo-item"><img src="${pet.photo_after}" style="width:100%;height:100%;object-fit:cover;" alt="术后"><div class="detail-photo-label">术后</div></div>`;
-  } else {
-    html += `<div class="detail-photo-item"><div class="photo-placeholder ${photoClass}">${emoji}</div><div class="detail-photo-label">术后</div></div>`;
-  }
-  if (pet.photo_treatment) {
-    html += `<div class="detail-photo-item"><img src="${pet.photo_treatment}" style="width:100%;height:100%;object-fit:cover;" alt="诊疗后"><div class="detail-photo-label">诊疗后</div></div>`;
-  } else {
-    html += `<div class="detail-photo-item"><div class="photo-placeholder ${photoClass}">${emoji}</div><div class="detail-photo-label">诊疗后</div></div>`;
-  }
-  html += '</div>';
   html += '</div>';
 
   // 基本信息

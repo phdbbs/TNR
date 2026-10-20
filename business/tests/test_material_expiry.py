@@ -287,7 +287,7 @@ class ExpiredMaterialIsNotBlanketBanTest(BusinessTestBase):
 
         self.login_as(self.hospital_user_a)
         self.ok(self.post_json(ADJUST_URL, {
-            'material_id': material.id, 'quantity': 10, 'reason': '过期报废',
+            'material_id': material.id, 'quantity': 10, 'reason': 'expired',
         }))
         self.assertEqual(get_hospital_stock(material, self.hospital_a), 0)
 

@@ -279,7 +279,17 @@ const TNR_UI = {
         { label: '芯片号', value: '<span class="font-mono">' + this.escape(chip.number || number) + '</span>' },
         { label: '当前状态', value: TNR_UI.chipStatusText(chip.status) },
         { label: '持有机构', value: this.escape(chip.institutionName || '—') },
-        { label: '绑定宠物', value: chip.petCode ? this.escape(chip.petCode) : '—' }
+        // 已绑定动物时编号可点：现场最常见的追问是「这颗芯片到底打到哪只
+        // 猫狗身上了、之后又去过哪」，追溯抽屉只有一行编号，看不到档案。
+        { label: '绑定宠物', value: chip.petCode
+            ? (chip.petId
+              ? '<button type="button" class="pet-code-chip" data-pet-archive="'
+                + this.escape(String(chip.petId)) + '" style="cursor:pointer;'
+                + 'text-decoration:underline;color:var(--cinnabar);border:0;'
+                + 'background:none;padding:0;font:inherit;">'
+                + this.escape(chip.petCode) + '</button>'
+              : this.escape(chip.petCode))
+            : '—' }
       ]) + '</div>';
     if (!events.length) {
       html += '<div class="fs-sm text-muted" style="padding:0 var(--sp-4) var(--sp-4);">暂无流转记录</div>';
@@ -295,7 +305,123 @@ const TNR_UI = {
       });
       html += '</div>';
     }
-    this.drawer({ title: '芯片追溯 · ' + this.escape(number), body: html });
+    const opened = this.drawer({ title: '芯片追溯 · ' + this.escape(number), body: html });
+    const petLink = opened.drawerEl.querySelector('[data-pet-archive]');
+    if (petLink) {
+      petLink.addEventListener('click', () => {
+        // 先关追溯再开档案：drawer() 是追加式实现，叠着开会留下两层遮罩。
+        opened.close();
+        this.showPetArchive(petLink.dataset.petArchive);
+      });
+    }
+  },
+
+  /* 一宠一档档案详情：各阶段数据 + 照片墙（点击放大）。
+     数据来自 /api/business/pets/<id>/lifecycle/，与政府端「一宠一档」同源。
+     放在公共层是因为芯片追溯（捕捉点/医院两端）也要从这里跳进来。 */
+  async showPetArchive(petId) {
+    let data = null;
+    try {
+      data = await TNR_API.getPetLifecycleStrict(petId);
+    } catch (e) {
+      this.toast('档案加载失败：' + (e.message || '未知错误'), 'danger');
+      return;
+    }
+    const pet = (data && (data.pet_brief || data.pet)) || {};
+    const photos = (data && data.photos) || [];
+    const events = (data && data.events) || [];
+
+    const items = [
+      { label: '一宠一档', value: '<span class="pet-code-chip">' + this.escape(pet.code || '—') + '</span>' },
+      { label: '昵称', value: this.escape(pet.name || '—') },
+      { label: '类别', value: this.escape(pet.species || '—') },
+      { label: '品种', value: this.escape(pet.breed || '—') },
+      { label: '性别', value: this.escape(pet.gender || '—') },
+      { label: '年龄', value: this.escape(pet.age || '—') },
+      { label: '毛色', value: this.escape(pet.color || '—') },
+      { label: '芯片号', value: this.escape(pet.chip_no || '—') },
+      { label: '当前状态', value: TNR_UI.petStageBadge(pet.stage || pet.status, pet.stage_display) },
+      { label: '所属区县', value: this.escape(pet.district_name || '—') },
+      { label: '捕捉点', value: this.escape(pet.shelter_name || '—') },
+      { label: '所在医院', value: this.escape(pet.hospital_name || '—') }
+    ];
+
+    let html = this.renderDescList(items);
+
+    // 照片墙：捕捉 / 整体合影 / 术前 / 术后 / 诊疗
+    html += '<div class="desc-item desc-full"><div class="desc-label">动物照片（点击可放大）</div><div class="desc-value">';
+    html += photos.length
+      ? '<div class="photo-grid" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr));">'
+        + photos.map(p => '<div class="photo-item"><img src="' + p.url + '" alt="' + this.escape(p.label) + '" data-zoom="' + p.url + '"><div class="photo-item-label">' + this.escape(p.label) + '</div></div>').join('')
+        + '</div>'
+      : '<span class="text-light fs-sm">暂无照片</span>';
+    html += '</div></div>';
+
+    // 流转全过程时间线（捕捉 → 转运 → 诊疗 → 回收/放归/领养/死亡）
+    html += '<div class="desc-item desc-full"><div class="desc-label">流转全过程（' + events.length + ' 条）</div><div class="desc-value">';
+    if (!events.length) {
+      html += '<span class="text-light fs-sm">暂无流转记录</span>';
+    } else {
+      html += '<div class="timeline">' + events.map(ev => {
+        const dateStr = ev.date ? TNR_UI.formatDate(ev.date) : '—';
+        let desc = '';
+        if (ev.type === 'capture') {
+          desc = '捕捉点：' + this.escape(ev.shelter_name || '—')
+            + '<br>小区：' + this.escape(ev.community_name || '—')
+            + '<br>地址：' + this.escape(ev.address || '—')
+            + '<br>物业交接人：' + this.escape(ev.contact_person || '—') + (ev.contact_phone ? ' / ' + this.escape(ev.contact_phone) : '')
+            + '<br>捕捉单号：' + this.escape(ev.ledger_no || '—');
+        } else if (ev.type === 'transfer') {
+          desc = '发出：' + this.escape(ev.from_shelter_name || '—')
+            + '<br>接收：' + this.escape(ev.to_hospital_name || '—')
+            + '<br>状态：' + this.escape(TNR_UI.transferStatusText(ev.status))
+            + (ev.received_at ? '<br>签收日期：' + this.escape(ev.received_at) : '');
+        } else if (ev.type === 'treatment') {
+          desc = '医院：' + this.escape(ev.hospital_name || '—')
+            + '<br>项目：' + this.escape((ev.items || []).join('、') || '—')
+            + '<br>状态：' + this.escape(TNR_UI.treatmentStatusText(ev.status))
+            + (ev.chip_no ? '<br>芯片号：' + this.escape(ev.chip_no) : '');
+        } else if (ev.type === 'release') {
+          desc = '放归小区：' + this.escape(ev.community_name || '—')
+            + '<br>接收人：' + this.escape(ev.receiver_name || '—')
+            + '<br>状态：' + this.escape(TNR_UI.releaseStatusText(ev.status));
+        } else if (ev.type === 'adoption') {
+          desc = '领养人：' + this.escape(ev.adopter_name || '—') + '<br>医院：' + this.escape(ev.hospital_name || '—');
+        } else if (ev.type === 'euthanasia') {
+          desc = '医院：' + this.escape(ev.hospital_name || '—') + '<br>原因：' + this.escape(ev.reason || '—');
+        } else if (ev.type === 'owner_return') {
+          // 回收：领回人完整信息 + 原因 + 操作人 + 签名照片
+          desc = '领回单号：' + this.escape(ev.ledger_no || '—')
+            + '<br>领回人：' + this.escape(ev.owner_name || '—')
+            + (ev.owner_phone ? '<br>联系电话：' + this.escape(ev.owner_phone) : '')
+            + (ev.owner_id_card ? '<br>身份证：' + this.escape(ev.owner_id_card) : '')
+            + (ev.owner_address ? '<br>住址：' + this.escape(ev.owner_address) : '')
+            + '<br>原因：' + this.escape(ev.reason || '—')
+            + '<br>操作人：' + this.escape(ev.operator_name || '—');
+          // 签名是 base64 data URL（png），直接当图片渲染
+          if (ev.signature && ev.signature.startsWith('data:image')) {
+            desc += '<div style="margin-top:8px;"><div style="font-size:12px;color:var(--ink-muted);margin-bottom:4px;">领回人电子签名</div>'
+              + '<img src="' + ev.signature + '" alt="签名" data-zoom="' + ev.signature + '" '
+              + 'style="max-width:260px;max-height:120px;background:#fff;border:1px solid var(--border-light);border-radius:6px;cursor:zoom-in;padding:4px;"></div>';
+          }
+        }
+        const evPhotos = ev.photos || [];
+        if (evPhotos.length) {
+          desc += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">'
+            + evPhotos.map(p => '<img src="' + p.url + '" alt="' + this.escape(p.label) + '" data-zoom="' + p.url + '" style="width:72px;height:72px;object-fit:cover;border-radius:6px;border:1px solid var(--border-light);cursor:zoom-in;">').join('')
+            + '</div>';
+        }
+        return '<div class="timeline-item done">'
+          + '<div class="timeline-time">' + this.escape(dateStr) + '</div>'
+          + '<div class="timeline-title">' + this.escape(ev.type_display || ev.type) + '</div>'
+          + '<div class="timeline-desc">' + desc + '</div>'
+          + '</div>';
+      }).join('') + '</div>';
+    }
+    html += '</div></div>';
+
+    this.drawer({ title: '一宠一档档案 · ' + this.escape(pet.code || ''), body: html });
+    setTimeout(() => this.bindPhotoZoom(document), 50);
   },
 
   // === 物料批次配套组件（B5：捕捉点 / 医院两端共用） ===
@@ -1474,6 +1600,8 @@ const TNR_UI = {
     in_transit:     { text: '在途',          badge: 'warning' },
     in_treatment:   { text: '待诊疗',        badge: 'info' },
     pending_adopt:  { text: '待领养',        badge: 'cinnabar' },
+    return_pending: { text: '待运回捕捉点',  badge: 'info' },
+    pending_release:{ text: '待放归',        badge: 'warning' },
     pending_claim:  { text: '待领出',        badge: 'cinnabar' },
     adopted:        { text: '已领养',        badge: 'success' },
     released:       { text: '已放归',        badge: 'success' },
@@ -1495,6 +1623,16 @@ const TNR_UI = {
     const m = TNR_UI.PET_STATUS[status];
     return `<span class="badge badge-${m ? m.badge : 'default'}">` +
       TNR_UI.escape(TNR_UI.petStatusText(status)) + '</span>';
+  },
+
+  /* 一宠一档的「当前阶段」：`pet.stage` 由 `pet_lifecycle` 按业务单据派生，
+     可能是 `Pet.STATUS_CHOICES` 之外的中间态（如 `pending_discharge`）。
+     已知状态码仍走 `PET_STATUS` 真源；派生态直接用后端给的文案，
+     前端不再维护第二张状态表。 */
+  petStageBadge(stage, label) {
+    if (stage && TNR_UI.PET_STATUS[stage]) return TNR_UI.petStatusBadge(stage);
+    return `<span class="badge badge-warning">` +
+      TNR_UI.escape(label || stage || '—') + '</span>';
   },
 
   /* === 放归单状态的唯一显示真源（第五十二轮，做法与 PET_STATUS 一致）===
@@ -1523,6 +1661,27 @@ const TNR_UI = {
      拆段的中间态就成了界面盲区。前端三处列表/判据都必须引用本数组，
      不要再各自写 `=== 'pending'`。 */
   OPEN_RELEASE_STATUS: ['pending', 'transferred'],
+
+  /* === 运回单状态的唯一显示真源（第五十四轮）===
+     `ReturnOrder.status`：医院开单后待捕捉点确认，捕捉点可接收/驳回，
+     医院在确认前可撤回。文案与后端 `ReturnOrder.STATUS_CHOICES` 保持一致。 */
+  RETURN_ORDER_STATUS: {
+    pending:   { text: '待确认',     badge: 'warning' },
+    received:  { text: '已确认出库', badge: 'success' },
+    rejected:  { text: '已驳回',     badge: 'danger' },
+    withdrawn: { text: '已撤回',     badge: 'default' },
+  },
+
+  returnOrderStatusText(status) {
+    const m = TNR_UI.RETURN_ORDER_STATUS[status];
+    return m ? m.text : (status || '—');
+  },
+
+  returnOrderStatusBadge(status) {
+    const m = TNR_UI.RETURN_ORDER_STATUS[status];
+    return `<span class="badge badge-${m ? m.badge : 'default'}">` +
+      TNR_UI.escape(TNR_UI.returnOrderStatusText(status)) + '</span>';
+  },
 
   /* 放归状态的纯文案（时间线、抽屉等不带徽章的地方用）。
      真源查不到时显示原始枚举码，不猜成某个具体业务状态 ——

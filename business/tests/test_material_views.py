@@ -3,8 +3,8 @@ from datetime import date
 
 from django.utils import timezone
 
-from business.models import Chip, Material, MaterialTransaction
-from business.services import get_hospital_stock
+from business.models import Chip, Material, MaterialBatch, MaterialTransaction
+from business.services import adjust_stock, get_hospital_stock
 from business.services_chip import CHIP_BATCH_MAX
 from business.tests.base import (
     assert_doc_no,
@@ -413,10 +413,30 @@ class StockAdjustmentTest(BusinessTestBase):
         make_hospital_txn(material, self.hospital_a, 'receive', 10)
         self.login_as(self.hospital_user_a)
         body = self.ok(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 3, 'reason': '过期报废',
+            'material_id': material.id, 'quantity': 3, 'reason': 'expired',
         }))
         self.assertEqual(body['data']['type'], 'adjustment')
         self.assertEqual(get_hospital_stock(material, self.hospital_a), 7)
+
+    def test_hospital_adjustment_can_target_a_batch(self):
+        """异动接口必须把 batch_no 透传到批次记账（过期报废按批处理）。"""
+        material = make_material(district=self.district_a, shelter_stock=0)
+        adjust_stock(
+            material, self.hospital_a, 6, 'receive', institution=self.hospital_a,
+            operator=self.hospital_user_a, batch_no='B1', ledger_no='RCV-B1')
+        adjust_stock(
+            material, self.hospital_a, 10, 'receive', institution=self.hospital_a,
+            operator=self.hospital_user_a, batch_no='B2', ledger_no='RCV-B2')
+        self.login_as(self.hospital_user_a)
+        body = self.ok(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 4, 'reason': 'expired',
+            'batch_no': 'B2',
+        }))
+        self.assertEqual(body['data']['batch_no'], 'B2')
+        qtys = {b.batch_no: b.quantity for b in MaterialBatch.objects.filter(
+            material=material, institution=self.hospital_a)}
+        self.assertEqual(qtys, {'B1': 6, 'B2': 6})
+        self.assertEqual(get_hospital_stock(material, self.hospital_a), 12)
 
     def test_gov_cannot_adjust_stock(self):
         """政府端只读（第四十九轮）：监管不再异动库存。
@@ -431,7 +451,7 @@ class StockAdjustmentTest(BusinessTestBase):
         for user in (self.gov_city, self.gov_a):
             self.login_as(user)
             self.expect_fail(self.post_json(f'{URL}adjustment/', {
-                'material_id': material.id, 'quantity': 4, 'reason': '损耗',
+                'material_id': material.id, 'quantity': 4, 'reason': 'loss',
             }), status=403)
         material.refresh_from_db()
         self.assertEqual(material.shelter_stock, 10)
@@ -443,7 +463,7 @@ class StockAdjustmentTest(BusinessTestBase):
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json(f'{URL}adjustment/',
                                  {'material_id': material.id, 'quantity': 0}),
-                  message='异动数量必须大于0')
+                  message='异动数量不能为0')
 
     def test_hospital_adjustment_cannot_go_negative(self):
         """医院侧库存由流水累加，异动必须自行校验余额，不能扣成负数。"""
@@ -451,7 +471,7 @@ class StockAdjustmentTest(BusinessTestBase):
         make_hospital_txn(material, self.hospital_a, 'receive', 3)
         self.login_as(self.hospital_user_a)
         self.expect_fail(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 5, 'reason': '过期报废',
+            'material_id': material.id, 'quantity': 5, 'reason': 'expired',
         }), message='医院库存不足')
         self.assertEqual(get_hospital_stock(material, self.hospital_a), 3)
         self.assertFalse(MaterialTransaction.objects.filter(
@@ -470,7 +490,7 @@ class StockAdjustmentTest(BusinessTestBase):
         material = make_material(district=self.district_a, shelter_stock=10)
         self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 4, 'reason': '过期报废',
+            'material_id': material.id, 'quantity': 4, 'reason': 'expired',
         }))
         self.assertEqual(body['data']['type'], 'adjustment')
         material.refresh_from_db()
@@ -485,7 +505,7 @@ class StockAdjustmentTest(BusinessTestBase):
         material = make_material(district=self.district_a, shelter_stock=2)
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 5, 'reason': '过期报废',
+            'material_id': material.id, 'quantity': 5, 'reason': 'expired',
         }), message='捕捉点库存不足')
         material.refresh_from_db()
         self.assertEqual(material.shelter_stock, 2)
@@ -499,7 +519,7 @@ class StockAdjustmentTest(BusinessTestBase):
         material = make_material(district=self.district_b, shelter_stock=10)
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 1, 'reason': '损耗',
+            'material_id': material.id, 'quantity': 1, 'reason': 'loss',
         }), status=404, message='无权访问')
         material.refresh_from_db()
         self.assertEqual(material.shelter_stock, 10)
@@ -509,14 +529,64 @@ class StockAdjustmentTest(BusinessTestBase):
         material = make_material(district=self.district_a, shelter_stock=10)
         self.login_as(self.shelter_user_a)
         self.ok(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 3, 'reason': '过期报废',
+            'material_id': material.id, 'quantity': 3, 'reason': 'expired',
         }))
         txn = MaterialTransaction.objects.get(material=material,
                                               type='adjustment')
         self.assertEqual(txn.quantity, 3)
         self.assertEqual(txn.operator_id, self.shelter_user_a.id)
-        self.assertIn('过期报废', txn.note)
+        self.assertEqual(txn.reason, 'expired')
+        self.assertIn('过期', txn.note)
         self.assertIsNone(txn.hospital_id, '捕捉点侧异动不该挂到医院名下')
+
+    def test_shelter_adjustment_surplus_increases_stock(self):
+        """负数异动 = 盘盈 / 退回入库，必须**增加**库存并记回批次。"""
+        material = make_material(district=self.district_a, shelter_stock=0)
+        adjust_stock(
+            material, self.shelter_user_a.institution, 5, 'receive',
+            institution=self.shelter_user_a.institution,
+            operator=self.shelter_user_a, batch_no='B1', ledger_no='RCV-B1')
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': -3, 'reason': 'gain',
+            'batch_no': 'B1',
+        }))
+        self.assertIn('增加 3', body['message'])
+        material.refresh_from_db()
+        self.assertEqual(material.shelter_stock, 8)
+        self.assertEqual(
+            MaterialBatch.objects.get(
+                material=material, institution=self.shelter_user_a.institution,
+                batch_no='B1').quantity, 8)
+        txn = MaterialTransaction.objects.get(material=material, type='adjustment')
+        self.assertEqual(txn.quantity, -3, '负数量原样入账，方向由符号表达')
+        self.assertEqual(txn.reason, 'gain')
+
+    def test_adjustment_reason_direction_mismatch_rejected(self):
+        """原因与方向必须一致：盘盈填正数、过期填负数都是错的。"""
+        material = make_material(district=self.district_a, shelter_stock=10)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 2, 'reason': 'gain',
+        }), message='必须为负数')
+        self.expect_fail(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': -2, 'reason': 'expired',
+        }), message='必须为正数')
+        material.refresh_from_db()
+        self.assertEqual(material.shelter_stock, 10)
+        self.assertFalse(MaterialTransaction.objects.filter(
+            material=material, type='adjustment').exists())
+
+    def test_adjustment_reason_must_be_enum(self):
+        """异动原因必须是六个枚举之一 —— 自由文本会让汇总统计对不上。"""
+        material = make_material(district=self.district_a, shelter_stock=10)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 1, 'reason': '过期报废',
+        }), message='异动原因必填')
+        self.expect_fail(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': 1,
+        }), message='异动原因必填')
 
     # ------------------------------------------------------------------
     # 芯片异动（第四十六轮）：库存减了，**号码也必须跟着作废**
@@ -537,7 +607,7 @@ class StockAdjustmentTest(BusinessTestBase):
                       institution=self.shelter_user_a.institution)
         self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 2, 'reason': '芯片损坏报废',
+            'material_id': material.id, 'quantity': 2, 'reason': 'invalid',
             'chip_start': '9000000001',
         }))
         self.assertIn('已作废', body['message'])
@@ -555,7 +625,7 @@ class StockAdjustmentTest(BusinessTestBase):
                   institution=self.hospital_a)
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 1,
+            'material_id': material.id, 'quantity': 1, 'reason': 'invalid',
             'chip_start': '9000000001',
         }), message='不属于')
         self.assertEqual(Chip.objects.get(number='9000000001').status, 'available')
@@ -567,7 +637,7 @@ class StockAdjustmentTest(BusinessTestBase):
                   institution=self.shelter_user_a.institution)
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 1,
+            'material_id': material.id, 'quantity': 1, 'reason': 'invalid',
             'chip_start': '9000000001',
         }), message='不可作废')
 
@@ -582,7 +652,7 @@ class StockAdjustmentTest(BusinessTestBase):
                   institution=self.shelter_user_a.institution)
         self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(f'{URL}adjustment/', {
-            'material_id': material.id, 'quantity': 2,
+            'material_id': material.id, 'quantity': 2, 'reason': 'invalid',
             'chip_start': '9000000001',  # 只有 1 颗，数量 2 不够
         }), message='不存在')
         material.refresh_from_db()
@@ -591,6 +661,16 @@ class StockAdjustmentTest(BusinessTestBase):
             MaterialTransaction.objects.filter(material=material,
                                                type='adjustment').exists(),
             '被拒的异动不该留下流水')
+
+    def test_chip_adjustment_rejects_negative_quantity(self):
+        """芯片盘盈不能走异动：号码是真源，负数不知道要恢复哪些号。"""
+        material = self._chip_material(stock=10)
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{URL}adjustment/', {
+            'material_id': material.id, 'quantity': -2, 'reason': 'gain',
+        }), message='芯片异动只支持正数')
+        material.refresh_from_db()
+        self.assertEqual(material.shelter_stock, 10)
 
 
 class LedgerViewsTest(BusinessTestBase):

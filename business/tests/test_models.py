@@ -35,7 +35,9 @@ class PetModelTest(TestCase):
         # 两个选项（安乐死 / 死亡无害化），后续单据也不同（安乐死单 / 无害化单）。
         # 产生点：`services_treatment.dispose()` 按去向 key 直接赋给 `Pet.status`。
         expected = {'in_transit', 'in_treatment', 'pending_adopt', 'pending_claim',
-                    'adopted', 'released', 'euthanized', 'dead', 'owner_returned'}
+                    'adopted', 'released', 'euthanized', 'dead', 'owner_returned',
+                    # 第五十四轮：医院 → 捕捉点的运回单在途，及捕捉点签收后的待放归。
+                    'return_pending', 'pending_release'}
         self.assertEqual({c for c, _ in Pet.STATUS_CHOICES}, expected)
 
     def test_district_protect(self):

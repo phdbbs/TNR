@@ -9,6 +9,13 @@ class Pet(models.Model):
         ('in_transit', '在途'),
         ('in_treatment', '待诊疗'),
         ('pending_adopt', '待领养'),
+        # 医院 → 捕捉点的反向运输（第五十四轮出院重组）：
+        # 运回单开出后动物进入 `return_pending`，捕捉点确认接收后进入
+        # `pending_release`，由捕捉点再开「放归单」与物业交接。
+        # 不加这两个中间态，动物在运回单未确认时仍可被领养/再次放归，
+        # 两张单据会同时承诺同一只动物。
+        ('return_pending', '待运回捕捉点'),
+        ('pending_release', '待放归'),
         ('pending_claim', '待领出'),
         ('adopted', '已领养'),
         ('released', '已放归'),
@@ -574,11 +581,33 @@ class MaterialTransaction(models.Model):
         ('transfer', '调拨'),
         ('inventory', '盘点'),
     ]
+    # 异动原因（第五十轮）：异动是「纠正账实差异」，原因也必须可汇总 ——
+    # 自由文本会让「过期 / 盘亏」这类统计永远对不上。
+    # 方向约定（判据见 `services_stock.validate_adjustment_reason()`）：
+    # 过期 / 失效 / 盘亏 = 减少（数量为正），盘盈 / 退回 = 增加（数量为负），
+    # 其他两者皆可。
+    ADJUSTMENT_REASON_CHOICES = [
+        ('expired', '过期'),
+        ('invalid', '失效'),
+        ('gain', '盘盈'),
+        ('loss', '盘亏'),
+        ('return', '退回'),
+        ('other', '其他'),
+    ]
+    # `reason` 列由出库与异动**共用**，字段 choices 是两套白名单的并集
+    # （`return` 两边同义，只留一份）。各自的白名单仍在 services_stock 里分开校验。
+    REASON_CHOICES = OUTBOUND_REASON_CHOICES + [
+        ('expired', '过期'),
+        ('invalid', '失效'),
+        ('gain', '盘盈'),
+        ('loss', '盘亏'),
+        ('other', '其他'),
+    ]
     type = models.CharField('类型', max_length=20, choices=TYPE_CHOICES)
-    # 出库原因：只对 `outbound` 有意义。其余类型一律为 '' ——
-    # 判据见 `services_stock.validate_outbound_reason()`，双边（建单/查询）同口径。
+    # 原因：`outbound` 记出库白名单，`adjustment` 记异动白名单，其余类型一律 '' ——
+    # 判据见 `services_stock.validate_outbound_reason()` / `validate_adjustment_reason()`。
     reason = models.CharField(
-        '出库原因', max_length=20, choices=OUTBOUND_REASON_CHOICES, blank=True, default='')
+        '原因', max_length=20, choices=REASON_CHOICES, blank=True, default='')
     material = models.ForeignKey('business.Material', on_delete=models.PROTECT, related_name='transactions', verbose_name='物资')
     material_name = models.CharField('物资名称', max_length=100, blank=True, default='')
     quantity = models.IntegerField('数量')
@@ -894,6 +923,65 @@ class Release(models.Model):
 
 
 # ============================================
+# 运回单（医院 → 捕捉点）
+# ============================================
+class ReturnOrder(models.Model):
+    """医院把诊疗完成的动物成批运回捕捉点（放归的反向前半段）。
+
+    与 `Release` 的分工：
+      * `ReturnOrder` —— 医院 → 捕捉点，**多只动物一张单**，捕捉点确认接收；
+      * `Release`     —— 捕捉点 → 原小区，单只动物，物业签字放归。
+    两者串起来才是完整放归：医院运回 → 捕捉点接收 → 捕捉点再放归。
+    此前只有 `Release` 一段，医院直接把动物「转运回小区」，捕捉点
+    既没有接收凭证，也不知道院里还有哪些动物等着接。
+    """
+    STATUS_CHOICES = [
+        ('pending', '待确认'),
+        ('received', '已确认出库'),
+        ('rejected', '已驳回'),
+        ('withdrawn', '已撤回'),
+    ]
+    OPEN_STATUSES = ('pending',)
+    shelter = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='received_return_orders', verbose_name='接收捕捉点')
+    shelter_name = models.CharField('接收捕捉点名称', max_length=100, blank=True, default='')
+    hospital = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='sent_return_orders', verbose_name='发出医院')
+    hospital_name = models.CharField('发出医院名称', max_length=100, blank=True, default='')
+    # 冗余「归属机构」= 发出医院（与转运单的 from_shelter 同一口径）。
+    institution = models.ForeignKey(
+        'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+', verbose_name='归属机构')
+    pet_codes = models.TextField('动物编号', blank=True, default='', help_text='逗号分隔')
+    pet_count = models.IntegerField('动物数量', default=0)
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
+    received_at = models.DateField('接收日期', null=True, blank=True)
+    receiver_name = models.CharField('接收人', max_length=50, blank=True, default='')
+    receiver_phone = models.CharField('接收人电话', max_length=20, blank=True, default='')
+    signature = models.TextField('接收人签字', blank=True, default='')
+    reject_reason = models.TextField('驳回原因', blank=True, default='')
+    note = models.TextField('备注', blank=True, default='')
+    operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name='return_orders', verbose_name='操作员')
+    operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
+    ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
+                                 db_index=True)
+    district = models.ForeignKey('core.District', on_delete=models.PROTECT,
+                                 related_name='return_orders', verbose_name='所属区县')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        ordering = ['-id']
+        verbose_name = '运回单'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'{self.hospital_name} -> {self.shelter_name} ({self.pet_count})'
+
+
+# ============================================
 # 领养记录
 # ============================================
 class Adoption(models.Model):
@@ -914,6 +1002,14 @@ class Adoption(models.Model):
     adoption_agreement = models.CharField('领养协议', max_length=200, blank=True, default='')
     hospital = models.ForeignKey('core.Institution', on_delete=models.SET_NULL, null=True, blank=True, related_name='adoptions', verbose_name='医院')
     hospital_name = models.CharField('医院名称', max_length=100, blank=True, default='')
+    # 领养出库 / 领养人交接（第五十四轮出院重组）。
+    # `pending_claim` 只是「捕捉点已批准、动物还在院」，医院真正交动物时
+    # 必须留下出库日期、医院交接人与领养人签字，否则纸面上无法证明
+    # 动物是哪天由谁交给领养人的。
+    outbound_at = models.DateField('出库日期', null=True, blank=True)
+    handover_name = models.CharField('交接人', max_length=50, blank=True, default='')
+    signature = models.TextField('领养人签字', blank=True, default='')
+    handover_photo = models.ImageField('交接照片', upload_to='adoptions/', null=True, blank=True)
     # 冗余「归属机构」—— 见 `Transfer.institution` 的说明。
     institution = models.ForeignKey(
         'core.Institution', on_delete=models.SET_NULL, null=True, blank=True,
@@ -1067,6 +1163,17 @@ class Euthanasia(models.Model):
     body_received_at = models.DateField('遗体领取日期', null=True, blank=True)
     body_received_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='received_bodies', verbose_name='遗体领取人')
     body_received_by_name = models.CharField('遗体领取人姓名', max_length=50, blank=True, default='')
+    # 死亡出库单（第五十四轮）：医院把遗体交给无害化处理厂时补录。
+    # 原先只有捕捉点「领取遗体」一个动作，医院侧没有出库凭证 ——
+    # 谁交接、交给哪家处理厂、接收人是谁、签字在哪，纸上全是空的。
+    outbound_at = models.DateField('出库日期', null=True, blank=True)
+    handover_name = models.CharField('交接人', max_length=50, blank=True, default='')
+    receiving_org = models.CharField('接收机构（无害化处理厂）', max_length=100, blank=True, default='')
+    receiver_name = models.CharField('接收人', max_length=50, blank=True, default='')
+    # 旧版出库单与「接收机构」重复的字段，已不再写入与展示，仅保留历史数据。
+    receiver_unit = models.CharField('接收单位', max_length=100, blank=True, default='')
+    signature = models.TextField('接收人签字', blank=True, default='')
+    photo = models.ImageField('出库照片', upload_to='euthanasia/', null=True, blank=True)
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='euthanasia_operated', verbose_name='操作员')
     operator_name = models.CharField('操作员姓名', max_length=50, blank=True, default='')
     ledger_no = models.CharField('台账编号', max_length=50, blank=True, default='',
@@ -1138,6 +1245,9 @@ class AdoptionHallListing(models.Model):
     personality = models.CharField('性格', max_length=100, blank=True, default='')
     body_condition = models.CharField('身体状况', max_length=100, blank=True, default='')
     flow_doc = models.TextField('流程文档', blank=True, default='')
+    # 捕捉/诊疗环节已经产生的照片，上架时默认全部展示；医院可逐张隐藏。
+    # 存字段名列表（如 ["photo_before"]），不存 URL —— 换图后设置仍然有效。
+    hidden_photos = models.JSONField('大厅隐藏照片', default=list, blank=True)
     is_active = models.BooleanField('已上架', default=True)
     published_at = models.DateField('上架日期', null=True, blank=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
@@ -1149,6 +1259,23 @@ class AdoptionHallListing(models.Model):
 
     def __str__(self):
         return f'上架 - {self.pet.code}'
+
+
+class AdoptionPhoto(models.Model):
+    """医院在领养资料里补拍的照片（不再重复上传捕捉/诊疗环节已有的照片）。"""
+    listing = models.ForeignKey(
+        AdoptionHallListing, on_delete=models.CASCADE,
+        related_name='extra_photos', verbose_name='领养上架')
+    image = models.ImageField('补充照片', upload_to='photos/adoption/')
+    created_at = models.DateTimeField('上传时间', auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+        verbose_name = '领养补充照片'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'补充照片 - {self.listing.pet.code}'
 
 
 # ============================================

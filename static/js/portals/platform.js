@@ -1008,6 +1008,7 @@ const PlatformPortal = {
         { type: '转运单', key: 'transfer_prefix', example: 'TRF260001' },
         { type: '领回单', key: 'owner_return_prefix', example: 'RET260001' },
         { type: '放归单', key: 'release_prefix', example: 'REL260001' },
+        { type: '运回单', key: 'return_prefix', example: 'RTN260001' },
         { type: '领养单', key: 'adoption_prefix', example: 'ADP260001' },
         { type: '安乐死单', key: 'euthanasia_prefix', example: 'EUT260001' },
         { type: '诊疗单', key: 'treatment_prefix', example: 'TRE260001' },
@@ -1015,6 +1016,7 @@ const PlatformPortal = {
         { type: '物料下发单', key: 'dispatch_prefix', example: 'DIS260001' },
         { type: '物料接收单', key: 'receive_prefix', example: 'RCV260001' },
         { type: '物料异动单', key: 'adjustment_prefix', example: 'ADJ260001' },
+        { type: '物料出库单', key: 'outbound_prefix', example: 'OUT260001' },
         { type: '物料消耗记录', key: 'consume_prefix', example: 'CON260001' }
       ];
       el.innerHTML = `

@@ -90,6 +90,9 @@ def api_me(request):
         'institution_id': u.institution_id,
         'institution_name': u.institution.name if u.institution else '',
         'phone': u.phone,
+        # 医院操作员在个人中心只读展示（由平台端维护）：证号会印在诊疗单、
+        # 处方与绝育证明上，本人不能改，只能看到自己当前在册的号码。
+        'vet_license': u.vet_license,
         # 账号状态：界面（个人中心「账号状态」）要**读数据**显示，
         # 不能写死「启用」—— 停用判据在 `user_toggle_status` 那边，
         # 值域见 `core.models.STATUS_VALUES`。

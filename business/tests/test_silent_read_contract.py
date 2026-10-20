@@ -168,7 +168,7 @@ class ApiMethodClassificationTest(SimpleTestCase):
             'getHospitalLedger', 'getHospitalPets', 'getInstitutions',
             'getMaterialSupervision', 'getMaterialTransactions', 'getMaterials',
             'getOperationLogs', 'getOwnerReturns', 'getPetArchive', 'getPetLifecycle',
-            'getPets', 'getReleases', 'getShelterLedger', 'getTransfers',
+            'getPets', 'getReleases', 'getReturnOrders', 'getShelterLedger', 'getTransfers',
             'getTreatments', 'getUsers',
         }
         actual = {n for n, k in self.api.items() if k == 'get-silent'}
@@ -293,7 +293,7 @@ class SilentReadInventoryTest(SimpleTestCase):
         ('shelter', 'showCaptureDetail'),
         # 捕捉编辑：取不到单据/机构时降级（机构取不到 → 允许改，服务端兜底）
         ('shelter', 'showCaptureEdit'),
-        # 回收登记弹窗：取不到捕捉单时用默认值
+        # 领回登记弹窗：取不到捕捉单时用默认值
         ('shelter', 'showRecoverModal'),
         # 第五十五轮：`renderReceiveTab` / `viewTransferDetail` 的动物档案
         # 已改为严格读 + 可见警告（失败时行内「未知」会被误读成档案缺失，

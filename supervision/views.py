@@ -1636,6 +1636,7 @@ SYSTEM_CONFIG_DEFAULTS = {
     'transfer_prefix': 'TRF',
     'owner_return_prefix': 'RET',
     'release_prefix': 'REL',
+    'return_prefix': 'RTN',
     'adoption_prefix': 'ADP',
     'euthanasia_prefix': 'EUT',
     'treatment_prefix': 'TRE',

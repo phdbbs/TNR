@@ -2,7 +2,7 @@
    宠物医院端 SPA · 全部业务逻辑（TNR_API 异步调用）
    ==================================================== */
 
-/* 办结去向的图标与说明（第四十六轮 v5.1）。
+/* 去向（诊疗页的「建议去向」）图标与说明（第四十六轮 v5.1）。
    ⚠ 只放**展示**信息：去向的**合法取值**由后端
      `Treatment.DISPOSAL_CHOICES` 通过 `options.disposals` 下发，
      前端不另写一份清单 —— 两边各写一份必然漂移（后端加了去向、
@@ -12,7 +12,7 @@ const TX_DISPOSAL_ICON = {
   euthanized: '🕯️', dead: '⚰️'
 };
 const TX_DISPOSAL_DESC = {
-  pending_adopt: '信息进入领养大厅', released: '待转运可选',
+  pending_adopt: '需登记领养并办出库', released: '待转运可选',
   owner_returned: '联系主人领回', euthanized: '需另开安乐死单',
   dead: '需另开无害化单'
 };
@@ -24,8 +24,6 @@ const Hospital = {
     'treatment': '诊疗业务管理',
     'discharge': '出院管理',
     'material': '物料库存管理',
-    'adoption-info': '领养信息维护',
-    'euthanasia': '安乐死处置',
     'ledger': '单据台账',
     'profile': '个人中心'
   },
@@ -40,8 +38,10 @@ const Hospital = {
     // 诊疗看板筛选（第四十八轮五态）：取值、顺序、文案都在 `TNR_UI.BOARD_STAGE`，
     // 这里只记初始页签
     treatmentFilter: 'checking',
-    // 出院模块的左侧子模块：adopt 领养 / dead 死亡（含安乐死）/ owner 领回 / release 放归
+    // 出院二级菜单：adopt 领养 / dead 死亡出库 / owner 领回 / release 放归
     dischargeTab: 'adopt',
+    // 领养二级菜单内的三态：ready 待领养 / reserved 已预约 / outbound 已出库
+    adoptionTab: 'ready',
     // 诊疗看板数据（`/api/business/treatments/board/` 的响应体）
     treatmentBoard: null,
     // 当前诊疗流程会话：{ detail, draft, step, maxStep, open }
@@ -144,12 +144,10 @@ const Hospital = {
       // 待签收 = pending + partial（部分签收的单还有剩余动物没到）
       const pendRecv = transfers.filter(t => TNR_UI.isOpenTransferStatus(t.status)).length;
       /* 「在院」不等于「待诊疗」（第五十二轮电脑端巡检发现）。
-         放归分两段：诊疗单**办结**（`disposed_at` 有值）时 `Pet.status` 仍留在
-         `in_treatment`，等转运单 + 放归单把动物送出去（`dispose(defer_pet_status=True)`）。
-         只按 `p.status === 'in_treatment'` 判待办，这批动物会被挂成「待诊疗」，
-         点进诊疗看板却不在任何一列（看板按诊疗单阶段分，它们已经在「已出院」），
-         界面等于说「你有活没干，但找不到在哪」。
-         所以按**每只动物最新一张诊疗单**分流：已办结的进「待出院」，其余才是「待诊疗」。 */
+         第五十六轮起，「诊疗完成」只落 `done_at`，动物进入**待出院**；
+         只有出院管理里的终态动作才写 `disposed_at`。所以按每只动物最新
+         一张诊疗单分流：`done_at` 有、`disposed_at` 空的进「待出院」，
+         没完成诊疗的才是「待诊疗」—— 两者都不该在首页上消失。 */
       const latestTxByPet = new Map();
       treatments.forEach(t => {
         const prev = latestTxByPet.get(t.pet_id);
@@ -158,16 +156,23 @@ const Hospital = {
       const inHouse = pets.filter(p => p.status === 'in_treatment');
       const pendTreatPets = inHouse.filter(p => {
         const t = latestTxByPet.get(p.id);
-        return !t || !t.is_disposed;
+        return !t || !t.done_at;
       });
       const pendDischargePets = inHouse.filter(p => {
         const t = latestTxByPet.get(p.id);
-        return !!t && !!t.is_disposed;
+        return !!t && !!t.done_at && !t.is_disposed;
       });
       const pendTreat = pendTreatPets.length;
       const pendDischarge = pendDischargePets.length;
       const stockWarn = materials.filter(m => (m.hospital_stock || 0) <= (m.safety_stock || 0)).length;
-      const pendAdopt = pets.filter(p => p.status === 'pending_adopt').length;
+      // 待领养资料维护 = 历史「待领养」状态 ∪ 诊疗完成且医生建议领养的待出院动物。
+      // 第五十六轮起诊疗完成不再改 `Pet.status`，只按状态筛会漏掉全部新数据。
+      const legacyAdoptPets = pets.filter(p => p.status === 'pending_adopt');
+      const advisedAdoptPets = pendDischargePets.filter(p => {
+        const t = latestTxByPet.get(p.id);
+        return t && t.disposal_advised === 'pending_adopt';
+      });
+      const pendAdopt = legacyAdoptPets.length + advisedAdoptPets.length;
       const pendingDisp = txns.filter(t => t.type === 'dispatch' && !(t.note || '').includes('[已签收]'));
 
       const todoItems = [];
@@ -186,13 +191,15 @@ const Hospital = {
       });
       pendDischargePets.forEach(p => {
         todoItems.push({icon: '🚪', title: '待出院：' + (p.code || ''),
-          desc: TNR_UI.joinInfo([p.name, '诊疗已办结，出院单据还没走完']), nav: 'discharge'});
+          desc: TNR_UI.joinInfo([p.name, '诊疗已完成，出院单据还没办完']), nav: 'discharge'});
       });
       pendingDisp.forEach(t => {
         todoItems.push({icon: '📦', title: '待接收物料：' + (t.material_name || ''), desc: '数量：' + (t.quantity || 0) + (t.unit || ''), nav: 'material'});
       });
-      pets.filter(p => p.status === 'pending_adopt').forEach(p => {
-        todoItems.push({icon: '🐾', title: '待领养资料维护：' + (p.code || ''), desc: TNR_UI.joinInfo([p.name, '请完善照片和简介']), nav: 'adoption-info'});
+      legacyAdoptPets.concat(advisedAdoptPets).forEach(p => {
+        todoItems.push({icon: '🐾', title: '待领养资料维护：' + (p.code || ''),
+          desc: TNR_UI.joinInfo([p.name, '请完善照片和简介']),
+          nav: 'discharge', tab: 'adopt', sub: 'ready'});
       });
 
       /* —— 数据概览：带「统计区间」（任意起止）。
@@ -255,7 +262,9 @@ const Hospital = {
         html += '<div class="empty-state" style="padding:var(--sp-8);"><div class="empty-state-icon">✓</div><div class="empty-state-text">暂无待办任务</div></div>';
       } else {
         todoItems.forEach(t => {
-          html += '<div class="todo-item" data-todo="' + t.nav + '">';
+          html += '<div class="todo-item" data-todo="' + t.nav + '"'
+            + (t.tab ? ' data-tab="' + t.tab + '"' : '')
+            + (t.sub ? ' data-sub="' + t.sub + '"' : '') + '>';
           html += '<div class="todo-item-icon">' + t.icon + '</div>';
           html += '<div class="todo-item-content"><div class="todo-item-title">' + this.escape(t.title) + '</div><div class="todo-item-desc">' + this.escape(t.desc) + '</div></div>';
           html += '<span style="color:var(--ink-light);font-size:14px;">›</span></div>';
@@ -267,13 +276,15 @@ const Hospital = {
       const actions = [
         {icon: '📥', label: '动物交接', page: 'receive'},
         {icon: '🔬', label: '诊疗操作', page: 'treatment'},
+        {icon: '🚪', label: '出院办理', page: 'discharge'},
         {icon: '📦', label: '物料管理', page: 'material'},
-        {icon: '🐾', label: '领养维护', page: 'adoption-info'},
-        {icon: '📊', label: '单据台账', page: 'ledger'},
-        {icon: '⚰️', label: '安乐死处置', page: 'euthanasia'}
+        {icon: '📊', label: '单据台账', page: 'ledger'}
       ];
       actions.forEach(a => {
-        html += '<div class="quick-action" data-quick="' + a.page + '"><div class="quick-action-icon">' + a.icon + '</div><div class="quick-action-label">' + a.label + '</div></div>';
+        html += '<div class="quick-action" data-quick="' + a.page + '"'
+          + (a.tab ? ' data-tab="' + a.tab + '"' : '') + '>'
+          + '<div class="quick-action-icon">' + a.icon + '</div>'
+          + '<div class="quick-action-label">' + a.label + '</div></div>';
       });
       html += '</div></div></div>';
       html += '</div>';
@@ -285,10 +296,17 @@ const Hospital = {
       document.getElementById('page-dashboard').innerHTML = html;
 
       document.querySelectorAll('[data-todo]').forEach(el => {
-        el.addEventListener('click', () => this.navigateTo(el.dataset.todo));
+        el.addEventListener('click', () => {
+          if (el.dataset.tab) this.state.dischargeTab = el.dataset.tab;
+          if (el.dataset.sub) this.state.adoptionTab = el.dataset.sub;
+          this.navigateTo(el.dataset.todo);
+        });
       });
       document.querySelectorAll('[data-quick]').forEach(el => {
-        el.addEventListener('click', () => this.navigateTo(el.dataset.quick));
+        el.addEventListener('click', () => {
+          if (el.dataset.tab) this.state.dischargeTab = el.dataset.tab;
+          this.navigateTo(el.dataset.quick);
+        });
       });
 
       // ---- 数据概览：统计区间交互 ----
@@ -842,7 +860,7 @@ const Hospital = {
     const petId = el.dataset.v;
     const tid = el.dataset.tid || '';
     if (kind === 'discharge') {
-      this.openDischargeChoice(petId, tid, el.dataset.dsp || '');
+      this.openDischargeChoice(petId, el.dataset.dsp || '');
       return;
     }
     const step = { check: 1, diagnose: 2, treat: 3 }[kind] || undefined;
@@ -852,18 +870,18 @@ const Hospital = {
   /* ==================== 出院（第四十八轮） ====================
    * 四类去向：领养 / 死亡（含安乐死）/ 领回 / 放归。
    *
-   * 流程顺序是**先开单据、再办结诊疗单**，不能反过来：
-   * 单据接口都要求动物还在院（`in_treatment` / `pending_adopt`），
-   * 先办结会把它改成终态，单据立刻 400「当前状态不可办理」。
+   * 诊疗单的「已出院」只由这里的**终态动作**决定（第五十六轮）：
+   * 领养出库、死亡出库单提交、运回单对方签收、主人领回完成时，
+   * 后端才写 `Treatment.disposed_at`。诊疗页选的只是「建议去向」，
+   * 点「诊疗完成」后动物仍在「待出院」。
    *
-   * 办结诊疗单时一律 `defer_pet_status: true` —— 动物状态由**单据**接管。
-   * 否则：
-   *   - 领养单刚把动物置成 `pending_claim`（待领出），办结又写成
-   *     `pending_adopt`（待领养），动物会「回到待领养」；
-   *   - 放归单是两段流程（转运回小区 → 放归回捕捉地），办结就写
-   *     `released` 会让还在车上的动物在台账上已经「已放归」。
+   * 前端只负责按去向开单，办结由后端随单据终态一起完成：
+   *   - 领养：登记领养单 → 领养列表里办「领养出库」；
+   *   - 死亡：登记死亡 / 安乐死 → 办「死亡出库单」；
+   *   - 领回：领回单当场完成交接（终态）；
+   *   - 放归：开运回单 → 捕捉点签收（终态）。
    */
-  openDischargeChoice(petId, tid, advised) {
+  openDischargeChoice(petId, advised) {
     const OPTS = [
       { k: 'adopt', ic: '🏠', n: '领养', d: '开具领养单，动物由领养人领走' },
       { k: 'dead', ic: '🕯️', n: '死亡（含安乐死）', d: '安乐死，或死亡后的无害化处理' },
@@ -893,18 +911,24 @@ const Hospital = {
         bodyEl.querySelectorAll('[data-dsp]').forEach(btn => {
           btn.onclick = () => {
             closeFn();
-            this.openDischargeForm(btn.dataset.dsp, petId, tid);
+            this.openDischargeForm(btn.dataset.dsp, petId);
           };
         });
       }
     });
   },
 
-  openDischargeForm(kind, petId, tid) {
+  openDischargeForm(kind, petId) {
+    const shelterOptions = ((this._dsp && this._dsp.returnShelters) || []).map(s => ({
+      value: s.id,
+      label: s.name + (s.is_city ? '（市级）' : '（' + (s.district_name || '') + '）')
+    }));
+    const pet = this.dspPet(petId) || {};
     const DEF = {
       adopt: {
-        title: '开具领养单',
-        hint: '保存后立即确认领出，动物状态变为「已领养」。',
+        title: '登记领养预约',
+        hint: '保存后动物进入「已预约」，还要在「出院管理 · 领养 · 已预约」中'
+          + '填写领养出库单（交接人、出库日期、领养人签字、可选照片）才完成交接。',
         fields: [
           { k: 'adopter_name', l: '领养人姓名', req: true },
           { k: 'adopter_phone', l: '联系电话', req: true },
@@ -932,17 +956,19 @@ const Hospital = {
           { k: 'owner_id_card', l: '身份证号' },
           { k: 'owner_address', l: '住址', full: true },
           { k: 'reason', l: '领回原因', full: true },
-          { k: 'return_time', l: '领回时间', type: 'date' }
+          { k: 'return_time', l: '领回时间', type: 'date' },
+          { k: 'signature', l: '主人签字', type: 'sig', req: true }
         ]
       },
       release: {
-        title: '发起放归',
-        hint: '放归分两段：医院先把动物「转运回原小区」，再由小区接收人确认'
-          + '「放归回捕捉地」。小区名称可留空 —— 系统按捕捉单登记的小区自动带出。',
+        title: '开运回单（放归反向物流）',
+        hint: '放归先由医院把动物运回捕捉点：本单提交后进入「待确认」，'
+          + '捕捉点填写接收单并签字后，动物进入捕捉点的「待放归」列表。'
+          + '接收捕捉点可选市级，或本院所在区县的捕捉点。',
         fields: [
-          { k: 'community_name', l: '原小区名称（留空自动带出）', full: true },
-          { k: 'receiver_name', l: '小区接收人' },
-          { k: 'receiver_phone', l: '接收人电话' }
+          { k: 'shelter_id', l: '接收捕捉点', req: true, type: 'select',
+            options: shelterOptions, selected: pet.shelter_id },
+          { k: 'note', l: '备注（交接说明）', full: true }
         ]
       }
     }[kind];
@@ -955,12 +981,26 @@ const Hospital = {
           '<span class="' + (i === 0 ? 'on' : '') + '" data-v="' + v + '">' + t + '</span>').join('')
         + '</div></div>'
       : '';
-    const fieldsHTML = DEF.fields.map(f =>
-      '<div class="dsp-fld' + (f.full ? ' full' : '') + '">'
-      + '<label>' + f.l + (f.req ? '<span class="req">*</span>' : '') + '</label>'
-      + '<input class="form-input" type="' + (f.type === 'date' ? 'date' : 'text') + '"'
-      + ' data-f="' + f.k + '">'
-      + '</div>').join('');
+    const fieldsHTML = DEF.fields.map(f => {
+      const label = '<label>' + f.l + (f.req ? '<span class="req">*</span>' : '') + '</label>';
+      let control;
+      if (f.type === 'sig') {
+        control = '<div class="sig-field" data-sig="' + f.k + '"></div>';
+      } else if (f.type === 'select') {
+        control = '<select class="form-select" data-f="' + f.k + '">'
+          + (f.options || []).map(o => '<option value="' + o.value + '"'
+            + (String(o.value) === String(f.selected) ? ' selected' : '') + '>'
+            + TNR_UI.escape(o.label) + '</option>').join('')
+          + '</select>';
+      } else if (f.type === 'textarea') {
+        control = '<textarea class="form-textarea" data-f="' + f.k + '" rows="2"></textarea>';
+      } else {
+        control = '<input class="form-input" type="' + (f.type === 'date' ? 'date' : 'text')
+          + '" data-f="' + f.k + '">';
+      }
+      return '<div class="dsp-fld' + (f.full || f.type === 'sig' || f.type === 'textarea' ? ' full' : '')
+        + '">' + label + control + '</div>';
+    }).join('');
 
     TNR_UI.modal({
       title: DEF.title,
@@ -979,11 +1019,16 @@ const Hospital = {
             sp.classList.add('on');
           };
         });
+        const sigPads = {};
+        bodyEl.querySelectorAll('[data-sig]').forEach(el => {
+          sigPads[el.dataset.sig] = TNR_UI.initSignatureField(el, {title: '手写签名'});
+        });
         bodyEl.querySelector('#dspSubmit').onclick = () => {
           const payload = {};
           bodyEl.querySelectorAll('[data-f]').forEach(el => {
             payload[el.dataset.f] = (el.value || '').trim();
           });
+          Object.keys(sigPads).forEach(k => { payload[k] = sigPads[k].getDataURL() || ''; });
           const chip = bodyEl.querySelector('.dsp-chips span.on');
           if (chip) payload[chip.parentElement.dataset.f] = chip.dataset.v;
           for (const f of (DEF.fields || [])) {
@@ -993,22 +1038,21 @@ const Hospital = {
             }
           }
           closeFn();
-          this.submitDischarge(kind, petId, tid, payload);
+          this.submitDischarge(kind, petId, payload);
         };
       }
     });
   },
 
-  async submitDischarge(kind, petId, tid, payload) {
+  async submitDischarge(kind, petId, payload) {
     const body = Object.assign({ pet_id: Number(petId) }, payload);
     try {
       let res;
       if (kind === 'adopt') {
         res = await TNR_API.registerAdoption(body);
-        TNR_UI.assertOk(res, '开具领养单失败');
-        // 医院现场出院 = 领养人当场领走，直接确认领出。
-        const claim = await TNR_API.confirmAdoptionClaim(res.data.id, {});
-        TNR_UI.assertOk(claim, '领养单已开，但确认领出失败');
+        TNR_UI.assertOk(res, '登记领养预约失败');
+        // 不再当场「确认领出」：领养完成必须走带交接人、签字、照片的
+        // 领养出库单，否则领养台账里没有任何交接凭证。
       } else if (kind === 'dead') {
         res = await TNR_API.createEuthanasia(body);
         TNR_UI.assertOk(res, '登记失败');
@@ -1016,23 +1060,17 @@ const Hospital = {
         res = await TNR_API.createOwnerReturn(body);
         TNR_UI.assertOk(res, '办理领回失败');
       } else {
-        res = await TNR_API.createRelease(body);
-        TNR_UI.assertOk(res, '发起放归失败');
+        res = await TNR_API.createReturnOrder({
+          pet_ids: [Number(petId)],
+          note: payload.note || '',
+          shelter_id: Number(payload.shelter_id) || undefined
+        });
+        TNR_UI.assertOk(res, '开运回单失败');
       }
 
-      // 办结诊疗单：只记去向，动物状态交给单据（见上面的说明）
-      if (tid) {
-        const disposal = {
-          adopt: 'pending_adopt',
-          dead: payload.kind === 'dead' ? 'dead' : 'euthanized',
-          owner: 'owner_returned',
-          release: 'released'
-        }[kind];
-        const disposed = await TNR_API.treatmentDispose(tid, disposal, { defer_pet_status: true });
-        TNR_UI.assertOk(disposed, '单据已开，但办结诊疗单失败');
-      }
-
-      TNR_UI.toast('出院办理成功', 'success');
+      // 这里只开单，不办结诊疗单：领养 / 死亡 / 放归还差最后一步
+      // （领养出库 / 死亡出库 / 捕捉点签收），要等那一步完成才算出院。
+      TNR_UI.toast('单据已创建，请继续办理出库 / 签收', 'success');
       /* 刷新**当前所在的页面**：同一个表单既能从诊疗看板（待出院行）打开，
          也能从出院管理页打开。写死 `render_treatment()` 会让出院页上的
          操作完成后跳到诊疗页 —— 用户点了「办理领养」，结果被弹回诊疗看板。 */
@@ -1376,6 +1414,14 @@ const Hospital = {
         '<span class="t" data-act="tx-advice-tpl" data-v="' + i + '">＋ '
         + this.escape(t) + '</span>').join('') + '</div>';
     }
+    // 医嘱尾部的操作人：整单医嘱由开单/执行医生负责，只显示一行文字
+    // （姓名 + 执业证号），不再放一枚重复的「电子章」。
+    const adviceVetName = detail.vet_name || '';
+    const adviceVetLicense = detail.vet_license || '';
+    h += '<div class="tx-fld" style="margin-top:10px;"><label>操作人</label>'
+      + '<input class="tx-inp" value="' + this.escape(adviceVetName)
+      + (adviceVetLicense ? '（' + this.escape(adviceVetLicense) + '）' : '')
+      + '" readonly></div>';
     h += '</div></div>';
 
     h += '<div class="tx-sec-head"><span class="bar"></span>处置项目'
@@ -1573,14 +1619,11 @@ const Hospital = {
     const detail = f.detail || {};
     const vetName = item.vetName || detail.vet_name || '';
     const vetLicense = item.vetLicense || detail.vet_license || '';
+    // 操作人只保留这一行。原先后面还有一条 `tx-sign-strip`（圆形红章 +
+    // 姓名/证号），与这行信息完全重复，视觉上像盖了两个章。
     h += '<div class="tx-fld"><label>操作人 <span class="auto">默认当前账号</span></label>'
       + '<input class="tx-inp" value="' + this.escape(vetName)
-      + (vetLicense ? '（' + this.escape(vetLicense) + '）' : '') + '" readonly></div>'
-      + '<div class="tx-sign-strip">'
-      + '<div class="stamp">' + this.escape(detail.hospital_seal || detail.hospital_name || '电子章')
-      + '</div>'
-      + '<div class="sd"><div class="n">' + this.escape(vetName || '未登记') + '</div>'
-      + '<div class="d">' + this.escape(vetLicense || '未登记执业证号') + '</div></div></div>';
+      + (vetLicense ? '（' + this.escape(vetLicense) + '）' : '') + '" readonly></div>';
 
     h += '</div></div>';
     return h;
@@ -1660,7 +1703,9 @@ const Hospital = {
       + '</div><div class="card-body">';
     if (!must.length) {
       h += '<div class="tx-empty">本单未选择任何处置项目（未填写处方）。<br>'
-        + '可直接点击下方「诊疗完成」进入办结。</div>';
+        + (detail.done_at ? '诊疗已完成，等待出院办理。'
+          : '可直接点击下方「诊疗完成」进入办结。')
+        + '</div>';
     } else {
       must.forEach(k => {
         const item = f.draft.items[k];
@@ -1730,16 +1775,22 @@ const Hospital = {
       + '诊疗结束后的现场留证（如术后伤口、精神状态），与领养资料「诊疗后」为同一张照片，'
       + '无需重复上传。</div></div></div></div>';
 
+    // 提交「诊疗完成」后建议去向已落库，界面锁定为只读 —— 再点芯片只改
+    // 本地 draft，后端没有任何“改建议”的入口，看着能改实际没保存。
+    const adviceLocked = !!detail.done_at;
     h += '<div class="card mb-5" style="margin-top:14px;"><div class="card-header">'
-      + '<div class="card-title"><span class="card-title-bar"></span>办结去向</div>'
-      + '<div class="text-muted fs-sm">单选 · 诊疗完成后可选</div></div><div class="card-body">';
+      + '<div class="card-title"><span class="card-title-bar"></span>建议去向</div>'
+      + '<div class="text-muted fs-sm">'
+      + (adviceLocked ? '已记录 · 仅供出院办理参考' : '单选 · 仅供出院办理参考')
+      + '</div></div><div class="card-body">';
     if (!detail.diagnosed_at) {
       h += '<div class="tx-empty">请先完成「医嘱与处方」并点击「诊断完成」。</div>';
     } else {
       h += '<div class="tx-disposal-grid">';
       (opts.disposals || []).forEach(dsp => {
-        h += '<div class="tx-dsp ' + (f.draft.disposal === dsp.key ? 'active' : '')
-          + '" data-act="tx-disposal" data-v="' + dsp.key + '">'
+        h += '<div class="tx-dsp ' + (f.draft.disposal === dsp.key ? 'active' : '') + '"'
+          + (adviceLocked ? '' : ' data-act="tx-disposal"')
+          + ' data-v="' + dsp.key + '">'
           + '<span class="ic">' + (TX_DISPOSAL_ICON[dsp.key] || '📌') + '</span>'
           + '<div class="tx"><div class="n">' + this.escape(dsp.label) + '</div>'
           + '<div class="d">' + this.escape(TX_DISPOSAL_DESC[dsp.key] || '') + '</div>'
@@ -1748,9 +1799,11 @@ const Hospital = {
       h += '</div>';
       if (f.draft.disposal) {
         const sel = (opts.disposals || []).find(x => x.key === f.draft.disposal) || {};
-        h += '<div class="tx-tip suc" style="margin-top:12px;"><span>✓</span><div>已选去向：<b>'
-          + this.escape(sel.label || f.draft.disposal) + '</b>。本步只变更动物状态并记录去向，'
-          + '具体单据（领养 / 放归 / 领回 / 安乐死 / 无害化）由对应模块后续开具。</div></div>';
+        h += '<div class="tx-tip suc" style="margin-top:12px;"><span>✓</span><div>'
+          + (adviceLocked ? '建议去向：<b>' : '已选建议去向：<b>')
+          + this.escape(sel.label || f.draft.disposal) + '</b>。动物仍在院，诊疗完成后列表显示'
+          + '「待出院」；只有在<b>出院管理</b>里办完单据（领养出库 / 死亡出库 / 运回签收 / '
+          + '主人领回）才算已出院。</div></div>';
       }
     }
     h += '</div></div>';
@@ -1792,9 +1845,8 @@ const Hospital = {
       return '<button class="btn btn-primary" data-act="tx-treat-done"' + (blocked ? ' disabled' : '')
         + '>' + (blocked ? '还有 ' + left + ' 项未完成' : '诊疗完成（转待出院）') + '</button>';
     }
-    const hasDisposal = !!f.draft.disposal;
-    return '<button class="btn btn-primary" data-act="tx-finish"' + (hasDisposal ? '' : ' disabled')
-      + '>' + (hasDisposal ? '完成办结，返回看板' : '请先选择办结去向') + '</button>';
+    return '<button class="btn btn-secondary" data-act="tx-back">返回看板</button>'
+      + '<button class="btn btn-primary" data-act="tx-discharge">去出院管理</button>';
   },
 
   /* ==================== 事件分发（全部走委托） ==================== */
@@ -1814,6 +1866,11 @@ const Hospital = {
     if (act === 'tx-refresh') { this.renderTreatmentFlow(); return; }
     if (act === 'tx-open') { this.openTreatmentFlow(k, el.dataset.tid || ''); return; }
     if (act === 'tx-back') { this.state.treatmentFlow = null; this.renderTreatmentFlow(); return; }
+    if (act === 'tx-discharge') {
+      this.state.treatmentFlow = null;
+      this.navigateTo('discharge');
+      return;
+    }
     if (!f) return;
 
     // 检查单已提交 / 已办结 → 第 1 步只读。
@@ -1915,7 +1972,6 @@ const Hospital = {
     if (act === 'tx-treat-done') { this.markTreatmentDone(); return; }
     if (act === 'tx-disposal') { f.draft.disposal = k; this.renderFlowView(); return; }
     if (act === 'tx-photo') { this.txUploadPhoto(); return; }
-    if (act === 'tx-finish') { this.finishTreatment(); return; }
   },
 
   /* 诊疗后照片上传（B2）：弹层选文件 + 预览（与领养页 uploadPhoto 同款交互），
@@ -2197,31 +2253,14 @@ const Hospital = {
     const f = this.state.treatmentFlow;
     if (!f) return;
     try {
-      // 把当前选中的「办结去向」作为**建议**一起提交：动物此刻还在院，
-      // 后端只写 `disposal_advised`，不碰最终去向。待出院时据此预选单据。
+      // 当前选中的只是「建议去向」：后端写 `disposal_advised`，动物进入
+      // 「待出院」。真正的办结由出院管理里的单据完成（见各出院接口）。
       const res = await TNR_API.treatmentDone(f.detail.id, f.draft.disposal);
       TNR_UI.assertOk(res, '诊疗完成失败');
       this.startTreatmentFlow(res.data, 3);
-      TNR_UI.toast(res.message || '诊疗完成，请在下方选择办结去向', 'success');
+      TNR_UI.toast(res.message || '诊疗完成，动物进入待出院', 'success');
     } catch (e) {
       TNR_UI.toast(e.message || '操作失败', 'danger');
-    }
-  },
-
-  async finishTreatment() {
-    const f = this.state.treatmentFlow;
-    if (!f) return;
-    const disposal = f.draft.disposal;
-    if (!disposal) { TNR_UI.toast('请先选择办结去向', 'warning'); return; }
-    try {
-      const res = await TNR_API.treatmentDispose(f.detail.id, disposal);
-      TNR_UI.assertOk(res, '办结失败');
-      TNR_UI.toast('已办结，动物状态已更新', 'success');
-      this.state.treatmentFlow = null;
-      this.state.treatmentFilter = 'done';
-      this.renderTreatmentFlow();
-    } catch (e) {
-      TNR_UI.toast(e.message || '办结失败', 'danger');
     }
   },
 
@@ -2638,94 +2677,248 @@ const Hospital = {
     }
   },
 
-  /* ========== 4. 出院管理（第四十八轮） ==========
-   * 左侧四个去向模块（领养 / 死亡含安乐死 / 领回 / 放归），右侧搜索条件 + 列表。
+  /* ========== 4. 出院管理（第五十四轮：四个去向并入二级菜单） ==========
+   * 出院只有四种去向：领养 / 死亡出库 / 领回 / 放归。
+   * 它们不是四个独立页面，而是出院的一级子状态 —— 因此侧栏不再保留
+   * 「领养信息维护」「安乐死处置」，全部收进出院页顶部的二级菜单。
    *
-   * 列表以**动物**为行，不以单据为行：用户问的是「这只动物出院了没有、
-   * 走的哪条路」，不是「今天开了几张单」。同一只动物在一个去向里最多一条
-   * 单据，行上同时给出「动物当前状态」与「单据状态」—— 两者不是一回事
-   * （领养单已开、还没确认领出时，单据是 pending_claim，动物还是 pending_adopt）。
+   * 领养再分三态（与用户口径一一对应）：
+   *   待领养 = 诊疗完成、资料可维护、推送领养大厅；
+   *   已预约 = 捕捉点已批准领养人 / 线下已登记，动物仍在院，待出库交接；
+   *   已出库 = 领养完成，只读。
    *
-   * 数据必须**两条线都取**：
-   *   ① 看板 `pending_discharge` —— 诊疗做完、还没办出院的动物（还没有单据）
-   *   ② 四个去向的单据列表 —— 已经办过的（有单据）
-   * 只取 ②：「待办理」的动物根本不出现，界面看起来像「暂时没有数据」；
-   * 只取 ①：办完就消失，历史单据查不到。
+   * 死亡出库 = 先登记安乐死 / 死亡，再填「死亡出库单」把遗体交给
+   * 无害化处理厂（交接人、接收机构、接收人、接收单位、签字、可选照片）。
    *
-   * 每行只给**一个**当前该做的动作（与诊疗看板同一原则，不让用户猜）：
-   *   待办理 → 办理；放归-待转运 → 转运回小区；其余已办结 → 打印单据。
-   * ⚠ 放归的第二段「确认放归」**不放在医院端**：`release_confirm` 只放行
-   *   `shelter`（小区接收人是捕捉点；政府端第四十九轮起只读），医院端点了必然 403。
-   *   这里只显示「待小区确认放归」的只读提示 —— 给一个永远点不通的按钮，
-   *   比不给更糟（用户会以为系统坏了）。
+   * 领回 = 主人到场认领：交接单 + 主人签字。
+   *
+   * 放归 = 捕捉点转运的反向：医院勾选待放归动物开「运回单」→ 捕捉点
+   * 签收（接收单）→ 动物进入捕捉点的待放归列表，再由捕捉点与物业签字放归。
+   * 运回单状态：待确认 / 已确认出库 / 已驳回 / 已撤回。
    */
-  dspModules() {
-    return [
-      { k: 'adopt', ic: '🏠', n: '领养', d: '开具领养单，动物由领养人领走' },
-      { k: 'dead', ic: '🕯️', n: '死亡（含安乐死）', d: '安乐死 / 无害化处理' },
-      { k: 'owner', ic: '🔁', n: '领回', d: '主人到场认领并领回' },
-      { k: 'release', ic: '🌿', n: '放归', d: '转运回小区 → 放归回捕捉地' }
-    ];
+  DSP_DOC_KEY: {
+    adoption: 'adoption',
+    euthanasia: 'euthanasia',
+    owner_return: 'owner_return',
+    return_order: 'return_order'
   },
 
-  /* 去向 → 打印页的单据键。
-     ⚠ 取值必须与后端 `business/views_print.py::DOC_SPECS` 的键一致，
-       它不是去向名（`adopt` ≠ `adoption`）。传错键后端回 404 打印页，
-       不会静默失败。 */
-  DSP_DOC_KEY: { adopt: 'adoption', dead: 'euthanasia', owner: 'owner_return', release: 'release' },
-
-  dspDocs(kind) { return (this._dsp && this._dsp.docs && this._dsp.docs[kind]) || []; },
-  dspPending() { return (this._dsp && this._dsp.pending) || []; },
-  dspPet(petId) { return (this._dsp && this._dsp.petMap) ? this._dsp.petMap[petId] : null; },
-
-  /* 模块角标 = 该去向的单据数 + 还没有单据的待办理动物数。
-     不能简单相加：`pending_discharge` 里可能已经有一条**别的**去向的单据
-     （比如先开了领养单又放弃），那种动物在其它模块里不该重复计数。 */
-  dspCount(kind) {
-    const docs = this.dspDocs(kind);
-    const withDoc = {};
-    docs.forEach(d => { withDoc[String(d.pet_id)] = 1; });
-    let n = docs.length;
-    this.dspPending().forEach(p => { if (!withDoc[String(p.pet_id)]) n += 1; });
-    return n;
+  dspPet(petId) {
+    const map = (this._dsp && this._dsp.petMap) || {};
+    return map[String(petId)] || null;
   },
 
-  dspAnimalBadge(petId, fallbackText) {
-    const pet = this.dspPet(petId);
-    if (!pet) {
-      // 动物档案不在本院列表里（档案作废 / 已被划走）时回退到单据状态，
-      // 不留空白 —— 空单元格看起来像「状态未知」。
-      return '<span class="badge badge-default">' + this.escape(fallbackText || '—') + '</span>';
-    }
-    return TNR_UI.petStatusBadge(pet.status);
+  dspPetCell(pet, fallbackCode) {
+    const code = (pet && pet.code) || fallbackCode || '—';
+    const name = pet ? (pet.name || '') : '';
+    const attr = pet ? TNR_API.petAttrText(pet) : '';
+    return '<div style="font-weight:500;">' + this.escape(code)
+      + (name ? ' · ' + this.escape(name) : '') + '</div>'
+      + (attr ? '<div class="fs-sm text-muted">' + this.escape(attr) + '</div>' : '');
+  },
+
+  dspImgTag(url, alt) {
+    return url
+      ? '<img src="' + this.escape(url) + '" alt="' + this.escape(alt || '照片') + '"'
+        + ' style="max-width:100%;max-height:180px;border-radius:var(--r-md);border:1px solid var(--border-light);">'
+      : '<span class="text-muted">—</span>';
+  },
+
+  dspSigTag(sig) {
+    return sig
+      ? '<img src="' + sig + '" alt="电子签名"'
+        + ' style="max-width:240px;max-height:110px;border:1px solid var(--border-light);border-radius:var(--r-md);background:#fff;">'
+      : '<span class="text-muted">—</span>';
+  },
+
+  dspUserLabel() {
+    const u = this.currentUser() || {};
+    return u.name || u.username || '';
+  },
+
+  dspStaffName() {
+    const u = this.currentUser() || {};
+    return u.name || u.username || '';
+  },
+
+  /* 已被领养流程占用的动物：待领出领养单 ∪ 已批准未出库的线上申请。
+     捕捉点批准申请后不会改 `Pet.status`，所以凡按状态筛「可出院动物」
+     的列表都必须再排一次这个集合。 */
+  dspReservedPetIds() {
+    const d = this._dsp || {};
+    const reserved = new Set();
+    (d.adoptions || []).forEach(a => {
+      if (a.status === 'pending_claim' && a.pet_id) reserved.add(String(a.pet_id));
+    });
+    (d.applications || []).forEach(a => {
+      if (a.status === 'approved' && a.pet_id) reserved.add(String(a.pet_id));
+    });
+    return reserved;
+  },
+
+  /* 诊疗完成、尚未办结的动物（看板 `pending_discharge` 桶）。
+     第五十六轮起诊疗页只记「建议去向」，动物仍是 `in_treatment`；
+     各去向的候选列表必须把这一类算进来，否则诊疗完成后在出院管理里
+     再也找不到它（页面显示「暂无动物」，其实刚治完一只）。
+     `advisedKeys` 传去向 key 列表：医生给了建议就按建议分流，
+     没给建议（空串）的动物在每个去向里都出现，由操作员人工选择。 */
+  dspPendingPets(advisedKeys) {
+    const d = this._dsp || {};
+    const reserved = this.dspReservedPetIds();
+    const out = [];
+    const seen = new Set();
+    (d.boardPending || []).forEach(r => {
+      if (!r.pet_id || reserved.has(String(r.pet_id))) return;
+      const pet = (d.petMap || {})[String(r.pet_id)];
+      if (!pet || pet.is_deleted) return;
+      const advised = r.disposal_advised || '';
+      if (advised && advisedKeys.indexOf(advised) === -1) return;
+      if (seen.has(String(pet.id))) return;
+      seen.add(String(pet.id));
+      out.push(pet);
+    });
+    return out;
+  },
+
+  /* 待领养 = 已诊疗完成、尚未被预约的动物。
+     捕捉点批准线上申请后**不会**改 `Pet.status`，动物仍是 pending_adopt；
+     不按申请单排除的话，同一只动物会同时出现在「待领养」和「已预约」，
+     数量与操作入口都对不上。 */
+  dspReadyPets() {
+    const d = this._dsp || {};
+    const reserved = this.dspReservedPetIds();
+    const ready = (d.pets || []).filter(p =>
+      p.status === 'pending_adopt' && !p.is_deleted && !reserved.has(String(p.id)));
+    const seen = new Set(ready.map(p => String(p.id)));
+    this.dspPendingPets(['pending_adopt']).forEach(p => {
+      if (!seen.has(String(p.id))) ready.push(p);
+    });
+    return ready;
+  },
+
+  /* 已预约 = 已有领养单待出库（pending_claim）∪ 已批准但还没生成领养单的申请。
+     同一只动物两处都有时只保留领养单行 —— 出库接口也应走领养单。 */
+  dspReservedRows() {
+    const d = this._dsp || {};
+    const petMap = d.petMap || {};
+    const pending = (d.adoptions || []).filter(a => a.status === 'pending_claim');
+    const withAdoption = new Set(pending.map(a => String(a.pet_id)));
+    const apps = (d.applications || []).filter(a => {
+      if (a.status !== 'approved' || !a.pet_id) return false;
+      if (withAdoption.has(String(a.pet_id))) return false;
+      const pet = petMap[String(a.pet_id)] || a.pet || null;
+      return !pet || pet.status !== 'adopted';
+    });
+    const rows = pending.map(a => ({
+      source: 'adoption',
+      id: a.id,
+      pet_id: a.pet_id,
+      pet: petMap[String(a.pet_id)] || a.pet || null,
+      pet_code: a.pet_code || '',
+      name: a.adopter_name || '',
+      phone: a.adopter_phone || '',
+      id_card: a.adopter_id_card || '',
+      address: a.adopter_address || '',
+      origin: '线下登记',
+      at: TNR_UI.firstDate(a.created_at, a.adopted_at),
+      raw: a
+    }));
+    apps.forEach(a => {
+      rows.push({
+        source: 'application',
+        id: a.id,
+        pet_id: a.pet_id,
+        pet: petMap[String(a.pet_id)] || a.pet || null,
+        pet_code: a.pet_code || '',
+        name: a.applicant_name || '',
+        phone: a.applicant_phone || '',
+        id_card: a.applicant_id_card || '',
+        address: a.applicant_address || '',
+        origin: '线上申请',
+        at: TNR_UI.firstDate(a.applied_at, a.reviewed_at),
+        raw: a
+      });
+    });
+    return rows;
+  },
+
+  dspCompletedAdoptions() {
+    return ((this._dsp && this._dsp.adoptions) || []).filter(a => a.status === 'completed');
+  },
+
+  dspOwnerPets() {
+    const reserved = this.dspReservedPetIds();
+    return ((this._dsp && this._dsp.pets) || [])
+      .filter(p => (p.status === 'pending_adopt' || p.status === 'in_treatment')
+        && !p.is_deleted && !reserved.has(String(p.id)));
+  },
+
+  /* 待放归 = 待领养动物，且没有未办结的旧版放归单、未被领养流程预留。
+     运回单开出后动物变成 return_pending，自然从本列表消失。 */
+  dspReleaseCandidates() {
+    const d = this._dsp || {};
+    const reserved = this.dspReservedPetIds();
+    const openReleasePets = new Set();
+    (d.releases || []).forEach(r => {
+      if (TNR_UI.OPEN_RELEASE_STATUS.indexOf(r.status) === -1) return;
+      const id = r.pet_id || (r.pet && r.pet.id);
+      if (id) openReleasePets.add(String(id));
+    });
+    const candidates = (d.pets || []).filter(p =>
+      p.status === 'pending_adopt' && !p.is_deleted
+      && !reserved.has(String(p.id)) && !openReleasePets.has(String(p.id)));
+    const seen = new Set(candidates.map(p => String(p.id)));
+    this.dspPendingPets(['released']).forEach(p => {
+      if (!seen.has(String(p.id)) && !openReleasePets.has(String(p.id))) {
+        candidates.push(p);
+      }
+    });
+    return candidates;
+  },
+
+  dspTabCount(kind) {
+    const d = this._dsp || {};
+    if (kind === 'adopt') return this.dspReadyPets().length + this.dspReservedRows().length;
+    if (kind === 'dead') return (d.euth || []).filter(e => !e.outbound_at).length;
+    if (kind === 'release') return (d.returnOrders || []).filter(o => o.status === 'pending').length;
+    return null;
   },
 
   async render_discharge() {
     const page = document.getElementById('page-discharge');
     page.innerHTML = '<div class="loading-state">加载中...</div>';
     try {
-      /* 六条全是**严格读**（失败抛错）。静默读会把 403/500 渲染成
-         「该去向暂无动物」—— 把「加载失败」伪装成「没有数据」，
-         操作员会以为真的没人要出院。 */
-      const [board, pets, adoptions, euth, releases, returns] = await Promise.all([
+      /* 全部严格读：任何一条失败都要显式报错。
+         静默读会把 403/500 渲染成「这个去向没有动物」，操作员会以为
+         这些流程真的没有待办。 */
+      const [board, pets, adoptions, applications, euth, returns, returnOrders, releases, listings, returnShelters] = await Promise.all([
         TNR_API.getTreatmentBoard(),
         TNR_API.getHospitalPetsStrict(),
         TNR_API.getAdoptionsStrict(),
+        TNR_API.getAdoptionApplicationsStrict(),
         TNR_API.getEuthanasiaStrict(),
+        TNR_API.getOwnerReturnsStrict(),
+        TNR_API.getReturnOrdersStrict(),
         TNR_API.getReleasesStrict(),
-        TNR_API.getOwnerReturnsStrict()
+        TNR_API.getHallListingsStrict(),
+        /* 运回单的捕捉点选项：通用机构接口按区县过滤，区县医院看不到市级捕捉点，
+           所以走专用接口。读失败必须可见 —— 选项静默为空等于「运回单开不出来」。 */
+        TNR_API.getData('/api/business/return-orders/shelters/')
       ]);
       const petMap = {};
-      (pets || []).forEach(p => { petMap[p.id] = p; });
+      (pets || []).forEach(p => { petMap[String(p.id)] = p; });
       this._dsp = {
-        pending: (board && board.pending_discharge) || [],
+        boardPending: (board && board.pending_discharge) || [],
+        pets: pets || [],
         petMap: petMap,
-        docs: {
-          adopt: adoptions || [],
-          dead: euth || [],
-          owner: returns || [],
-          release: releases || []
-        }
+        adoptions: adoptions || [],
+        applications: applications || [],
+        euth: euth || [],
+        returns: returns || [],
+        returnOrders: returnOrders || [],
+        releases: releases || [],
+        listings: listings || [],
+        returnShelters: returnShelters || []
       };
       this.renderDischargeShell();
     } catch (e) {
@@ -2738,292 +2931,1295 @@ const Hospital = {
   renderDischargeShell() {
     const page = document.getElementById('page-discharge');
     if (!page) return;
-    let html = '<div class="dsp-layout"><div class="dsp-side">';
-    this.dspModules().forEach(m => {
-      html += '<button type="button" class="dsp-mod '
-        + (this.state.dischargeTab === m.k ? 'active' : '') + '" data-dspmod="' + m.k + '">'
-        + '<span class="ic">' + m.ic + '</span>'
-        + '<span class="tx"><span class="n">' + m.n + '</span>'
-        + '<span class="d">' + m.d + '</span></span>'
-        + '<span class="cnt" data-cnt="' + m.k + '">' + this.dspCount(m.k) + '</span>'
+    const TABS = [
+      {k: 'adopt', ic: '🏠', n: '领养', d: '待领养 · 已预约 · 已出库'},
+      {k: 'dead', ic: '🕯️', n: '死亡出库', d: '安乐死 / 死亡 / 无害化交接'},
+      {k: 'owner', ic: '🔁', n: '领回', d: '主人认领并签字接回'},
+      {k: 'release', ic: '🌿', n: '放归', d: '运回捕捉点 → 签字放归'}
+    ];
+    let html = '<div class="dsp-tabs">';
+    TABS.forEach(t => {
+      const cnt = this.dspTabCount(t.k);
+      html += '<button type="button" class="dsp-tab'
+        + (this.state.dischargeTab === t.k ? ' active' : '') + '" data-dspmod="' + t.k + '">'
+        + '<span class="ic">' + t.ic + '</span>'
+        + '<span class="tx"><b>' + t.n + '</b><i>' + t.d + '</i></span>'
+        + (cnt === null ? '' : '<span class="cnt">' + cnt + '</span>')
         + '</button>';
     });
-    html += '</div><div class="dsp-main">';
-    // 搜索条与表格容器的顺序不能反：先写进 DOM 再 mountTable，
-    // 否则选择器查不到元素，表格会静默不渲染。
-    html += TNR_UI.renderFilterBar([
-      { key: 'keyword', label: '搜索', type: 'search',
-        placeholder: '动物编号 / 名称 / 品种 / 领养人 / 主人 / 小区' },
-      { key: 'stage', label: '办理状态', type: 'select', options: [
-        { value: 'todo', label: '待办理' },
-        { value: 'done', label: '已办结' }
-      ]},
-      { key: 'start_date', label: '开始日期', type: 'date' },
-      { key: 'end_date', label: '结束日期', type: 'date' }
-    ], '<button type="button" class="btn btn-secondary btn-sm" data-dsprefresh="1">刷新</button>',
-      { id: 'dspFilterBar' });
-    html += '<div id="dspTable"></div></div></div>';
+    html += '</div><div id="dspContent"></div>';
     page.innerHTML = html;
 
-    /* 委托绑在 `#page-discharge`（**稳定容器**）上：视图每次整体重渲染
-       `innerHTML`，绑在子节点上的监听器会随旧节点一起被丢弃，表现为
-       「点按钮没反应，且控制台干干净净」。 */
+    /* 委托绑在稳定容器 `#page-discharge` 上，一次注册全部动作。
+       视图重渲染只换 innerHTML，监听器不会随子节点丢失。 */
     TNR_UI.delegateClick(page, {
-      'data-dspmod': (v) => { this.state.dischargeTab = v; this.renderDischargeShell(); },
+      'data-dspmod': (v) => {
+        this.state.dischargeTab = v;
+        this.renderDischargeShell();
+      },
+      'data-dspadopt': (v) => {
+        this.state.adoptionTab = v;
+        this.renderDischargeShell();
+      },
       'data-dsprefresh': () => this.render_discharge(),
       'data-dspact': (v, el) => this.onDspAction(v, el)
     }, 'discharge');
-    this.renderDischargeTable();
-    TNR_UI.bindFilter(() => this.renderDischargeTable(), page);
+    this.renderDspTab();
   },
 
-  renderDischargeTable() {
-    const page = document.getElementById('page-discharge');
-    const bar = document.getElementById('dspFilterBar');
-    if (!page || !bar) return;
+  renderDspTab() {
+    const c = document.getElementById('dspContent');
+    if (!c) return;
     const kind = this.state.dischargeTab;
-    const v = TNR_UI.getFilterValues(bar);
-
-    const docs = this.dspDocs(kind);
-    const withDoc = {};
-    docs.forEach(d => { withDoc[String(d.pet_id)] = 1; });
-
-    let rows = docs.map(d => this.dspDocRow(kind, d));
-    this.dspPending().forEach(p => {
-      if (withDoc[String(p.pet_id)]) return;
-      rows.push(this.dspPendingRow(kind, p));
-    });
-
-    rows = rows.filter(r => {
-      if (v.stage === 'todo' && !r._todo) return false;
-      if (v.stage === 'done' && r._todo) return false;
-      // `_date` 已按去向挑好并带 `created_at` 兜底（见 `dspDocRow`）——
-      // 不带兜底的话，先建单后填日期的记录会被整批藏起来。
-      if (!TNR_UI.inDateRange(r._date, v.start_date, v.end_date)) return false;
-      if (!v.keyword) return true;
-      return r._hay.toLowerCase().indexOf(v.keyword) !== -1;
-    });
-    // 待办理排前面 —— 这一页首先是「待办清单」，已办结只是留痕。
-    rows.sort((a, b) => (b._todo ? 1 : 0) - (a._todo ? 1 : 0));
-
-    TNR_UI.mountTable('#dspTable', {
-      id: 'hospital.discharge.' + kind,
-      columns: [
-        { title: '动物', key: '_pet', sortable: false },
-        { title: '动物状态', key: '_animal', sortable: false },
-        { title: '单据 / 办理状态', key: '_doc', sortable: false },
-        { title: '办理时间', key: '_dateText', sortable: false },
-        { title: '办理人', key: '_who', sortable: false },
-        { title: '操作', key: '_actions', sortable: false, align: 'right' }
-      ],
-      data: rows,
-      emptyText: '该去向暂无动物'
-    });
+    if (kind === 'adopt') this.renderDspAdoption(c);
+    else if (kind === 'dead') this.renderDspDeath(c);
+    else if (kind === 'owner') this.renderDspOwner(c);
+    else this.renderDspRelease(c);
   },
 
-  dspDocRow(kind, d) {
-    const pet = this.dspPet(d.pet_id);
-    const code = d.pet_code || (pet ? pet.code : '') || '—';
-    const name = pet ? (pet.name || '') : '';
-    const attr = pet ? TNR_API.petAttrText(pet) : '—';
+  dspSubTab(key, label, count, activeKey) {
+    return '<div class="tab-item' + (activeKey === key ? ' active' : '')
+      + '" data-dspadopt="' + key + '">' + label + ' (' + count + ')</div>';
+  },
 
-    /* 每个去向的「单据状态映射 / 业务时间 / 办理人 / 搜索词」各不相同。
-       时间一律 `TNR_UI.firstDate(...)` 取第一个有值的，并把 `created_at`
-       放在最后兜底 —— 这几个日期字段全是**可空**的。 */
-    const M = {
-      adopt: {
-        map: Object.fromEntries(Object.entries(TNR_UI.ADOPTION_STATUS)
-          .map(([k, v]) => [k, [v.text, 'badge-' + v.badge]])),
-        date: TNR_UI.firstDate(d.adopted_at, d.adoptedAt, d.created_at, d.createdAt),
-        who: d.adopter_name || d.operator_name || '',
-        hay: [d.adopter_name, d.adopter_phone, d.ledger_no]
-      },
-      dead: {
-        map: { euthanasia: ['已安乐死', 'badge-danger'],
-               dead: ['已死亡 / 无害化', 'badge-danger'] },
-        date: TNR_UI.firstDate(d.euthanized_at, d.euthanizedAt, d.created_at, d.createdAt),
-        who: d.operator_name || '',
-        hay: [d.reason, d.condition, d.ledger_no]
-      },
-      owner: {
-        // 领回没有子状态（单据一建就是已领回），文案固定。
-        map: {},
-        date: TNR_UI.firstDate(d.return_time, d.returnTime, d.created_at, d.createdAt),
-        who: d.owner_name || d.operator_name || '',
-        hay: [d.owner_name, d.owner_phone, d.owner_address, d.ledger_no]
-      },
-      release: {
-        /* 文案/配色取自 `TNR_UI.RELEASE_STATUS`（与捕捉点端、监管端同一份）。
-           以前这里独立写了一份三段表，还多一条后端根本不存在的 `cancelled`
-           ——放归单没有撤销状态，`Release.STATUS_CHOICES` 只有三个取值。 */
-        map: Object.fromEntries(Object.entries(TNR_UI.RELEASE_STATUS)
-          .map(([k, v]) => [k, [v.text, 'badge-' + v.badge]])),
-        date: TNR_UI.firstDate(d.released_at, d.releasedAt,
-                               d.transferred_at, d.transferredAt,
-                               d.created_at, d.createdAt),
-        who: d.receiver_name || d.operator_name || '',
-        hay: [d.community_name, d.receiver_name, d.receiver_phone, d.ledger_no]
+  dspDateMatch(value, v) {
+    return TNR_UI.inDateRange(value, v.start_date, v.end_date);
+  },
+
+  dspKeyword(v, parts) {
+    if (!v.keyword) return true;
+    return parts.filter(Boolean).join(' ').toLowerCase().indexOf(v.keyword) !== -1;
+  },
+
+  /* ---------- 领养 ---------- */
+  renderDspAdoption(c) {
+    const sub = this.state.adoptionTab || 'ready';
+    const ready = this.dspReadyPets();
+    const reserved = this.dspReservedRows();
+    const completed = this.dspCompletedAdoptions();
+    c.innerHTML = '<div class="tabs dsp-subtabs">'
+      + this.dspSubTab('ready', '已诊疗好 · 待领养', ready.length, sub)
+      + this.dspSubTab('reserved', '已预约', reserved.length, sub)
+      + this.dspSubTab('outbound', '已出库', completed.length, sub)
+      + '</div><div id="dspAdoptBody"></div>';
+    const body = document.getElementById('dspAdoptBody');
+    if (sub === 'reserved') this.renderDspAdoptReserved(body);
+    else if (sub === 'outbound') this.renderDspAdoptOutbound(body);
+    else this.renderDspAdoptReady(body);
+  },
+
+  renderDspAdoptReady(body) {
+    const d = this._dsp || {};
+    const pendingApps = (d.applications || []).filter(a => a.status === 'pending');
+    // 诊疗完成、等出院的动物：状态列显示「待出院」而不是 Pet.status 的「诊疗中」。
+    const pendingIds = new Set(
+      this.dspPendingPets(['pending_adopt']).map(p => String(p.id)));
+    const listingByPet = {};
+    (d.listings || []).forEach(l => {
+      const id = l.pet_id || (l.pet && l.pet.id);
+      if (id) listingByPet[String(id)] = l;
+    });
+
+    body.innerHTML = TNR_UI.renderFilterBar([
+      {key: 'keyword', label: '搜索', type: 'search', placeholder: '动物编号 / 名称 / 品种 / 简介'},
+      {key: 'hall', label: '领养大厅', type: 'select', options: [
+        {value: 'on', label: '已上架'},
+        {value: 'off', label: '未上架'}
+      ]}
+    ], '<button type="button" class="btn btn-secondary btn-sm" data-dsprefresh="1">刷新</button>',
+      {id: 'dspAdoptBar'})
+      + (pendingApps.length
+        ? '<div class="card mb-4"><div class="card-header"><div class="card-title">'
+          + '<span class="card-title-bar"></span>待审核领养申请 (' + pendingApps.length + ')</div>'
+          + '<div class="fs-sm text-muted">申请人在领养大厅提交，审核通过后进入「已预约」</div></div>'
+          + '<div class="card-body-flush"><div id="dspApplTable"></div></div></div>'
+        : '')
+      + '<div class="card"><div class="card-body-flush"><div id="dspReadyTable"></div></div></div>';
+
+    const mount = () => {
+      const v = TNR_UI.getFilterValues(document.getElementById('dspAdoptBar'));
+      if (pendingApps.length) {
+        const appRows = pendingApps.map(a => ({
+          _pet: this.dspPetCell(this.dspPet(a.pet_id), a.pet_code),
+          applicant_name: a.applicant_name || '',
+          applicant_phone: a.applicant_phone || '',
+          _qual: this.escape((a.qualification || '').slice(0, 40)),
+          applied_at: a.applied_at || a.created_at || '',
+          _actions: '<div class="dsp-acts">'
+            + '<button class="btn btn-sm btn-success" data-dspact="appl-review" data-id="' + a.id + '" data-action="approve">通过</button>'
+            + '<button class="btn btn-sm btn-danger" data-dspact="appl-review" data-id="' + a.id + '" data-action="reject">拒绝</button>'
+            + '<button class="btn btn-sm btn-secondary" data-dspact="appl-detail" data-id="' + a.id + '">详情</button>'
+            + '</div>'
+        })).filter(r => this.dspKeyword(v, [r._pet, r.applicant_name, r.applicant_phone, r._qual]));
+        TNR_UI.mountTable('#dspApplTable', {
+          id: 'hospital.discharge.applications',
+          columns: [
+            {title: '动物', key: '_pet', sortable: false},
+            {title: '申请人', key: 'applicant_name'},
+            {title: '电话', key: 'applicant_phone'},
+            {title: '资质说明', key: '_qual', sortable: false},
+            {title: '申请时间', key: 'applied_at', render: r => this.formatDateTime(r.applied_at)},
+            {title: '操作', key: '_actions', sortable: false, align: 'right'}
+          ],
+          data: appRows,
+          emptyText: '暂无待审核申请'
+        });
       }
-    }[kind];
 
-    let stText;
-    let stCls;
-    if (kind === 'dead') {
-      // 死亡与安乐死共用一张表，靠 `kind` 区分（不是靠 pet.status）
-      const pair = M.map[d.kind || 'euthanasia'] || ['已处置', 'badge-danger'];
-      stText = pair[0];
-      stCls = pair[1];
-    } else if (kind === 'owner') {
-      stText = '已领回';
-      stCls = 'badge-default';
-    } else {
-      const pair = M.map[d.status] || [d.status || '—', 'badge-default'];
-      stText = pair[0];
-      stCls = pair[1];
-    }
-
-    let act;
-    if (kind === 'release' && d.status === 'pending') {
-      act = '<button class="btn btn-sm btn-primary" data-dspact="transfer"'
-        + ' data-kind="release" data-doc="' + d.id + '">转运回小区</button>';
-    } else if (kind === 'release' && d.status === 'transferred') {
-      // 第二段是小区 / 政府端的事，医院端只等 —— 不给点不通的按钮
-      act = '<span class="fs-sm text-muted">待小区确认放归</span>';
-    } else {
-      act = '<button class="btn btn-sm btn-secondary" data-dspact="print"'
-        + ' data-kind="' + kind + '" data-doc="' + d.id + '">打印单据</button>';
-    }
-
-    return {
-      _todo: false,
-      _date: M.date || '',
-      _dateText: M.date ? this.formatDateTime(M.date) : '—',
-      _pet: '<div style="font-weight:500;">' + this.escape(code)
-        + (name ? ' · ' + this.escape(name) : '') + '</div>'
-        + '<div class="fs-sm text-muted">' + this.escape(attr) + '</div>',
-      _animal: this.dspAnimalBadge(d.pet_id, stText),
-      _doc: '<span class="badge ' + stCls + '">' + this.escape(stText) + '</span>'
-        + '<div class="fs-sm text-muted">' + this.escape(d.ledger_no || '—') + '</div>',
-      _who: this.escape(M.who || '—'),
-      _actions: '<div class="dsp-acts">' + act
-        + '<button class="btn btn-sm btn-secondary" data-dspact="detail"'
-        + ' data-kind="' + kind + '" data-doc="' + d.id + '">详情</button></div>',
-      _hay: [code, name, attr, stText, M.who, d.ledger_no].concat(M.hay || [])
-        .filter(Boolean).join(' ')
+      let rows = this.dspReadyPets().map(p => {
+        const listing = listingByPet[String(p.id)] || null;
+        const inHall = !!(listing && listing.is_active);
+        const intro = (listing && listing.intro) || p.description || '';
+        const personality = (listing && listing.personality) || '';
+        const bodyCondition = (listing && listing.body_condition) || '';
+        return {
+          _pet: this.dspPetCell(p),
+          _status: pendingIds.has(String(p.id))
+            ? TNR_UI.boardStageBadge('pending_discharge')
+            : TNR_UI.petStatusBadge(p.status),
+          _hall: inHall
+            ? '<span class="badge badge-success">已上架</span>'
+            : '<span class="badge badge-warning">未上架</span>',
+          _intro: this.escape(intro ? intro.slice(0, 40) : '—'),
+          _actions: '<div class="dsp-acts">'
+            + '<button class="btn btn-sm btn-primary" data-dspact="adopt-info" data-pet="' + p.id + '">维护资料</button>'
+            + (inHall
+              ? '<button class="btn btn-sm btn-secondary" data-dspact="adopt-hall" data-pet="' + p.id + '" data-active="0">下架</button>'
+              : '<button class="btn btn-sm btn-gold" data-dspact="adopt-hall" data-pet="' + p.id + '" data-active="1">发布至大厅</button>')
+            + '</div>',
+          _hay: [p.code, p.name, p.species, p.breed, p.gender, intro, personality, bodyCondition, inHall ? '已上架' : '未上架'],
+          _date: p.created_at || '',
+          _hallOn: inHall
+        };
+      });
+      rows = rows.filter(r => {
+        if (v.hall === 'on' && !r._hallOn) return false;
+        if (v.hall === 'off' && r._hallOn) return false;
+        if (!this.dspDateMatch(r._date, v)) return false;
+        return this.dspKeyword(v, r._hay);
+      });
+      TNR_UI.mountTable('#dspReadyTable', {
+        id: 'hospital.discharge.adopt.ready',
+        columns: [
+          {title: '动物', key: '_pet', sortable: false},
+          {title: '动物状态', key: '_status', sortable: false},
+          {title: '领养大厅', key: '_hall', sortable: false},
+          {title: '简介', key: '_intro', sortable: false},
+          {title: '操作', key: '_actions', sortable: false, align: 'right'}
+        ],
+        data: rows,
+        emptyText: '暂无待领养动物'
+      });
     };
+    mount();
+    TNR_UI.bindFilter(mount, document.getElementById('dspAdoptBar'));
   },
 
-  dspPendingRow(kind, r) {
-    const label = (this.dspModules().find(m => m.k === kind) || {}).n || '出院';
-    const attr = TNR_API.petAttrText({ species: r.species, breed: r.breed, gender: r.gender });
-    const doneAt = r.done_at ? this.formatDateTime(r.done_at) : '';
-    return {
-      _todo: true,
-      // 还没办出院，「办理时间」就是空的。诊疗完成时间放到状态副行 ——
-      // 放进这一列会让「办理时间」列在待办理行上显示一个**不是办理时间**的值。
-      _date: r.done_at || '',
-      _dateText: '—',
-      _pet: '<div style="font-weight:500;">' + this.escape(r.pet_code || '')
-        + (r.pet_name ? ' · ' + this.escape(r.pet_name) : '') + '</div>'
-        + '<div class="fs-sm text-muted">' + this.escape(attr) + '</div>',
-      /* 动物状态**不用** `TNR_UI.petStatusText('in_treatment')`：它返回
-         「待诊疗/诊疗中」，而这一行恰恰是「诊疗已完成、等着办出院」——
-         两者放在同一行里自相矛盾。这一列对在院动物只说「在院」。 */
-      _animal: '<span class="badge badge-info">在院</span>',
-      _doc: '<span class="badge badge-warning">待办理</span>'
-        + '<div class="fs-sm text-muted">诊疗已完成'
-        + (doneAt ? ' · ' + this.escape(doneAt) : '') + '</div>',
-      _who: '—',
-      _actions: '<div class="dsp-acts"><button class="btn btn-sm btn-primary"'
-        + ' data-dspact="handle" data-kind="' + kind + '"'
-        + ' data-pet="' + r.pet_id + '" data-tid="' + (r.treatment_id || '') + '">'
-        + '办理' + this.escape(label) + '</button></div>',
-      _hay: [r.pet_code, r.pet_name, attr, r.transfer_no, r.shelter, label]
-        .filter(Boolean).join(' ')
+  renderDspAdoptReserved(body) {
+    body.innerHTML = TNR_UI.renderFilterBar([
+      {key: 'keyword', label: '搜索', type: 'search', placeholder: '动物编号 / 领养人 / 电话 / 单号'},
+      {key: 'origin', label: '预约来源', type: 'select', options: [
+        {value: '线下登记', label: '线下登记'},
+        {value: '线上申请', label: '线上申请'}
+      ]}
+    ], '<button type="button" class="btn btn-secondary btn-sm" data-dsprefresh="1">刷新</button>',
+      {id: 'dspReservedBar'})
+      + '<div class="card"><div class="card-body-flush"><div id="dspReservedTable"></div></div></div>';
+
+    const mount = () => {
+      const v = TNR_UI.getFilterValues(document.getElementById('dspReservedBar'));
+      const rows = this.dspReservedRows().filter(r => {
+        if (v.origin && v.origin !== r.origin) return false;
+        if (!this.dspDateMatch(r.at, v)) return false;
+        return this.dspKeyword(v, [r.pet_code, r.name, r.phone, r.id_card, r.address,
+          r.origin, r.raw.ledger_no, r.raw.qualification]);
+      }).map(r => ({
+        _pet: this.dspPetCell(r.pet, r.pet_code),
+        _adopter: '<div style="font-weight:500;">' + this.escape(r.name || '—') + '</div>'
+          + '<div class="fs-sm text-muted">' + this.escape(r.phone || '') + '</div>',
+        _origin: '<span class="badge ' + (r.source === 'application' ? 'badge-info' : 'badge-default') + '">'
+          + r.origin + '</span>'
+          + (r.raw.ledger_no ? '<div class="fs-sm text-muted">' + this.escape(r.raw.ledger_no) + '</div>' : ''),
+        _status: r.source === 'application'
+          ? TNR_UI.applyStatusBadge(r.raw.status)
+          : TNR_UI.adoptionStatusBadge(r.raw.status),
+        _at: this.formatDateTime(r.at),
+        _actions: '<div class="dsp-acts">'
+          + '<button class="btn btn-sm btn-primary" data-dspact="adopt-outbound"'
+          + ' data-src="' + r.source + '" data-id="' + r.id + '">出库</button>'
+          + '<button class="btn btn-sm btn-secondary" data-dspact="adopt-detail"'
+          + ' data-src="' + r.source + '" data-id="' + r.id + '">详情</button>'
+          + '</div>',
+        _date: r.at || ''
+      }));
+      TNR_UI.mountTable('#dspReservedTable', {
+        id: 'hospital.discharge.adopt.reserved',
+        columns: [
+          {title: '动物', key: '_pet', sortable: false},
+          {title: '领养人', key: '_adopter', sortable: false},
+          {title: '预约来源', key: '_origin', sortable: false},
+          {title: '状态', key: '_status', sortable: false},
+          {title: '预约时间', key: '_at', sortable: false},
+          {title: '操作', key: '_actions', sortable: false, align: 'right'}
+        ],
+        data: rows,
+        emptyText: '暂无已预约动物'
+      });
     };
+    mount();
+    TNR_UI.bindFilter(mount, document.getElementById('dspReservedBar'));
+  },
+
+  renderDspAdoptOutbound(body) {
+    body.innerHTML = TNR_UI.renderFilterBar([
+      {key: 'keyword', label: '搜索', type: 'search', placeholder: '动物编号 / 领养人 / 电话 / 单号'}
+    ], '<button type="button" class="btn btn-secondary btn-sm" data-dsprefresh="1">刷新</button>',
+      {id: 'dspOutboundBar'})
+      + '<div class="card"><div class="card-body-flush"><div id="dspOutboundTable"></div></div></div>';
+
+    const mount = () => {
+      const v = TNR_UI.getFilterValues(document.getElementById('dspOutboundBar'));
+      const rows = this.dspCompletedAdoptions().filter(a => {
+        const at = TNR_UI.firstDate(a.outbound_at, a.adopted_at, a.created_at);
+        if (!this.dspDateMatch(at, v)) return false;
+        return this.dspKeyword(v, [a.pet_code, a.adopter_name, a.adopter_phone,
+          a.ledger_no, a.handover_name, a.handoverName]);
+      }).map(a => {
+        const at = TNR_UI.firstDate(a.outbound_at, a.adopted_at, a.created_at);
+        return {
+          _pet: this.dspPetCell(this.dspPet(a.pet_id), a.pet_code),
+          _adopter: '<div>' + this.escape(a.adopter_name || '—') + '</div>'
+            + '<div class="fs-sm text-muted">' + this.escape(a.adopter_phone || '') + '</div>',
+          _out: '<span class="badge badge-success">已出库</span>',
+          _date: this.formatDateTime(at),
+          _handover: this.escape(a.handover_name || a.handoverName || '—'),
+          _actions: '<div class="dsp-acts">'
+            + '<button class="btn btn-sm btn-secondary" data-dspact="adopt-detail"'
+            + ' data-src="adoption" data-id="' + a.id + '">详情</button>'
+            + '<button class="btn btn-sm btn-secondary" data-dspact="print"'
+            + ' data-doc="adoption" data-id="' + a.id + '">打印</button>'
+            + '</div>',
+          _dateRaw: at || ''
+        };
+      });
+      TNR_UI.mountTable('#dspOutboundTable', {
+        id: 'hospital.discharge.adopt.outbound',
+        columns: [
+          {title: '动物', key: '_pet', sortable: false},
+          {title: '领养人', key: '_adopter', sortable: false},
+          {title: '状态', key: '_out', sortable: false},
+          {title: '出库日期', key: '_date', sortable: false},
+          {title: '交接人', key: '_handover', sortable: false},
+          {title: '操作', key: '_actions', sortable: false, align: 'right'}
+        ],
+        data: rows,
+        emptyText: '暂无已出库领养记录'
+      });
+    };
+    mount();
+    TNR_UI.bindFilter(mount, document.getElementById('dspOutboundBar'));
+  },
+
+  /* ---------- 死亡出库 ---------- */
+  renderDspDeath(c) {
+    c.innerHTML = TNR_UI.renderFilterBar([
+      {key: 'keyword', label: '搜索', type: 'search', placeholder: '动物编号 / 原因 / 接收单位 / 操作人'},
+      {key: 'out', label: '出库状态', type: 'select', options: [
+        {value: 'todo', label: '待出库'},
+        {value: 'done', label: '已出库'}
+      ]}
+    ], '<button type="button" class="btn btn-primary btn-sm" data-dspact="euth-create">登记安乐死 / 死亡</button>'
+      + '<button type="button" class="btn btn-secondary btn-sm" data-dsprefresh="1">刷新</button>',
+      {id: 'dspEuthBar'})
+      + '<div class="card"><div class="card-body-flush"><div id="dspEuthTable"></div></div></div>';
+
+    const mount = () => {
+      const v = TNR_UI.getFilterValues(document.getElementById('dspEuthBar'));
+      const rows = ((this._dsp && this._dsp.euth) || []).filter(e => {
+        const done = !!e.outbound_at;
+        if (v.out === 'todo' && done) return false;
+        if (v.out === 'done' && !done) return false;
+        const at = TNR_UI.firstDate(e.outbound_at, e.euthanized_at, e.created_at);
+        if (!this.dspDateMatch(at, v)) return false;
+        return this.dspKeyword(v, [e.pet_code, e.reason, e.condition,
+          e.receiving_org, e.receiver_name, e.operator_name, e.ledger_no]);
+      }).map(e => {
+        const done = !!e.outbound_at;
+        return {
+          _pet: this.dspPetCell(this.dspPet(e.pet_id), e.pet_code),
+          _kind: e.kind === 'dead'
+            ? '<span class="badge badge-danger">死亡 / 无害化</span>'
+            : '<span class="badge badge-danger">安乐死</span>',
+          _reason: this.escape(e.reason || '—'),
+          _date: e.euthanized_at || '',
+          _out: done
+            ? '<span class="badge badge-success">已出库</span>'
+              + '<div class="fs-sm text-muted">' + this.formatDate(e.outbound_at) + '</div>'
+            : '<span class="badge badge-warning">待出库</span>',
+          _receiver: done
+            ? this.escape(e.receiving_org || '—')
+            : '—',
+          _actions: '<div class="dsp-acts">'
+            + (done
+              ? '<button class="btn btn-sm btn-secondary" data-dspact="euth-detail" data-id="' + e.id + '">详情</button>'
+                + '<button class="btn btn-sm btn-secondary" data-dspact="print" data-doc="euthanasia" data-id="' + e.id + '">打印</button>'
+              : '<button class="btn btn-sm btn-primary" data-dspact="euth-outbound" data-id="' + e.id + '">死亡出库单</button>'
+                + '<button class="btn btn-sm btn-secondary" data-dspact="euth-detail" data-id="' + e.id + '">详情</button>')
+            + '</div>',
+          _dateRaw: TNR_UI.firstDate(e.outbound_at, e.euthanized_at, e.created_at) || ''
+        };
+      });
+      TNR_UI.mountTable('#dspEuthTable', {
+        id: 'hospital.discharge.euthanasia',
+        columns: [
+          {title: '动物', key: '_pet', sortable: false},
+          {title: '处置方式', key: '_kind', sortable: false},
+          {title: '原因', key: '_reason', sortable: false},
+          {title: '处置日期', key: '_date', sortable: false,
+            render: r => this.formatDate(r._date)},
+          {title: '出库状态', key: '_out', sortable: false},
+          {title: '接收机构', key: '_receiver', sortable: false},
+          {title: '操作', key: '_actions', sortable: false, align: 'right'}
+        ],
+        data: rows,
+        emptyText: '暂无死亡 / 安乐死记录'
+      });
+    };
+    mount();
+    TNR_UI.bindFilter(mount, document.getElementById('dspEuthBar'));
+  },
+
+  /* ---------- 领回 ---------- */
+  renderDspOwner(c) {
+    c.innerHTML = TNR_UI.renderFilterBar([
+      {key: 'keyword', label: '搜索', type: 'search', placeholder: '动物编号 / 主人 / 电话 / 单号'}
+    ], '<button type="button" class="btn btn-primary btn-sm" data-dspact="owner-create">办理领回</button>'
+      + '<button type="button" class="btn btn-secondary btn-sm" data-dsprefresh="1">刷新</button>',
+      {id: 'dspOwnerBar'})
+      + '<div class="card"><div class="card-body-flush"><div id="dspOwnerTable"></div></div></div>';
+
+    const mount = () => {
+      const v = TNR_UI.getFilterValues(document.getElementById('dspOwnerBar'));
+      const rows = ((this._dsp && this._dsp.returns) || []).filter(r => {
+        const at = TNR_UI.firstDate(r.return_time, r.created_at);
+        if (!this.dspDateMatch(at, v)) return false;
+        return this.dspKeyword(v, [r.pet_code, r.owner_name, r.owner_phone,
+          r.owner_id_card, r.owner_address, r.reason, r.ledger_no]);
+      }).map(r => ({
+        _pet: this.dspPetCell(this.dspPet(r.pet_id), r.pet_code),
+        _owner: '<div style="font-weight:500;">' + this.escape(r.owner_name || '—') + '</div>'
+          + '<div class="fs-sm text-muted">' + this.escape(r.owner_phone || '') + '</div>',
+        _time: this.formatDateTime(TNR_UI.firstDate(r.return_time, r.created_at)),
+        _status: '<span class="badge badge-success">已领回</span>',
+        _actions: '<div class="dsp-acts">'
+          + '<button class="btn btn-sm btn-secondary" data-dspact="owner-detail" data-id="' + r.id + '">详情</button>'
+          + '<button class="btn btn-sm btn-secondary" data-dspact="print" data-doc="owner_return" data-id="' + r.id + '">打印</button>'
+          + '</div>',
+        _dateRaw: TNR_UI.firstDate(r.return_time, r.created_at) || ''
+      }));
+      TNR_UI.mountTable('#dspOwnerTable', {
+        id: 'hospital.discharge.owner',
+        columns: [
+          {title: '动物', key: '_pet', sortable: false},
+          {title: '主人', key: '_owner', sortable: false},
+          {title: '领回时间', key: '_time', sortable: false},
+          {title: '状态', key: '_status', sortable: false},
+          {title: '操作', key: '_actions', sortable: false, align: 'right'}
+        ],
+        data: rows,
+        emptyText: '暂无主人领回记录'
+      });
+    };
+    mount();
+    TNR_UI.bindFilter(mount, document.getElementById('dspOwnerBar'));
+  },
+
+  /* ---------- 放归（运回捕捉点） ---------- */
+  renderDspRelease(c) {
+    const orders = (this._dsp && this._dsp.returnOrders) || [];
+    c.innerHTML = '<div class="card mb-4"><div class="card-header">'
+      + '<div class="card-title"><span class="card-title-bar"></span>待放归动物</div>'
+      + '<div class="fs-sm text-muted">勾选动物 → 生成运回单 → 捕捉点签收接收单</div></div>'
+      + '<div class="card-body">'
+      + TNR_UI.renderFilterBar([
+        {key: 'keyword', label: '搜索', type: 'search', placeholder: '动物编号 / 名称 / 品种'}
+      ], '', {id: 'dspPickBar'})
+      + '<div id="dspPickList" class="dsp-pick-list"></div>'
+      + '<div class="form-group mt-3"><label class="form-label">运回备注</label>'
+      + '<input class="form-input" id="dspReturnNote" placeholder="交接说明（选填）"></div>'
+      + '<div class="dsp-actions" style="justify-content:flex-start;">'
+      + '<button type="button" class="btn btn-primary" data-dspact="return-create">生成运回单</button>'
+      + '</div></div></div>'
+      + TNR_UI.renderFilterBar([
+        {key: 'keyword', label: '搜索', type: 'search', placeholder: '运回单号 / 动物编号 / 捕捉点'},
+        {key: 'status', label: '单据状态', type: 'select', options: [
+          {value: 'pending', label: '待确认'},
+          {value: 'received', label: '已确认出库'},
+          {value: 'rejected', label: '已驳回'},
+          {value: 'withdrawn', label: '已撤回'}
+        ]}
+      ], '<button type="button" class="btn btn-secondary btn-sm" data-dsprefresh="1">刷新</button>',
+        {id: 'dspReturnBar'})
+      + '<div class="card"><div class="card-body-flush"><div id="dspReturnTable"></div></div></div>';
+
+    const mountPicks = () => {
+      const pickBar = document.getElementById('dspPickBar');
+      if (!pickBar) return;
+      const v = TNR_UI.getFilterValues(pickBar);
+      const list = this.dspReleaseCandidates().filter(p =>
+        this.dspKeyword(v, [p.code, p.name, p.species, p.breed, p.gender]));
+      const wrap = document.getElementById('dspPickList');
+      if (!list.length) {
+        wrap.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🏡</div>'
+          + '<div class="empty-state-text">暂无待放归动物</div>'
+          + '<div class="empty-state-desc">需诊疗完成且未被领养 / 放归占用</div></div>';
+        return;
+      }
+      const shelves = {};
+      list.forEach(p => { if (p.shelter_name) shelves[p.shelter_name] = 1; });
+      const tip = Object.keys(shelves).length > 1
+        ? '<div class="dsp-hint">这些动物原属不同捕捉点；生成运回单时可统一选择市级或本院所在区县的捕捉点。</div>'
+        : '';
+      wrap.innerHTML = tip + list.map(p =>
+        '<label class="dsp-pick">'
+        + '<input type="checkbox" value="' + p.id + '" data-petpick="1">'
+        + '<span class="dsp-pick-main">' + this.dspPetCell(p) + '</span>'
+        + '<span class="badge badge-info">待放归</span>'
+        + '<span class="fs-sm text-muted">' + this.escape(p.shelter_name || '') + '</span>'
+        + '</label>').join('');
+    };
+
+    const mountOrders = () => {
+      const bar = document.getElementById('dspReturnBar');
+      if (!bar) return;
+      const v = TNR_UI.getFilterValues(bar);
+      const rows = orders.filter(o => {
+        if (v.status && v.status !== o.status) return false;
+        const at = TNR_UI.firstDate(o.created_at, o.received_at);
+        if (!this.dspDateMatch(at, v)) return false;
+        const codes = (o.pets || []).map(p => p.code).join(' ') || o.pet_codes;
+        return this.dspKeyword(v, [o.ledger_no, codes, o.shelter_name,
+          o.hospital_name, o.note, o.receiver_name, o.reject_reason]);
+      }).map(o => {
+        const pets = o.pets || [];
+        const codes = pets.length ? pets.map(p => p.code).join('、') : (o.pet_codes || '');
+        return {
+          _no: '<div class="font-mono fs-sm" style="color:var(--cinnabar);">'
+            + this.escape(o.ledger_no || o.id) + '</div>'
+            + '<div class="fs-sm text-muted">' + this.formatDateTime(o.created_at) + '</div>',
+          _pets: '<div>' + this.escape(codes || '—') + '</div>'
+            + '<div class="fs-sm text-muted">共 ' + (o.pet_count || pets.length || 0) + ' 只</div>',
+          _shelter: this.escape(o.shelter_name || '—'),
+          _status: TNR_UI.returnOrderStatusBadge(o.status)
+            + (o.received_at
+              ? '<div class="fs-sm text-muted">' + this.formatDate(o.received_at) + '</div>' : ''),
+          _actions: '<div class="dsp-acts">'
+            + (o.status === 'pending'
+              ? '<button class="btn btn-sm btn-danger" data-dspact="return-withdraw" data-id="' + o.id + '">撤回</button>' : '')
+            + '<button class="btn btn-sm btn-secondary" data-dspact="return-detail" data-id="' + o.id + '">详情</button>'
+            + '<button class="btn btn-sm btn-secondary" data-dspact="print" data-doc="return_order" data-id="' + o.id + '">打印</button>'
+            + '</div>',
+          _date: TNR_UI.firstDate(o.created_at, o.received_at) || ''
+        };
+      });
+      TNR_UI.mountTable('#dspReturnTable', {
+        id: 'hospital.discharge.returnOrders',
+        columns: [
+          {title: '运回单', key: '_no', sortable: false},
+          {title: '动物', key: '_pets', sortable: false},
+          {title: '捕捉点', key: '_shelter', sortable: false},
+          {title: '状态', key: '_status', sortable: false},
+          {title: '操作', key: '_actions', sortable: false, align: 'right'}
+        ],
+        data: rows,
+        emptyText: '暂无运回单'
+      });
+    };
+
+    mountPicks();
+    mountOrders();
+    TNR_UI.bindFilter(mountPicks, document.getElementById('dspPickBar'));
+    TNR_UI.bindFilter(mountOrders, document.getElementById('dspReturnBar'));
   },
 
   onDspAction(act, el) {
-    const kind = el.dataset.kind;
-    const docId = el.dataset.doc || '';
-    if (act === 'handle') {
-      this.openDischargeForm(kind, el.dataset.pet, el.dataset.tid || '');
-    } else if (act === 'detail') {
-      this.viewDischargeDetail(kind, docId);
-    } else if (act === 'transfer') {
-      this.doReleaseTransfer(docId);
-    } else if (act === 'print') {
-      /* 与 `TNR_UI.printDocBtn` 同一个 URL 形态（`/print/<doc>/<pk>/`）。
-         这里不复用它：它返回的是抽屉底部专用的 `.print-doc-row`
-         （带上边框 + 右对齐），塞进表格单元格会多出一条横线。 */
-      const key = this.DSP_DOC_KEY[kind];
-      if (!key) return;
-      window.open('/print/' + key + '/' + docId + '/', '_blank', 'noopener');
-    }
+    const id = el.dataset.id || '';
+    if (act === 'adopt-info') this.dspOpenAdoptInfo(el.dataset.pet);
+    else if (act === 'adopt-hall') this.dspToggleHall(el.dataset.pet, el.dataset.active === '1');
+    else if (act === 'appl-review') this.dspReviewApplication(id, el.dataset.action);
+    else if (act === 'appl-detail') this.dspViewApplication(id);
+    else if (act === 'adopt-outbound') this.dspOpenAdoptionOutbound(el.dataset.src, id);
+    else if (act === 'adopt-detail') this.dspViewAdoption(el.dataset.src, id);
+    else if (act === 'euth-create') this.dspOpenEuthCreate();
+    else if (act === 'euth-outbound') this.dspOpenEuthOutbound(id);
+    else if (act === 'euth-detail') this.dspViewEuth(id);
+    else if (act === 'owner-create') this.dspOpenOwnerCreate();
+    else if (act === 'owner-detail') this.dspViewOwner(id);
+    else if (act === 'return-create') this.dspOpenReturnCreate();
+    else if (act === 'return-withdraw') this.dspWithdrawReturn(id);
+    else if (act === 'return-detail') this.dspViewReturnOrder(id);
+    else if (act === 'print') this.dspPrint(el.dataset.doc, id);
   },
 
-  async doReleaseTransfer(docId) {
+  dspPrint(doc, id) {
+    const key = this.DSP_DOC_KEY[doc];
+    if (!key || !id) return;
+    window.open('/print/' + key + '/' + id + '/', '_blank', 'noopener');
+  },
+
+  /* ---------- 领养资料维护 / 大厅上下架 ---------- */
+  dspOpenAdoptInfo(petId) {
+    const pet = this.dspPet(petId);
+    if (!pet) { TNR_UI.toast('动物档案已刷新，请重试', 'warning'); return; }
+    const listing = ((this._dsp.listings || []).find(l =>
+      String(l.pet_id || (l.pet && l.pet.id)) === String(petId))) || null;
+    const intro = (listing && listing.intro) || pet.description || '';
+    const personality = (listing && listing.personality) || '';
+    const bodyCondition = (listing && listing.body_condition) || '';
+    const inHall = !!(listing && listing.is_active);
+
+    /* 系统照片全部来自捕捉 / 诊疗档案，这里只决定"显不显示"。
+       `listing.photos` 是后端按可见性整理后的清单（含隐藏项与 visible 标记），
+       没有 listing 时退回到动物档案字段。 */
+    const SYSTEM_PHOTOS = [
+      ['photo_capture', '捕捉照片'],
+      ['photo_group', '整体合影'],
+      ['photo_before', '术前照片'],
+      ['photo_after', '术后照片'],
+      ['photo_treatment', '诊疗后照片']
+    ];
+    const listed = (listing && listing.photos) || [];
+    const hiddenSet = new Set((listing && (listing.hidden_photos || listing.hiddenPhotos)) || []);
+    const systemPhotos = SYSTEM_PHOTOS
+      .map(([field, label]) => {
+        const row = listed.find(p => p.field === field);
+        return {field: field, label: label, url: (row && row.url) || pet[field] || '',
+                visible: !hiddenSet.has(field)};
+      })
+      .filter(p => p.url);
+    const extraPhotos = (listing && (listing.extra_photos || listing.extraPhotos)) || [];
+
+    const systemPhotoHtml = systemPhotos.length
+      ? '<div class="dsp-photo-grid">' + systemPhotos.map(p =>
+        '<div class="dsp-photo">'
+        + '<div class="dsp-photo-box"><img src="' + this.escape(p.url) + '" alt="'
+        + this.escape(p.label) + '"></div>'
+        + '<div class="dsp-photo-label">' + this.escape(p.label) + '</div>'
+        + '<label class="dsp-check"><input type="checkbox" data-photo-visible="'
+        + p.field + '"' + (p.visible ? ' checked' : '') + '> 大厅显示</label>'
+        + '</div>').join('') + '</div>'
+      : '<div class="dsp-note">暂无捕捉或诊疗照片；捕捉点、诊疗环节产生后会自动带入，无需在此重复上传。</div>';
+
+    const extraPhotoHtml = extraPhotos.length
+      ? '<div class="dsp-photo-grid">' + extraPhotos.map(p =>
+        '<div class="dsp-photo">'
+        + '<div class="dsp-photo-box"><img src="' + this.escape(p.image || '') + '" alt="补充照片"></div>'
+        + '<label class="dsp-check"><input type="checkbox" data-del-extra="' + p.id + '"> 删除</label>'
+        + '</div>').join('') + '</div>'
+      : '';
+
+    TNR_UI.modal({
+      title: '维护领养资料 · ' + pet.code,
+      size: 'lg',
+      body: (bodyEl, closeFn) => {
+        bodyEl.innerHTML = '<div class="dsp-form">'
+          + '<div class="dsp-fld full"><label>动物简介</label>'
+          + '<textarea class="form-textarea" id="dspIntro" rows="3" placeholder="供领养大厅展示">'
+          + this.escape(intro) + '</textarea></div>'
+          + '<div class="dsp-fld"><label>性格特点</label>'
+          + '<input class="form-input" id="dspPersonality" value="' + this.escape(personality) + '"'
+          + ' placeholder="如：温顺、亲人"></div>'
+          + '<div class="dsp-fld"><label>健康状况</label>'
+          + '<input class="form-input" id="dspHealth" value="' + this.escape(bodyCondition) + '"'
+          + ' placeholder="如：已绝育、已免疫"></div>'
+          + '<div class="dsp-fld full"><label>系统已有照片（捕捉 / 诊疗环节自动带入）</label>'
+          + systemPhotoHtml + '</div>'
+          + '<div class="dsp-fld full"><label>补充照片（仅补拍说明，可多选）</label>'
+          + extraPhotoHtml
+          + '<label class="dsp-photo-label" style="text-align:left;margin-top:8px;">'
+          + '选择新照片<input type="file" id="dspExtraFiles" accept="image/*" multiple></label>'
+          + '<div class="dsp-photo-grid" id="dspNewPreviews" style="margin-top:8px;"></div>'
+          + '<div class="dsp-note">已上传的补充照片可勾选删除；新选的照片在保存时上传。</div></div>'
+          + '<div class="dsp-fld full"><label class="dsp-check">'
+          + '<input type="checkbox" id="dspPublish"' + (inHall ? ' checked' : '') + '>'
+          + ' 发布到领养大厅（潜在领养人可见）</label></div>'
+          + '</div>'
+          + '<div class="dsp-actions">'
+          + '<button type="button" class="btn btn-secondary" data-close>取消</button>'
+          + '<button type="button" class="btn btn-primary" id="dspInfoSave">保存资料</button>'
+          + '</div>';
+        bodyEl.querySelector('[data-close]').onclick = closeFn;
+        bodyEl.querySelector('#dspExtraFiles').addEventListener('change', e => {
+          const preview = bodyEl.querySelector('#dspNewPreviews');
+          preview.innerHTML = Array.from(e.target.files || []).map(file =>
+            '<div class="dsp-photo"><div class="dsp-photo-box" data-new-preview>'
+            + '<img alt="待上传"></div><div class="dsp-photo-label">待上传</div></div>').join('');
+          const boxes = preview.querySelectorAll('[data-new-preview]');
+          Array.from(e.target.files || []).forEach((file, i) => {
+            if (!boxes[i]) return;
+            const reader = new FileReader();
+            reader.onload = ev => {
+              boxes[i].innerHTML = '<img src="' + ev.target.result + '" alt="预览">';
+            };
+            reader.readAsDataURL(file);
+          });
+        });
+        bodyEl.querySelector('#dspInfoSave').onclick = async () => {
+          const btn = bodyEl.querySelector('#dspInfoSave');
+          btn.disabled = true;
+          try {
+            const hidden_photos = [];
+            bodyEl.querySelectorAll('[data-photo-visible]').forEach(cb => {
+              if (!cb.checked) hidden_photos.push(cb.dataset.photoVisible);
+            });
+            const deleteIds = Array.from(bodyEl.querySelectorAll('[data-del-extra]:checked'))
+              .map(cb => Number(cb.dataset.delExtra));
+            const files = bodyEl.querySelector('#dspExtraFiles').files || [];
+            if (files.length > 6) {
+              TNR_UI.toast('补充照片一次最多上传 6 张', 'warning');
+              btn.disabled = false;
+              return;
+            }
+            const fd = new FormData();
+            fd.append('intro', bodyEl.querySelector('#dspIntro').value.trim());
+            fd.append('personality', bodyEl.querySelector('#dspPersonality').value.trim());
+            fd.append('body_condition', bodyEl.querySelector('#dspHealth').value.trim());
+            fd.append('is_active', bodyEl.querySelector('#dspPublish').checked ? '1' : '0');
+            fd.append('hidden_photos', JSON.stringify(hidden_photos));
+            if (deleteIds.length) {
+              fd.append('delete_photo_ids', JSON.stringify(deleteIds));
+            }
+            Array.from(files).forEach(f => fd.append('extra_photos', f));
+            const res = await TNR_API.saveAdoptionInfo(petId, fd);
+            TNR_UI.assertOk(res, '资料保存失败');
+            TNR_UI.toast('领养资料已保存', 'success');
+            closeFn();
+            this.render_discharge();
+          } catch (e) {
+            TNR_UI.toast(e.message || '保存失败', 'danger');
+            btn.disabled = false;
+          }
+        };
+      }
+    });
+  },
+
+  async dspToggleHall(petId, active) {
     try {
-      const res = await TNR_API.transferRelease(docId);
-      TNR_UI.assertOk(res, '转运回小区失败');
-      TNR_UI.toast('已登记转运回小区，等待小区接收人确认放归', 'success');
+      const res = await TNR_API.editAdoptionInfo(petId, {is_active: active});
+      TNR_UI.assertOk(res, active ? '发布失败' : '下架失败');
+      TNR_UI.toast(active ? '已发布至领养大厅' : '已从领养大厅下架', 'success');
       this.render_discharge();
     } catch (e) {
       TNR_UI.toast(e.message || '操作失败', 'danger');
     }
   },
 
-  viewDischargeDetail(kind, docId) {
-    const d = this.dspDocs(kind).find(x => String(x.id) === String(docId));
-    if (!d) { TNR_UI.toast('单据数据已刷新，请重试', 'warning'); return; }
-    const pet = this.dspPet(d.pet_id);
-    const key = this.DSP_DOC_KEY[kind];
-    const T = {
-      adopt: '领养单',
-      dead: (d.kind === 'dead' ? '死亡 / 无害化处理单' : '安乐死处置单'),
-      owner: '主人领回单',
-      release: '放归单'
-    }[kind] || '单据';
-
-    const rows = [
-      { label: '动物编号', value: this.escape(d.pet_code || (pet ? pet.code : '') || '—') },
-      { label: '动物名称', value: this.escape(pet ? (pet.name || '—') : '—') },
-      { label: '动物状态', value: this.dspAnimalBadge(d.pet_id, '—') },
-      { label: '单据编号', value: this.escape(d.ledger_no || '—') }
-    ];
-    if (kind === 'adopt') {
-      rows.push({ label: '领养人', value: this.escape(d.adopter_name || '—') });
-      rows.push({ label: '联系电话', value: this.escape(d.adopter_phone || '—') });
-      rows.push({ label: '身份证号', value: this.escape(d.adopter_id_card || '—') });
-      rows.push({ label: '住址', value: this.escape(d.adopter_address || '—'), full: true });
-      rows.push({ label: '领养日期', value: this.formatDate(d.adopted_at) });
-    } else if (kind === 'dead') {
-      rows.push({ label: '处置方式', value: this.escape(d.kind === 'dead' ? '死亡 / 无害化' : '安乐死') });
-      rows.push({ label: '处置日期', value: this.formatDate(d.euthanized_at) });
-      rows.push({ label: '原因', value: this.escape(d.reason || '—'), full: true });
-      rows.push({ label: '动物状况', value: this.escape(d.condition || '—'), full: true });
-      rows.push({ label: '遗体移交', value: d.body_received ? '已移交' : '未移交' });
-    } else if (kind === 'owner') {
-      rows.push({ label: '主人姓名', value: this.escape(d.owner_name || '—') });
-      rows.push({ label: '联系电话', value: this.escape(d.owner_phone || '—') });
-      rows.push({ label: '身份证号', value: this.escape(d.owner_id_card || '—') });
-      rows.push({ label: '住址', value: this.escape(d.owner_address || '—'), full: true });
-      rows.push({ label: '领回时间', value: this.formatDateTime(d.return_time) });
-      rows.push({ label: '领回原因', value: this.escape(d.reason || '—'), full: true });
-    } else {
-      rows.push({ label: '原小区', value: this.escape(d.community_name || '—'), full: true });
-      rows.push({ label: '小区接收人', value: this.escape(d.receiver_name || '—') });
-      rows.push({ label: '接收人电话', value: this.escape(d.receiver_phone || '—') });
-      rows.push({ label: '转运回小区', value: this.formatDateTime(d.transferred_at) });
-      rows.push({ label: '放归日期', value: this.formatDate(d.released_at) });
+  async dspReviewApplication(id, action) {
+    const label = action === 'approve' ? '通过' : '拒绝';
+    const ok = await TNR_UI.confirm('确认' + label + '该领养申请？', '审核领养申请');
+    if (!ok) return;
+    try {
+      const reviewNote = action === 'reject' ? (window.prompt('请输入拒绝原因：') || '') : '';
+      const res = await TNR_API.post(
+        TNR_API.BASE + 'adoptions/applications/' + id + '/review/',
+        {action: action, review_note: reviewNote});
+      TNR_UI.assertOk(res, '审核失败');
+      TNR_UI.toast(res.message || '审核完成', 'success');
+      this.render_discharge();
+    } catch (e) {
+      TNR_UI.toast(e.message || '审核失败', 'danger');
     }
-    rows.push({ label: '操作人', value: this.escape(d.operator_name || '—') });
+  },
+
+  dspViewApplication(id) {
+    const a = ((this._dsp && this._dsp.applications) || [])
+      .find(x => String(x.id) === String(id));
+    if (!a) { TNR_UI.toast('申请数据已刷新，请重试', 'warning'); return; }
+    TNR_UI.drawer({
+      title: '领养申请 · ' + this.escape(a.pet_code || ''),
+      body: '<div class="detail-section"><div class="detail-section-title">申请信息</div>'
+        + TNR_UI.renderDescList([
+          {label: '动物', value: this.dspPetCell(this.dspPet(a.pet_id), a.pet_code), full: true},
+          {label: '申请人', value: this.escape(a.applicant_name || '—')},
+          {label: '联系电话', value: this.escape(a.applicant_phone || '—')},
+          {label: '身份证号', value: this.escape(a.applicant_id_card || '—')},
+          {label: '住址', value: this.escape(a.applicant_address || '—'), full: true},
+          {label: '资质说明', value: this.escape(a.qualification || '—'), full: true},
+          {label: '申请理由', value: this.escape(a.reason || '—'), full: true},
+          {label: '申请时间', value: this.formatDateTime(a.applied_at)},
+          {label: '审核状态', value: this.escape(a.status_display || a.status_display_text || a.status || '—')}
+        ]) + '</div>'
+    });
+  },
+
+  /* ---------- 领养出库交接单 ---------- */
+  /* 出库照片的手机选择器：拍照 / 相册（本地文件）两个入口。
+     单个 file input 在部分手机浏览器里只弹文件管理器，现场拍的照片反而
+     找不到；选图后先本地压缩（手机原图 3~5MB，直接传慢且易撞上限）。
+     onPick(null) 表示清除已选照片。 */
+  dspPhotoPickHtml(key, label, hint) {
+    return '<div class="dsp-fld full"><label>' + label + '</label>'
+      + '<div class="dsp-photo-pick">'
+      + '<button type="button" class="btn btn-secondary" data-photo-cam="' + key + '">📷 拍照</button>'
+      + '<button type="button" class="btn btn-secondary" data-photo-lib="' + key + '">🖼 相册 / 文件</button>'
+      + '</div>'
+      + '<input type="file" accept="image/*" capture="environment"'
+      + ' data-photo-input-cam="' + key + '" style="display:none">'
+      + '<input type="file" accept="image/*" data-photo-input-lib="' + key + '" style="display:none">'
+      + '<div class="dsp-photo-picked" data-photo-preview="' + key + '"></div>'
+      + '<div class="dsp-note">' + hint + '</div>'
+      + '</div>';
+  },
+
+  dspBindPhotoPick(bodyEl, key, onPick) {
+    const camInput = bodyEl.querySelector('[data-photo-input-cam="' + key + '"]');
+    const libInput = bodyEl.querySelector('[data-photo-input-lib="' + key + '"]');
+    const preview = bodyEl.querySelector('[data-photo-preview="' + key + '"]');
+    bodyEl.querySelector('[data-photo-cam="' + key + '"]').onclick = () => camInput.click();
+    bodyEl.querySelector('[data-photo-lib="' + key + '"]').onclick = () => libInput.click();
+    const handle = async (input) => {
+      const raw = input.files && input.files[0];
+      if (!raw) return;
+      preview.textContent = '处理中…';
+      const file = await TNR_UI.compressImage(raw);
+      preview.innerHTML = '<div class="dsp-photo-picked-box">'
+        + '<img alt="已选照片">'
+        + '<button type="button" class="btn btn-secondary btn-sm">重新选择</button></div>';
+      const img = preview.querySelector('img');
+      const reader = new FileReader();
+      reader.onload = ev => { img.src = ev.target.result; };
+      reader.readAsDataURL(file);
+      preview.querySelector('button').onclick = () => {
+        camInput.value = '';
+        libInput.value = '';
+        preview.innerHTML = '';
+        onPick(null);
+      };
+      onPick(file);
+    };
+    camInput.onchange = () => handle(camInput);
+    libInput.onchange = () => handle(libInput);
+  },
+
+  dspOpenAdoptionOutbound(source, id) {
+    const row = this.dspReservedRows().find(r =>
+      r.source === source && String(r.id) === String(id));
+    if (!row) { TNR_UI.toast('预约数据已刷新，请重试', 'warning'); return; }
+    TNR_UI.modal({
+      title: '领养出库 · ' + (row.pet_code || ''),
+      size: 'lg',
+      body: (bodyEl, closeFn) => {
+        bodyEl.innerHTML = '<div class="tx-tip inf"><span>ℹ</span><div>'
+          + '填写领养出库单与交接信息。确认后领养单完成、动物状态变为「已领养」，不可再操作。</div></div>'
+          + '<div class="dsp-summary">'
+          + '<div><span>动物</span><b>' + this.escape(row.pet_code || '—') + '</b></div>'
+          + '<div><span>领养人</span><b>' + this.escape(row.name || '—') + '</b></div>'
+          + '<div><span>联系电话</span><b>' + this.escape(row.phone || '—') + '</b></div>'
+          + '<div><span>预约来源</span><b>' + row.origin + '</b></div>'
+          + '</div>'
+          + '<div class="dsp-form">'
+          + '<div class="dsp-fld"><label>出库日期<span class="req">*</span></label>'
+          + '<input class="form-input" type="date" id="dspOutDate" value="' + TNR_UI.todayStr() + '"></div>'
+          + '<div class="dsp-fld"><label>交接人<span class="req">*</span></label>'
+          + '<input class="form-input" id="dspOutHandover" value="' + this.escape(this.dspStaffName()) + '"'
+          + ' placeholder="医院交接人"></div>'
+          + '<div class="dsp-fld full"><label>领养人签字<span class="req">*</span></label>'
+          + '<div class="sig-field" id="dspOutSig"></div></div>'
+          + this.dspPhotoPickHtml('out', '交接照片（非必需）',
+            '手机可直接拍照，或从相册 / 本地文件选择；选图后自动压缩')
+          + '</div>'
+          + '<div class="dsp-actions">'
+          + '<button type="button" class="btn btn-secondary" data-close>取消</button>'
+          + '<button type="button" class="btn btn-primary" id="dspOutSubmit">确认出库</button>'
+          + '</div>';
+        const sig = TNR_UI.initSignatureField(bodyEl.querySelector('#dspOutSig'),
+          {title: '领养人签字'});
+        let outPhoto = null;
+        this.dspBindPhotoPick(bodyEl, 'out', f => { outPhoto = f; });
+        bodyEl.querySelector('[data-close]').onclick = closeFn;
+        bodyEl.querySelector('#dspOutSubmit').onclick = async () => {
+          const date = bodyEl.querySelector('#dspOutDate').value;
+          const handover = bodyEl.querySelector('#dspOutHandover').value.trim();
+          if (!date) { TNR_UI.toast('请选择出库日期', 'warning'); return; }
+          if (!handover) { TNR_UI.toast('请填写交接人', 'warning'); return; }
+          if (sig.isEmpty()) { TNR_UI.toast('请完成领养人签字', 'warning'); return; }
+          const fd = new FormData();
+          fd.append('outbound_at', date);
+          fd.append('handover_name', handover);
+          fd.append('signature', sig.getDataURL());
+          if (outPhoto) fd.append('handover_photo', outPhoto);
+          const btn = bodyEl.querySelector('#dspOutSubmit');
+          btn.disabled = true;
+          try {
+            const res = source === 'application'
+              ? await TNR_API.outboundAdoptionApplication(id, fd)
+              : await TNR_API.outboundAdoption(id, fd);
+            TNR_UI.assertOk(res, '领养出库失败');
+            TNR_UI.toast('领养出库完成', 'success');
+            closeFn();
+            this.render_discharge();
+          } catch (e) {
+            TNR_UI.toast(e.message || '出库失败', 'danger');
+            btn.disabled = false;
+          }
+        };
+      }
+    });
+  },
+
+  dspViewAdoption(source, id) {
+    if (source === 'application') { this.dspViewApplication(id); return; }
+    const a = ((this._dsp && this._dsp.adoptions) || [])
+      .find(x => String(x.id) === String(id));
+    if (!a) { TNR_UI.toast('领养单已刷新，请重试', 'warning'); return; }
+    const photo = a.handover_photo || a.handoverPhoto || '';
+    const rows = [
+      {label: '动物', value: this.dspPetCell(this.dspPet(a.pet_id), a.pet_code), full: true},
+      {label: '单据编号', value: this.escape(a.ledger_no || '—')},
+      {label: '领养人', value: this.escape(a.adopter_name || '—')},
+      {label: '联系电话', value: this.escape(a.adopter_phone || '—')},
+      {label: '身份证号', value: this.escape(a.adopter_id_card || '—')},
+      {label: '住址', value: this.escape(a.adopter_address || '—'), full: true},
+      {label: '出库日期', value: this.formatDate(a.outbound_at || a.adopted_at)},
+      {label: '交接人', value: this.escape(a.handover_name || a.handoverName || '—')},
+      {label: '操作人', value: this.escape(a.operator_name || '—')}
+    ];
+    TNR_UI.drawer({
+      title: '领养出库单 · ' + this.escape(a.pet_code || ''),
+      body: '<div class="detail-section"><div class="detail-section-title">交接信息</div>'
+        + TNR_UI.renderDescList(rows)
+        + '<div class="detail-section-title" style="margin-top:var(--sp-3);">领养人签字</div>'
+        + this.dspSigTag(a.signature)
+        + '<div class="detail-section-title" style="margin-top:var(--sp-3);">交接照片</div>'
+        + this.dspImgTag(photo, '交接照片')
+        + '</div>' + TNR_UI.printDocBtn('adoption', a.id)
+    });
+  },
+
+  /* ---------- 死亡登记 / 死亡出库 ---------- */
+  dspOpenEuthCreate() {
+    const reserved = this.dspReservedPetIds();
+    const eligible = ((this._dsp && this._dsp.pets) || [])
+      .filter(p => (p.status === 'in_treatment' || p.status === 'pending_adopt')
+        && !reserved.has(String(p.id)));
+    if (!eligible.length) {
+      TNR_UI.toast('暂无可登记的动物（需诊疗中或待领养）', 'warning');
+      return;
+    }
+    TNR_UI.modal({
+      title: '登记安乐死 / 死亡',
+      size: 'lg',
+      body: (bodyEl, closeFn) => {
+        bodyEl.innerHTML = '<div class="tx-tip inf"><span>ℹ</span><div>'
+          + '本步只登记临床处置；遗体离院还要在列表中办理「死亡出库单」。</div></div>'
+          + '<div class="dsp-form">'
+          + '<div class="dsp-fld full"><label>动物<span class="req">*</span></label>'
+          + '<select class="form-select" id="dspEuthPet"><option value="">请选择</option>'
+          + eligible.map(p => '<option value="' + p.id + '">' + this.escape(p.code)
+            + (p.name ? ' · ' + this.escape(p.name) : '') + '（'
+            + TNR_UI.petStatusText(p.status) + '）</option>').join('')
+          + '</select></div>'
+          + '<div class="dsp-fld full"><label>处置方式<span class="req">*</span></label>'
+          + '<div class="dsp-chips" id="dspEuthKind">'
+          + '<span class="on" data-v="euthanasia">安乐死</span>'
+          + '<span data-v="dead">死亡 / 无害化</span></div></div>'
+          + '<div class="dsp-fld"><label>处置日期<span class="req">*</span></label>'
+          + '<input class="form-input" type="date" id="dspEuthDate" value="' + TNR_UI.todayStr() + '"></div>'
+          + '<div class="dsp-fld"><label>原因<span class="req">*</span></label>'
+          + '<input class="form-input" id="dspEuthReason" placeholder="如：严重疾病、无法救治"></div>'
+          + '<div class="dsp-fld full"><label>动物状况</label>'
+          + '<textarea class="form-textarea" id="dspEuthCondition" rows="2"'
+          + ' placeholder="详细描述动物状况及处置原因"></textarea></div>'
+          + '</div>'
+          + '<div class="dsp-actions">'
+          + '<button type="button" class="btn btn-secondary" data-close>取消</button>'
+          + '<button type="button" class="btn btn-danger" id="dspEuthSubmit">确认登记</button>'
+          + '</div>';
+        bodyEl.querySelector('[data-close]').onclick = closeFn;
+        bodyEl.querySelectorAll('#dspEuthKind span').forEach(sp => {
+          sp.onclick = () => {
+            bodyEl.querySelectorAll('#dspEuthKind span').forEach(x => x.classList.remove('on'));
+            sp.classList.add('on');
+          };
+        });
+        bodyEl.querySelector('#dspEuthSubmit').onclick = async () => {
+          const petId = bodyEl.querySelector('#dspEuthPet').value;
+          const date = bodyEl.querySelector('#dspEuthDate').value;
+          const reason = bodyEl.querySelector('#dspEuthReason').value.trim();
+          const condition = bodyEl.querySelector('#dspEuthCondition').value.trim();
+          const chip = bodyEl.querySelector('#dspEuthKind span.on');
+          const kind = chip ? chip.dataset.v : 'euthanasia';
+          if (!petId) { TNR_UI.toast('请选择动物', 'warning'); return; }
+          if (!date) { TNR_UI.toast('请选择处置日期', 'warning'); return; }
+          if (!reason) { TNR_UI.toast('请填写原因', 'warning'); return; }
+          const btn = bodyEl.querySelector('#dspEuthSubmit');
+          btn.disabled = true;
+          try {
+            const res = await TNR_API.createEuthanasia({
+              pet_id: Number(petId), kind: kind, reason: reason,
+              condition: condition, euthanized_at: date
+            });
+            TNR_UI.assertOk(res, '登记失败');
+            TNR_UI.toast('已登记，请在列表中继续办理死亡出库单；出库完成才算出院', 'success');
+            closeFn();
+            this.render_discharge();
+          } catch (e) {
+            TNR_UI.toast(e.message || '登记失败', 'danger');
+            btn.disabled = false;
+          }
+        };
+      }
+    });
+  },
+
+  dspOpenEuthOutbound(id) {
+    const e = ((this._dsp && this._dsp.euth) || [])
+      .find(x => String(x.id) === String(id));
+    if (!e) { TNR_UI.toast('死亡记录已刷新，请重试', 'warning'); return; }
+    if (e.outbound_at) { TNR_UI.toast('该记录已完成死亡出库', 'warning'); return; }
+    TNR_UI.modal({
+      title: '死亡出库单 · ' + (e.pet_code || ''),
+      size: 'lg',
+      body: (bodyEl, closeFn) => {
+        bodyEl.innerHTML = '<div class="tx-tip inf"><span>ℹ</span><div>'
+          + '死亡出库单是遗体交给无害化处理厂的交接凭证；照片为非必需。</div></div>'
+          + '<div class="dsp-form">'
+          + '<div class="dsp-fld"><label>出库日期<span class="req">*</span></label>'
+          + '<input class="form-input" type="date" id="dspEoDate" value="' + TNR_UI.todayStr() + '"></div>'
+          + '<div class="dsp-fld"><label>交接人<span class="req">*</span></label>'
+          + '<input class="form-input" id="dspEoHandover" value="' + this.escape(this.dspStaffName()) + '"'
+          + ' placeholder="医院交接人"></div>'
+          + '<div class="dsp-fld"><label>接收机构（无害化处理厂）<span class="req">*</span></label>'
+          + '<input class="form-input" id="dspEoOrg" placeholder="如：XX无害化处理厂"></div>'
+          + '<div class="dsp-fld"><label>接收人<span class="req">*</span></label>'
+          + '<input class="form-input" id="dspEoReceiver" placeholder="接收人姓名"></div>'
+          + '<div class="dsp-fld full"><label>原因<span class="req">*</span></label>'
+          + '<textarea class="form-textarea" id="dspEoReason" rows="2">'
+          + this.escape(e.reason || '') + '</textarea></div>'
+          + '<div class="dsp-fld full"><label>接收人签字<span class="req">*</span></label>'
+          + '<div class="sig-field" id="dspEoSig"></div></div>'
+          + this.dspPhotoPickHtml('eo', '出库照片（非必需）',
+            '手机可直接拍照，或从相册 / 本地文件选择；选图后自动压缩')
+          + '</div>'
+          + '<div class="dsp-actions">'
+          + '<button type="button" class="btn btn-secondary" data-close>取消</button>'
+          + '<button type="button" class="btn btn-primary" id="dspEoSubmit">确认出库</button>'
+          + '</div>';
+        const sig = TNR_UI.initSignatureField(bodyEl.querySelector('#dspEoSig'),
+          {title: '接收人签字'});
+        let eoPhoto = null;
+        this.dspBindPhotoPick(bodyEl, 'eo', f => { eoPhoto = f; });
+        bodyEl.querySelector('[data-close]').onclick = closeFn;
+        bodyEl.querySelector('#dspEoSubmit').onclick = async () => {
+          const date = bodyEl.querySelector('#dspEoDate').value;
+          const handover = bodyEl.querySelector('#dspEoHandover').value.trim();
+          const org = bodyEl.querySelector('#dspEoOrg').value.trim();
+          const receiver = bodyEl.querySelector('#dspEoReceiver').value.trim();
+          const reason = bodyEl.querySelector('#dspEoReason').value.trim();
+          if (!date) { TNR_UI.toast('请选择出库日期', 'warning'); return; }
+          if (!handover) { TNR_UI.toast('请填写交接人', 'warning'); return; }
+          if (!org) { TNR_UI.toast('请填写接收机构（无害化处理厂）', 'warning'); return; }
+          if (!receiver) { TNR_UI.toast('请填写接收人', 'warning'); return; }
+          if (!reason) { TNR_UI.toast('请填写原因', 'warning'); return; }
+          if (sig.isEmpty()) { TNR_UI.toast('请完成接收人签字', 'warning'); return; }
+          const fd = new FormData();
+          fd.append('outbound_at', date);
+          fd.append('handover_name', handover);
+          fd.append('receiving_org', org);
+          fd.append('receiver_name', receiver);
+          fd.append('reason', reason);
+          fd.append('signature', sig.getDataURL());
+          if (eoPhoto) fd.append('photo', eoPhoto);
+          const btn = bodyEl.querySelector('#dspEoSubmit');
+          btn.disabled = true;
+          try {
+            const res = await TNR_API.outboundEuthanasia(id, fd);
+            TNR_UI.assertOk(res, '死亡出库失败');
+            TNR_UI.toast('死亡出库登记成功', 'success');
+            closeFn();
+            this.render_discharge();
+          } catch (err) {
+            TNR_UI.toast(err.message || '出库失败', 'danger');
+            btn.disabled = false;
+          }
+        };
+      }
+    });
+  },
+
+  dspViewEuth(id) {
+    const e = ((this._dsp && this._dsp.euth) || [])
+      .find(x => String(x.id) === String(id));
+    if (!e) { TNR_UI.toast('死亡记录已刷新，请重试', 'warning'); return; }
+    const photo = e.photo || '';
+    TNR_UI.drawer({
+      title: (e.kind === 'dead' ? '死亡 / 无害化' : '安乐死') + ' · ' + this.escape(e.pet_code || ''),
+      body: '<div class="detail-section"><div class="detail-section-title">处置信息</div>'
+        + TNR_UI.renderDescList([
+          {label: '动物', value: this.dspPetCell(this.dspPet(e.pet_id), e.pet_code), full: true},
+          {label: '单据编号', value: this.escape(e.ledger_no || '—')},
+          {label: '处置方式', value: e.kind === 'dead' ? '死亡 / 无害化' : '安乐死'},
+          {label: '处置日期', value: this.formatDate(e.euthanized_at)},
+          {label: '原因', value: this.escape(e.reason || '—'), full: true},
+          {label: '动物状况', value: this.escape(e.condition || '—'), full: true},
+          {label: '出库日期', value: this.formatDate(e.outbound_at)},
+          {label: '交接人', value: this.escape(e.handover_name || '—')},
+          {label: '接收机构', value: this.escape(e.receiving_org || '—')},
+          {label: '接收人', value: this.escape(e.receiver_name || '—')},
+          {label: '操作人', value: this.escape(e.operator_name || '—')}
+        ])
+        + '<div class="detail-section-title" style="margin-top:var(--sp-3);">接收人签字</div>'
+        + this.dspSigTag(e.signature)
+        + '<div class="detail-section-title" style="margin-top:var(--sp-3);">出库照片</div>'
+        + this.dspImgTag(photo, '出库照片')
+        + '</div>' + TNR_UI.printDocBtn('euthanasia', e.id)
+    });
+  },
+
+  /* ---------- 主人领回交接单 ---------- */
+  dspOpenOwnerCreate() {
+    const eligible = this.dspOwnerPets();
+    if (!eligible.length) {
+      TNR_UI.toast('暂无可领回的动物（需诊疗中或待领养）', 'warning');
+      return;
+    }
+    TNR_UI.modal({
+      title: '主人领回 · 交接单',
+      size: 'lg',
+      body: (bodyEl, closeFn) => {
+        bodyEl.innerHTML = '<div class="tx-tip inf"><span>ℹ</span><div>'
+          + '核对主人身份与联系方式，填写交接信息并由主人签字。领回后动物状态变为「已领回」。</div></div>'
+          + '<div class="dsp-form">'
+          + '<div class="dsp-fld full"><label>动物<span class="req">*</span></label>'
+          + '<select class="form-select" id="dspOrPet"><option value="">请选择</option>'
+          + eligible.map(p => '<option value="' + p.id + '">' + this.escape(p.code)
+            + (p.name ? ' · ' + this.escape(p.name) : '') + '（'
+            + TNR_UI.petStatusText(p.status) + '）</option>').join('')
+          + '</select></div>'
+          + '<div class="dsp-fld"><label>主人姓名<span class="req">*</span></label>'
+          + '<input class="form-input" id="dspOrName"></div>'
+          + '<div class="dsp-fld"><label>联系电话<span class="req">*</span></label>'
+          + '<input class="form-input" id="dspOrPhone"></div>'
+          + '<div class="dsp-fld"><label>身份证号</label>'
+          + '<input class="form-input" id="dspOrIdCard"></div>'
+          + '<div class="dsp-fld"><label>领回日期<span class="req">*</span></label>'
+          + '<input class="form-input" type="date" id="dspOrDate" value="' + TNR_UI.todayStr() + '"></div>'
+          + '<div class="dsp-fld full"><label>住址</label>'
+          + '<input class="form-input" id="dspOrAddress"></div>'
+          + '<div class="dsp-fld full"><label>领回原因<span class="req">*</span></label>'
+          + '<textarea class="form-textarea" id="dspOrReason" rows="2"></textarea></div>'
+          + '<div class="dsp-fld full"><label>主人签字<span class="req">*</span></label>'
+          + '<div class="sig-field" id="dspOrSig"></div></div>'
+          + '</div>'
+          + '<div class="dsp-actions">'
+          + '<button type="button" class="btn btn-secondary" data-close>取消</button>'
+          + '<button type="button" class="btn btn-primary" id="dspOrSubmit">确认领回</button>'
+          + '</div>';
+        const sig = TNR_UI.initSignatureField(bodyEl.querySelector('#dspOrSig'),
+          {title: '主人签字'});
+        bodyEl.querySelector('[data-close]').onclick = closeFn;
+        bodyEl.querySelector('#dspOrSubmit').onclick = async () => {
+          const petId = bodyEl.querySelector('#dspOrPet').value;
+          const name = bodyEl.querySelector('#dspOrName').value.trim();
+          const phone = bodyEl.querySelector('#dspOrPhone').value.trim();
+          const idCard = bodyEl.querySelector('#dspOrIdCard').value.trim();
+          const date = bodyEl.querySelector('#dspOrDate').value;
+          const address = bodyEl.querySelector('#dspOrAddress').value.trim();
+          const reason = bodyEl.querySelector('#dspOrReason').value.trim();
+          if (!petId) { TNR_UI.toast('请选择动物', 'warning'); return; }
+          if (!name) { TNR_UI.toast('请填写主人姓名', 'warning'); return; }
+          if (!phone) { TNR_UI.toast('请填写联系电话', 'warning'); return; }
+          if (!date) { TNR_UI.toast('请选择领回日期', 'warning'); return; }
+          if (!reason) { TNR_UI.toast('请填写领回原因', 'warning'); return; }
+          if (sig.isEmpty()) { TNR_UI.toast('请完成主人签字', 'warning'); return; }
+          const btn = bodyEl.querySelector('#dspOrSubmit');
+          btn.disabled = true;
+          try {
+            let bl = null;
+            try {
+              const r = await TNR_API.checkBlacklist(idCard, phone);
+              bl = r && r.data;
+            } catch (err) {
+              TNR_UI.toast('黑名单校验失败，请重试：' + (err.message || '未知错误'), 'danger');
+              btn.disabled = false;
+              return;
+            }
+            if (bl && (bl.name || bl.idCard)) {
+              TNR_UI.toast('该主人在黑名单中，无法办理领回：' + (bl.reason || ''), 'danger');
+              btn.disabled = false;
+              return;
+            }
+            const res = await TNR_API.createOwnerReturn({
+              pet_id: Number(petId), owner_name: name, owner_phone: phone,
+              owner_id_card: idCard, owner_address: address, reason: reason,
+              return_time: date, signature: sig.getDataURL()
+            });
+            TNR_UI.assertOk(res, '领回办理失败');
+            TNR_UI.toast('主人领回登记成功，已计入出院', 'success');
+            closeFn();
+            this.render_discharge();
+          } catch (err) {
+            TNR_UI.toast(err.message || '办理失败', 'danger');
+            btn.disabled = false;
+          }
+        };
+      }
+    });
+  },
+
+  dspViewOwner(id) {
+    const r = ((this._dsp && this._dsp.returns) || [])
+      .find(x => String(x.id) === String(id));
+    if (!r) { TNR_UI.toast('领回记录已刷新，请重试', 'warning'); return; }
+    TNR_UI.drawer({
+      title: '主人领回单 · ' + this.escape(r.pet_code || ''),
+      body: '<div class="detail-section"><div class="detail-section-title">交接信息</div>'
+        + TNR_UI.renderDescList([
+          {label: '动物', value: this.dspPetCell(this.dspPet(r.pet_id), r.pet_code), full: true},
+          {label: '单据编号', value: this.escape(r.ledger_no || '—')},
+          {label: '主人姓名', value: this.escape(r.owner_name || '—')},
+          {label: '联系电话', value: this.escape(r.owner_phone || '—')},
+          {label: '身份证号', value: this.escape(r.owner_id_card || '—')},
+          {label: '住址', value: this.escape(r.owner_address || '—'), full: true},
+          {label: '领回时间', value: this.formatDateTime(TNR_UI.firstDate(r.return_time, r.created_at))},
+          {label: '领回原因', value: this.escape(r.reason || '—'), full: true},
+          {label: '操作人', value: this.escape(r.operator_name || '—')}
+        ])
+        + '<div class="detail-section-title" style="margin-top:var(--sp-3);">主人签字</div>'
+        + this.dspSigTag(r.signature)
+        + '</div>' + TNR_UI.printDocBtn('owner_return', r.id)
+    });
+  },
+
+  /* ---------- 运回单（放归反向物流） ---------- */
+  dspOpenReturnCreate() {
+    const picked = Array.from(
+      document.querySelectorAll('#dspPickList input[data-petpick]:checked'))
+      .map(x => Number(x.value));
+    if (!picked.length) {
+      TNR_UI.toast('请先勾选待放归动物', 'warning');
+      return;
+    }
+    const pets = picked.map(id => this.dspPet(id)).filter(Boolean);
+    if (pets.length !== picked.length) {
+      TNR_UI.toast('部分动物档案已刷新，请重新勾选', 'warning');
+      return;
+    }
+    const shelves = (this._dsp && this._dsp.returnShelters) || [];
+    if (!shelves.length) {
+      TNR_UI.toast('未加载到可用的捕捉点，请刷新页面后重试', 'warning');
+      return;
+    }
+    /* 默认选中：全部动物原本属于同一个捕捉点时沿用该捕捉点；
+       来自不同捕捉点时留给操作员选（可选市级）。 */
+    const petShelterIds = Array.from(new Set(pets.map(p => String(p.shelter_id || ''))));
+    let shelterId = petShelterIds.length === 1 ? petShelterIds[0] : '';
+    if (!shelves.some(s => String(s.id) === shelterId)) {
+      shelterId = String(shelves[0].id);
+    }
+    const noteEl = document.getElementById('dspReturnNote');
+    const note = noteEl ? noteEl.value.trim() : '';
+
+    TNR_UI.modal({
+      title: '生成运回单',
+      size: 'lg',
+      body: (bodyEl, closeFn) => {
+        bodyEl.innerHTML = '<div class="tx-tip inf"><span>ℹ</span><div>'
+          + '运回单提交后为「待确认」，动物状态变为「待运回捕捉点」。'
+          + '捕捉点签收后进入其待放归列表；签收前医院可以撤回。</div></div>'
+          + '<div class="dsp-fld full"><label>接收捕捉点<span class="req">*</span></label>'
+          + '<select class="form-select" id="dspReturnShelter">'
+          + shelves.map(s => '<option value="' + s.id + '"'
+            + (String(s.id) === shelterId ? ' selected' : '') + '>'
+            + this.escape(s.name) + (s.is_city ? '（市级）' : '（' + this.escape(s.district_name || '') + '）')
+            + '</option>').join('')
+          + '</select></div>'
+          + '<div class="dsp-hint">可选市级捕捉点，或本院所在区县的捕捉点；不能选其他区县。</div>'
+          + '<div class="dsp-return-pets">' + pets.map(p =>
+            '<div class="dsp-return-pet"><b>' + this.escape(p.code) + '</b>'
+            + '<span>' + this.escape(p.name || '') + '</span></div>').join('') + '</div>'
+          + (note ? '<div class="dsp-note">备注：' + this.escape(note) + '</div>' : '')
+          + '<div class="dsp-actions">'
+          + '<button type="button" class="btn btn-secondary" data-close>取消</button>'
+          + '<button type="button" class="btn btn-primary" id="dspReturnSubmit">确认生成</button>'
+          + '</div>';
+        bodyEl.querySelector('[data-close]').onclick = closeFn;
+        bodyEl.querySelector('#dspReturnSubmit').onclick = async () => {
+          const btn = bodyEl.querySelector('#dspReturnSubmit');
+          const shelterSelect = bodyEl.querySelector('#dspReturnShelter');
+          if (!shelterSelect.value) {
+            TNR_UI.toast('请选择接收捕捉点', 'warning');
+            return;
+          }
+          btn.disabled = true;
+          try {
+            const res = await TNR_API.createReturnOrder({
+              pet_ids: picked,
+              note: note,
+              shelter_id: Number(shelterSelect.value)
+            });
+            TNR_UI.assertOk(res, '运回单创建失败');
+            TNR_UI.toast('运回单已提交，等待捕捉点确认接收', 'success');
+            closeFn();
+            this.render_discharge();
+          } catch (e) {
+            TNR_UI.toast(e.message || '创建失败', 'danger');
+            btn.disabled = false;
+          }
+        };
+      }
+    });
+  },
+
+  async dspWithdrawReturn(id) {
+    const ok = await TNR_UI.confirm(
+      '确定撤回该运回单？撤回后动物回到「待领养」，可重新选择出院去向。',
+      '撤回运回单');
+    if (!ok) return;
+    try {
+      const res = await TNR_API.withdrawReturnOrder(id);
+      TNR_UI.assertOk(res, '撤回失败');
+      TNR_UI.toast('运回单已撤回，动物已回到待领养', 'success');
+      this.render_discharge();
+    } catch (e) {
+      TNR_UI.toast(e.message || '撤回失败', 'danger');
+    }
+  },
+
+  dspViewReturnOrder(id) {
+    const o = ((this._dsp && this._dsp.returnOrders) || [])
+      .find(x => String(x.id) === String(id));
+    if (!o) { TNR_UI.toast('运回单已刷新，请重试', 'warning'); return; }
+    const pets = o.pets || [];
+    const petHtml = pets.length
+      ? '<div class="dsp-return-pets">' + pets.map(p =>
+        '<div class="dsp-return-pet"><b>' + this.escape(p.code) + '</b>'
+        + '<span>' + this.escape(p.name || '') + '</span>'
+        + '<span class="badge badge-default">' + this.escape(p.status_display || p.status || '') + '</span>'
+        + '</div>').join('') + '</div>'
+      : '<div class="text-muted">' + this.escape(o.pet_codes || '—') + '</div>';
 
     TNR_UI.drawer({
-      title: T + ' · ' + this.escape(d.pet_code || ''),
+      title: '运回单 · ' + this.escape(o.ledger_no || ''),
       body: '<div class="detail-section"><div class="detail-section-title">单据信息</div>'
-        + TNR_UI.renderDescList(rows) + '</div>'
-        + TNR_UI.printDocBtn(key, d.id, '打印' + T)
+        + TNR_UI.renderDescList([
+          {label: '医院', value: this.escape(o.hospital_name || '—')},
+          {label: '捕捉点', value: this.escape(o.shelter_name || '—')},
+          {label: '状态', value: TNR_UI.returnOrderStatusBadge(o.status)},
+          {label: '动物数量', value: (o.pet_count || pets.length || 0) + ' 只'},
+          {label: '创建时间', value: this.formatDateTime(o.created_at)},
+          {label: '接收时间', value: this.formatDate(o.received_at)},
+          {label: '接收人', value: this.escape(o.receiver_name || '—')},
+          {label: '接收人电话', value: this.escape(o.receiver_phone || '—')},
+          {label: '备注', value: this.escape(o.note || '—'), full: true},
+          {label: '驳回原因', value: this.escape(o.reject_reason || '—'), full: true}
+        ]) + '</div>'
+        + '<div class="detail-section"><div class="detail-section-title">动物清单</div>'
+        + petHtml + '</div>'
+        + '<div class="detail-section"><div class="detail-section-title">捕捉点接收人签字</div>'
+        + this.dspSigTag(o.signature) + '</div>'
+        + TNR_UI.printDocBtn('return_order', o.id)
     });
   },
 
@@ -3203,14 +4399,24 @@ const Hospital = {
     materials = materials || [];
 
     const q = this._matQuery();
+    // 异动原因枚举（第五十轮）。key 与 `MaterialTransaction.ADJUSTMENT_REASON_CHOICES`
+    // 一一对应；历史行 `reason` 为空，回退显示当时的自由文本 `note`。
+    const ADJ_REASON_TEXT = {
+      expired: '过期', invalid: '失效', gain: '盘盈',
+      loss: '盘亏', return: '退回', other: '其他'
+    };
     const adj = txns.filter(t => t.type === 'adjustment')
       .filter(t => q.inRange(t.date)
-        && q.ok([t.material_name, t.note, t.operator_name].join(' ')));
+        && q.ok([t.material_name, t.reason, t.note, t.operator_name].join(' ')));
     let adjHtml = '<div class="empty-state" style="padding:var(--sp-6);"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无异动记录</div></div>';
     const adjRows = adj.map(t => ({
       material_name: t.material_name || '',
-      note: t.note || '—',
-      _qty: (t.quantity || 0) + ' ' + this.escape(t.unit || ''),
+      _reason: ADJ_REASON_TEXT[t.reason] || t.note || '—',
+      note: ADJ_REASON_TEXT[t.reason] ? (t.note || '—') : '—',
+      // 负数量是盘盈 / 退回入库（增加库存），用 + 显式标出来，
+      // 只看数字会以为又扣了一笔。
+      _qty: (t.quantity > 0 ? '-' : '+') + Math.abs(t.quantity || 0)
+        + ' ' + this.escape(t.unit || ''),
       date: t.date,
       operator_name: t.operator_name || '',
     }));
@@ -3220,7 +4426,11 @@ const Hospital = {
       '<div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">📝</div><div class="form-section-title">新增异动报备</div></div><div class="form-section-body">' +
       '<div class="form-row"><div class="form-group"><label class="form-label">物料<span class="req">*</span></label><select class="form-select" id="adjMaterial"><option value="">请选择</option>' +
       materials.map(m => '<option value="' + m.id + '">' + this.escape(m.name) + ' (当前:' + (m.hospital_stock || 0) + (m.unit || '') + ')</option>').join('') +
-      '</select></div><div class="form-group"><label class="form-label">数量<span class="req">*</span></label><input type="number" class="form-input" id="adjQty" value="1" min="1" /></div></div>' +
+      '</select></div><div class="form-group"><label class="form-label">数量<span class="req">*</span></label><input type="number" class="form-input" id="adjQty" value="1" />' +
+      '<div class="fs-sm text-muted mt-2">正数 = 扣减库存；<b>负数 = 增加库存</b>（盘盈 / 退回）</div></div>' +
+      '<div class="form-group" id="adjBatchGroup"><label class="form-label">批号（可选）</label>' +
+      '<select class="form-select" id="adjBatch"><option value="">不指定（按近效期先出）</option></select>' +
+      '<div class="fs-sm text-muted mt-2">有库存的批次都会列出；过期报废可直接指定批次，只扣该批。不选则按近效期先出</div></div>' +
       '<div class="form-group" id="adjChipGroup" style="display:none;"><label class="form-label">芯片起始号<span class="req">*</span></label><input class="form-input" id="adjChipStart" placeholder="如 042060107000177" inputmode="numeric"><div class="fs-sm text-muted mt-2">按「首号 + 数量」作废连续号码的芯片，作废后不可恢复</div>'
       + '<div class="mt-2" id="adjChipSegments"></div>'
       + '<div class="fs-sm mt-2" id="adjChipPreview"><span class="text-muted">填写起始号后，这里会预览将要作废的号码范围</span></div></div>' +
@@ -3228,21 +4438,28 @@ const Hospital = {
       // 预览不跳过过期批次（txn_type='adjustment'），操作员能明确看到
       // 报废的就是那批过期的。
       '<div class="form-group"><div class="fs-sm mt-2" id="adjBatchHint"><span class="text-muted">填写数量后，这里会预览将要扣减的批次</span></div></div>' +
-      '<div class="form-group"><label class="form-label">原因说明<span class="req">*</span></label><textarea class="form-textarea" id="adjReason" placeholder="请说明异动原因（过期/破损/盘亏等）"></textarea></div>' +
+      '<div class="form-group"><label class="form-label">异动原因<span class="req">*</span></label>' +
+      '<select class="form-select" id="adjReason"><option value="">请选择</option>' +
+      '<option value="expired">过期</option><option value="invalid">失效</option>' +
+      '<option value="gain">盘盈</option><option value="loss">盘亏</option>' +
+      '<option value="return">退回</option><option value="other">其他</option></select>' +
+      '<div class="fs-sm text-muted mt-2">过期 / 失效 / 盘亏填正数；盘盈 / 退回填负数</div></div>' +
+      '<div class="form-group"><label class="form-label">备注</label><textarea class="form-textarea" id="adjNote" placeholder="补充说明（可选）"></textarea></div>' +
       '<div style="display:flex;justify-content:flex-end;"><button class="btn btn-primary" id="adjSubmitBtn">提交报备</button></div></div></div></div></div>' +
       '<div class="card mt-5"><div class="card-body-flush">' + adjHtml + '</div></div>';
 
     if (adj.length > 0) {
       TNR_UI.mountTable('hospitalAdjTable', { id: 'hospital.material.adjustment', columns: [
           { title: '物料', key: 'material_name' },
-          { title: '原因', key: 'note' },
+          { title: '原因', key: '_reason' },
           { title: '数量', key: '_qty', sortable: false },
+          { title: '备注', key: 'note' },
           { title: '日期', key: 'date' },
           { title: '操作人', key: 'operator_name' },
         ], data: adjRows, emptyText: '暂无异动记录' });
     }
-    // 异动数量：PC/移动端统一的 −/+ 步进按钮
-    TNR_UI.bindQtyStepper('adjQty');
+    // 异动数量可正可负：默认步进 `min=1` 会让负数根本走不到。
+    TNR_UI.bindQtyStepper('adjQty', { min: -99999 });
     // 芯片物料按号码作废（「首号 + 数量」口径）：选到芯片时才亮出起始号，
     // 否则后端 `chip_batch_void()` 拿不到号码直接 400 —— 而界面上
     // 原来没有任何地方能填，芯片报废这条路完全走不通。
@@ -3265,11 +4482,41 @@ const Hospital = {
     };
     // B5：批次扣减预览（adjustment 不跳过过期批次 —— 异动正是过期物料的出口）
     const adjBatchPreview = TNR_UI.bindBatchPreview('adjQty', 'adjBatchHint',
-      () => document.getElementById('adjMaterial')?.value || null, 'adjustment');
-    c.querySelector('#adjMaterial')?.addEventListener('change', () => {
+      () => document.getElementById('adjMaterial')?.value || null, 'adjustment',
+      () => document.getElementById('adjBatch')?.value || '');
+    /* 批次下拉：列出该物料**所有还有余量的批次**，过期批单独标注。
+       过期报废往往要按批清理（同一药品不同批号效期不同），只给「不指定」
+       会强迫操作员先 FEFO 扣到别的批次；指定批号后服务端只扣该批。 */
+    const adjLoadBatches = async () => {
+      const m = materials.find(x => String(x.id) === String(document.getElementById('adjMaterial').value));
+      const isChip = !!(m && m.category === 'chip');
+      const group = document.getElementById('adjBatchGroup');
+      const batchEl = document.getElementById('adjBatch');
+      if (group) group.style.display = (isChip || !m) ? 'none' : '';
+      if (!batchEl) return;
+      batchEl.innerHTML = '<option value="">不指定（按近效期先出）</option>';
+      if (isChip || !m) return;
+      try {
+        const res = await TNR_API.getMaterialBatches(m.id);
+        const today = TNR_UI.todayStr();
+        ((res && res.batches) || []).filter(b => (b.quantity || 0) > 0).forEach(b => {
+          const opt = document.createElement('option');
+          opt.value = b.batch_no;
+          const exp = b.expiry_date ? ' 效期' + b.expiry_date : '';
+          const expired = b.expiry_date && b.expiry_date < today ? '（已过期）' : '';
+          opt.textContent = b.batch_no + expired + '（余 ' + b.quantity + (m.unit || '') + exp + '）';
+          batchEl.appendChild(opt);
+        });
+      } catch (e) { /* 批次拉取失败不阻塞表单：留空 = 走 FEFO */ }
+    };
+    c.querySelector('#adjMaterial')?.addEventListener('change', async () => {
       adjToggleChip();
-      // 物料切换 → 批次预览重跑（bindBatchPreview 只监听数量输入，
-      // 物料维度的变化由这里驱动 —— 与芯片 preview 的 rerun 同一模式）
+      await adjLoadBatches();
+      // 物料/批次切换 → 批次预览重跑（bindBatchPreview 只监听数量输入，
+      // 这两个维度的变化由这里驱动）
+      if (adjBatchPreview) adjBatchPreview.rerun();
+    });
+    c.querySelector('#adjBatch')?.addEventListener('change', () => {
       if (adjBatchPreview) adjBatchPreview.rerun();
     });
     c.querySelector('#adjSubmitBtn')?.addEventListener('click', () => this.saveStockAdjustment(materials));
@@ -3277,22 +4524,47 @@ const Hospital = {
 
   async saveStockAdjustment(materials) {
     const mid = document.getElementById('adjMaterial').value;
-    const qty = parseInt(document.getElementById('adjQty').value);
-    const reason = document.getElementById('adjReason').value.trim();
+    const qtyRaw = document.getElementById('adjQty').value;
+    const qty = parseInt(qtyRaw, 10);
+    const reason = document.getElementById('adjReason').value;
+    const note = (document.getElementById('adjNote')?.value || '').trim();
     if (!mid) { TNR_UI.toast('请选择物料', 'warning'); return; }
-    if (!qty || qty <= 0) { TNR_UI.toast('请输入有效数量', 'warning'); return; }
-    if (!reason) { TNR_UI.toast('请填写原因说明', 'warning'); return; }
-    // 芯片物料：异动 = 按「首号 + 数量」作废号码。空号码先在前端挡一道，
-    // 后端 `chip_batch_void()` 还有第二道（「请填写起始芯片号」）。
+    if (isNaN(qty)) { TNR_UI.toast('请填写异动数量（可填负数表示盘盈 / 退回）', 'warning'); return; }
+    if (qty === 0) { TNR_UI.toast('异动数量不能为0', 'warning'); return; }
+    if (!reason) { TNR_UI.toast('请选择异动原因', 'warning'); return; }
+    // 原因与方向绑定：服务端有同一道判据，这里先挡是为了不让用户白填一次。
+    const DEC = ['expired', 'invalid', 'loss'];
+    const INC = ['gain', 'return'];
+    if (DEC.indexOf(reason) !== -1 && qty < 0) {
+      TNR_UI.toast('「' + document.querySelector('#adjReason option:checked').textContent
+        + '」表示减少库存，数量必须为正数', 'warning'); return;
+    }
+    if (INC.indexOf(reason) !== -1 && qty > 0) {
+      TNR_UI.toast('「' + document.querySelector('#adjReason option:checked').textContent
+        + '」表示增加库存，数量必须为负数', 'warning'); return;
+    }
+    // 芯片物料：异动 = 按「首号 + 数量」作废号码。负数盘盈不知道恢复哪些
+    // 号码，服务端直接拒绝 —— 前端也提前说清楚。
     const mat = (materials || []).find(x => String(x.id) === String(mid));
-    const chipStart = (mat && mat.category === 'chip')
+    const isChip = !!(mat && mat.category === 'chip');
+    if (isChip && qty < 0) {
+      TNR_UI.toast('芯片异动只支持正数（按号码作废）；盘盈请通过采购 / 入库办理', 'warning');
+      return;
+    }
+    // 空号码先在前端挡一道，后端 `chip_batch_void()` 还有第二道。
+    const chipStart = isChip
       ? (document.getElementById('adjChipStart')?.value || '').trim() : '';
-    if (mat && mat.category === 'chip' && !chipStart) { TNR_UI.toast('请填写芯片起始号', 'warning'); return; }
+    if (isChip && !chipStart) { TNR_UI.toast('请填写芯片起始号', 'warning'); return; }
+    // 芯片不认批号定向（号码才是真源），与出库单同口径。
+    const batchNo = isChip ? '' : (document.getElementById('adjBatch')?.value || '');
 
     try {
-      const res = await TNR_API.adjustStock({material_id: parseInt(mid), quantity: qty, reason: reason, chip_start: chipStart});
+      const res = await TNR_API.adjustStock({
+        material_id: parseInt(mid), quantity: qty, reason: reason, note: note,
+        chip_start: chipStart, batch_no: batchNo
+      });
       if (res.success) {
-        TNR_UI.toast('异动报备已提交，库存已扣减', 'success');
+        TNR_UI.toast(res.message || '异动报备已提交', 'success');
         this.render_material();
       } else {
         TNR_UI.toast(res.message || '提交失败', 'danger');
@@ -3304,11 +4576,11 @@ const Hospital = {
 
   /* ---------- 物料出库（报废 / 退回 / 调拨 / 盘点） ----------
    *
-   * 与「库存异动」的三处硬差异，前端必须**照单呈现**，不能合并成一个表单：
-   *   ① 出库原因只能四选一（枚举），异动是自由文本；
-   *   ② 出库可以选批号（定向扣减），异动不选；
-   *   ③ 出库数量**可以为负**（盘盈 / 退回入库），异动只能正。
-   * 三者都是服务端判据，前端只负责「让用户填得对」—— 判据不在这里重写。
+   * 与「库存异动」的差异，前端必须**照单呈现**，不能合并成一个表单：
+   *   ① 出库原因四选一（报废/退回/调拨/盘点），异动是六类原因；
+   *   ② 出库可以选批号（定向扣减），异动仅药品可按批；
+   *   ③ 出库数量与异动都可为负（盘盈 / 退回入库），但方向与原因的对应关系不同。
+   * 这些都是服务端判据，前端只负责「让用户填得对」—— 判据不在这里重写。
    */
   async renderMaterialOutbound(c, txns, materials) {
     materials = materials || [];
@@ -3578,400 +4850,7 @@ const Hospital = {
     });
   },
 
-  /* ========== 6. 领养信息维护 ========== */
-  async render_adoption_info() {
-    const page = document.getElementById('page-adoption-info');
-    page.innerHTML = '<div class="loading-state">加载中...</div>';
-    // 行内按钮统一走事件委托（绑在稳定的页容器上，只绑一次）。
-    // 本方法有三条分支（仅有申请 / 仅有领出 / 完整卡片），每条都会重设 page.innerHTML，
-    // 绑在按钮上的监听器会随旧节点丢失，故在此一次性声明全部动作。
-    TNR_UI.delegateClick(page, {
-      'data-review-apply': (id, node) => this.reviewApplication(id, node.dataset.action),
-      'data-confirm-claim': (id) => this.confirmClaim(id),
-      'data-save-info': (id) => this.saveAdoptionInfo(id),
-      'data-publish': (id) => this.publishToHall(id),
-      'data-unpublish': (id) => this.unpublishFromHall(id),
-      'data-upload-photo': (id, node) => this.uploadPhoto(id, node.dataset.photoField)
-    }, 'AdoptionInfo');
-
-    try {
-      const [pets, listings, adoptions, appJson] = await Promise.all([
-        TNR_API.getHospitalPetsStrict('pending_adopt'),
-        TNR_API.getHallListingsStrict(),
-        TNR_API.getAdoptionsStrict(),
-        TNR_API.get(TNR_API.BASE + 'adoptions/applications/')
-      ]);
-
-      // 待审核领养申请（领养人在线提交）
-      const applications = appJson.data || [];
-      const pendingAppls = applications.filter(a => a.status === 'pending');
-      let applHtml = '';
-      if (pendingAppls.length > 0) {
-        applHtml = '<div id="hospitalApplTable"></div>';
-      }
-      const applRows = pendingAppls.map(a => ({
-        _pet: '<span class="pet-code-chip">' + this.escape(a.pet_code || '') + '</span>',
-        applicant_name: a.applicant_name || '',
-        applicant_phone: a.applicant_phone || '',
-        _qual: this.escape((a.qualification || '').substring(0, 40)),
-        applied_at: a.applied_at,
-        _actions: '<button class="btn btn-success btn-sm" data-review-apply="' + a.id + '" data-action="approve">通过</button> <button class="btn btn-danger btn-sm" data-review-apply="' + a.id + '" data-action="reject">拒绝</button>',
-      }));
-
-      // 待领出确认列表（捕捉点已登记领养，等待医院确认领出）
-      const pendingClaims = adoptions.filter(a => a.status === 'pending_claim');
-      let claimsHtml = '';
-      if (pendingClaims.length > 0) {
-        claimsHtml = '<div id="hospitalClaimsTable"></div>';
-      }
-      const claimRows = pendingClaims.map(a => ({
-        ledger_no: a.ledger_no || a.id,
-        _pet: '<span class="pet-code-chip">' + this.escape(a.pet_code || '') + '</span>',
-        adopter_name: a.adopter_name || '',
-        adopter_phone: a.adopter_phone || '',
-        created_at: a.created_at,
-        _actions: '<button class="btn btn-primary btn-sm" data-confirm-claim="' + a.id + '">确认领出</button>',
-      }));
-
-      /* 两个待办列表（待审核申请 / 待领出确认）共用一条筛选条。
-         本方法原先按「有无待领养动物」分三条渲染分支，两个提前 return 的分支
-         **漏了 bindFilter** —— 搜索框看得见、输入没反应。现在统一在末尾挂表、
-         绑一次筛选。 */
-      const infoBarHtml = TNR_UI.renderFilterBar([
-        { key: 'keyword', label: '搜索', type: 'search', placeholder: '单号 / 宠物编号 / 申请人 / 电话' }
-      ], '', { id: 'adoptInfoFilterBar' });
-      // 行对象是映射后的展示结构（含 HTML 片段），逐字段拼成 haystack 最省事，
-      // 也不会漏列 —— 逐列写死字段名在字段改名后会静默失效。
-      //
-      // 起止时间：两张表的时间字段**不同**（申请单看 `applied_at`，待领出看领养
-      // 登记时间 `created_at`），所以由调用方把要比的值传进来 ——
-      // 在里面写死一个字段名，必然有一张表的时间是错的（而且照样返回 200）。
-      const infoHit = (v, r, dateValue) => {
-        if (!TNR_UI.inDateRange(dateValue, v.start_date, v.end_date)) return false;
-        return !v.keyword
-          || Object.keys(r).map(k => r[k]).join(' ').toLowerCase().includes(v.keyword);
-      };
-      const mountAppl = () => {
-        if (pendingAppls.length === 0) return;
-        const v = TNR_UI.getFilterValues(document.getElementById('adoptInfoFilterBar'));
-        TNR_UI.mountTable('hospitalApplTable', { id: 'hospital.adoption.appl', columns: [
-            { title: '宠物编号', key: '_pet', sortable: false },
-            { title: '申请人', key: 'applicant_name' },
-            { title: '电话', key: 'applicant_phone' },
-            { title: '资质说明', key: '_qual', sortable: false },
-            { title: '申请时间', key: 'applied_at', render: r => this.formatDateTime(r.applied_at) },
-            { title: '操作', key: '_actions', sortable: false },
-          ], data: applRows.filter(r => infoHit(v, r, r.applied_at)), emptyText: '暂无申请' });
-      };
-      const mountClaims = () => {
-        if (pendingClaims.length === 0) return;
-        const v = TNR_UI.getFilterValues(document.getElementById('adoptInfoFilterBar'));
-        TNR_UI.mountTable('hospitalClaimsTable', { id: 'hospital.adoption.claims', columns: [
-            { title: '领养单号', key: 'ledger_no' },
-            { title: '宠物编号', key: '_pet', sortable: false },
-            { title: '领养人', key: 'adopter_name' },
-            { title: '电话', key: 'adopter_phone' },
-            { title: '登记时间', key: 'created_at', render: r => this.formatDateTime(r.created_at) },
-            { title: '操作', key: '_actions', sortable: false },
-          ], data: claimRows.filter(r => infoHit(v, r, r.created_at)), emptyText: '暂无记录' });
-      };
-
-      const emptyHint = '<div class="empty-state"><div class="empty-state-icon">🐾</div>'
-        + '<div class="empty-state-text">暂无待领养动物</div>'
-        + '<div class="empty-state-desc">诊疗完成5天后，动物状态将自动变更为「待领养」</div></div>';
-
-      const petCards = pets.map(p => {
-        const listing = listings.find(l => l.pet && String(l.pet.id) === String(p.id));
-        const inHall = listing && listing.is_active;
-        const intro = listing ? (listing.intro || '') : (p.description || '');
-        const personality = listing ? (listing.personality || '') : '';
-        const bodyCondition = listing ? (listing.body_condition || '') : '';
-
-        return '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>' + this.escape(p.code) + ' · ' + this.escape(p.name || '') + '</div>' +
-          '<div class="flex gap-2">' + (inHall ? '<span class="badge badge-success">已上架领养大厅</span>' : '<span class="badge badge-warning">未上架</span>') +
-          TNR_UI.petStatusBadge(p.status) + '</div></div>' +
-          '<div class="card-body">' +
-          '<div class="detail-section"><div class="detail-section-title">照片管理（捕捉前/捕捉后/诊疗后）</div>' +
-          '<div style="grid-template-columns:repeat(3,1fr);display:grid;gap:var(--sp-3);">' +
-          this.renderPhotoSlot(p, 'photo_before', '捕捉前') +
-          this.renderPhotoSlot(p, 'photo_after', '捕捉后') +
-          this.renderPhotoSlot(p, 'photo_treatment', '诊疗后') +
-          '</div></div>' +
-          '<div class="detail-section"><div class="detail-section-title">宠物简介</div>' +
-          '<div class="form-group"><label class="form-label">简介描述</label><textarea class="form-textarea" id="desc_' + p.id + '" placeholder="请输入宠物简介">' + this.escape(intro) + '</textarea></div>' +
-          '<div class="form-row"><div class="form-group"><label class="form-label">性格特点</label><input type="text" class="form-input" id="personality_' + p.id + '" value="' + this.escape(personality) + '" placeholder="如：温顺、亲人" /></div>' +
-          '<div class="form-group"><label class="form-label">健康状况</label><input type="text" class="form-input" id="health_' + p.id + '" value="' + this.escape(bodyCondition) + '" placeholder="如：已绝育、已免疫" /></div></div>' +
-          '<div class="form-group"><label class="form-label">芯片编号</label><input type="text" class="form-input" value="' + this.escape(p.chip_no || '') + '" readonly /></div>' +
-          '</div>' +
-          '<div class="detail-section"><div class="detail-section-title">领养状态</div>' + TNR_UI.renderDescList([
-            {label: '当前状态', value: TNR_UI.petStatusBadge(p.status)},
-            {label: '领养大厅', value: inHall ? '<span class="badge badge-success">已发布</span>' : '<span class="badge badge-default">未发布</span>'},
-            {label: '物种/品种', value: this.escape(p.species || '') + ' / ' + this.escape(p.breed || '')}
-          ]) + '</div>' +
-          '<div style="display:flex;gap:var(--sp-3);justify-content:flex-end;">' +
-          '<button class="btn btn-secondary" data-save-info="' + p.id + '">保存资料</button>' +
-          (inHall ? '<button class="btn btn-secondary" data-unpublish="' + p.id + '">下架</button>' : '<button class="btn btn-gold" data-publish="' + p.id + '">发布至领养大厅</button>') +
-          '</div></div></div>';
-      }).join('');
-
-      page.innerHTML = infoBarHtml + claimsHtml + applHtml + (petCards || emptyHint);
-      mountClaims();
-      mountAppl();
-      TNR_UI.bindFilter(() => { mountClaims(); mountAppl(); }, page);
-    } catch (e) {
-      page.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div></div>';
-    }
-  },
-
-  renderPhotoSlot(pet, photoField, label) {
-    const url = pet[photoField] || '';
-    const inner = url ? '<img src="' + url + '" style="width:100%;height:100%;object-fit:cover;border-radius:var(--r-lg);" />' : '📷';
-    return '<div style="cursor:pointer;" data-upload-photo="' + pet.id + '" data-photo-field="' + photoField + '"><div class="photo-placeholder-lg">' + inner + '</div><div style="text-align:center;font-size:var(--fs-sm);color:var(--ink-muted);margin-top:4px;">' + label + '</div></div>';
-  },
-
-  uploadPhoto(petId, photoField) {
-    const labels = {photo_before: '捕捉前', photo_after: '捕捉后', photo_treatment: '诊疗后', photo_group: '合照'};
-    TNR_UI.modal({
-      title: '上传照片（' + (labels[photoField] || '') + '）',
-      body: (bodyEl, closeFn) => {
-        bodyEl.innerHTML = '<div class="form-group"><label class="form-label">选择图片文件</label><input type="file" accept="image/*" id="photoFileInput" class="form-input" style="padding:4px;" /></div>' +
-          '<div id="photoPreview" style="margin-top:var(--sp-3);"></div>' +
-          '<div style="display:flex;gap:var(--sp-3);justify-content:flex-end;margin-top:var(--sp-4);"><button class="btn btn-secondary" data-close>取消</button><button class="btn btn-primary" id="photoUploadBtn">上传</button></div>';
-        bodyEl.querySelector('[data-close]').onclick = closeFn;
-        bodyEl.querySelector('#photoFileInput').addEventListener('change', e => {
-          const file = e.target.files[0];
-          if (!file) return;
-          const reader = new FileReader();
-          reader.onload = ev => {
-            bodyEl.querySelector('#photoPreview').innerHTML = '<img src="' + ev.target.result + '" style="width:100%;border-radius:var(--r-md);" />';
-          };
-          reader.readAsDataURL(file);
-        });
-        bodyEl.querySelector('#photoUploadBtn').onclick = async () => {
-          const file = bodyEl.querySelector('#photoFileInput').files[0];
-          if (!file) { TNR_UI.toast('请选择图片文件', 'warning'); return; }
-          try {
-            const res = await TNR_API.uploadPetPhoto(petId, photoField, file);
-            if (res.success) {
-              TNR_UI.toast('照片上传成功', 'success');
-              closeFn();
-              this.render_adoption_info();
-            } else {
-              TNR_UI.toast(res.message || '上传失败', 'danger');
-            }
-          } catch (e) {
-            TNR_UI.toast(e.message || '上传失败', 'danger');
-          }
-        };
-      }
-    });
-  },
-
-  async confirmClaim(adoptionId) {
-    TNR_UI.confirm('确认该领养人已到院领出动物？<br>确认后领养流程完成，宠物状态变为「已领养」。', '确认领出').then(async ok => {
-      if (!ok) return;
-      try {
-        const res = await TNR_API.confirmAdoptionClaim(adoptionId);
-        TNR_UI.assertOk(res, '领出确认失败');
-        TNR_UI.toast(res.message || '领出确认成功', 'success');
-        this.render_adoption_info();
-      } catch (e) {
-        TNR_UI.toast('确认失败：' + e.message, 'danger');
-      }
-    });
-  },
-
-  async reviewApplication(applicationId, action) {
-    const label = action === 'approve' ? '通过' : '拒绝';
-    TNR_UI.confirm('确认' + label + '该领养申请？', '审核申请').then(async ok => {
-      if (!ok) return;
-      try {
-        const reviewNote = action === 'reject' ? (window.prompt('请输入拒绝原因：') || '') : '';
-        const res = await TNR_API.post(TNR_API.BASE + 'adoptions/applications/' + applicationId + '/review/', {
-          action,
-          review_note: reviewNote
-        });
-        TNR_UI.toast(res.message || '审核完成', 'success');
-        this.render_adoption_info();
-      } catch (e) {
-        TNR_UI.toast('审核失败：' + e.message, 'danger');
-      }
-    });
-  },
-
-  async saveAdoptionInfo(petId) {
-    const intro = document.getElementById('desc_' + petId).value.trim();
-    const personality = document.getElementById('personality_' + petId).value.trim();
-    const bodyCondition = document.getElementById('health_' + petId).value.trim();
-
-    try {
-      const res = await TNR_API.editAdoptionInfo(petId, {intro, personality, body_condition: bodyCondition});
-      if (res.success) {
-        TNR_UI.toast('领养资料保存成功', 'success');
-      } else {
-        TNR_UI.toast(res.message || '保存失败', 'danger');
-      }
-    } catch (e) {
-      TNR_UI.toast(e.message || '操作失败', 'danger');
-    }
-  },
-
-  async publishToHall(petId) {
-    try {
-      const res = await TNR_API.editAdoptionInfo(petId, {is_active: true});
-      if (res.success) {
-        TNR_UI.toast('已发布至领养大厅', 'success');
-        this.render_adoption_info();
-      } else {
-        TNR_UI.toast(res.message || '发布失败', 'danger');
-      }
-    } catch (e) {
-      TNR_UI.toast(e.message || '操作失败', 'danger');
-    }
-  },
-
-  async unpublishFromHall(petId) {
-    try {
-      const res = await TNR_API.editAdoptionInfo(petId, {is_active: false});
-      if (res.success) {
-        TNR_UI.toast('已从领养大厅下架', 'success');
-        this.render_adoption_info();
-      } else {
-        TNR_UI.toast(res.message || '下架失败', 'danger');
-      }
-    } catch (e) {
-      TNR_UI.toast(e.message || '操作失败', 'danger');
-    }
-  },
-
-  /* ========== 7. 安乐死处置 ========== */
-  async render_euthanasia() {
-    const page = document.getElementById('page-euthanasia');
-    page.innerHTML = '<div class="loading-state">加载中...</div>';
-
-    try {
-      const [eligiblePets, records] = await Promise.all([
-        TNR_API.getHospitalPetsStrict(),
-        TNR_API.getEuthanasiaStrict()
-      ]);
-
-      const eligible = eligiblePets.filter(p => p.status === 'in_treatment' || p.status === 'pending_adopt');
-
-      let html = '<div class="card mb-5"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>新增安乐死处置</div></div><div class="card-body">' +
-        '<div class="form-hint" style="padding:var(--sp-3);background:var(--rouge-light);border-radius:var(--r-md);color:var(--rouge);font-size:var(--fs-sm);margin-bottom:var(--sp-4);">⚠️ 安乐死处置为不可逆操作，请确认后谨慎执行。处置完成后将登记遗体移交记录并扣减活体库存。</div>' +
-        '<div class="form-row"><div class="form-group"><label class="form-label">选择动物<span class="req">*</span></label><select class="form-select" id="euthPetSelect"><option value="">请选择</option>' +
-        eligible.map(p => '<option value="' + p.id + '">' + this.escape(p.code) + ' · ' + this.escape(p.name || '') + ' (' + TNR_UI.petStatusText(p.status) + ')</option>').join('') +
-        '</select></div><div class="form-group"><label class="form-label">处置日期<span class="req">*</span></label><input type="date" class="form-input" id="euthDate" value="' + TNR_UI.todayStr() + '" /></div></div>' +
-        '<div class="form-group"><label class="form-label">安乐死原因<span class="req">*</span></label><select class="form-select" id="euthReason"><option value="严重疾病">严重疾病</option><option value="严重外伤">严重外伤</option><option value="攻击性过强">攻击性过强</option><option value="无法救治">无法救治</option><option value="其他">其他</option></select></div>' +
-        '<div class="form-group"><label class="form-label">动物状况描述<span class="req">*</span></label><textarea class="form-textarea" id="euthCondition" placeholder="请详细描述动物状况及处置原因"></textarea></div>' +
-        '<div style="display:flex;justify-content:flex-end;"><button class="btn btn-danger" id="euthSubmitBtn">提交安乐死处置</button></div></div></div>';
-
-      /* 记录列表：列表卡不再渲染标题（数量看列表下方「共 N 条」），
-         筛选条独立于卡片、放页面级 —— 嵌在卡片里时 sticky 的可钉范围被卡片高度限制住。 */
-      html += TNR_UI.renderFilterBar([
-        { key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号 / 原因 / 操作人' },
-        { key: 'body', label: '遗体移交', type: 'select', options: [
-          { value: 'done', label: '已移交' },
-          { value: 'todo', label: '未移交' }
-        ]},
-        { key: 'start_date', label: '开始日期', type: 'date' },
-        { key: 'end_date', label: '结束日期', type: 'date' }
-      ], '', { id: 'euthFilterBar' });
-      html += '<div class="card"><div class="card-body-flush">';
-      html += '<div id="hospitalEuthTable"></div></div></div>';
-
-      page.innerHTML = html;
-
-      const euthBar = document.getElementById('euthFilterBar');
-      const renderEuthTable = () => {
-        const v = TNR_UI.getFilterValues(euthBar);
-        const list = records.filter(e => {
-          if (v.body === 'done' && !e.body_received) return false;
-          if (v.body === 'todo' && e.body_received) return false;
-          // `euthanized_at` 是 DateField（纯日期），`inDateRange` 内部对纯日期串原样返回。
-          // 它是**可空**的（已登记但尚未处置），所以必须带创建时间兜底 ——
-          // 否则圈一个「全部」区间反而会把这类记录藏起来。
-          if (!TNR_UI.inDateRange(TNR_UI.firstDate(e.euthanizedAt, e.euthanized_at, e.createdAt, e.created_at), v.start_date, v.end_date)) return false;
-          if (v.keyword) {
-            const hay = [e.pet_code, e.reason, e.operator_name].filter(Boolean).join(' ').toLowerCase();
-            if (!hay.includes(v.keyword)) return false;
-          }
-          return true;
-        });
-        if (records.length === 0) return;
-        const rows = list.map(e => ({
-          _pet: '<div style="font-weight:500;">' + this.escape(e.pet_code || '') + '</div>',
-          reason: e.reason || '',
-          euthanized_at: e.euthanized_at,
-          _body: e.body_received ? '<span class="badge badge-success">已移交</span>' : '<span class="badge badge-warning">未移交</span>',
-          operator_name: e.operator_name || '',
-          _actions: '<button class="btn-link" data-view-euth="' + e.id + '">详情</button>',
-        }));
-        TNR_UI.mountTable('hospitalEuthTable', { id: 'hospital.euthanasia', columns: [
-            { title: '宠物编号', key: '_pet', sortable: false },
-            { title: '原因', key: 'reason' },
-            { title: '处置日期', key: 'euthanized_at', render: r => this.formatDate(r.euthanized_at) },
-            { title: '遗体移交', key: '_body', sortable: false },
-            { title: '操作人', key: 'operator_name' },
-            { title: '操作', key: '_actions', sortable: false },
-          ], data: rows, emptyText: '暂无处置记录' });
-      };
-      renderEuthTable();
-      TNR_UI.bindFilter(renderEuthTable, page);
-
-      page.querySelector('#euthSubmitBtn')?.addEventListener('click', () => this.saveEuthanasia());
-      TNR_UI.delegateClick(page, {
-        'data-view-euth': (id) => this.viewEuthanasiaDetail(id, records)
-      });
-    } catch (e) {
-      page.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div class="empty-state-text">加载失败</div></div>';
-    }
-  },
-
-  async saveEuthanasia() {
-    const petId = document.getElementById('euthPetSelect').value;
-    const date = document.getElementById('euthDate').value;
-    const reason = document.getElementById('euthReason').value;
-    const condition = document.getElementById('euthCondition').value.trim();
-
-    if (!petId) { TNR_UI.toast('请选择动物', 'warning'); return; }
-    if (!date) { TNR_UI.toast('请选择处置日期', 'warning'); return; }
-    if (!condition) { TNR_UI.toast('请填写动物状况描述', 'warning'); return; }
-
-    TNR_UI.confirm('确认对该动物执行安乐死处置？此操作不可逆。', '确认安乐死处置').then(async ok => {
-      if (!ok) return;
-      try {
-        const res = await TNR_API.createEuthanasia({pet_id: parseInt(petId), reason, condition, euthanized_at: date});
-        if (res.success) {
-          TNR_UI.toast('安乐死处置已登记，动物状态已更新', 'success');
-          this.render_euthanasia();
-        } else {
-          TNR_UI.toast(res.message || '登记失败', 'danger');
-        }
-      } catch (e) {
-        TNR_UI.toast(e.message || '操作失败', 'danger');
-      }
-    });
-  },
-
-  viewEuthanasiaDetail(id, records) {
-    const e = records.find(x => String(x.id) === String(id));
-    if (!e) return;
-    const html = '<div class="detail-section"><div class="detail-section-title">处置信息</div>' + TNR_UI.renderDescList([
-      {label: '宠物编号', value: this.escape(e.pet_code || '')},
-      {label: '处置日期', value: this.formatDate(e.euthanized_at)},
-      {label: '原因', value: this.escape(e.reason || '')},
-      {label: '动物状况', value: this.escape(e.condition || ''), full: true},
-      {label: '遗体移交', value: e.body_received ? '<span class="badge badge-success">已移交</span>' : '<span class="badge badge-warning">未移交</span>'},
-      {label: '移交日期', value: this.formatDate(e.body_received_at)},
-      {label: '操作人', value: this.escape(e.operator_name || '')},
-      {label: '单据编号', value: this.escape(e.ledger_no || '')}
-    ]) + '</div>';
-    TNR_UI.drawer({title: '安乐死处置详情 · ' + this.escape(e.pet_code),
-      body: html + TNR_UI.printDocBtn('euthanasia', e.id)});
-  },
-
-  /* ========== 8. 单据台账 ========== */
+  /* ========== 6. 单据台账 ========== */
   async render_ledger() {
     const page = document.getElementById('page-ledger');
     page.innerHTML = '<div class="loading-state">加载中...</div>';
@@ -4157,30 +5036,73 @@ const Hospital = {
     }
   },
 
-  /* ========== 9. 个人中心 ========== */
+  /* ========== 7. 个人中心 ========== */
   render_profile() {
     const u = this.currentUser();
     if (!u) return;
     const page = document.getElementById('page-profile');
-    page.innerHTML = '<div class="card mb-5"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>账户信息</div></div><div class="card-body">' +
-      TNR_UI.renderDescList([
-        {label: '用户名', value: this.escape(u.username || '')},
-        {label: '姓名', value: this.escape(u.name || '')},
-        {label: '所属机构', value: this.escape(u.institution_name || '—')},
-        {label: '机构类型', value: '宠物医院'},
-        {label: '角色', value: this.escape(u.role_display || TNR_UI.roleText(u.role))},
-        {label: '所属区县', value: this.escape(u.district_name || '—')},
-        {label: '联系电话', value: this.escape(u.phone || '—')},
-        {label: '用户ID', value: this.escape(String(u.id || ''))}
-      ]) + '</div></div>' +
-      '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>系统说明</div></div><div class="card-body">' +
+    page.innerHTML =
+      '<div class="form-row" style="align-items: stretch;">' +
+        '<div class="card">' +
+          '<div class="card-header"><div class="card-title"><span class="card-title-bar"></span>账户信息</div></div>' +
+          '<div class="card-body">' +
+            TNR_UI.renderDescList([
+              {label: '用户名', value: this.escape(u.username || '')},
+              {label: '姓名', value: this.escape(u.name || '')},
+              {label: '所属机构', value: this.escape(u.institution_name || '—')},
+              {label: '机构类型', value: '宠物医院'},
+              {label: '角色', value: this.escape(u.role_display || TNR_UI.roleText(u.role))},
+              {label: '所属区县', value: this.escape(u.district_name || '—')},
+              // 执业证号只能由平台端维护：它是诊疗单/处方/绝育证明上
+              // 执业人身份的唯一来源，本人可改就等于自证身份。
+              {label: '执业兽医师证号', value: u.vet_license
+                  ? this.escape(u.vet_license)
+                  : '<span class="badge badge-danger">未登记（请联系平台管理员）</span>'},
+              {label: '联系电话', value: this.escape(u.phone || '—')},
+              {label: '用户ID', value: this.escape(String(u.id || ''))}
+            ]) +
+          '</div>' +
+        '</div>' +
+        '<div class="card">' +
+          '<div class="card-header"><div class="card-title"><span class="card-title-bar"></span>修改密码</div></div>' +
+          '<div class="card-body">' +
+            '<div class="form-group"><label class="form-label">原密码</label><input type="password" class="form-input" id="pf_oldPwd" autocomplete="current-password"></div>' +
+            '<div class="form-group"><label class="form-label">新密码</label><input type="password" class="form-input" id="pf_newPwd" autocomplete="new-password"></div>' +
+            '<div class="form-group"><label class="form-label">确认新密码</label><input type="password" class="form-input" id="pf_confirmPwd" autocomplete="new-password"></div>' +
+            '<button class="btn btn-primary" id="btnChangePwd">修改密码</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card mt-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>系统说明</div></div><div class="card-body">' +
       '<div style="font-size:var(--fs-sm);color:var(--ink-muted);line-height:1.8;">' +
       '· 医院端负责动物接收、诊疗操作、物料管理、领养信息维护及安乐死处置。<br>' +
-      '· 诊疗完成后5天，系统自动将动物状态变更为「待领养」。<br>' +
-      '· 领养出库登记由捕捉点端完成，医院端仅维护领养大厅信息。<br>' +
+      '· 领养登记与出库在「出院管理」办理，领养大厅资料由本院维护。<br>' +
       '· 物料库存联动：疫苗/驱虫/芯片在诊疗时自动扣减医院库存。<br>' +
-      '· 如需修改密码，请联系系统管理员。' +
+      '· 执业兽医师证号由平台管理员统一登记，如需变更请联系平台管理员。' +
       '</div></div></div>';
+
+    document.getElementById('btnChangePwd').addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      const oldPwd = document.getElementById('pf_oldPwd').value;
+      const newPwd = document.getElementById('pf_newPwd').value;
+      const confirmPwd = document.getElementById('pf_confirmPwd').value;
+      if (!oldPwd || !newPwd || !confirmPwd) { TNR_UI.toast('请填写完整', 'warning'); return; }
+      if (newPwd !== confirmPwd) { TNR_UI.toast('两次新密码不一致', 'warning'); return; }
+      if (newPwd.length < 6) { TNR_UI.toast('新密码至少6位', 'warning'); return; }
+      btn.disabled = true;
+      try {
+        const res = await TNR_API.post('/api/me/password/', {
+          old_password: oldPwd, new_password: newPwd, confirm_password: confirmPwd
+        });
+        TNR_UI.toast((res && res.message) || '密码修改成功', 'success');
+        document.getElementById('pf_oldPwd').value = '';
+        document.getElementById('pf_newPwd').value = '';
+        document.getElementById('pf_confirmPwd').value = '';
+      } catch (e) {
+        TNR_UI.toast('修改失败：' + (e.message || '未知错误'), 'danger');
+      }
+      btn.disabled = false;
+    });
   }
 };
 

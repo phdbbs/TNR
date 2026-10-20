@@ -48,33 +48,75 @@ class TransferCreateTest(BusinessTestBase):
         self.assertEqual(body['data'][0]['petCount'], 1)
 
     def test_split_to_multiple_hospitals(self):
+        hospital_a2 = make_institution(type='hospital', district=self.district_a,
+                                       name='甲区二院')
         pets = self._make_transit_pets(2)
         self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(f'{TRANSFER_URL}create/', {
             'from_shelter_id': self.shelter_a.id,
             'items': [
                 {'hospital_id': self.hospital_a.id, 'pet_ids': [pets[0].id]},
-                {'hospital_id': self.hospital_b.id, 'pet_ids': [pets[1].id]},
+                {'hospital_id': hospital_a2.id, 'pet_ids': [pets[1].id]},
             ],
         }))
         self.assertEqual(len(body['data']), 2)
         pets[0].refresh_from_db()
         pets[1].refresh_from_db()
         self.assertEqual(pets[0].hospital_id, self.hospital_a.id)
-        self.assertEqual(pets[1].hospital_id, self.hospital_b.id)
+        self.assertEqual(pets[1].hospital_id, hospital_a2.id)
 
     def test_duplicate_pet_assigned_only_once(self):
+        hospital_a2 = make_institution(type='hospital', district=self.district_a,
+                                       name='甲区二院')
         pet = self._make_transit_pets(1)[0]
         self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(f'{TRANSFER_URL}create/', {
             'from_shelter_id': self.shelter_a.id,
             'items': [
                 {'hospital_id': self.hospital_a.id, 'pet_ids': [pet.id]},
-                {'hospital_id': self.hospital_b.id, 'pet_ids': [pet.id]},
+                {'hospital_id': hospital_a2.id, 'pet_ids': [pet.id]},
             ],
         }))
         self.assertEqual(len(body['data']), 1, '同一宠物只能进一张转运单')
         self.assertEqual(body['data'][0]['petCount'], 1)
+
+    def test_district_shelter_cannot_send_to_foreign_hospital(self):
+        """区级捕捉点只能转运到本区医院（第五十轮）。"""
+        pet = self._make_transit_pets(1)[0]
+        self.login_as(self.shelter_user_a)
+        self.expect_fail(self.post_json(f'{TRANSFER_URL}create/', {
+            'from_shelter_id': self.shelter_a.id,
+            'to_hospital_id': self.hospital_b.id,
+            'pet_codes': [pet.code],
+        }), message='只能转运到本区医院')
+        self.assertFalse(Transfer.objects.filter(pet_codes=pet.code).exists(),
+                         '校验失败不应留下半截转运单')
+
+    def test_city_shelter_sends_across_districts_in_one_request(self):
+        """市级捕捉点可全市转运（第五十轮）：一次多医院拆分可跨区县。"""
+        city_shelter = make_institution(type='shelter', district=self.city,
+                                        name='市级捕捉点')
+        city_user = make_user('city_shelter_t', role='shelter',
+                              district=self.city, institution=city_shelter)
+        pets = self._make_transit_pets(2)
+        pets[1].district = self.district_b
+        pets[1].save(update_fields=['district'])
+        self.login_as(city_user)
+        body = self.ok(self.post_json(f'{TRANSFER_URL}create/', {
+            'from_shelter_id': city_shelter.id,
+            'items': [
+                {'hospital_id': self.hospital_a.id, 'pet_ids': [pets[0].id]},
+                {'hospital_id': self.hospital_b.id, 'pet_ids': [pets[1].id]},
+            ],
+        }))
+        self.assertEqual(len(body['data']), 2)
+        transfers = {t.to_hospital_id: t for t in
+                     Transfer.objects.filter(from_shelter=city_shelter)}
+        self.assertEqual(set(transfers), {self.hospital_a.id, self.hospital_b.id})
+        self.assertEqual(transfers[self.hospital_a.id].district_id,
+                         self.district_a.id, '甲区动物的转运单应归属甲区')
+        self.assertEqual(transfers[self.hospital_b.id].district_id,
+                         self.district_b.id, '乙区动物的转运单应归属乙区')
 
     def test_only_in_transit_pets_transferred(self):
         treated = make_pet(district=self.district_a, status='in_treatment',

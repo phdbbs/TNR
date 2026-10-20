@@ -47,7 +47,7 @@ from django.core.exceptions import RequestDataTooBig
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import RequestFactory, SimpleTestCase, override_settings
 
-from business.models import Capture, Pet
+from business.models import AdoptionPhoto, Capture, Pet
 from business.services import MAX_CAPTURE_BATCH, parse_json_body
 from business.tests.base import BusinessTestBase, make_pet
 
@@ -239,12 +239,10 @@ class LargeUploadEndToEndTest(BusinessTestBase):
         self.assertNotIn('DATA_UPLOAD_MAX_MEMORY_SIZE', text)
 
     def test_adoption_info_edit_with_large_photo_succeeds(self):
-        """另一个 multipart 接口（领养上架信息 + 照片）同样不能 400。
+        """另一个 multipart 接口（领养上架信息 + 补充照片）同样不能 400。
 
-        字段名用视图真正读取的 `photo_before`（`views_adoption.py:121-126`），
-        并断言照片**确实存下来了** —— 用错字段名的话文件会被忽略，
-        用例就成了"假绿"（请求体里照样有这个文件，机制上仍能触发，
-        但断言不到业务结果）。
+        字段名用视图真正读取的 `extra_photos`；系统照片（捕捉/诊疗）不再从
+        这里上传，误用旧字段的话文件会被忽略，用例就成了"假绿"。
         """
         pet = make_pet(code='TESTPETBIG1', status='in_treatment',
                        district=self.district_a, hospital=self.hospital_a)
@@ -255,14 +253,13 @@ class LargeUploadEndToEndTest(BusinessTestBase):
                 'intro': '性格亲人，已绝育免疫',
                 'personality': '活泼亲人',
                 'body_condition': '健康良好',
-                'flow_doc': '提交申请 → 审核 → 签署协议 → 确认领出',
                 'is_active': 'true',
-                'photo_before': make_big_image('listing.png'),
+                'extra_photos': make_big_image('listing.png'),
             })
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertTrue(resp.json().get('success'), resp.content)
-        pet.refresh_from_db()
-        self.assertTrue(pet.photo_before, '捕捉前照片应当被保存')
+        photo = AdoptionPhoto.objects.get(listing__pet=pet)
+        self.assertTrue(photo.image, '补充照片应当被保存')
 
     def test_missing_group_photo_is_rejected_even_when_other_fields_are_valid(self):
         """缺整体合影不能靠「请求很小」绕过新增捕捉的必传规则。"""

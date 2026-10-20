@@ -165,37 +165,36 @@ def transfer_create(request):
     # 归属区县：优先用显式提交的，否则从**本次实际转运的动物**推导。
     # 市级捕捉点（第四十五轮）只能靠后者 —— 它自己挂在「全市（市级）」下，
     # 拿它当锚点会把记录落到市级、击穿区县隔离（Q2 已确认按实际捕捉区县）。
+    city_shelter = is_city_shelter(shelter)
     batch_pets = _requested_pets(items)
     anchors = ([capture] if capture is not None else []) + batch_pets
     district, err = resolve_district_scope(
-        user, shelter, body_int(data, 'district_id'), extra_anchors=anchors)
+        user, shelter, body_int(data, 'district_id'), extra_anchors=anchors,
+        # 市级捕捉点可全市转运（第五十轮）：操作员账号挂在哪个区县都不该拦。
+        allow_cross_district=city_shelter)
     if err:
         return json_fail(err)
     district_id = district.id
 
-    # 一张转运单只能有一个归属区县。市级捕捉点的动物可能来自不同区县 ——
-    # 混合时**明确要求分单**，不要静默按「第一只的区县」归属：那会把别的
-    # 区县的动物记到本区县名下，区县政府看到本区没有的动物、另一区看不到
-    # 本区被带走的动物，而且**全程不报错**。
-    # 只对市级捕捉点判：区县级捕捉点提交外区动物由下面的「不属于本区县」
-    # 判据拦（文案更贴合那个场景，历史用例也在匹配它）。
-    if is_city_shelter(shelter):
-        batch_districts = {p.district_id for p in batch_pets if p.district_id}
-        if len(batch_districts) > 1:
-            return json_fail('本单动物来自多个区县，请按区县分单后再转运')
-
     if requested_codes:
-        busy = busy_transfer_codes(requested_codes, district_id)
+        # 未结单占位判据：市级捕捉点必须**跨区县**查重（同一只动物可能被
+        # 另一个区县的未结单占着，按本单归属区县过滤会漏掉，于是同一只
+        # 动物同时挂在两张未结单上）。
+        busy = busy_transfer_codes(
+            requested_codes, None if city_shelter else district_id)
         if busy:
             return json_fail(
                 '以下动物已在未结的转运单中，不能重复下发：' + '、'.join(sorted(busy))
                 + '。如需改派，请先在「转运明细」里撤回原单。')
 
-        foreign = sorted(Pet.objects.filter(
-            code__in=requested_codes, is_deleted=False
-        ).exclude(district_id=district_id).values_list('code', flat=True))
-        if foreign:
-            return json_fail('以下动物不属于本区县，无法转运：' + '、'.join(foreign))
+        # 区级捕捉点只能转运**本区**动物（第五十轮：市级捕捉点不受此限，
+        # 可全市捕捉、全市转运；区级仍按「本区捕捉、转运到本区医院」）。
+        if not city_shelter:
+            foreign = sorted(Pet.objects.filter(
+                code__in=requested_codes, is_deleted=False
+            ).exclude(district_id=district_id).values_list('code', flat=True))
+            if foreign:
+                return json_fail('以下动物不属于本区县，无法转运：' + '、'.join(foreign))
 
     created = []
     assigned_pet_ids = set()  # 防止同一宠物被拆分进多家医院
@@ -215,12 +214,21 @@ def transfer_create(request):
         hospital_id = item.get('hospital_id')
         if not hospital_id:
             continue
-        hospital = Institution.objects.filter(id=hospital_id, type='hospital').first()
+        hospital = Institution.objects.filter(
+            id=hospital_id, type='hospital').select_related('district').first()
         if hospital is None:
             continue
         inst_err = inactive_institution_error(hospital, '接收医院')
         if inst_err:
             return json_fail(inst_err)
+        # 区级捕捉点只能转运到**本区**医院（第五十轮）。市级捕捉点不受限
+        # （可全市转运）。判据放在写库之前：边校验边落库会在循环里留下半截单。
+        if not city_shelter:
+            hospital_district = getattr(hospital, 'district', None)
+            if hospital_district is None or hospital_district.id != district_id:
+                return json_fail(
+                    f'区级捕捉点只能转运到本区医院（{district.name}），'
+                    f'「{hospital.name}」不属于{district.name}')
 
     for item in items:
         hospital_id = item.get('hospital_id')
@@ -237,9 +245,13 @@ def transfer_create(request):
         pet_ids = [pid for pid in item.get('pet_ids', []) if pid not in assigned_pet_ids]
         pet_codes = item.get('pet_codes', [])
         if pet_ids:
-            pets = list(Pet.objects.filter(id__in=pet_ids, status='in_transit', is_deleted=False))
+            pets = list(Pet.objects.filter(
+                id__in=pet_ids, status='in_transit', is_deleted=False
+            ).select_related('district'))
         elif pet_codes:
-            pets = list(Pet.objects.filter(code__in=pet_codes, status='in_transit', is_deleted=False))
+            pets = list(Pet.objects.filter(
+                code__in=pet_codes, status='in_transit', is_deleted=False
+            ).select_related('district'))
         else:
             continue
 
@@ -248,6 +260,17 @@ def transfer_create(request):
         if not pets:
             continue
         assigned_pet_ids.update(p.id for p in pets)
+
+        # 市级捕捉点一次可跨区县拆单，归属区县必须**逐单跟随本单动物**：
+        # 全用同一请求解析出的单一区县，会把乙区的转运单记到甲区名下，
+        # 乙区政府在区县隔离下看不到本区自己的转运。
+        transfer_district_id = district_id
+        if city_shelter:
+            item_district_id = next(
+                (p.district_id for p in pets
+                 if p.district_id and not p.district.is_city), None)
+            if item_district_id:
+                transfer_district_id = item_district_id
 
         pet_code_list = [p.code for p in pets]
         # 未显式指定捕捉单时，按宠物归属回填，保证捕捉单状态可被准确推导
@@ -271,7 +294,7 @@ def transfer_create(request):
             operator=user,
             operator_name=user.get_full_name() or user.username,
             ledger_no=generate_doc_no('TRF'),
-            district_id=district_id,
+            district_id=transfer_district_id,
         )
 
         # 更新宠物归属医院（状态保持 in_transit 直到签收）

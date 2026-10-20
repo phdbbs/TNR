@@ -8,7 +8,9 @@
 2. **医嘱与处方** —— 整单医嘱 + 逐处置项目（绝育 / 驱虫 / 免疫 / 芯片 / 其他）的
    预计执行时间、处方、注意事项、操作人。「诊断完成」落 `diagnosed_at`。
 3. **执行与办结** —— 逐项「执行完成」（**此时才扣库存**），全部必执行项目完成后
-   「诊疗完成」落 `done_at`，最后选办结去向落 `disposed_at` 并改 `Pet.status`。
+   「诊疗完成」落 `done_at`（动物进入「待出院」），医生选的去向只是
+   `disposal_advised`（建议）；真正的 `disposed_at` 由**出院单据完成时**
+   落（见 `dispose_for_discharge`）。在诊疗页点「完成」不算出院。
 
 为什么扣库存放在「执行」而不是「诊断完成」
 ------------------------------------------
@@ -1052,8 +1054,12 @@ def mark_done(treatment, disposal_advised=''):
     return treatment
 
 
-def dispose(treatment, disposal, user, defer_pet_status=False):
+def dispose(treatment, disposal, user, defer_pet_status=False, promote_hall=True):
     """办结 —— 记录去向并改动物状态。
+
+    :param promote_hall: 是否为「领养」把动物上架领养大厅。出院单据接管时
+        置 False —— 领养出库完成时动物已 `adopted`，再按 `pending_adopt`
+        激活大厅，会把已领养的动物重新挂回大厅。
 
     :param defer_pet_status: 由**出院单据**接管动物状态时置 True。
         放归是两段（转运回小区 → 放归回捕捉地），办结时动物还在本院待转运，
@@ -1100,7 +1106,7 @@ def dispose(treatment, disposal, user, defer_pet_status=False):
     # 新流程这两件事是**同一条 UPDATE 里同时发生**的，那个中间态再也不存在，
     # 定时任务永远命中不到。不在这里补，动物会变成「状态待领养、大厅里查不到」
     # 的幽灵（界面上办结提示还写着「信息进入领养大厅」，承诺与事实不符）。
-    if disposal == 'pending_adopt' and not pet.is_deleted:
+    if promote_hall and disposal == 'pending_adopt' and not pet.is_deleted:
         listing = AdoptionHallListing.objects.filter(pet=pet).first()
         if listing is None:
             AdoptionHallListing.objects.create(
@@ -1119,6 +1125,27 @@ def dispose(treatment, disposal, user, defer_pet_status=False):
                 listing.hospital_name = pet.hospital.name
             listing.save(update_fields=['is_active', 'hospital', 'hospital_name'])
     return treatment
+
+
+def dispose_for_discharge(pet, disposal, user):
+    """出院单据**真正完成**时，办结该动物所有「诊疗完成、尚未办结」的诊疗单。
+
+    第五十六轮口径：诊疗页选的是「建议去向」，只有出院管理里的终态动作
+    （领养出库 / 死亡出库单提交 / 运回单对方签收 / 主人领回）才说明动物
+    离院。那些接口在写完自己的单据后调用本函数，`disposed_at` 才落。
+
+    与 `dispose()` 直接办结的区别：**不改宠物状态、不进领养大厅** ——
+    两者都由出院单据自己负责，这里只补诊疗单的办结时间与去向。
+    """
+    if pet is None:
+        return []
+    treatments = list(Treatment.objects.filter(
+        pet=pet, done_at__isnull=False, disposed_at__isnull=True,
+    ))
+    for treatment in treatments:
+        dispose(treatment, disposal, user,
+                defer_pet_status=True, promote_hall=False)
+    return treatments
 
 
 # ============================================

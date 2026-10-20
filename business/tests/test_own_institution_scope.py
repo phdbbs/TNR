@@ -92,23 +92,22 @@ class CrossDistrictReferralStillWorksTest(BusinessTestBase):
     `transfer_receive` 原先**没有**区县判据是**对的**（转运本就允许跨区县），
     所以这组用例是本次修复的**判别性测试**：
     如果谁把 `get_own_institution_object` 换成了区县收敛，这里会立刻红。
+
+    ⚠ 第五十轮后**新建**跨区转运只允许市级捕捉点发起（区级捕捉点限本区医院），
+    但**存量/市级**的跨区单据仍要能正常签收、驳回。所以这里直接 ORM 造单，
+    不再走 `transfer_create` —— 签收侧的口径与「谁能发单」是两条独立规则。
     """
 
     def _send_a_to_b(self):
-        """甲区捕捉点 → 乙区医院，走真实接口（`transfer_create`）。"""
+        """甲区捕捉点 → 乙区医院（ORM 造单，模拟存量跨区单据）。"""
         pet = make_pet(district=self.district_a, shelter=self.shelter_a,
                        status='in_transit')
-        self.login_as(self.shelter_user_a)
-        body = self.ok(self.post_json(f'{TRANSFER_URL}create/', {
-            'from_shelter_id': self.shelter_a.id,
-            'to_hospital_id': self.hospital_b.id,
-            'pet_codes': [pet.code],
-            'pet_count': 1,
-        }))
-        transfer_id = body['data'][0]['id']
-        self.assertEqual(Transfer.objects.get(id=transfer_id).to_hospital_id,
-                         self.hospital_b.id, '跨区县送医没落库')
-        return pet, transfer_id
+        transfer = Transfer.objects.create(
+            from_shelter=self.shelter_a, to_hospital=self.hospital_b,
+            pet_codes=pet.code, pet_count=1, district=self.district_a)
+        pet.hospital = self.hospital_b
+        pet.save(update_fields=['hospital'])
+        return pet, transfer.id
 
     def test_cross_district_receive_succeeds(self):
         """甲区送 → **乙区医院签收**，必须成功。"""

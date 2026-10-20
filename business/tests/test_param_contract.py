@@ -846,7 +846,7 @@ class MaterialQuantityBodyTest(ParamContractMixin, BusinessTestBase):
         self.login_as(self.shelter_user_a)
         mat = self._fresh_material()
         self.ok(self.post_json(ADJUSTMENT, {
-            'material_id': mat.id, 'quantity': 4, 'reason': '盘点',
+            'material_id': mat.id, 'quantity': 4, 'reason': 'other',
         }))
         mat.refresh_from_db()
         self.assertEqual(mat.shelter_stock, 46)

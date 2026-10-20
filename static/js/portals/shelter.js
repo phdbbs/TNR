@@ -71,7 +71,7 @@ const Shelter = {
     if (renderer) {
       const done = renderer.call(this);
       // 渲染是异步的（要先拉数据），等它落地后再切子标签。
-      // 快捷操作「回收登记」就是靠这个直接落到「动物去向 → 回收」。
+      // 快捷操作「领回登记」就是靠这个直接落到「动物去向 → 领回」。
       if (tab) Promise.resolve(done).then(() => this._activateSubTab(pageId, tab));
     }
   },
@@ -231,13 +231,13 @@ const Shelter = {
     if (lowStock > 0) todoItems.push({ label: lowStock + ' 项物料库存低于安全线', page: 'material', badge: 'danger' });
     if (todoItems.length === 0) todoItems.push({ label: '暂无待办任务，今天也是善待动物的一天', page: null, badge: null });
 
-    // 快捷操作：现场最高频的四个动作。回收登记直接深链到「动物去向 → 回收」。
+    // 快捷操作：现场最高频的四个动作。领回登记直接深链到「动物去向 → 领回」。
     const quickActions = [
       { icon: '➕', text: '新增捕捉', desc: '录入流浪动物捕捉信息', page: 'capture-add' },
-      { icon: '🏠', text: '回收登记', desc: '主人领回 / 动物回收', page: 'release', tab: 'recovery' },
+      { icon: '🏠', text: '领回登记', desc: '主人认领并当场领回', page: 'release', tab: 'recovery' },
       { icon: '🚚', text: '安排转运', desc: '把捕捉的动物转运到医院', page: 'transfer' },
       { icon: '📦', text: '物料采购', desc: '采购入库登记', page: 'material' },
-      { icon: '🌿', text: '放归登记', desc: '动物放归登记', page: 'release' }
+      { icon: '🌿', text: '放归登记', desc: '运回签收后放回原小区', page: 'release', tab: 'release' }
     ];
 
     const rangeOptions = [
@@ -818,7 +818,7 @@ const Shelter = {
             </div>
           </div>
           <div class="form-group"><label class="form-label">单只照片与档案信息（逐只填写）<span class="req">*</span></label>
-            <div class="form-hint" style="margin-bottom:8px;">每只动物单独选择猫/狗、公/母并填写品种，信息会随该动物带入转运、回收、诊疗、领养、放归、死亡全流程</div>
+            <div class="form-hint" style="margin-bottom:8px;">每只动物单独选择猫/狗、公/母并填写品种，信息会随该动物带入转运、领回、诊疗、领养、放归、死亡全流程</div>
             <div class="pet-entry-list" id="ca_petEntries">
               <div class="text-light fs-sm">正在生成单只信息项…</div>
             </div>
@@ -1407,11 +1407,11 @@ const Shelter = {
   /* ⚠ 当前**不可达**（第二十二轮实测）：
    *
    * 本方法 + `showOwnerReturnForm()` + `#page-owner-return` 组成「主人领回」独立页，
-   * 但**没有任何入口指向它** —— 侧栏没有、首页快捷操作的「回收登记」走的是
-   * `navigate('release', 'recovery')`（动物去向 → 回收标签），也没有任何
+   * 但**没有任何入口指向它** —— 侧栏没有、首页快捷操作的「领回登记」走的是
+   * `navigate('release', 'recovery')`（动物去向 → 领回标签），也没有任何
    * `navigate('owner-return')` 调用。两者只互相引用，所以整段是**死代码**。
    *
-   * 主人领回**实际走的是「动物去向」页的「回收」标签**（`render_release` 里
+   * 主人领回**实际走的是「动物去向」页的「领回」标签**（`render_release` 里
    * `data-tab="recovery"`），那条路径**没有前端黑名单预检**
    * （服务端 `owner_return` 会硬拦，所以只是少了提示，不是漏洞）。
    *
@@ -1427,14 +1427,14 @@ const Shelter = {
     el.innerHTML = TNR_UI.renderFilterBar(filters, actions) + '<div id="returnTableWrap"></div>';
 
     let list = await TNR_API.getOwnerReturns();
-    // 一宠一档：回收列表同样要展示该动物的类别/品种/性别
+    // 一宠一档：领回列表同样要展示该动物的类别/品种/性别
     const pets = await TNR_API.getPets();
     const petByCode = {};
     pets.forEach(p => { petByCode[p.code] = p; });
 
     const renderTable = () => {
       const vals = TNR_UI.getFilterValues(el);
-      // 时间口径与「动物去向 → 回收」标签一致：有 returnTime 用 returnTime，没有退到 createdAt。
+      // 时间口径与「动物去向 → 领回」标签一致：有 returnTime 用 returnTime，没有退到 createdAt。
       let filtered = list.filter(r =>
         TNR_UI.inDateRange(r.returnTime || r.createdAt, vals.start_date, vals.end_date));
       if (vals.keyword) {
@@ -1566,6 +1566,7 @@ const Shelter = {
     el.innerHTML = `
       <div class="tabs" id="transferTabs">
         <div class="tab-item active" data-tab="pending">待转运</div>
+        <div class="tab-item" data-tab="return">运回单</div>
         <div class="tab-item" data-tab="detail">转运明细</div>
       </div>
       <div id="transferContent"></div>
@@ -1578,6 +1579,16 @@ const Shelter = {
       });
     });
     this._transfers = await TNR_API.getTransfers();
+    /* 运回单 = 医院反向物流，第一段由本站签收。
+       失败要能说出来（Strict 读抛错），否则「没有待接收单据」与
+       「接口 403/500」在界面上完全一样。 */
+    try {
+      this._returnOrders = await TNR_API.getReturnOrdersStrict();
+      this._returnOrderError = '';
+    } catch (e) {
+      this._returnOrders = [];
+      this._returnOrderError = e.message || '运回单加载失败';
+    }
     this.renderTransferTab('pending');
   },
 
@@ -1620,6 +1631,9 @@ const Shelter = {
     // 记录一律从 this._transfers 实时取，避免委托闭包捕获到上一轮的过期列表。
     TNR_UI.delegateClick(wrap, {
       'data-pet-code': (code) => this.showCapturePhoto(code),
+      'data-return-receive': (id) => this.showReturnReceiveModal(id),
+      'data-return-reject': (id) => this.showReturnRejectModal(id),
+      'data-return-detail': (id) => this.showReturnOrderDetail(id),
       'data-act': (act, node) => {
         const rec = (this._transfers || []).find(r => String(r.id) === String(node.dataset.id));
         if (!rec) return;
@@ -1631,6 +1645,13 @@ const Shelter = {
     if (tab === 'pending') {
       const hospitals = await TNR_API.getInstitutions('hospital');
       const user = TNR_API.getCurrentUser();
+      // 区级捕捉点只能转运到**本区**医院；市级捕捉点可全市转运（第五十轮）。
+      // 判据用**机构**所属区县，不用操作员账号的 district —— 现场区县捕捉点的
+      // 操作员也可能挂在「全市（市级）」下。
+      const isCityShelter = !!(user && user.institution_district_is_city);
+      const hospitalOptions = (hospitals || []).filter(h => h.status === 'active'
+        && (isCityShelter
+          || String(h.districtId) === String(user?.institution_district_id)));
       // 待转运动物 = 在途 且 未被「已下发待医院签收」的转运单占用。
       // 医院驳回(rejected) / 捕捉点撤回(void) 的单据不占位，宠物会自动回到这里。
       const availablePets = this._availableTransferPets(pets, all);
@@ -1647,10 +1668,14 @@ const Shelter = {
         });
         html += '</div></div>';
         html += '<div class="form-row">';
-        html += '<div class="form-group"><label class="form-label">接收医院<span class="req">*</span></label><select class="form-select" id="tr_hospital">' + (hospitals || []).filter(h => h.status === 'active').map(h => '<option value="' + h.id + '" data-name="' + esc(h.name) + '">' + esc(h.name) + '</option>').join('') + '</select></div>';
+        html += '<div class="form-group"><label class="form-label">接收医院<span class="req">*</span></label><select class="form-select" id="tr_hospital">'
+          + hospitalOptions.map(h => '<option value="' + h.id + '" data-name="' + esc(h.name) + '">' + esc(h.name) + '</option>').join('')
+          + '</select>'
+          + (hospitalOptions.length ? '' : '<div class="fs-sm text-muted mt-2">本区暂无启用中的医院</div>')
+          + '</div>';
         html += '<div class="form-group"><label class="form-label">备注</label><input class="form-input" id="tr_note" placeholder="转运备注"></div>';
         html += '</div>';
-        html += '<button class="btn btn-primary" id="btnCreateTransfer">下发转运单</button>';
+        html += '<button class="btn btn-primary" id="btnCreateTransfer"' + (hospitalOptions.length ? '' : ' disabled') + '>下发转运单</button>';
       }
       html += '</div></div>';
 
@@ -1710,7 +1735,7 @@ const Shelter = {
           }
         });
       }
-    } else {
+    } else if (tab === 'detail') {
       // 「转运明细」：把已签收 / 已驳回 / 已撤回（连同已下发的）汇总到一个列表。
       // 这三种状态本来就是同一张单据的同一批字段，切成三个标签只是把同一份数据切碎。
       const hospitals = await TNR_API.getInstitutions('hospital');
@@ -1766,6 +1791,62 @@ const Shelter = {
       };
       renderDetail();
       TNR_UI.bindFilter(renderDetail, wrap);
+    } else if (tab === 'return') {
+      /* 运回单（医院 → 捕捉点）：签收后动物进入本站「待放归」。
+         第五十八轮从「动物去向 → 放归」迁到转运交接：它本来就是一段
+         反向物流，放在放归页会让人以为动物已回到小区。 */
+      const orders = this._returnOrders || [];
+      const pendingReturns = orders.filter(o => o.status === 'pending');
+      const petCodesOf = (o) => (o.pets || []).map(p => p.code).join('、')
+        || o.pet_codes || '—';
+
+      let html = '';
+      if (this._returnOrderError) {
+        html += '<div class="card mb-4"><div class="card-body"><div class="empty-state">'
+          + '<div class="empty-state-icon">⚠️</div>'
+          + '<div class="empty-state-text">运回单加载失败</div>'
+          + '<div class="empty-state-desc">' + esc(this._returnOrderError) + '</div></div></div></div>';
+      }
+      html += '<div class="card mb-4"><div class="card-header">'
+        + '<div class="card-title"><span class="card-title-bar"></span>医院运回待接收 (' + pendingReturns.length + ')</div>'
+        + '<div class="fs-sm text-muted">医院开运回单后，本站核对动物并签收「接收单」</div></div>'
+        + '<div class="card-body-flush"><div data-mt="shelter.transfer.returnPending"></div></div></div>';
+      html += '<div class="card"><div class="card-header">'
+        + '<div class="card-title"><span class="card-title-bar"></span>运回明细</div>'
+        + '<div class="fs-sm text-muted">已确认出库 / 已驳回；待确认的单据请在上方签收</div></div>'
+        + '<div class="card-body-flush"><div data-mt="shelter.transfer.returnOrders"></div></div></div>';
+      wrap.innerHTML = html;
+
+      TNR_UI.mountTable('[data-mt="shelter.transfer.returnPending"]', {
+        id: 'shelter.transfer.returnPending',
+        columns: [
+          { title: '运回单号', key: 'ledger_no', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-return-detail="' + r.id + '">' + esc(r.ledger_no || r.id) + '</span>' },
+          { title: '医院', key: 'hospital_name', render: r => esc(r.hospital_name || '—') },
+          { title: '动物', render: r => esc(petCodesOf(r)) + '<div class="fs-sm text-muted">共 ' + (r.pet_count || (r.pets || []).length) + ' 只</div>' },
+          { title: '开出时间', key: 'created_at', render: r => TNR_UI.formatDateTime(r.created_at) },
+          { title: '备注', key: 'note', render: r => esc(r.note || '—') },
+          { title: '操作', render: r => '<div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;">'
+              + '<button class="btn btn-success btn-sm" data-return-receive="' + r.id + '">签收</button>'
+              + '<button class="btn btn-danger btn-sm" data-return-reject="' + r.id + '">驳货</button>'
+              + '</div>' }
+        ],
+        data: pendingReturns,
+        emptyText: '暂无待接收的运回单'
+      });
+      TNR_UI.mountTable('[data-mt="shelter.transfer.returnOrders"]', {
+        id: 'shelter.transfer.returnOrders',
+        columns: [
+          { title: '运回单号', key: 'ledger_no', render: r => '<span class="font-mono fs-sm" style="color:var(--cinnabar);cursor:pointer;text-decoration:underline;" data-return-detail="' + r.id + '">' + esc(r.ledger_no || r.id) + '</span>' },
+          { title: '医院', key: 'hospital_name', render: r => esc(r.hospital_name || '—') },
+          { title: '动物', render: r => esc(petCodesOf(r)) + '<div class="fs-sm text-muted">共 ' + (r.pet_count || (r.pets || []).length) + ' 只</div>' },
+          { title: '状态', render: r => TNR_UI.returnOrderStatusBadge(r.status)
+              + (r.reject_reason ? '<div class="fs-sm text-muted">' + esc(r.reject_reason) + '</div>' : '') },
+          { title: '开出时间', key: 'created_at', render: r => TNR_UI.formatDateTime(r.created_at) },
+          { title: '接收时间', key: 'received_at', render: r => r.received_at ? TNR_UI.formatDate(r.received_at) : '—' }
+        ],
+        data: orders.filter(o => o.status !== 'pending'),
+        emptyText: '暂无运回单记录'
+      });
     }
   },
 
@@ -2410,12 +2491,21 @@ const Shelter = {
           + (isExpired(m) ? '（已过期）' : '')
           + ' (库存:' + stockOf(m) + (m.unit || '') + ')</option>')
         .join('');
+      // 异动原因枚举（第五十轮），与 `MaterialTransaction.ADJUSTMENT_REASON_CHOICES`
+      // 同源；历史行 reason 为空时回退显示当时的自由文本 note。
+      const ADJ_REASON_TEXT = {
+        expired: '过期', invalid: '失效', gain: '盘盈',
+        loss: '盘亏', return: '退回', other: '其他'
+      };
       const adjRows = adj.map(t => ({
         // 同文件 `flow` tab 读的是 camel 键，这里做兼容取值 —— 第三十六轮
         // 已让响应同时含两套键，但前端**两种都认**才不怕将来口径回摆。
         material_name: t.materialName || t.material_name || '',
-        note: t.note || '—',
-        _qty: (t.quantity || 0) + ' ' + (t.unit || ''),
+        _reason: ADJ_REASON_TEXT[t.reason] || t.note || '—',
+        note: ADJ_REASON_TEXT[t.reason] ? (t.note || '—') : '—',
+        // 负数量 = 盘盈 / 退回入库（增加库存），用 + 标出方向。
+        _qty: (t.quantity > 0 ? '-' : '+') + Math.abs(t.quantity || 0)
+          + ' ' + (t.unit || ''),
         date: t.date || '',
         operator_name: t.operatorName || t.operator_name || ''
       }));
@@ -2437,7 +2527,11 @@ const Shelter = {
         + '<div class="form-row"><div class="form-group"><label class="form-label">物料<span class="req">*</span></label>'
         + '<select class="form-select" id="adjMaterial"><option value="">请选择</option>' + opts + '</select></div>'
         + '<div class="form-group"><label class="form-label">数量<span class="req">*</span></label>'
-        + '<input type="number" class="form-input" id="adjQty" value="1" min="1" /></div></div>'
+        + '<input type="number" class="form-input" id="adjQty" value="1" />'
+        + '<div class="fs-sm text-muted mt-2">正数 = 扣减库存；<b>负数 = 增加库存</b>（盘盈 / 退回）</div></div></div>'
+        + '<div class="form-group" id="adjBatchGroup"><label class="form-label">批号（可选）</label>'
+        + '<select class="form-select" id="adjBatch"><option value="">不指定（按近效期先出）</option></select>'
+        + '<div class="fs-sm text-muted mt-2">有库存的批次都会列出；过期报废可直接指定批次，只扣该批。不选则按近效期先出</div></div>'
         + '<div class="form-group" id="adjChipGroup" style="display:none;"><label class="form-label">芯片起始号<span class="req">*</span></label>'
         + '<input class="form-input" id="adjChipStart" placeholder="如 042060107000177" inputmode="numeric">'
         + '<div class="fs-sm text-muted mt-2">按「首号 + 数量」作废连续号码的芯片，作废后不可恢复</div>'
@@ -2446,8 +2540,14 @@ const Shelter = {
         // B5：异动 = 过期物料的正规出口，预览不跳过过期批次 —— 操作员
         // 能明确看到「报废扣的就是那批 2025-06 到期的」，提交前心里有数。
         + '<div class="form-group"><div class="fs-sm" id="adjBatchHint"><span class="text-muted">填写数量后，这里会预览将要扣减的批次</span></div></div>'
-        + '<div class="form-group"><label class="form-label">原因说明<span class="req">*</span></label>'
-        + '<textarea class="form-textarea" id="adjReason" placeholder="请说明异动原因（过期报废/破损/盘亏等）"></textarea></div>'
+        + '<div class="form-group"><label class="form-label">异动原因<span class="req">*</span></label>'
+        + '<select class="form-select" id="adjReason"><option value="">请选择</option>'
+        + '<option value="expired">过期</option><option value="invalid">失效</option>'
+        + '<option value="gain">盘盈</option><option value="loss">盘亏</option>'
+        + '<option value="return">退回</option><option value="other">其他</option></select>'
+        + '<div class="fs-sm text-muted mt-2">过期 / 失效 / 盘亏填正数；盘盈 / 退回填负数</div></div>'
+        + '<div class="form-group"><label class="form-label">备注</label>'
+        + '<textarea class="form-textarea" id="adjNote" placeholder="补充说明（可选）"></textarea></div>'
         + '<div style="display:flex;justify-content:flex-end;">'
         + '<button class="btn btn-primary" id="adjSubmitBtn">提交报备</button></div>'
         + '</div></div></div></div>';
@@ -2463,15 +2563,17 @@ const Shelter = {
           id: 'shelter.material.adjustment',
           columns: [
             { title: '物料', key: 'material_name' },
-            { title: '原因', key: 'note' },
+            { title: '原因', key: '_reason' },
             { title: '数量', key: '_qty', sortable: false },
+            { title: '备注', key: 'note' },
             { title: '日期', key: 'date' },
             { title: '操作人', key: 'operator_name' }
           ],
           data: adjRows, emptyText: '暂无异动记录'
         });
       }
-      TNR_UI.bindQtyStepper('adjQty');
+      // 异动数量可正可负：默认步进 `min=1` 会让负数根本走不到。
+      TNR_UI.bindQtyStepper('adjQty', { min: -99999 });
       // 芯片物料按号码作废（「首号 + 数量」口径）：选到芯片时才亮出起始号，
       // 否则后端 `chip_batch_void()` 拿不到号码直接 400 —— 而界面上
       // 原来没有任何地方能填，芯片报废这条路完全走不通。
@@ -2479,9 +2581,6 @@ const Shelter = {
       // 比事后发现「作废错了号码」挽救成本低得多。
       const adjPreview = TNR_UI.bindChipPreview('void', 'adjChipStart', 'adjQty', 'adjChipPreview',
         () => ({ material_id: document.getElementById('adjMaterial').value }));
-      // B5：FEFO 批次扣减预览（adjustment：过期物料不跳过，报废正是出口）
-      const adjBatchPreview = TNR_UI.bindBatchPreview('adjQty', 'adjBatchHint',
-        () => document.getElementById('adjMaterial')?.value || null, 'adjustment');
       const adjToggleChip = () => {
         const m = materials.find(x => String(x.id) === String(document.getElementById('adjMaterial').value));
         const isChip = !!(m && m.category === 'chip');
@@ -2495,9 +2594,41 @@ const Shelter = {
           document.getElementById('adjChipSegments').innerHTML = '';
         }
       };
-      wrap.querySelector('#adjMaterial')?.addEventListener('change', () => {
+      // B5：FEFO 批次扣减预览（adjustment：过期物料不跳过，报废正是出口）
+      const adjBatchPreview = TNR_UI.bindBatchPreview('adjQty', 'adjBatchHint',
+        () => document.getElementById('adjMaterial')?.value || null, 'adjustment',
+        () => document.getElementById('adjBatch')?.value || '');
+      /* 批次下拉：列出该物料所有还有余量的批次，过期批单独标注。
+         过期报废常按批清理，指定批号后服务端只扣该批。 */
+      const adjLoadBatches = async () => {
+        const m = materials.find(x => String(x.id) === String(document.getElementById('adjMaterial').value));
+        const isChip = !!(m && m.category === 'chip');
+        const group = document.getElementById('adjBatchGroup');
+        const batchEl = document.getElementById('adjBatch');
+        if (group) group.style.display = (isChip || !m) ? 'none' : '';
+        if (!batchEl) return;
+        batchEl.innerHTML = '<option value="">不指定（按近效期先出）</option>';
+        if (isChip || !m) return;
+        try {
+          const res = await TNR_API.getMaterialBatches(m.id);
+          const today = TNR_UI.todayStr();
+          ((res && res.batches) || []).filter(b => (b.quantity || 0) > 0).forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b.batch_no;
+            const exp = b.expiry_date ? ' 效期' + b.expiry_date : '';
+            const expired = b.expiry_date && b.expiry_date < today ? '（已过期）' : '';
+            opt.textContent = b.batch_no + expired + '（余 ' + b.quantity + (m.unit || '') + exp + '）';
+            batchEl.appendChild(opt);
+          });
+        } catch (e) { /* 批次拉取失败不阻塞表单：留空 = 走 FEFO */ }
+      };
+      wrap.querySelector('#adjMaterial')?.addEventListener('change', async () => {
         adjToggleChip();
-        // 物料切换 → 批次预览跟着重跑（bindBatchPreview 只监听数量输入）
+        await adjLoadBatches();
+        // 物料/批次切换 → 批次预览跟着重跑（bindBatchPreview 只监听数量输入）
+        if (adjBatchPreview) adjBatchPreview.rerun();
+      });
+      wrap.querySelector('#adjBatch')?.addEventListener('change', () => {
         if (adjBatchPreview) adjBatchPreview.rerun();
       });
       wrap.querySelector('#adjSubmitBtn')
@@ -2784,21 +2915,41 @@ const Shelter = {
   async saveStockAdjustment() {
     const mid = document.getElementById('adjMaterial')?.value;
     const qty = parseInt(document.getElementById('adjQty')?.value, 10);
-    const reason = (document.getElementById('adjReason')?.value || '').trim();
+    const reason = document.getElementById('adjReason')?.value || '';
+    const note = (document.getElementById('adjNote')?.value || '').trim();
     if (!mid) { TNR_UI.toast('请选择物料', 'warning'); return; }
-    if (!qty || qty <= 0) { TNR_UI.toast('请输入有效数量', 'warning'); return; }
-    if (!reason) { TNR_UI.toast('请填写原因说明', 'warning'); return; }
+    if (isNaN(qty)) { TNR_UI.toast('请填写异动数量（可填负数表示盘盈 / 退回）', 'warning'); return; }
+    if (qty === 0) { TNR_UI.toast('异动数量不能为0', 'warning'); return; }
+    if (!reason) { TNR_UI.toast('请选择异动原因', 'warning'); return; }
+    // 原因与方向绑定（服务端同判据，这里先挡一道）
+    const DEC = ['expired', 'invalid', 'loss'];
+    const INC = ['gain', 'return'];
+    const reasonText = document.querySelector('#adjReason option:checked')?.textContent || '';
+    if (DEC.indexOf(reason) !== -1 && qty < 0) {
+      TNR_UI.toast('「' + reasonText + '」表示减少库存，数量必须为正数', 'warning'); return;
+    }
+    if (INC.indexOf(reason) !== -1 && qty > 0) {
+      TNR_UI.toast('「' + reasonText + '」表示增加库存，数量必须为负数', 'warning'); return;
+    }
     // 芯片物料：异动 = 按「首号 + 数量」作废号码。空号码先在前端挡一道，
     // 后端 `chip_batch_void()` 还有第二道（「请填写起始芯片号」）。
     const mat = (this._materials || []).find(x => String(x.id) === String(mid));
-    const chipStart = (mat && mat.category === 'chip')
+    const isChip = !!(mat && mat.category === 'chip');
+    if (isChip && qty < 0) {
+      TNR_UI.toast('芯片异动只支持正数（按号码作废）；盘盈请通过采购 / 入库办理', 'warning');
+      return;
+    }
+    const chipStart = isChip
       ? (document.getElementById('adjChipStart')?.value || '').trim() : '';
-    if (mat && mat.category === 'chip' && !chipStart) { TNR_UI.toast('请填写芯片起始号', 'warning'); return; }
+    if (isChip && !chipStart) { TNR_UI.toast('请填写芯片起始号', 'warning'); return; }
+    // 芯片不认批号定向（号码才是真源），与出库单同口径。
+    const batchNo = isChip ? '' : (document.getElementById('adjBatch')?.value || '');
 
     let res;
     try {
       res = await TNR_API.adjustStock({
-        material_id: parseInt(mid, 10), quantity: qty, reason: reason, chip_start: chipStart
+        material_id: parseInt(mid, 10), quantity: qty, reason: reason, note: note,
+        chip_start: chipStart, batch_no: batchNo
       });
     } catch (e) {
       TNR_UI.toast(e.message || '操作失败', 'danger');
@@ -2808,7 +2959,7 @@ const Shelter = {
       TNR_UI.toast((res && res.message) || '提交失败', 'danger');
       return;
     }
-    TNR_UI.toast('异动报备已提交，库存已扣减', 'success');
+    TNR_UI.toast(res.message || '异动报备已提交', 'success');
     /* 重新拉一次：库存与流水都要反映这次扣减，不能只改本地数组。
      *
      * ⚠ 必须用 `XxxStrict()`（失败抛错）而不是 `getMaterials()` ——
@@ -2885,7 +3036,7 @@ const Shelter = {
     const el = document.getElementById('page-release');
     el.innerHTML = `
       <div class="tabs" id="relTabs">
-        <div class="tab-item active" data-tab="recovery">回收</div>
+        <div class="tab-item active" data-tab="recovery">领回</div>
         <div class="tab-item" data-tab="release">放归</div>
         <div class="tab-item" data-tab="adoption">领养</div>
         <div class="tab-item" data-tab="death">死亡</div>
@@ -2932,6 +3083,8 @@ const Shelter = {
       'data-confirm-release': (id) => this.showReleaseConfirmModal(id, this._releases || []),
       'data-transfer-release': (id) => this.transferReleaseBack(id),
       'data-body-receive': (id) => this.confirmBodyReceive(id),
+      'data-euth-detail': (id) => this.showEuthanasiaDetail(id),
+      'data-pet-archive': (id) => TNR_UI.showPetArchive(id),
       'data-owner-return-id': (id) => {
         const rec = (this._ownerReturns || []).find(r => String(r.id) === String(id));
         if (rec) this.showOwnerReturnDetail(rec);
@@ -2951,18 +3104,19 @@ const Shelter = {
     }, 'RelRows');
 
     if (tab === 'recovery') {
-      // 回收：上方「待回收动物」+ 下方「回收记录列表」
+      // 领回：已捕捉、尚未转运的动物由主人当场领回（不是「回收」）
       const pendingTransferCodes = new Set(
         transfers.filter(t => t.status === 'pending')
            .flatMap(t => (t.petCodes || []))
       );
-      const recoverable = pets.filter(p => p.status === 'in_transit' && !pendingTransferCodes.has(p.code));
+      const recoverable = pets.filter(p => p.status === 'in_transit'
+        && !p.hospital_id && !pendingTransferCodes.has(p.code));
 
-      // 加载回收记录（缓存在 this._ownerReturns 供详情抽屉和事件委托使用）
+      // 加载领回记录（缓存在 this._ownerReturns 供详情抽屉和事件委托使用）
       this._ownerReturns = await TNR_API.getOwnerReturns();
       const ownerReturns = this._ownerReturns || [];
 
-      /* 本标签页有**两个**列表（待回收动物 / 回收记录），各自带一个筛选条。
+      /* 本标签页有**两个**列表（待领回动物 / 领回记录），各自带一个筛选条。
          两个筛选条必须各自绑定自己的容器：getFilterValues 会遍历作用域内全部
          [data-filter]，而两边的 key 都叫 keyword —— 共用 scope 会互相覆盖。
          ⚠ 两条筛选条还各自**单独成块**（bar + 它自己的列表放同一个 div）。
@@ -2974,7 +3128,7 @@ const Shelter = {
         { key: 'keyword', label: '搜索', type: 'search', placeholder: '编号/姓名/电话/住址' },
         { key: 'start_date', label: '开始时间', type: 'date' },
         { key: 'end_date', label: '结束时间', type: 'date' },
-        { key: 'owner_name', label: '回收人', type: 'text', placeholder: '回收人姓名' },
+        { key: 'owner_name', label: '领回人', type: 'text', placeholder: '领回人姓名' },
         { key: 'owner_phone', label: '电话', type: 'text', placeholder: '联系电话' },
         { key: 'owner_address', label: '住址', type: 'text', placeholder: '住址关键词' },
         { key: 'pet_breed', label: '品种', type: 'text', placeholder: '宠物品种' }
@@ -2989,7 +3143,7 @@ const Shelter = {
         + '</div>';
       wrap.innerHTML = html;
 
-      // 1) 待回收动物列表
+      // 1) 待领回动物列表
       const recovBar = document.getElementById('recovFilterBar');
       const renderRecoverable = () => {
         const v = TNR_UI.getFilterValues(recovBar);
@@ -3002,15 +3156,15 @@ const Shelter = {
         const columns = [
           { title: '宠物编号', key: 'code', render: r => '<span class="pet-code-chip" data-pet-code="' + r.code + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + r.code + '</span>' },
           { title: '类别/品种/性别', render: r => esc(TNR_API.petAttrText(r)) },
-          { title: '状态', render: r => TNR_UI.petStatusBadge(r.status) },
-          { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-recover="' + r.id + '">回收登记</button>' }
+          { title: '状态', render: () => '<span class="badge badge-warning">待转运</span>' },
+          { title: '操作', render: r => '<button class="btn btn-success btn-sm" data-recover="' + r.id + '">领回登记</button>' }
         ];
-        TNR_UI.mountTable('[data-mt="shelter.release.recovery"]', { id: 'shelter.release.recovery', columns, data: rows, emptyText: '暂无待回收动物' });
+        TNR_UI.mountTable('[data-mt="shelter.release.recovery"]', { id: 'shelter.release.recovery', columns, data: rows, emptyText: '暂无待领回动物' });
       };
       renderRecoverable();
       TNR_UI.bindFilter(renderRecoverable, recovBar);
 
-      // 2) 回收记录列表（筛选栏 + 表格 + 分页）—— 筛选条已随上面的 html 一起渲染。
+      // 2) 领回记录列表（筛选栏 + 表格 + 分页）—— 筛选条已随上面的 html 一起渲染。
       const returnBar = document.getElementById('ownerReturnFilterBar');
       const renderReturnTable = () => {
         const vals = TNR_UI.getFilterValues(returnBar);
@@ -3042,20 +3196,20 @@ const Shelter = {
           filtered = filtered.filter(r => (r.petBreed || '').toLowerCase().includes(v));
         }
         const returnColumns = [
-          { title: '回收单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;" data-owner-return-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
+          { title: '领回单号', key: 'ledgerNo', render: r => '<span class="font-mono fs-sm" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;" data-owner-return-id="' + r.id + '">' + esc(r.ledgerNo || r.id) + '</span>' },
           { title: '宠物编号', key: 'petCode', render: r => '<span class="pet-code-chip">' + esc(r.petCode || '') + '</span>' },
           { title: '类别/品种/性别', render: r => esc(TNR_API.petAttrText({ species: r.petSpecies, breed: r.petBreed, gender: r.petGender })) },
-          { title: '回收人', key: 'ownerName' },
+          { title: '领回人', key: 'ownerName' },
           { title: '电话', key: 'ownerPhone' },
           { title: '住址', key: 'ownerAddress', render: r => esc(r.ownerAddress || '—') },
-          { title: '回收时间', key: 'returnTime', render: r => TNR_UI.formatDateTime(r.returnTime || r.createdAt) }
+          { title: '领回时间', key: 'returnTime', render: r => TNR_UI.formatDateTime(r.returnTime || r.createdAt) }
         ];
         const returnRowActions = (r) => '<button class="btn-link" data-owner-return-id="' + r.id + '">详情</button>';
         TNR_UI.mountTable('[data-mt="shelter.release.return-records"]', {
           id: 'shelter.release.returnRecords',
           columns: returnColumns,
           data: filtered,
-          emptyText: '暂无回收记录',
+          emptyText: '暂无领回记录',
           rowActions: returnRowActions,
           pageSize: 10,
           pageSizes: [10, 20, 50]
@@ -3088,8 +3242,12 @@ const Shelter = {
          选中动物时自动带出它捕捉单登记的小区名，允许改。 */
       const pendingReleasePetIds = new Set(
         pendingReleases.map(r => String(r.petId ?? r.pet_id)));
+      /* 放归备选 = 医院完成诊疗 + 运回单已被本站签收（`pending_release`）。
+         诊疗中 / 待领养的动物还没回到捕捉点，不能由捕捉点直接开放归单；
+         签收后这类动物**没有** Release 单据（单据要等发起放归才建），
+         只按 `pendingReleases` 排重会把它们从下拉里漏掉。 */
       const releasable = pets.filter(p =>
-        (p.status === 'in_treatment' || p.status === 'pending_adopt')
+        p.status === 'pending_release'
         && !pendingReleasePetIds.has(String(p.id)));
 
       const captures = await TNR_API.getCaptures();
@@ -3100,9 +3258,10 @@ const Shelter = {
         return cap.communityName || cap.community_name || '';
       };
 
-      let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>发起放归（放回原捕捉小区）</div></div><div class="card-body">';
+      let html = '';
+      html += '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>发起放归（放回原捕捉小区）</div></div><div class="card-body">';
       if (!releasable.length) {
-        html += '<div class="empty-block"><div class="empty-block-icon">🏡</div>暂无可放归动物（需已完成诊疗，且尚无待放归记录）</div>';
+        html += '<div class="empty-block"><div class="empty-block-icon">🏡</div>暂无可放归动物（需医院完成诊疗并开运回单，本站签收后进入）</div>';
       } else {
         html += '<div class="form-row">';
         html += '<div class="form-group"><label class="form-label">选择动物<span class="req">*</span></label><select class="form-select" id="rel_pet">'
@@ -3259,8 +3418,13 @@ const Shelter = {
       const deadPets = pets.filter(p => ['euthanized', 'dead'].includes(p.status));
       const euths = await TNR_API.getEuthanasia();
       this._euthanasia = euths || [];
-      const euthOf = (pet) => this._euthanasia.find(
-        e => (e.petCode || e.pet_code) === pet.code);
+      /* 同一动物可能有多条处置记录（历史数据）；优先展示已办理出库的那条，
+         否则取最新一条 —— 只取第一条会让「详情」打开一张更早的空单据。 */
+      const euthOf = (pet) => {
+        const list = (this._euthanasia || []).filter(
+          e => (e.petCode || e.pet_code) === pet.code);
+        return list.find(e => e.outbound_at) || list[0] || null;
+      };
 
       let html = TNR_UI.renderFilterBar([
             { key: 'keyword', label: '搜索', type: 'search', placeholder: '宠物编号 / 品种 / 死亡原因' },
@@ -3271,7 +3435,8 @@ const Shelter = {
           ], '', { id: 'relDeathFilterBar' });
       html += '<div data-mt="shelter.release.death"></div>';
       const columns = [
-        { title: '宠物编号', key: 'code', render: r => '<span class="pet-code-chip" data-pet-code="' + r.code + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + r.code + '</span>' },
+        // 编号点击进入一宠一档（第五十八轮：死亡列表不再只看照片）
+        { title: '宠物编号', key: 'code', render: r => '<span class="pet-code-chip" data-pet-archive="' + r.id + '" style="cursor:pointer;color:var(--cinnabar);text-decoration:underline;">' + r.code + '</span>' },
         { title: '类别/品种/性别', render: r => esc(TNR_API.petAttrText(r)) },
         { title: '死亡原因', render: r => { const e = euthOf(r); return esc((e && e.reason) || '—'); } },
         { title: '处置日期', render: r => { const e = euthOf(r); return e ? TNR_UI.formatDate(e.euthanizedAt || e.euthanized_at) : '—'; } },
@@ -3284,8 +3449,13 @@ const Shelter = {
           } },
         { title: '操作', render: r => {
             const e = euthOf(r);
-            if (!e || e.bodyReceived || e.body_received) return '';
-            return '<button class="btn btn-success btn-sm" data-body-receive="' + e.id + '">领取遗体</button>';
+            if (!e) return '—';
+            const detail = '<button class="btn-link" data-euth-detail="' + e.id + '">详情</button>';
+            const receive = (e.bodyReceived || e.body_received)
+              ? ''
+              : '<button class="btn btn-success btn-sm" data-body-receive="' + e.id + '">领取遗体</button>';
+            return '<div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;">'
+              + detail + receive + '</div>';
           } }
       ];
       wrap.innerHTML = html;
@@ -3329,6 +3499,60 @@ const Shelter = {
     this.renderRelTab('death');
   },
 
+  /* 死亡详情：医院登记 + 交给无害化处理厂的出库单（第五十八轮）。
+     捕捉点只看到「已死亡」，看不到遗体由谁、何时、交给了哪家单位；
+     医院侧已有出库单，但捕捉点端此前没有任何入口。 */
+  showEuthanasiaDetail(id) {
+    const e = (this._euthanasia || []).find(x => String(x.id) === String(id));
+    if (!e) { TNR_UI.toast('死亡记录已刷新，请重试', 'warning'); return; }
+    const esc = TNR_UI.escape.bind(TNR_UI);
+    const outboundAt = e.outboundAt || e.outbound_at;
+    const photo = e.photo || '';
+    const sig = e.signature || '';
+    const sigHtml = sig
+      ? '<img src="' + esc(sig) + '" alt="接收人签字" data-zoom="' + esc(sig) + '" '
+        + 'style="max-width:240px;max-height:120px;background:#fff;border:1px solid var(--border-light);'
+        + 'border-radius:6px;cursor:zoom-in;padding:4px;">'
+      : '<span class="text-muted">—</span>';
+    const photoHtml = photo
+      ? '<img src="' + esc(photo) + '" alt="出库照片" data-zoom="' + esc(photo) + '" '
+        + 'style="max-width:100%;max-height:260px;object-fit:contain;border:1px solid var(--border-light);'
+        + 'border-radius:8px;cursor:zoom-in;">'
+      : '<span class="text-muted">—</span>';
+
+    const outbound = outboundAt
+      ? TNR_UI.renderDescList([
+          { label: '出库日期', value: TNR_UI.formatDate(outboundAt) },
+          { label: '交接人', value: esc(e.handoverName || e.handover_name || '—') },
+          { label: '接收机构', value: esc(e.receivingOrg || e.receiving_org || '—') },
+          { label: '接收人', value: esc(e.receiverName || e.receiver_name || '—') }
+        ])
+        + '<div class="detail-section-title" style="margin-top:var(--sp-3);">接收人签字</div>' + sigHtml
+        + '<div class="detail-section-title" style="margin-top:var(--sp-3);">出库照片</div>' + photoHtml
+      : '<div class="empty-block"><div class="empty-block-icon">⚰️</div>'
+        + '医院尚未办理死亡出库，遗体未移交无害化处理厂</div>';
+
+    TNR_UI.drawer({
+      title: (outboundAt ? '无害化出库单 · ' : '死亡处置 · ')
+        + esc(e.petCode || e.pet_code || ''),
+      body: '<div class="detail-section"><div class="detail-section-title">处置信息</div>'
+        + TNR_UI.renderDescList([
+          { label: '单据编号', value: esc(e.ledgerNo || e.ledger_no || '—') },
+          { label: '处置方式', value: e.kind === 'dead' ? '死亡 / 无害化' : '安乐死' },
+          { label: '处置日期', value: (e.euthanizedAt || e.euthanized_at)
+              ? TNR_UI.formatDate(e.euthanizedAt || e.euthanized_at) : '—' },
+          { label: '医院', value: esc(e.hospitalName || e.hospital_name || '—') },
+          { label: '原因', value: esc(e.reason || '—'), full: true },
+          { label: '动物状况', value: esc(e.condition || '—'), full: true },
+          { label: '操作人', value: esc(e.operatorName || e.operator_name || '—') }
+        ]) + '</div>'
+        + '<div class="detail-section"><div class="detail-section-title">无害化出库</div>'
+        + outbound + '</div>'
+        + TNR_UI.printDocBtn('euthanasia', e.id)
+    });
+    TNR_UI.bindPhotoZoom(document);
+  },
+
   /* 点击宠物编号 → 弹出该动物的捕捉照片（各环节共用） */
   async showCapturePhoto(petCode) {
     const pets = (this._pets && this._pets.length) ? this._pets : await TNR_API.getPets();
@@ -3341,6 +3565,156 @@ const Shelter = {
     }
     TNR_UI.drawer({ title: '捕捉照片 · ' + petCode, body: '<img src="' + photo + '" data-zoom="' + photo + '" alt="' + petCode + '" style="max-width:100%;max-height:400px;object-fit:contain;border-radius:8px;border:1px solid var(--border-light);cursor:zoom-in;">' });
     // 抽屉内容挂在 body 上，document 级委托（幂等）会自动接管新图片
+    TNR_UI.bindPhotoZoom(document);
+  },
+
+  /* ========== 运回单接收（放归第一段的反向物流） ========== */
+  returnOrderById(id) {
+    return (this._returnOrders || []).find(o => String(o.id) === String(id));
+  },
+
+  async refreshReturnOrders() {
+    try {
+      this._returnOrders = await TNR_API.getReturnOrdersStrict();
+      this._returnOrderError = '';
+    } catch (e) {
+      this._returnOrderError = e.message || '运回单加载失败';
+    }
+    this._pets = await TNR_API.getPets();
+    this._releases = await TNR_API.getReleases();
+    this.renderTransferTab('return');
+  },
+
+  showReturnReceiveModal(id) {
+    const o = this.returnOrderById(id);
+    if (!o) { TNR_UI.toast('运回单已刷新，请重试', 'warning'); return; }
+    const esc = TNR_UI.escape.bind(TNR_UI);
+    const petCodes = (o.pets || []).map(p => p.code).join('、') || o.pet_codes || '—';
+    const body = (el) => {
+      el.innerHTML = `
+        <div class="card mb-4"><div class="card-body">
+          <div class="desc-list">
+            <div class="desc-item"><div class="desc-label">运回单号</div><div class="desc-value">${esc(o.ledger_no || o.id)}</div></div>
+            <div class="desc-item"><div class="desc-label">医院</div><div class="desc-value">${esc(o.hospital_name || '—')}</div></div>
+            <div class="desc-item"><div class="desc-label">动物</div><div class="desc-value">${esc(petCodes)}（共 ${o.pet_count || (o.pets || []).length} 只）</div></div>
+          </div>
+        </div></div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">接收日期<span class="req">*</span></label><input type="date" class="form-input" id="rr_receivedAt" value="${TNR_UI.todayStr()}"></div>
+          <div class="form-group"><label class="form-label">接收人<span class="req">*</span></label><input class="form-input" id="rr_receiverName" value="${esc((TNR_API.getCurrentUser() || {}).name || '')}"></div>
+        </div>
+        <div class="form-group"><label class="form-label">接收人电话</label><input class="form-input" id="rr_receiverPhone" placeholder="联系电话"></div>
+        <div class="form-group"><label class="form-label">接收人签字<span class="req">*</span></label>
+          <div class="sig-field" id="rr_signature"></div>
+        </div>
+      `;
+    };
+    const { close } = TNR_UI.modal({
+      title: '运回单接收 · ' + (o.ledger_no || o.id),
+      size: 'lg',
+      body,
+      actions: '<button class="btn btn-secondary" data-action="close">取消</button><button class="btn btn-success" id="btnReturnReceive">确认接收</button>'
+    });
+    setTimeout(() => {
+      const sigPad = TNR_UI.initSignatureField(document.getElementById('rr_signature'),
+        { title: '接收人签字' });
+      document.getElementById('btnReturnReceive').addEventListener('click', async () => {
+        const receivedAt = document.getElementById('rr_receivedAt').value;
+        const receiverName = document.getElementById('rr_receiverName').value.trim();
+        const receiverPhone = document.getElementById('rr_receiverPhone').value.trim();
+        if (!receivedAt) { TNR_UI.toast('请选择接收日期', 'warning'); return; }
+        if (!receiverName) { TNR_UI.toast('请填写接收人', 'warning'); return; }
+        if (sigPad.isEmpty()) { TNR_UI.toast('请完成接收人签字', 'warning'); return; }
+        const res = await TNR_API.receiveReturnOrder(o.id, {
+          received_at: receivedAt,
+          receiver_name: receiverName,
+          receiver_phone: receiverPhone,
+          signature: sigPad.getDataURL()
+        });
+        if (res && res.success !== false) {
+          TNR_UI.toast('接收成功，动物进入待放归', 'success');
+          close();
+          this.refreshReturnOrders();
+        } else {
+          TNR_UI.toast('接收失败：' + ((res && res.message) || '未知错误'), 'danger');
+        }
+      });
+    }, 100);
+  },
+
+  showReturnRejectModal(id) {
+    const o = this.returnOrderById(id);
+    if (!o) { TNR_UI.toast('运回单已刷新，请重试', 'warning'); return; }
+    const esc = TNR_UI.escape.bind(TNR_UI);
+    const body = (el) => {
+      el.innerHTML = `
+        <div class="form-hint" style="margin-bottom:var(--sp-3);color:var(--ink-muted);">
+          驳回后动物退回医院，由医院修正后重新开单。运回单：${esc(o.ledger_no || o.id)}
+        </div>
+        <div class="form-group"><label class="form-label">驳回原因<span class="req">*</span></label>
+          <textarea class="form-textarea" id="rj_reason" rows="3" placeholder="如：动物数量不符 / 诊疗未完成 / 交接信息缺失"></textarea>
+        </div>
+      `;
+    };
+    const { close } = TNR_UI.modal({
+      title: '驳回运回单',
+      size: 'md',
+      body,
+      actions: '<button class="btn btn-secondary" data-action="close">取消</button><button class="btn btn-danger" id="btnReturnReject">确认驳回</button>'
+    });
+    setTimeout(() => {
+      document.getElementById('btnReturnReject').addEventListener('click', async () => {
+        const reason = document.getElementById('rj_reason').value.trim();
+        if (!reason) { TNR_UI.toast('请填写驳回原因', 'warning'); return; }
+        const res = await TNR_API.rejectReturnOrder(o.id, { reject_reason: reason });
+        if (res && res.success !== false) {
+          TNR_UI.toast('已驳回运回单', 'success');
+          close();
+          this.refreshReturnOrders();
+        } else {
+          TNR_UI.toast('驳回失败：' + ((res && res.message) || '未知错误'), 'danger');
+        }
+      });
+    }, 100);
+  },
+
+  showReturnOrderDetail(id) {
+    const o = this.returnOrderById(id);
+    if (!o) { TNR_UI.toast('运回单已刷新，请重试', 'warning'); return; }
+    const esc = TNR_UI.escape.bind(TNR_UI);
+    const pets = o.pets || [];
+    const petHtml = pets.length
+      ? '<div style="display:flex;flex-direction:column;gap:6px;">' + pets.map(p =>
+        '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border-light);border-radius:8px;">'
+        + '<b>' + esc(p.code) + '</b><span>' + esc(p.name || '') + '</span>'
+        + '<span class="badge badge-default">' + esc(p.status_display || p.status || '') + '</span></div>').join('')
+      + '</div>'
+      : '<div class="text-muted">' + esc(o.pet_codes || '—') + '</div>';
+    const sig = o.signature
+      ? '<img src="' + esc(o.signature) + '" data-zoom="' + esc(o.signature) + '" alt="接收人签字" style="max-width:220px;max-height:110px;object-fit:contain;border:1px solid var(--border-light);border-radius:8px;cursor:zoom-in;">'
+      : '<span class="text-muted">—</span>';
+    TNR_UI.drawer({
+      title: '运回单 · ' + esc(o.ledger_no || o.id),
+      body: '<div class="detail-section"><div class="detail-section-title">单据信息</div>'
+        + TNR_UI.renderDescList([
+          { label: '运回单号', value: esc(o.ledger_no || o.id) },
+          { label: '医院', value: esc(o.hospital_name || '—') },
+          { label: '捕捉点', value: esc(o.shelter_name || '—') },
+          { label: '状态', value: TNR_UI.returnOrderStatusBadge(o.status) },
+          { label: '动物数量', value: (o.pet_count || pets.length || 0) + ' 只' },
+          { label: '开出时间', value: TNR_UI.formatDateTime(o.created_at) },
+          { label: '接收时间', value: TNR_UI.formatDate(o.received_at) },
+          { label: '接收人', value: esc(o.receiver_name || '—') },
+          { label: '接收人电话', value: esc(o.receiver_phone || '—') },
+          { label: '备注', value: esc(o.note || '—'), full: true },
+          { label: '驳回原因', value: esc(o.reject_reason || '—'), full: true }
+        ]) + '</div>'
+        + '<div class="detail-section"><div class="detail-section-title">动物清单</div>'
+        + petHtml + '</div>'
+        + '<div class="detail-section"><div class="detail-section-title">接收人签字</div>'
+        + sig + '</div>'
+        + TNR_UI.printDocBtn('return_order', o.id)
+    });
     TNR_UI.bindPhotoZoom(document);
   },
 
@@ -3394,7 +3768,7 @@ const Shelter = {
     ]) });
   },
 
-  /* 回收记录详情抽屉：展示回收单信息 + 捕捉时照片 */
+  /* 领回记录详情抽屉：展示领回单信息 + 捕捉时照片 */
   showOwnerReturnDetail(rec) {
     const esc = TNR_UI.escape.bind(TNR_UI);
     const photos = [];
@@ -3408,24 +3782,24 @@ const Shelter = {
           '<div style="font-size:12px;color:var(--ink-muted);text-align:center;margin-top:4px;">' + esc(p.label) + '</div></div>').join('') +
         '</div>';
     }
-    TNR_UI.drawer({ title: '回收详情 · ' + esc(rec.ledgerNo || rec.id), body: TNR_UI.renderDescList([
-      { label: '回收单号', value: rec.ledgerNo || rec.id },
+    TNR_UI.drawer({ title: '领回详情 · ' + esc(rec.ledgerNo || rec.id), body: TNR_UI.renderDescList([
+      { label: '领回单号', value: rec.ledgerNo || rec.id },
       { label: '宠物编号', value: '<span class="pet-code-chip">' + esc(rec.petCode || '') + '</span>' },
       { label: '类别/品种/性别', value: esc(TNR_API.petAttrText({ species: rec.petSpecies, breed: rec.petBreed, gender: rec.petGender })) },
-      { label: '回收人姓名', value: esc(rec.ownerName || '—') },
+      { label: '领回人姓名', value: esc(rec.ownerName || '—') },
       { label: '联系电话', value: esc(rec.ownerPhone || '—') },
       { label: '身份证号', value: esc(rec.ownerIdCard || '—') },
       { label: '住址', value: esc(rec.ownerAddress || '—'), full: true },
       { label: '走失原因', value: esc(rec.reason || '—'), full: true },
-      { label: '回收时间', value: TNR_UI.formatDateTime(rec.returnTime || rec.createdAt) },
+      { label: '领回时间', value: TNR_UI.formatDateTime(rec.returnTime || rec.createdAt) },
       { label: '操作员', value: esc(rec.operatorName || '—') }
     ]) + (photos.length ? '<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border-light);"><div style="font-weight:600;margin-bottom:8px;">捕捉时照片</div>' + photoHtml + '</div>' : '')
-      /* 回收详情 = 「领回单」的落点。后端 DOC_SPECS 早就有 `owner_return`，
+      /* 领回详情 = 「领回单」的落点。后端 DOC_SPECS 早就有 `owner_return`，
          但前端一直没挂入口 —— 属于「后端写好了、界面没接」。 */
       + TNR_UI.printDocBtn('owner_return', rec.id) });
   },
 
-  /* 回收登记 - 填写回收单（回收单号、回收人姓名、手机号、住址、签字、走失原因、时间） */
+  /* 领回登记 - 填写领回单（领回单号、领回人姓名、手机号、住址、签字、走失原因、时间） */
   async showRecoverModal(pet) {
     const communities = await TNR_API.getInstitutions('community');
     // 优先匹配宠物原捕捉小区
@@ -3441,30 +3815,30 @@ const Shelter = {
       el.innerHTML = `
         <div class="form-group"><label class="form-label">宠物编号</label><input class="form-input" value="${TNR_UI.escape(pet.code)}" readonly></div>
         <div class="form-row">
-          <div class="form-group"><label class="form-label">回收单号</label><input class="form-input" id="rc_ledgerNo" value="系统自动生成（RET 前缀）" readonly style="background:var(--bg-subtle);color:var(--text-muted);"></div>
-          <div class="form-group"><label class="form-label">回收时间<span class="req">*</span></label><input type="datetime-local" class="form-input" id="rc_returnTime" value="${TNR_UI.nowLocalStr()}"></div>
+          <div class="form-group"><label class="form-label">领回单号</label><input class="form-input" id="rc_ledgerNo" value="系统自动生成（RET 前缀）" readonly style="background:var(--bg-subtle);color:var(--text-muted);"></div>
+          <div class="form-group"><label class="form-label">领回时间<span class="req">*</span></label><input type="datetime-local" class="form-input" id="rc_returnTime" value="${TNR_UI.nowLocalStr()}"></div>
         </div>
         <div class="form-row">
-          <div class="form-group"><label class="form-label">回收人姓名<span class="req">*</span></label><input class="form-input" id="rc_ownerName" placeholder="主人姓名"></div>
+          <div class="form-group"><label class="form-label">领回人姓名<span class="req">*</span></label><input class="form-input" id="rc_ownerName" placeholder="主人姓名"></div>
           <div class="form-group"><label class="form-label">联系电话<span class="req">*</span></label><input class="form-input" id="rc_ownerPhone" placeholder="手机号"></div>
         </div>
         <div class="form-group"><label class="form-label">住址<span class="req">*</span></label><input class="form-input" id="rc_ownerAddress" placeholder="详细住址"></div>
         <div class="form-group"><label class="form-label">走失原因<span class="req">*</span></label><textarea class="form-textarea" id="rc_lostReason" placeholder="说明走失原因及找回经过"></textarea></div>
-        <div class="form-group"><label class="form-label">回收人电子签名<span class="req">*</span></label>
+        <div class="form-group"><label class="form-label">领回人电子签名<span class="req">*</span></label>
           <div class="sig-field" id="rc_signature"></div>
         </div>
       `;
     };
     const { close } = TNR_UI.modal({
-      title: '回收登记 · ' + pet.code,
+      title: '领回登记 · ' + pet.code,
       size: 'lg',
       body,
-      actions: '<button class="btn btn-secondary" data-action="close">取消</button><button class="btn btn-success" id="btnSubmitRecover">确认回收</button>'
+      actions: '<button class="btn btn-secondary" data-action="close">取消</button><button class="btn btn-success" id="btnSubmitRecover">确认领回</button>'
     });
 
     setTimeout(() => {
       const sigPad = TNR_UI.initSignatureField(document.getElementById('rc_signature'),
-        { title: '回收人电子签名' });
+        { title: '领回人电子签名' });
 
       document.getElementById('btnSubmitRecover').addEventListener('click', async () => {
         const ownerName = document.getElementById('rc_ownerName').value.trim();
@@ -3472,12 +3846,12 @@ const Shelter = {
         const ownerAddress = document.getElementById('rc_ownerAddress').value.trim();
         const lostReason = document.getElementById('rc_lostReason').value.trim();
         const returnTime = document.getElementById('rc_returnTime').value;
-        if (!ownerName || !ownerPhone) { TNR_UI.toast('请填写回收人信息', 'warning'); return; }
+        if (!ownerName || !ownerPhone) { TNR_UI.toast('请填写领回人信息', 'warning'); return; }
         if (!ownerAddress) { TNR_UI.toast('请填写住址', 'warning'); return; }
         if (!lostReason) { TNR_UI.toast('请填写走失原因', 'warning'); return; }
-        if (sigPad.isEmpty()) { TNR_UI.toast('请完成回收人电子签名', 'warning'); return; }
+        if (sigPad.isEmpty()) { TNR_UI.toast('请完成领回人电子签名', 'warning'); return; }
 
-        // 使用主人领回接口完成回收
+        // 使用主人领回接口完成领回
         const res = await TNR_API.ownerReturn(pet.id, {
           pet_id: pet.id,
           owner_name: ownerName,
@@ -3489,7 +3863,7 @@ const Shelter = {
         });
         if (res && res.success !== false) {
           const no = res.data && (res.data.ledgerNo || res.data.ledger_no);
-          TNR_UI.toast('回收登记成功' + (no ? '：' + no : '') + '，该动物已退回主人', 'success');
+          TNR_UI.toast('领回登记成功' + (no ? '：' + no : '') + '，该动物已退回主人', 'success');
           close();
           this._pets = await TNR_API.getPets();
           this.renderRelTab('recovery');
@@ -4445,112 +4819,10 @@ const Shelter = {
     setTimeout(() => TNR_UI.bindPhotoZoom(document), 50);
   },
 
-  /* 一宠一档档案详情：各阶段数据 + 照片墙（点击放大）。
-     数据来自 /api/business/pets/<id>/lifecycle/，与政府端「一宠一档」同源。 */
+  /* 一宠一档档案详情：实现已下沉到 TNR_UI.showPetArchive（芯片追溯也要跳转，
+     两端各写一份必然漂移）。保留本方法作为端内调用点。 */
   async showPetArchive(petId) {
-    let data = null;
-    try {
-      data = await TNR_API.getPetLifecycleStrict(petId);
-    } catch (e) {
-      TNR_UI.toast('档案加载失败：' + (e.message || '未知错误'), 'danger');
-      return;
-    }
-    const esc = TNR_UI.escape.bind(TNR_UI);
-    const pet = (data && (data.pet_brief || data.pet)) || {};
-    const photos = (data && data.photos) || [];
-    const events = (data && data.events) || [];
-
-    const items = [
-      { label: '一宠一档', value: '<span class="pet-code-chip">' + esc(pet.code || '—') + '</span>' },
-      { label: '昵称', value: esc(pet.name || '—') },
-      { label: '类别', value: esc(pet.species || '—') },
-      { label: '品种', value: esc(pet.breed || '—') },
-      { label: '性别', value: esc(pet.gender || '—') },
-      { label: '年龄', value: esc(pet.age || '—') },
-      { label: '毛色', value: esc(pet.color || '—') },
-      { label: '芯片号', value: esc(pet.chip_no || '—') },
-      { label: '当前状态', value: TNR_UI.petStatusBadge(pet.status) },
-      { label: '所属区县', value: esc(pet.district_name || '—') },
-      { label: '捕捉点', value: esc(pet.shelter_name || '—') },
-      { label: '所在医院', value: esc(pet.hospital_name || '—') }
-    ];
-
-    let html = TNR_UI.renderDescList(items);
-
-    // 照片墙：捕捉 / 整体合影 / 术前 / 术后 / 诊疗
-    html += '<div class="desc-item desc-full"><div class="desc-label">动物照片（点击可放大）</div><div class="desc-value">';
-    html += photos.length
-      ? '<div class="photo-grid" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr));">'
-        + photos.map(p => '<div class="photo-item"><img src="' + p.url + '" alt="' + esc(p.label) + '" data-zoom="' + p.url + '"><div class="photo-item-label">' + esc(p.label) + '</div></div>').join('')
-        + '</div>'
-      : '<span class="text-light fs-sm">暂无照片</span>';
-    html += '</div></div>';
-
-    // 流转全过程时间线（捕捉 → 转运 → 诊疗 → 回收/放归/领养/死亡）
-    html += '<div class="desc-item desc-full"><div class="desc-label">流转全过程（' + events.length + ' 条）</div><div class="desc-value">';
-    if (!events.length) {
-      html += '<span class="text-light fs-sm">暂无流转记录</span>';
-    } else {
-      html += '<div class="timeline">' + events.map(ev => {
-        const dateStr = ev.date ? TNR_UI.formatDate(ev.date) : '—';
-        let desc = '';
-        if (ev.type === 'capture') {
-          desc = '捕捉点：' + esc(ev.shelter_name || '—')
-            + '<br>小区：' + esc(ev.community_name || '—')
-            + '<br>地址：' + esc(ev.address || '—')
-            + '<br>物业交接人：' + esc(ev.contact_person || '—') + (ev.contact_phone ? ' / ' + esc(ev.contact_phone) : '')
-            + '<br>捕捉单号：' + esc(ev.ledger_no || '—');
-        } else if (ev.type === 'transfer') {
-          desc = '发出：' + esc(ev.from_shelter_name || '—')
-            + '<br>接收：' + esc(ev.to_hospital_name || '—')
-            + '<br>状态：' + esc(TNR_UI.transferStatusText(ev.status))
-            + (ev.received_at ? '<br>签收日期：' + esc(ev.received_at) : '');
-        } else if (ev.type === 'treatment') {
-          desc = '医院：' + esc(ev.hospital_name || '—')
-            + '<br>项目：' + esc((ev.items || []).join('、') || '—')
-            + '<br>状态：' + esc(TNR_UI.treatmentStatusText(ev.status))
-            + (ev.chip_no ? '<br>芯片号：' + esc(ev.chip_no) : '');
-        } else if (ev.type === 'release') {
-          desc = '放归小区：' + esc(ev.community_name || '—')
-            + '<br>接收人：' + esc(ev.receiver_name || '—')
-            + '<br>状态：' + esc(TNR_UI.releaseStatusText(ev.status));
-        } else if (ev.type === 'adoption') {
-          desc = '领养人：' + esc(ev.adopter_name || '—') + '<br>医院：' + esc(ev.hospital_name || '—');
-        } else if (ev.type === 'euthanasia') {
-          desc = '医院：' + esc(ev.hospital_name || '—') + '<br>原因：' + esc(ev.reason || '—');
-        } else if (ev.type === 'owner_return') {
-          // 回收：领回人完整信息 + 原因 + 操作人 + 签名照片
-          desc = '领回单号：' + esc(ev.ledger_no || '—')
-            + '<br>领回人：' + esc(ev.owner_name || '—')
-            + (ev.owner_phone ? '<br>联系电话：' + esc(ev.owner_phone) : '')
-            + (ev.owner_id_card ? '<br>身份证：' + esc(ev.owner_id_card) : '')
-            + (ev.owner_address ? '<br>住址：' + esc(ev.owner_address) : '')
-            + '<br>原因：' + esc(ev.reason || '—')
-            + '<br>操作人：' + esc(ev.operator_name || '—');
-          // 签名是 base64 data URL（png），直接当图片渲染
-          if (ev.signature && ev.signature.startsWith('data:image')) {
-            desc += '<div style="margin-top:8px;"><div style="font-size:12px;color:var(--ink-muted);margin-bottom:4px;">领回人电子签名</div>'
-              + '<img src="' + ev.signature + '" alt="签名" data-zoom="' + ev.signature + '" '
-              + 'style="max-width:260px;max-height:120px;background:#fff;border:1px solid var(--border-light);border-radius:6px;cursor:zoom-in;padding:4px;"></div>';
-          }
-        }
-        const evPhotos = ev.photos || [];
-        if (evPhotos.length) {
-          desc += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">'
-            + evPhotos.map(p => '<img src="' + p.url + '" alt="' + esc(p.label) + '" data-zoom="' + p.url + '" style="width:72px;height:72px;object-fit:cover;border-radius:6px;border:1px solid var(--border-light);cursor:zoom-in;">').join('')
-            + '</div>';
-        }
-        return '<div class="timeline-item done">'
-          + '<div class="timeline-time">' + esc(dateStr) + '</div>'
-          + '<div class="timeline-title">' + esc(ev.type_display || ev.type) + '</div>'
-          + '<div class="timeline-desc">' + desc + '</div>'
-          + '</div>';
-      }).join('') + '</div>';
-    }
-    html += '</div></div>';
-
-    TNR_UI.drawer({ title: '一宠一档档案 · ' + esc(pet.code || ''), body: html });
-    setTimeout(() => TNR_UI.bindPhotoZoom(document), 50);
+    return TNR_UI.showPetArchive(petId);
   },
 
   /* ========== 13. 个人中心 ========== */

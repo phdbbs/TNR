@@ -21,7 +21,9 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from PIL import Image
 
-from business.models import Adoption, AdoptionHallListing, Capture, CheckIn, Pet
+from business.models import (
+    Adoption, AdoptionHallListing, AdoptionPhoto, Capture, CheckIn, Pet,
+)
 from business.services import validate_image_upload
 from business.tests.base import BusinessTestBase, make_pet
 
@@ -203,7 +205,7 @@ class CheckInUploadValidationTest(BusinessTestBase):
 
 
 class AdoptionPhotoUploadValidationTest(BusinessTestBase):
-    """医院领养资料照片：非法时不得写进宠物档案。"""
+    """医院领养资料的**补充照片**：非法时整单都不落库。"""
 
     def test_rejects_non_image(self):
         pet = make_pet(code='TNRIMGADP001', status='pending_adopt',
@@ -213,10 +215,9 @@ class AdoptionPhotoUploadValidationTest(BusinessTestBase):
             hospital_name=self.hospital_a.name, intro='原简介')
         self.login_as(self.hospital_user_a)
         resp = self.client.post(f'/api/business/adoptions/{pet.id}/edit-info/',
-                                {'intro': '很亲人', 'photo_before': text_file('b.png')})
+                                {'intro': '很亲人', 'extra_photos': text_file('b.png')})
         self.expect_fail(resp, message='不是有效的图片文件')
-        pet.refresh_from_db()
-        self.assertFalse(pet.photo_before)
+        self.assertFalse(AdoptionPhoto.objects.filter(listing=listing).exists())
         # 照片非法时**整单都不该落库**：原实现先 save() 再校验照片，
         # 于是接口返回失败、界面弹红字，简介其实已经改掉了 —— 所见非所得。
         listing.refresh_from_db()
@@ -225,10 +226,21 @@ class AdoptionPhotoUploadValidationTest(BusinessTestBase):
     def test_accepts_real_image(self):
         pet = make_pet(code='TNRIMGADP002', status='pending_adopt',
                        district=self.district_a, hospital=self.hospital_a)
-        AdoptionHallListing.objects.create(pet=pet, hospital=self.hospital_a,
-                                           hospital_name=self.hospital_a.name)
+        listing = AdoptionHallListing.objects.create(
+            pet=pet, hospital=self.hospital_a,
+            hospital_name=self.hospital_a.name)
         self.login_as(self.hospital_user_a)
         self.ok(self.client.post(f'/api/business/adoptions/{pet.id}/edit-info/',
-                                 {'intro': '很亲人', 'photo_before': png_file('b.png')}))
+                                 {'intro': '很亲人', 'extra_photos': png_file('b.png')}))
+        photo = AdoptionPhoto.objects.get(listing=listing)
+        self.assertTrue(photo.image)
+
+    def test_system_photo_fields_are_read_only(self):
+        """旧字段（photo_before 等）不再接受上传：系统照片只来自捕捉/诊疗。"""
+        pet = make_pet(code='TNRIMGADP003', status='pending_adopt',
+                       district=self.district_a, hospital=self.hospital_a)
+        self.login_as(self.hospital_user_a)
+        self.ok(self.client.post(f'/api/business/adoptions/{pet.id}/edit-info/',
+                                 {'photo_before': png_file('b.png')}))
         pet.refresh_from_db()
-        self.assertTrue(pet.photo_before)
+        self.assertFalse(pet.photo_before)
