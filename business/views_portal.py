@@ -410,7 +410,7 @@ def _pet_stage(pet):
       诊疗已完成但未办结出院 → 待出院
       其余仍以 `Pet.status` 为准（含全部终态）。
     """
-    if pet.status in ('adopted', 'released', 'euthanized', 'dead', 'owner_returned'):
+    if pet.status in Pet.TERMINAL_STATUSES:
         return pet.status, pet.get_status_display()
 
     if ReturnOrder.objects.filter(status='pending').filter(

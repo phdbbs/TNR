@@ -1882,6 +1882,32 @@ MUTATIONS += [
         "{ title: '捕捉单号', key: 'ledgerNo', render:",
         'test_mobile_wide_tables_collapse_low_priority_columns',
     ),
+    (
+        # 撤回转运单把终态动物一起回退（现网真有一条：放归单已 released，
+        # 档案却被打回 in_transit）。去掉 exclude 必须让新用例变红。
+        'M172 撤回转运单不再排除终态动物',
+        'business/views_transfer.py',
+        "    Pet.objects.filter(code__in=pet_codes, district_id=transfer.district_id).exclude(\n"
+        "        status__in=Pet.TERMINAL_STATUSES).update(\n",
+        "    Pet.objects.filter(code__in=pet_codes, district_id=transfer.district_id).update(\n",
+        'test_withdraw_keeps_released_pet_released',
+    ),
+    (
+        'M173 驳回转运单不再排除终态动物',
+        'business/views_transfer.py',
+        "        Pet.objects.filter(code__in=remaining).exclude(\n"
+        "            status__in=Pet.TERMINAL_STATUSES).update(\n",
+        "        Pet.objects.filter(code__in=remaining).update(\n",
+        'test_reject_keeps_terminal_pet_terminal',
+    ),
+    (
+        # 巡检项写了方法却没挂进 `checks` 也一样是零 —— 这条证明「挂上」本身有判据。
+        'M174 放归办结巡检没进检查清单',
+        'core/management/commands/check_data_integrity.py',
+        "            ('放归已办结但宠物状态未出库', self.check_released_pet_status),\n",
+        '',
+        'test_released_document_on_non_terminal_pet_is_reported',
+    ),
 ]
 
 # 允许 5 元组（单文件变异）与 6 元组（+ 附加改动，用于「复现原缺陷」这类跨文件变异）

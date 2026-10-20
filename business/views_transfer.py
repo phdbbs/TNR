@@ -456,7 +456,11 @@ def transfer_reject(request, pk):
 
         # 医院退回：宠物回退为在途，并解除医院归属，
         # 使其真正回到「未转运」状态（可被领回、可编辑/删除捕捉单）
-        Pet.objects.filter(code__in=remaining).update(
+        # ⚠ 终态动物不能跟着回退：`remaining` 只是「本单没签收」的编号，
+        #    同名的另一张单可能早已把它放归/领养/无害化出库 —— 把它打回
+        #    「待转运」会让档案与已归档的出库单据互相矛盾（现网已有一条）。
+        Pet.objects.filter(code__in=remaining).exclude(
+            status__in=Pet.TERMINAL_STATUSES).update(
             status='in_transit', hospital=None)
 
         # 若该捕捉单还存在其它未退回的转运单，则保持已转运，不重复回退
@@ -509,7 +513,10 @@ def transfer_withdraw(request, pk):
 
     pet_codes = [c.strip() for c in transfer.pet_codes.split(',') if c.strip()]
     # 宠物编号全局唯一，按编号回退状态；同时限定本单区县以防编号被伪造
-    Pet.objects.filter(code__in=pet_codes, district_id=transfer.district_id).update(
+    # 终态（已放归/已领养/已死亡…）不回退：撤回一张待签收的转运单
+    # 不该把已经出库、单据已归档的动物重新变成「待转运」。
+    Pet.objects.filter(code__in=pet_codes, district_id=transfer.district_id).exclude(
+        status__in=Pet.TERMINAL_STATUSES).update(
         status='in_transit', hospital=None)
 
     # 本单可能装有多张捕捉单的动物，按宠物归属逐张重算

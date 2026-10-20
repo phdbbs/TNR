@@ -70,6 +70,7 @@ class Command(BaseCommand):
             ('诊疗记录区县与宠物区县不一致', self.check_treatment_district),
             ('主人领回区县与宠物区县不一致', self.check_owner_return_district),
             ('放归记录区县与宠物区县不一致', self.check_release_district),
+            ('放归已办结但宠物状态未出库', self.check_released_pet_status),
             ('领养记录区县与宠物区县不一致', self.check_adoption_district),
             ('安乐死记录区县与宠物区县不一致', self.check_euthanasia_district),
             ('宠物未作废但所属捕捉单已作废', self.check_pet_of_deleted_capture),
@@ -277,6 +278,24 @@ class Command(BaseCommand):
             lambda r: (f'{r.ledger_no or r.id}（{r.pet_code}）：放归={_district_name(r)} '
                        f'宠物={_district_name(r.pet)}'),
             limit, related=('district', 'pet__district'))
+
+    @staticmethod
+    def check_released_pet_status(limit):
+        """放归单已办结（`released`），宠物档案状态却不是「已放归」。
+
+        现网抓到过一条：撤回一张待签收的转运单时按编号把动物一律改回
+        `in_transit`，把当月**已放归办结**的档案拉回「待转运」—— 放归单、
+        打印件、物业签字都已归档，档案却重新变成「没出院」，而且全程不报错。
+        写入点已排除终态（`transfer_cancel` / `transfer_reject`），这条检查
+        负责把历史遗留行和任何同类路径造成的矛盾持续抓出来。
+        """
+        qs = (Release.objects.filter(status='released')
+              .exclude(pet__status='released').order_by('id'))
+        return _rows(
+            qs,
+            lambda r: (f'{r.ledger_no or r.id}（{r.pet_code}）：放归已办结，'
+                       f'宠物状态却是「{r.pet.get_status_display()}」'),
+            limit, related=('pet',))
 
     @staticmethod
     def check_adoption_district(limit):

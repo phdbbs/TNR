@@ -9,6 +9,7 @@ from io import StringIO
 
 from django.core.management import call_command
 
+from business.models import Release
 from business.tests.base import BusinessTestBase, make_capture, make_pet, make_user
 from core.models import AuditLog, Institution
 
@@ -83,6 +84,38 @@ class CheckDataIntegrityCommandTest(BusinessTestBase):
         self.assertEqual(code, 1)
         self.assertIn(pet.code, output)
         self.assertIn('捕捉单已作废', output)
+
+    def test_released_document_on_non_terminal_pet_is_reported(self):
+        """放归单已办结、档案却还挂在流程里 —— 现网真有一条，必须报出来。
+
+        成因是撤回一张没签收的转运单时按编号无条件回退状态，把已放归的
+        动物打回「待转运」：纸质放归单与物业签字已归档，档案却是「没出院」，
+        而且全程不报错。写入点已经修了，这条测的是**历史遗留行还能被查到**。
+        """
+        pet = make_pet(code='DI-REL-0001', district=self.district_a,
+                       shelter=self.shelter_a, status='in_transit')
+        Release.objects.create(
+            pet=pet, pet_code=pet.code, community=self.community_a,
+            community_name=self.community_a.name, status='released',
+            ledger_no='REL-DI-0001', district=self.district_a,
+            institution=self.shelter_a)
+        output, code = self._run()
+        self.assertEqual(code, 1, output)
+        self.assertIn('REL-DI-0001', output)
+        self.assertIn('放归已办结', output)
+
+    def test_released_document_matching_pet_is_not_reported(self):
+        """误报守卫：单据与档案一致（动物确实已放归）时一条都不该报。"""
+        pet = make_pet(code='DI-REL-0002', district=self.district_a,
+                       shelter=self.shelter_a, status='released')
+        Release.objects.create(
+            pet=pet, pet_code=pet.code, community=self.community_a,
+            community_name=self.community_a.name, status='released',
+            ledger_no='REL-DI-0002', district=self.district_a,
+            institution=self.shelter_a)
+        output, code = self._run()
+        self.assertEqual(code, 0, output)
+        self.assertIn('✓ 放归已办结但宠物状态未出库', output)
 
     # ---------- 明细截断 ----------
     def test_limit_caps_detail_lines(self):

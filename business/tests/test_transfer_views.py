@@ -4,13 +4,31 @@ from unittest import mock
 from django.utils import timezone
 
 from business import views_transfer
-from business.models import Pet, Transfer
+from business.models import Pet, Release, Transfer
 from business.services import busy_transfer_codes, capture_transfer_state
 from business.tests.base import (
     assert_doc_no,BusinessTestBase, make_capture, make_institution,
                                  make_pet, make_user)
 
 TRANSFER_URL = '/api/business/transfers/'
+
+
+def mark_released(base, pet, ledger_no='REL-TRM-1'):
+    """把动物按「放归已办结」落库：单据 `released` + 档案状态同步。
+
+    用来构造「回退类操作遇上终态动物」这个场景 —— 现网确实有一条这样的档案
+    与单据互相矛盾的数据，成因见 `TransferWithdrawTest.test_withdraw_keeps_released_pet_released`。
+    """
+    Release.objects.create(
+        pet=pet, pet_code=pet.code, community=base.community_a,
+        community_name=base.community_a.name, status='released',
+        ledger_no=ledger_no, district=pet.district,
+        institution=pet.shelter or pet.hospital)
+    # `release_confirm` 办结时改的就是这两个：单据 released + 档案 released
+    pet.status = 'released'
+    pet.hospital = None
+    pet.save(update_fields=['status', 'hospital'])
+    return pet
 
 
 class TransferCreateTest(BusinessTestBase):
@@ -635,6 +653,21 @@ class TransferRejectAndReassignGuardTest(BusinessTestBase):
         transfer.refresh_from_db()
         self.assertEqual(transfer.reject_reason, '容量不足')
 
+    def test_reject_keeps_terminal_pet_terminal(self):
+        """驳回不能把已出库（终态）的动物打回「待转运」。
+
+        `remaining` 只是「本单没签收」的编号清单，不代表这些动物还在流程里：
+        同一编号可能已经被别的单据放归/领养办结，纸质件与签字都已归档。
+        无条件回退会让档案与已归档单据互相矛盾（现网抓到过一条）。
+        """
+        pet, transfer = self._make_pending()
+        mark_released(self, pet, ledger_no='REL-TRM-RJ')
+        self.login_as(self.hospital_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/reject/',
+                               {'reason': '容量不足'}))
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'released', '终态动物不得被回退成待转运')
+
     def test_rejected_pet_returns_to_pending_pool(self):
         """被驳回的动物必须自动回到「待转运」备选框。
 
@@ -733,6 +766,23 @@ class TransferWithdrawTest(BusinessTestBase):
         pet.refresh_from_db()
         self.assertEqual(pet.status, 'in_transit')
         self.assertIsNone(pet.hospital_id, '撤回后必须解除医院归属')
+
+    def test_withdraw_keeps_released_pet_released(self):
+        """撤回一张没签收的转运单，不能把已放归办结的动物打回「待转运」。
+
+        现网真有一条：`Release` 状态是 `released`（放归单、打印件、物业签字
+        都已归档），档案状态却是 `in_transit`。撤回按编号无条件回退、没排除
+        终态，于是动物「出了院又回到没出院」，而且全程没有任何报错。
+        判据落在**动物状态**上，不停在「接口返回成功」。
+        """
+        pet, transfer = self._make_pending()
+        mark_released(self, pet, ledger_no='REL-TRM-WD')
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json(f'{TRANSFER_URL}{transfer.id}/withdraw/'))
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'released', '终态动物不得被回退成待转运')
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'void', '撤回本身仍然要成功，只是不动终态动物')
 
     def test_withdraw_unlocks_capture(self):
         """医院未签收撤回后，捕捉单应回到可编辑/可删除。"""

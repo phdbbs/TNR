@@ -30,6 +30,10 @@ class Pet(models.Model):
         ('dead', '已死亡/无害化'),
         ('owner_returned', '主人领回'),
     ]
+    #: 已出库的终态：到了这些状态，动物就不在任何在办流程里了。
+    #: 回退类操作（驳回/撤回转运单）必须排除它们，否则一张作废的转运单
+    #: 能把「已放归/已领养」的档案打回「待转运」，与已归档的单据互相矛盾。
+    TERMINAL_STATUSES = ('adopted', 'released', 'euthanized', 'dead', 'owner_returned')
     SPECIES_CHOICES = [
         ('猫', '猫'),
         ('狗', '狗'),
