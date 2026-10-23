@@ -10556,4 +10556,129 @@ renderAccountsTable() {
 （`git status` 干净）。该手册里的过期结论**只在报告与 `DEPLOY.md` 里纠偏，不落在手册上**。
 `DEPLOY.md` §5.15 因本次改写比原来长 4 行，手册引用它的 `DEPLOY.md:941`–`979`
 等行号会有小幅漂移 —— 引用锚是行号，这一点在只读手册没法改成章节锚之前应当注意。
+实测校准后的锚：§5.15 起于 `DEPLOY.md:941`，现跨到 985，`## 六、常见报错对照`
+在 `DEPLOY.md:986`（原来是 982）。
+
+### 一百二十八、生产发布（c4fd5ab → ts-phd）与发布后实测
+
+发布包 `git archive --format=tar.gz --prefix=tnr/ HEAD`：**288 个条目 / 1,868,066 字节**，
+sha256 `3994c867707ce49cdb20742ff2811d35362b3b19b507b08fabfbc31bdeaef7db`
+（上传后两端一致）。解包前先用 `git diff --diff-filter=D --name-only 07b25fa..c4fd5ab`
+确认**本批没有删除任何文件** —— `/opt/tnr` 不是 git 工作区，覆盖式解包不会清旧文件，
+一旦本批删过模块，残留的 `.py` 会继续可 import。
+
+发布动作与结果（`2026-10-23 14:03`）：
+
+| 步骤 | 结果 |
+|---|---|
+| `migrate --noinput` | `No migrations to apply.`（本批无迁移，`business/models.py` 未改） |
+| `check` | 0 issues |
+| `collectstatic`（root）+ `chown www-data` | 8 copied / 162 unmodified |
+| 三条哈希闸门 | `tnr-api.js` `1b16c2635908`、`platform.js` `ae08c051a452`、`hospital.js` `638eed44a6af` —— 源码 == 产物 == nginx 实际吐出的内容 == 页面里的 `?v=` |
+| `supervisorctl restart` | 新 pid 3055801 / 3055809，RUNNING |
+| Traceback 总数 | gunicorn 519、qworker 8 —— **与重启前逐字相同**，本次发布没引入新异常 |
+| `Schedule.objects.count()` | 2（`auto_promote_to_adoptable` next_run 当日 19:00、`send_checkin_reminders` next_run 11-01 01:00） |
+| HTTP | `/` 302、`/login/` 200、`/api/pets/` 404 且 `Content-Type: application/json`（接口一律 JSON 的契约没破） |
+| 五端登录 | `platform` / `admin` / `cy_gov` / `adopter1` / `city_shelter` 全部 302 进门户，门户页 200 |
+| 平台端新页面 | `/platform/` HTML 里出现「出院单据维护」，且引的正是本次 `platform.js` 哈希 |
+| `check_data_integrity` | 仍然只有那 1 条 `REL2600001（TNR260917009）`，**未新增** |
+
+#### 备份闸门踩到的两处坑
+
+1. **`tar` 的 `-C` 只管紧随其后的那一个成员名**，`--exclude` 必须写在成员名之前。
+   写 `tar -czf X -C /opt tnr media` 得到的是「`/opt/tnr` 整棵 + 在 cwd 里找 `media`」：
+   产物变成一个 132 MB 的「媒体包」（其实是全量代码含 venv）+ 一句
+   `media: Cannot stat`，而 conf 包因同样的原因只有 162 字节（空包）。
+   **判据不是 tar 的退出码，是 `tar -tzf | wc -l` 与内容清单**：
+   代码包 1314 条目 / 20,445,949 字节且 `^tnr/venv/` 命中 0 次、
+   媒体包 336,965 字节、配置包能列出 `etc/nginx/sites-enabled/tnr` 与
+   `etc/supervisor/conf.d/tnr.conf`。
+2. **备份产物不能落在正被打包的树里**。第一次把 code tar 写进 `/opt/tnr/backups/`，
+   tar 报 `file changed as we read it` 并 exit≠0；备份统一放 `/var/backups/tnr/`
+   （在 `/opt/tnr` 之外），`.env` 与配置副本 `chmod 600`。
+
+数据库备份（`docker exec 1Panel-mariadb-LQ69 mariadb-dump … --single-transaction --routines --triggers`）
+实测 **863,329 字节 / 40 个 `CREATE TABLE` / 32 张表有 `INSERT` / 结尾有
+`-- Dump completed on 2026-10-23 5:59:57`**。
+
+> ⚠ `OPERA_GUIDE` §3.4 与 §8.2 写的「备份的**表数 = 33**」闸门**已过期**（该文件只读，此处只纠偏不落手册）。
+> 现网真值：**受管模型表 38 张，库里 40 张**（多出的 4 张是 `accounts_user_groups`、
+> `accounts_user_user_permissions`、`auth_group_permissions`、`django_migrations` 这类框架表，
+> 38 张模型表在库里**一张不缺**）。判据应从「数到 33」换成
+> **「模型表清单 ⊆ 库表清单，且 dump 有 `Dump completed` 结尾」** —— 按 33 数下去，
+> 每次发布都会多出一张表要人临时判断是不是备份坏了。
+
+#### 生产上跑不了测试套件（新发现，值得记住）
+
+`tnr` 这个库账号的权限只有两条：`USAGE ON *.*` + `ALL PRIVILEGES ON tnr_system.*`。
+Django 测试运行器要建 `test_tnr_system`，**建库这一步必然失败** —— 所以
+`OPERA_GUIDE` §8.2「在 `/opt/tnr` 里 `python manage.py test`」这条**在现网不可执行**，
+除非给库账号加 `CREATE` 权限或改用 root 建库（都属于对现网基础设施的写操作，
+不该在发布流程里顺手做）。测试留在开发机 / CI 跑，现网只做**只读实测**，见下。
+
+#### 三项新功能的现网实测（全部只读，零落库）
+
+现网 50 只动物、28 张诊疗单里**没有任何一张处于「诊疗完成且未办结」**
+（`pending_treatment()` 命中 0）。这本身就是第一条要验的事：新加的出院闸门
+**不能把存量流程挡死**。逐只 × 四个去向共 200 次判据求值，
+`discharge_candidate_error()` 返回非空的条数 = **0**，与
+`services_discharge` 里「只约束确实处于待出院的动物，没走过诊疗流程的存量行
+仍只由各接口原有的 `Pet.status` 口径把关」的注释一致。
+
+建议去向的锁，现网数据直接可验：**15 只终态动物全部锁死**（含「已出院…请由平台端维护单据」文案），
+**2 只被单据占用的动物**（如 `TNR260917026` 状态「待领出」）锁死并给出「请先撤回或办结该单据」，
+其余 **32 只在可改窗口内**。
+
+正向分流用**事务内造数 + 强制回滚**验（不落库）：把 `TNR261005001` 的一张诊疗单改成
+「已完成未办结、建议=放回原小区」，四个去向得到
+`adoption`/`death`/`owner` 三条拒绝文案 + `release` **PASS**；再把动物状态推到
+`pending_release`，`advice_edit_error()` 立刻转为拒绝。
+回滚后复查快照：诊疗单 34/35/36 的 `disposal_advised`、`done_at`、`disposed_at`
+与发布前逐字一致，`adoption 19 = completed`、`release 7 = released`，
+`Pet/Treatment/Adoption/Release = 50/28/5/5` 未变。
+
+HTTP 闸门矩阵（全部应为拒绝，且**拒绝即无痕**）：
+
+| 请求 | 响应 |
+|---|---|
+| 跨院改建议（诊疗单 34 属 I005，用 aixin_hosp） | 404 诊疗单不存在或无权访问 |
+| 本院已办结单改建议（36） | 400「本单已办结，建议去向不能再修改」 |
+| 未点「诊疗完成」就改（35） | 400「请先点击「诊疗完成」，动物进入待出院后才能修改建议去向」 |
+| 非法去向值 | 400（同上，完成判据在它之前 —— 短路顺序正确） |
+| 维护接口 `doc_type=bogus` / 缺 `target` / 缺 `reason` / `reason` 201 字 | 400 四条文案各自命中 |
+| 维护接口白名单外的迁移（`adoption 19 completed → received`、`release 7 released → completed`） | 400「当前为「…」，不能退回…」 |
+| **政府端**（`admin`）调维护接口 | **403 无权访问该接口**（只读口径守住） |
+
+七条拒绝之后回查：两张单据状态没动，`core_auditlog` 里今天多了 **11 条**
+「出院单据维护·修改单据状态（**失败**）」、`success` 全为 `False` ——
+本次向该接口发的 11 个请求（含政府端那一个 **403**）**全部留了痕**，
+连没进到业务判据就被角色装饰器挡掉的也记。失败也留痕，符合这类操作的监管要求。
+
+> 维护接口的请求字段名是 `doc_type` / `doc_id` / `target` / `reason`
+> （`discharge_doc_status` 里 `field('doc_type','docType')`），**不是** `kind` / `to`；
+> 猜错会得到「单据类型不合法」，容易误判成白名单坏了。
+
+回滚预案（本批可执行的最小组合）：代码用 `git archive --prefix=tnr/ 07b25fa`
+重打包覆盖 + `collectstatic` root 跑 + `supervisorctl restart`；
+**本批无迁移**，不需要动库；数据兜底用
+`/opt/tnr/backups/tnr_system-20261023-135957-pre-c4fd5ab.sql`。
+
+#### 本轮 `DEPLOY.md` 改动造成的锚点右移（手册是行号锚，只能这样对账）
+
+`OPERA_GUIDE` 只读，它引 `DEPLOY.md` 的 37 个行号锚会跟着漂移。本轮实测校准值：
+
+| 手册引用 | 本轮前 | 本轮后 |
+|---|---|---|
+| `DEPLOY.md:36`（`git archive` 发布包） | 36 | **55** |
+| `DEPLOY.md:761`（`/api/` 三条闸门单测） | 761 | **784** |
+| `DEPLOY.md:839`（`tests_session_expiry`） | 839 | **868** |
+| `DEPLOY.md:934`（`supervision.tests_notice`） | 934 | **963** |
+| `DEPLOY.md:941`（§5.15 `collectstatic` 以 root 跑） | 941 | **970** |
+| `## 六、常见报错对照` | 982 | **1015** |
+
+顺带一条**本轮之前就已存在**的漂移：手册 §8.2 引的 `settings.py:346`
+（「测试会隔离 MEDIA_ROOT」）实际在 `tnr_system/settings.py:338` ——
+`settings.py` 本轮没动过，说明行号锚这种引用方式本身就在持续腐烂。
+建议将来允许改手册时统一换成章节锚（`DEPLOY.md §5.15` 而不是 `:941`）。
+
 

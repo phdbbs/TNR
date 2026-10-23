@@ -27,13 +27,36 @@
 
 ```bash
 # 0. 备份（服务器上执行；容器里没有 mysql 客户端，要用 mariadb-dump）
-mkdir -p /root/tnr-backup-$(date +%Y%m%d-%H%M%S)
-#   mariadb-dump tnr_system > .../db-tnr_system.sql
-#   tar czf .../opt-tnr-code.tar.gz -C / opt/tnr      # ⚠ -C / 之后路径不再带 /opt
-#   cp /opt/tnr/.env /etc/nginx/... /etc/supervisor/... 一并备份
+DIR=/var/backups/tnr; TS=$(date +%Y%m%d-%H%M%S); sudo mkdir -p $DIR
+#   ① 库：宿主机 mysql 客户端 8.0 连 Docker 里的 MariaDB 会 exit=2 产坏备份，必须在容器内跑
+sudo docker exec 1Panel-mariadb-LQ69 mariadb-dump -utnr -p"$DBP" \
+     --single-transaction --routines --triggers tnr_system \
+     | sudo tee $DIR/tnr_system-$TS.sql >/dev/null
+#   判据：结尾有 `-- Dump completed on …`；`CREATE TABLE` 数 == 库里的表数；
+#         且「Django 受管模型表 ⊆ 备份里的表」—— 用
+#         `manage.py shell -c` 比 `apps.get_models()` 与 `connection.introspection.table_names()`，
+#         现网真值是 模型表 38 / 库表 40（多的是 m2m 与 django_migrations 等框架表）。
+#         ⚠ 「数到 33」那个老闸门已过期，照它数每次发布都会多出一张表要人重新判断。
+#   ② 代码 + 媒体 + 配置 + .env
+sudo tar -czf $DIR/code-$TS.tar.gz \
+     --exclude=tnr/venv --exclude=tnr/staticfiles --exclude=tnr/media --exclude=tnr/backups \
+     -C /opt tnr
+sudo tar -czf $DIR/media-$TS.tar.gz -C /opt/tnr media
+sudo tar -czf $DIR/conf-$TS.tar.gz --absolute-names /etc/nginx/sites-enabled /etc/supervisor/conf.d
+sudo cp /opt/tnr/.env $DIR/env-$TS.txt; sudo chmod 600 $DIR/*-$TS.*
+#   ⚠ 两个 tar 坑（第六十二轮踩过，产过 132MB 的「假媒体包」和一个 162 字节的空包）：
+#     `--exclude` 必须写在成员名**之前**；`-C` 只作用于紧随其后的**那一个**成员名，
+#     所以 `-C /opt tnr media` 打的是 `/opt/tnr` 整棵 + 在 cwd 里找一个不存在的 `media`。
+#     备份产物**不要落在正被打包的树里**（写 `/opt/tnr/backups/` 会报
+#     `file changed as we read it` 并非零退出），统一放 `/var/backups/tnr`。
+#     tar 的退出码不够，判据是 `tar -tzf | wc -l` 与内容清单。
 
 # 1. 发布包（本地）——只含已提交内容，天然干净
 git archive --format=tar.gz --prefix=tnr/ HEAD -o /tmp/tnr-release.tar.gz
+
+# 1b. 解包前先确认本批没有删文件：/opt/tnr 不是 git 工作区，覆盖式解包不清旧文件，
+#     被删模块的 .py 会留在原地继续可 import
+git diff --diff-filter=D --name-only <上个发布版本>..HEAD
 
 # 2. 服务器上解包覆盖 → 3. 校准 .env（保留 SECRET_KEY/DB_PASSWORD，只补 TNR_AMAP_KEY）
 # 4. migrate + seed_data + ensure_superuser → 5. mkdir media + collectstatic
@@ -762,6 +785,12 @@ python manage.py test core.tests.AllApiRoutesContractTest \
                       core.tests.AllApiRoutesReturnJsonWhenUnauthenticatedTest
 # 共 4 例，覆盖全部 78 条 /api/ 路由（新增接口自动纳入）
 ```
+
+⚠ **这几条单测在现网跑不了**：生产库账号 `tnr` 的权限只有
+`USAGE ON *.*` + `ALL PRIVILEGES ON tnr_system.*`，而 Django 测试运行器要
+建 `test_tnr_system` —— 建库这步直接失败（第六十二轮实测）。
+单测在开发机 / CI 跑，现网只做**只读**验证：`curl` 打形状、
+`check_data_integrity`、`Schedule.objects.count()`、重启后错误日志增量。
 
 ⚠ **别用 `http://127.0.0.1:8000`** —— 直连 gunicorn 会绕过 nginx，
 测出来的结果不代表真实路径（第三十一轮就因此把一个真实缺陷误判成「正常」）。
