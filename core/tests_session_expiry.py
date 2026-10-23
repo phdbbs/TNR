@@ -99,17 +99,31 @@ class UnauthorizedRedirectContractTest(SimpleTestCase):
         `_get` / `_post` / `_postForm` / `_handle` / `getData` 五条路径
         各自独立处理响应 —— 只修 `_get` 的话，写接口遇到会话过期仍然
         会把失败当业务错误提示，用户还是不知道要重新登录。
+
+        ⚠ `_post` / `_postForm` 现在把响应收口委托给 `_envelope()`
+        （非 JSON / 非 2xx 也要判失败），所以「认 401」允许两种形态：
+        方法体内直接判，或者显式委托给自身认 401 的 `_envelope`。
+        委托后仍在这里验证 `_envelope` 确实识别 401 —— 否则「每个方法
+        都写着 `_envelope`」却没人处理会话过期，测试会变成空转。
         """
+        envelope = self._method_body(self.api, '_envelope(res, data) {')
+        self.assertTrue(envelope, '找不到 _envelope 的方法体')
+        self.assertIn('res.status === 401', envelope,
+                      '_envelope 没有识别 401 —— 委托它的写接口都会漏掉会话过期')
+        self.assertIn('this._handleUnauthorized(', envelope,
+                      '_envelope 必须把 401 交给统一的跳转处理器')
         for signature in ('async _get(url)', 'async _post(url, body)',
                           'async _postForm(url, formData)',
                           'async _handle(res)', 'async getData(url)'):
             with self.subTest(method=signature):
                 body = self._method_body(self.api, signature)
                 self.assertTrue(body, f'找不到 {signature} 的方法体')
-                self.assertIn(
-                    'res.status === 401', body,
-                    f'{signature} 没有识别 401 —— 会话过期时它会把失败'
-                    f'静默成「没有数据」或一句业务错误')
+                detects = ('res.status === 401' in body
+                           or 'this._envelope(res, data)' in body)
+                self.assertTrue(
+                    detects,
+                    f'{signature} 没有识别 401（也没有委托 _envelope）—— '
+                    f'会话过期时它会把失败静默成「没有数据」或一句业务错误')
 
     def test_toast_is_deduplicated(self):
         """并发 401 会让 `_handleUnauthorized` 与调用方 catch 各弹一次。

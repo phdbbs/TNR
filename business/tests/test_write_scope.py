@@ -88,6 +88,16 @@ class HospitalWriteScopeBase(BusinessTestBase):
         cls.v_treatment = Treatment.objects.create(
             pet=cls.v_pet, district=d, hospital=cls.hospital_a2)
 
+        # 本院**诊疗过**、但当前挂在别家医院的动物（跨院送医后又被转走）。
+        # 上面那些受害记录全都落在「本院经手过」之外，取单那一关就 404 了，
+        # 拦下它们的是取单口径而非机构判据 —— 判据删掉也测不出来。
+        # 这条形状才是判据的**唯一**防线：读得到（`hospital_pet_scope` 命中本院
+        # 诊疗单），写不得（`pet.hospital_id` 不是本院）。
+        cls.moved_pet = make_pet(district=d, shelter=cls.shelter_a,
+                                 hospital=cls.hospital_a2, status='pending_adopt')
+        Treatment.objects.create(pet=cls.moved_pet, district=d,
+                                 hospital=cls.hospital_a)
+
         # ---------- 正向对照：本方（自己）名下的同类记录 ----------
         cls.o_pet = make_pet(district=d, shelter=cls.shelter_a,
                              hospital=cls.hospital_a, status='pending_adopt')
@@ -189,6 +199,25 @@ class HospitalWriteCrossInstitutionTest(HospitalWriteScopeBase):
                             {'intro': 'x'})
         self.assert_refused(resp, '无机构账号')
         self.assertFalse(AdoptionHallListing.objects.filter(pet=self.v_pet).exists())
+
+    def test_edit_info_refused_for_pet_moved_to_other_hospital(self):
+        """本院**诊疗过**、现在挂他院的动物：读得到，但仍然写不得。
+
+        上面那条 `..._cross_institution_refused` 拦不住这个洞 —— 受害宠物压根
+        不在本院的取单范围内，`get_hospital_scoped_pet()` 先返回 None，
+        404 文案「宠物不存在或无权访问」同样含「无权」，判据删了用例照样绿
+        （变异 M1 长期报 WEAK 就是这个原因）。这里要求拒绝**来自判据本身**，
+        所以断言的是判据专用的那句文案。
+        """
+        resp = self.post_as(self.me,
+                            f'/api/business/adoptions/{self.moved_pet.id}/edit-info/',
+                            {'intro': '越权改的文案', 'is_active': True})
+        msg = self.assert_refused(resp, 'edit-info 本院诊疗过但挂他院')
+        self.assertIn('无权编辑此动物', msg,
+                      '被取单口径的 404 挡掉了 —— 这条用例没测到机构判据')
+        self.assertFalse(
+            AdoptionHallListing.objects.filter(pet=self.moved_pet).exists(),
+            '判据失效：本院给挂着别家医院的宠物上架了公开领养大厅')
 
 
 class HospitalWriteOwnRecordsTest(HospitalWriteScopeBase):

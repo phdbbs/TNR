@@ -7,9 +7,10 @@
 from django.utils import timezone
 
 from business.models import (
-    Adoption, AdoptionApplication, AdoptionHallListing, Euthanasia, Pet,
-    Release, ReturnOrder, Treatment,
+    Adoption, AdoptionApplication, AdoptionHallListing, Euthanasia, OwnerReturn,
+    Pet, Release, ReturnOrder, Treatment,
 )
+from business.services_discharge import DISCHARGE_LABELS
 from business.tests.base import (
     BusinessTestBase, assert_doc_no, make_capture, make_institution, make_pet,
 )
@@ -72,7 +73,8 @@ class ReturnOrderCreateTest(ReturnOrderBase):
         Treatment.objects.create(
             pet=pet, pet_code=pet.code, hospital=self.hospital_a,
             hospital_name=self.hospital_a.name, institution=self.hospital_a,
-            status='completed', done_at=timezone.now(), district=self.district_a)
+            status='completed', done_at=timezone.now(), district=self.district_a,
+            disposal_advised='released')
         self._order(self._create_order([pet.id]))
         pet.refresh_from_db()
         self.assertEqual(pet.status, 'return_pending')
@@ -190,7 +192,8 @@ class ReturnOrderShelterTest(ReturnOrderBase):
         Treatment.objects.create(
             pet=pet, pet_code=pet.code, hospital=self.hospital_a,
             hospital_name=self.hospital_a.name, institution=self.hospital_a,
-            status='completed', done_at=timezone.now(), district=self.district_a)
+            status='completed', done_at=timezone.now(), district=self.district_a,
+            disposal_advised='released')
         order = self._order(self._create_order([pet.id]))
 
         self.login_as(self.shelter_user_a)
@@ -674,6 +677,136 @@ class DisposalReservationTest(BusinessTestBase):
             message='已批准的领养申请')
         second.refresh_from_db()
         self.assertEqual(second.status, 'pending', '拒绝后申请单不得变成已通过')
+
+
+class DischargeAdviceGateTest(BusinessTestBase):
+    """出院四个去向的候选 = 最后一张待办结诊疗单的「建议去向」（第五十七轮）。
+
+    判据必须在后端：前端列表分流只是让人少白点一次，直接 POST 才是真缺口 ——
+    建议「放归」的动物若能从这里开出领养单，同一只动物就有了两个归宿，
+    而且两张单据都能走到「已办结」，台账上互相覆盖动物状态。
+    """
+
+    def setUp(self):
+        self.login_as(self.hospital_user_a)
+
+    def _pending(self, code, advised='pending_adopt'):
+        """一只「诊疗完成、未办结」的动物（= 待出院），建议去向 = `advised`。"""
+        pet = make_pet(code=code, status='in_treatment', district=self.district_a,
+                       shelter=self.shelter_a, hospital=self.hospital_a)
+        Treatment.objects.create(
+            pet=pet, pet_code=pet.code, hospital=self.hospital_a,
+            hospital_name=self.hospital_a.name, institution=self.hospital_a,
+            status='in_progress', done_at=timezone.now(),
+            disposal_advised=advised, district=self.district_a)
+        return pet
+
+    def _doc(self, kind, pet):
+        """按去向开对应出院单据，返回响应（成功与失败都由用例自己判）。"""
+        if kind == 'adoption':
+            return self.post_json(f'{ADOPT_URL}register/', {
+                'pet_id': pet.id, 'adopter_name': '李领养',
+                'adopter_phone': '13800002101'})
+        if kind == 'death':
+            return self.post_json(f'{EUTH_URL}create/', {
+                'pet_id': pet.id, 'kind': 'euthanasia',
+                'reason': '伤病无法救治',
+                'euthanized_at': timezone.localdate().isoformat()})
+        if kind == 'owner':
+            return self.post_json('/api/business/owner-returns/create/', {
+                'pet_id': pet.id, 'owner_name': '张领回',
+                'owner_phone': '13800002102'})
+        if kind == 'release':
+            return self.post_json('/api/business/releases/create/',
+                                  {'pet_id': pet.id})
+        return self.post_json(f'{RTN_URL}create/', {'pet_ids': [pet.id]})
+
+    def _reject_others(self, pet, blocked):
+        """`blocked` 里每个去向都要 400，而且**一条单据都不落库**。
+
+        `return`（运回单）与 `release`（医院直接放归）共用服务层去向 key
+        `release`，所以文案里的去向名按 `DISCHARGE_LABELS` 取。
+        """
+        for kind in blocked:
+            label = DISCHARGE_LABELS['release' if kind == 'return' else kind]
+            self.expect_fail(self._doc(kind, pet), message=f'不能按「{label}」办理出院')
+        self.assertEqual(Adoption.objects.count(), 0, '拒绝后不得留下领养单')
+        self.assertEqual(Euthanasia.objects.count(), 0, '拒绝后不得留下死亡登记')
+        self.assertEqual(ReturnOrder.objects.count(), 0, '拒绝后不得留下运回单')
+        self.assertEqual(Release.objects.count(), 0, '拒绝后不得留下放归单')
+        self.assertEqual(OwnerReturn.objects.count(), 0, '拒绝后不得留下领回单')
+
+    def test_adoption_advice_blocks_other_three(self):
+        pet = self._pending('ADV-A-001', advised='pending_adopt')
+        self._reject_others(pet, ('death', 'owner', 'release', 'return'))
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_treatment', '拒绝不得推动动物出院')
+        self.ok(self._doc('adoption', pet))
+
+    def test_release_advice_blocks_other_three(self):
+        pet = self._pending('ADV-A-002', advised='released')
+        self._reject_others(pet, ('adoption', 'death', 'owner'))
+        self.ok(self._doc('return', pet))
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'return_pending')
+
+    def test_owner_advice_blocks_other_three(self):
+        pet = self._pending('ADV-A-003', advised='owner_returned')
+        self._reject_others(pet, ('adoption', 'death', 'release', 'return'))
+        self.ok(self._doc('owner', pet))
+
+    def test_death_advice_accepts_both_euthanasia_and_dead(self):
+        """「安乐死」与「死亡 / 无害化」共用一张登记表单，两个建议 key 都要放行。"""
+        for advised in ('euthanized', 'dead'):
+            pet = self._pending(f'ADV-A-004-{advised}', advised=advised)
+            self._reject_others(pet, ('adoption', 'owner', 'release', 'return'))
+            self.ok(self._doc('death', pet))
+            Euthanasia.objects.all().delete()
+
+    def test_blank_advice_blocks_all_four(self):
+        """没补录建议 = 四个去向全部拒绝，并引导先去诊疗看板补录。
+
+        放行其中任何一个（旧行为）就等于「没判断也能出院」，
+        而界面按建议分流，操作员根本不知道自己点的是哪条路径。
+        """
+        pet = self._pending('ADV-A-005', advised='')
+        for kind in ('adoption', 'death', 'owner', 'release', 'return'):
+            self.expect_fail(self._doc(kind, pet), message='没有记录建议去向')
+        self.assertEqual(Adoption.objects.count(), 0)
+        self.assertEqual(Euthanasia.objects.count(), 0)
+        self.assertEqual(ReturnOrder.objects.count(), 0)
+        self.assertEqual(Release.objects.count(), 0)
+        self.assertEqual(OwnerReturn.objects.count(), 0)
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_treatment')
+
+    def test_latest_pending_treatment_decides(self):
+        """多张待办结单要看**最后一张**的建议（复查后医生改了判断）。"""
+        pet = self._pending('ADV-A-006', advised='released')
+        Treatment.objects.create(
+            pet=pet, pet_code=pet.code, hospital=self.hospital_a,
+            hospital_name=self.hospital_a.name, institution=self.hospital_a,
+            status='in_progress', done_at=timezone.now(),
+            disposal_advised='pending_adopt', district=self.district_a)
+        self.expect_fail(self._doc('return', pet), message='不能按「放归」办理出院')
+        self.ok(self._doc('adoption', pet))
+
+    def test_pet_without_pending_treatment_is_not_gated(self):
+        """不在待出院流程里的动物不做建议校验（存量行 / 没走诊疗流程）。
+
+        一刀切会让这批动物**再也办不了出院**：它们的诊疗单要么没有、
+        要么早已办结，可比的对不存在。
+        """
+        pet = make_pet(code='ADV-A-007', status='pending_adopt',
+                       district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a)
+        Treatment.objects.create(
+            pet=pet, pet_code=pet.code, hospital=self.hospital_a,
+            hospital_name=self.hospital_a.name, institution=self.hospital_a,
+            status='completed', done_at=timezone.now(),
+            disposed_at=timezone.now(), disposal='pending_adopt',
+            district=self.district_a)
+        self.ok(self._doc('adoption', pet))
 
 
 class ReleaseConfirmClosesTreatmentTest(BusinessTestBase):

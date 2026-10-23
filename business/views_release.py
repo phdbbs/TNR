@@ -11,6 +11,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
 from business.models import Release
+from business.services_discharge import discharge_candidate_error
 from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
@@ -101,6 +102,13 @@ def release_create(request):
                 '放归备选须为医院已运回、且运回单经本站签收的动物')
     elif pet.status not in ('in_treatment', 'pending_adopt', 'pending_release'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可放归')
+    elif user.role == 'hospital':
+        # 医院端放归（旧口径：不经运回单直接开）同样受建议去向约束
+        # （第五十七轮）。捕捉点分支不校验：那时动物已经过医院运回签收，
+        # 建议去向早就随单据办结了，再比一次会把正常的第二步挡死。
+        err = discharge_candidate_error(pet, 'release')
+        if err:
+            return json_fail(err)
 
     # 互斥校验：不能与未完结的领养流程同时占用同一只动物
     if pet_has_active_adoption(pet):

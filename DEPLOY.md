@@ -18,7 +18,7 @@
 **重写 `.env`**（丢掉现有 `SECRET_KEY`/`DB_PASSWORD`）、`chown root:www-data`
 （而进程实际以 `ubuntu` 跑）。三者都会破坏现状。
 
-**当前 `admin` 口令**：演示期**固定为 `123456`**（磊哥决策，上线时手工删号重建）。
+**当前 `admin` 口令**：演示期**固定为 `111111`**（业务方决策，上线时手工删号重建）。
 该口令来自 `.env` 的 `ADMIN_PASSWORD`，重跑 `deploy.sh` 会**强制重置**为该值 ——
 详见 §5.12。**手工改口令请改 `.env`**，不要只跑 `manage.py ensure_superuser`
 （不带 `--reset-password` 时它会跳过、什么也不做）。
@@ -233,10 +233,10 @@ chmod 640 /opt/tnr/.env
 ## 四、验证定位相关接口
 
 ```bash
-# 登录（用现有账号，如 cy_shelter/123456）
+# 登录（用现有账号，如 cy_shelter/111111）
 curl -s -c /tmp/c.txt -o /dev/null http://127.0.0.1:8000/login/
 CSRF=$(grep csrftoken /tmp/c.txt | awk '{print $7}')
-curl -s -b /tmp/c.txt -c /tmp/c.txt -d "username=cy_shelter&password=123456&csrfmiddlewaretoken=$CSRF" \
+curl -s -b /tmp/c.txt -c /tmp/c.txt -d "username=cy_shelter&password=111111&csrfmiddlewaretoken=$CSRF" \
   -H 'Referer: http://127.0.0.1:8000/login/' -o /dev/null -w '登录: %{http_code}\n' http://127.0.0.1:8000/login/
 
 # 逆地理编码（应返回 success:true 与地址）
@@ -266,7 +266,7 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 |---|---|---|
 | 配置无告警 | `python manage.py check --deploy` | 除 HTTPS 类告警（W004/W008/W012/W016）外无警告 |
 | 超级管理员可登录 | 访问 `/admin/` 用 `ensure_superuser` 输出的口令 | 能进入后台 |
-| 演示账号可用 | 访问 `/login/` 用 `cy_shelter` / `123456` | 能进入捕捉点门户 |
+| 演示账号可用 | 访问 `/login/` 用 `cy_shelter` / `111111` | 能进入捕捉点门户 |
 | **照片上传可用**（含手机原图） | 用 **≥3MB 的真实手机照片**提交捕捉登记（或多张合照），再**经反代取回** | 上传成功；`media/` 出现文件；`/media/...` 返回 200 且**与原图逐字节一致**；**不得**出现 `RequestDataTooBig` 的 400 |
 | **请求体上限一致** | 见下方 §5.5 / §5.7 | nginx `client_max_body_size` **20M**；`DATA_UPLOAD_MAX_MEMORY_SIZE` 未被人为调小；`DATA_UPLOAD_MAX_NUMBER_FILES` **≥ `MAX_CAPTURE_BATCH + 1`**；`/api/` 的 400 与 413 **都是 JSON**（`handler400` + nginx `error_page 413`） |
 | **`/api/` 响应形状一致** | 见下方 §5.8 / §5.9 | 五类非 2xx **全是 JSON**：400（`handler400`）/ 403 CSRF（`CSRF_FAILURE_VIEW`）/ **404（`handler404`）** / **500（`handler500`）** / 413（nginx）；**未登录不得 302 到登录页**（用 `api_login_required` 或 `role_required`）。⚠ 自检必须**经 nginx（80 端口）**，直连 8000 结果不可信 |
@@ -280,7 +280,7 @@ curl -s -b /tmp/c.txt http://127.0.0.1:8000/api/business/geocode/ip/
 | 无未捕获异常 | **只看最后一次重启之后**的 Traceback（见 §5.3），**不要**对整份日志 `grep -c` | 重启后 **0** 处业务异常；`DisallowedHost` 是**正确行为**，不算 |
 | 非法参数不炸 | 非数字进整型外键 / 非日期进日期字段 / 超大数 | 4xx，**不得 500** |
 | 地图 Key 生效 | `GET /api/business/geocode/reverse/?lng=112.144&lat=32.045`（需登录） | 返回真实地址（不是「未配置地图服务Key」） |
-| 静态文件已更新 | 页面上确认 `?v=` 为本次版本号 | 与 `templates/base.html` 一致 |
+| 静态文件已更新 | 三条哈希对齐（见 §5.15）：页面里的 `?v=<12 位>` == 源码文件 == `staticfiles/` 产物 | 缓存键由**内容哈希**自动生成，人工不需要记版本号 |
 
 > ⚠ **上传那一项必须走真实 HTTP multipart**，不能只用 shell 试写文件 ——
 > shell 试写只证明「磁盘可写」，证明不了「Django 存储 + 反代 `alias` + 目录属主」串起来是对的。
@@ -510,7 +510,7 @@ print('已生成', os.path.getsize('/tmp/tnr-big/big.jpg') // 1024, 'KB')"
 curl -s -c /tmp/c.txt -o /dev/null http://127.0.0.1:8000/login/
 CSRF=$(grep csrftoken /tmp/c.txt | awk '{print $7}')
 curl -s -b /tmp/c.txt -c /tmp/c.txt -o /dev/null \
-  -d "username=cy_shelter&password=123456&csrfmiddlewaretoken=$CSRF" \
+  -d "username=cy_shelter&password=111111&csrfmiddlewaretoken=$CSRF" \
   -H 'Referer: http://127.0.0.1:8000/login/' http://127.0.0.1:8000/login/
 
 # 3) 发超大 multipart，看状态码与 Content-Type
@@ -850,7 +850,7 @@ python manage.py test core.tests_session_expiry
 
 | `.env` 里 `ADMIN_PASSWORD` | 行为 |
 |---|---|
-| **有值**（如 `123456`） | 每次部署都**强制重置** `admin` 口令为该值（带 `--reset-password`） |
+| **有值**（如 `111111`） | 每次部署都**强制重置** `admin` 口令为该值（带 `--reset-password`） |
 | 空 | 维持旧行为：已有启用的超管则**不动口令** |
 
 **为什么改**：`ensure_superuser` 在没有启用的超管时会**随机生成**口令，
@@ -858,7 +858,7 @@ python manage.py test core.tests_session_expiry
 运维也不知道新口令」的死局（2026-09-23 实测 `admin/123456` 与
 `admin/admin123456` 均不匹配）。
 
-**当前策略**（磊哥决策）：**上线前固定 `123456`** 便于演示，
+**当前策略**（业务方决策）：**上线前固定 `111111`** 便于演示，
 上线时手工删号重建。
 
 **运维注意**：
@@ -873,7 +873,7 @@ python manage.py test core.tests_session_expiry
 ```bash
 cd /opt/tnr && ./venv/bin/python manage.py shell -c \
   "from accounts.models import User; u=User.objects.get(username='admin'); \
-   print('123456 matches:', u.check_password('123456'))"
+   print('111111 matches:', u.check_password('111111'))"
 ```
 
 
@@ -949,9 +949,13 @@ PermissionError: [Errno 13] Permission denied: '/opt/tnr/staticfiles/js/tnr-comm
 `staticfiles/` 属主是 `www-data`，而 `collectstatic` 若以 `ubuntu` 跑，
 **删不掉已有的旧文件** → 报错退出，旧 JS 原样留着。
 
-⚠ 危险之处在于**它不是彻底失败**：`/login/` 里的 `?v=` 已经升到新版本号，
+⚠ 危险之处在于**它不是彻底失败**：`/login/` 里的 `?v=<内容哈希>` 已经随源码变新，
 但 `nginx` 返回的 `tnr-api.js` 仍是**旧内容** —— 浏览器按新 URL 取到旧文件并缓存，
 于是「改了代码、部署了、功能没生效」。
+
+> 缓存键换成内容哈希（第五十二轮，`core/templatetags/assets.py`）后，「**忘升 `?v=`**」
+> 这一类事故没有了；但「**产物没更新**」依然在 —— 哈希只说明源码是什么，
+> 不说明 `/staticfiles/` 里躺的是哪一版。判据因此从「看版本号」换成「比哈希」。
 
 正确顺序：
 
@@ -965,18 +969,18 @@ chown -R www-data:www-data /opt/tnr/staticfiles
 **判据**（不能只看 `collectstatic` 的退出码，要看 nginx 实际吐出来的内容）：
 
 ```bash
-# 产物时间必须是本次部署时间
-stat -c '%y' /opt/tnr/staticfiles/js/tnr-api.js
-# nginx 实际返回的内容里必须有本次新增的标识符（按本次改动替换）
+# 源码哈希：页面里 `tnr-api.js?v=` 后面那 12 位应当等于它
+sha1sum /opt/tnr/static/js/tnr-api.js | cut -c1-12
+# 产物哈希：必须与源码同值 —— 不同就是 collectstatic 没落到位
+sha1sum /opt/tnr/staticfiles/js/tnr-api.js | cut -c1-12
+# 兜底：nginx 实际返回的内容里必须有本次新增的标识符（按本次改动替换）
 curl -s http://127.0.0.1/static/js/tnr-api.js | grep -c '_handleUnauthorized'
 ```
 
-⚠ 若窗口期已有客户端按**新** URL 缓存过旧内容，就必须再升一位 `?v=`。
-判断方式（读访问日志，别猜）：
+哈希算法是 `sha1(文件字节)` 取前 12 位，与 `asset_stamp()` 一致，可直接 `sha1sum` 对。
 
-```bash
-grep -c 'v=20260924a' /var/log/nginx/access.log   # 为 0 才不用再升位
-```
+⚠ **不要再人工升 `?v=`，也不要再 `grep 'v=2026xxxx'` 访问日志**：那个串现在是哈希，
+每次部署整片变化，旧串恒为 0，会给出假的「没人缓存过」。
 
 
 ## 六、常见报错对照

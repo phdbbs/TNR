@@ -4867,7 +4867,7 @@ const Shelter = {
       const confirmPwd = document.getElementById('pf_confirmPwd').value;
       if (!oldPwd || !newPwd || !confirmPwd) { TNR_UI.toast('请填写完整', 'warning'); return; }
       if (newPwd !== confirmPwd) { TNR_UI.toast('两次新密码不一致', 'warning'); return; }
-      if (newPwd.length < 6) { TNR_UI.toast('新密码至少6位', 'warning'); return; }
+      if (newPwd.length < 8) { TNR_UI.toast('新密码至少8位', 'warning'); return; }
       btn.disabled = true;
       try {
         const res = await TNR_API.post('/api/me/password/', {

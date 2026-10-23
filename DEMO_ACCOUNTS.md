@@ -6,7 +6,7 @@
 > 业务记录按业务单号匹配，重复执行不会产生重复数据。
 > 因此可以、也应该在每次启动流程中重复执行。
 
-## 演示账号清单（统一密码：`123456`）
+## 演示账号清单（统一密码：`111111`）
 
 | 账号 | 角色 | 归属 |
 |------|------|------|
@@ -60,13 +60,13 @@
   姓名、`is_active` 状态都会被修正回下表定义的值。因此演示账号即使被人为
   停用或改了归属，重跑一次即可恢复；命令输出会打印被校准的账号清单
   （例如 `已校准 2 个演示账号：hd_shelter(is_active)、aixin_hosp(is_active)`）。
-- **密码不会被自动重置**。`seed_data` 只在账号**不存在**时写入 `123456`；
+- **密码不会被自动重置**。`seed_data` 只在账号**不存在**时写入 `111111`；
   静默覆盖生产环境里人为修改过的凭据是危险的。若确实需要重置密码，
   请手工执行：
   ```python
   from accounts.models import User
   u = User.objects.get(username='cy_shelter')
-  u.set_password('123456')
+  u.set_password('111111')
   u.save()
   ```
 - 演示账号被停用后，除 `seed_data` 校准外，也可由**平台管理员**在
@@ -74,7 +74,7 @@
 - **演示账号提示落在两处 UI 上**（第四十三轮）：
   `templates/login.html` 的 `.login-demo-hint` 与
   `templates/portal/index.html` 的 `.portal-demo-hint`（仅未登录时渲染）。
-  两处都是**公开页面**、都写着 `123456`，**改一处必须改另一处**。
+  两处都是**公开页面**、都写着 `111111`，**改一处必须改另一处**。
   判据在 `core/tests_frontend_consistency.py::PortalLandingPageTest`：
   提示里出现的账号必须在本文件清单内、门户首页提示必须**列全**本文件的所有账号、
   两个提示都必须给出平台端账号 `platform`。
@@ -88,11 +88,11 @@
   cd /opt/tnr && PLATFORM_ADMIN_PASSWORD=新口令 ./venv/bin/python manage.py \
       ensure_platform_admin --username platform --reset-password
   ```
-- **生产环境 `admin` 的口令固定为 `123456`**（演示期约定，第三十七轮磊哥决策）。
+- **生产环境 `admin` 的口令固定为 `111111`**（演示期约定，第三十七轮起由业务方拍板）。
   `deploy.sh` 第 5 步会写 `.env`，第 7 步执行
   `manage.py ensure_superuser --username admin --reset-password`，
   口令来源优先级：命令行 `ADMIN_PASSWORD` → **继承已有 `.env`** → 随机生成。
-  由于 `.env` 里已写入 `ADMIN_PASSWORD=123456`，**每次部署都会强制应用它**，
+  由于 `.env` 里已写入 `ADMIN_PASSWORD=111111`，**每次部署都会强制应用它**，
   不会再回退成「随机生成、只显示一次、不落盘」那个谁也不知道的口令。
   ⚠ **正式上线时**按约定手工删除已有账号、全部重建，并把 `.env` 里该行改成
   强口令或清空 —— 那时 `ensure_superuser` 才会走「没拿到口令 → SKIP」分支，

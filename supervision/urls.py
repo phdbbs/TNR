@@ -3,7 +3,7 @@ Task 13: 政府监管后端 - URL 路由
 """
 from django.urls import path
 
-from . import views
+from . import doc_maintenance, views
 
 app_name = 'supervision'
 
@@ -29,6 +29,9 @@ urlpatterns = [
     path('users/create/', views.user_create, name='user_create'),
     # 只改「姓名 / 电话 / 执业证号」三个抄错类字段 —— 见 `views.user_update` 的说明。
     path('users/<int:pk>/edit/', views.user_update, name='user_update'),
+    # 管理员为他人重置口令；本人改密走 `/api/me/password/`（必须验原口令）。
+    path('users/<int:pk>/reset-password/', views.user_reset_password,
+         name='user_reset_password'),
     path('users/<int:pk>/toggle/', views.user_toggle_status, name='user_toggle_status'),
 
     # 监管
@@ -41,4 +44,13 @@ urlpatterns = [
     # 公告（第三十七轮）：发布与已发列表
     path('notices/', views.notice_list, name='notice_list'),
     path('notices/publish/', views.notice_publish, name='notice_publish'),
+
+    # ============================================
+    # 出院单据状态维护（第五十七轮，仅平台管理员）
+    # 判据与白名单在 `supervision.doc_maintenance`，这里只挂路由。
+    # ============================================
+    path('discharge-docs/', doc_maintenance.discharge_doc_list,
+         name='discharge_doc_list'),
+    path('discharge-docs/status/', doc_maintenance.discharge_doc_status,
+         name='discharge_doc_status'),
 ]

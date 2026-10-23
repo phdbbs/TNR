@@ -213,6 +213,12 @@
   .dsp-opt .tx b{font-size:var(--fs-md);color:var(--ink-text)}
   .dsp-opt .tx i{font-style:normal;font-size:var(--fs-sm);color:var(--ink-muted)}
   .dsp-opt .go{color:var(--ink-light);flex:none}
+  /* 与「建议去向」不符的去向：置灰不可点（第五十七轮，后端同判据会 400） */
+  .dsp-opt:disabled,.dsp-opt[disabled]{cursor:not-allowed;border-color:var(--border-light);
+    background:var(--bg-page, #f7f8fa);opacity:.55}
+  .dsp-opt[disabled]:hover{border-color:var(--border-light);background:var(--bg-page, #f7f8fa)}
+  .dsp-opt[disabled] .tx b{color:var(--ink-muted)}
+  .dsp-opt[disabled] .go{visibility:hidden}
   /* 医生在「诊疗完成」时给的去向建议 —— 高亮供确认，不自动跳过选择 */
   .dsp-opt.suggested{border-color:var(--cinnabar);background:var(--cinnabar-light)}
   .dsp-opt .dsp-tag{display:inline-block;margin-left:6px;padding:1px 6px;vertical-align:1px;
@@ -253,6 +259,18 @@
     font-weight:700;color:var(--cinnabar);background:var(--cinnabar-light);
     border-radius:var(--r-full);padding:1px 7px}
   #page-discharge .dsp-tab.active .cnt{background:var(--white)}
+  /* 待补录建议去向：四个去向都选不到它，顶栏给直达入口 */
+  #page-discharge .dsp-notice{display:flex;gap:var(--sp-3);flex-wrap:wrap;align-items:center;
+    justify-content:space-between;margin-bottom:var(--sp-4);padding:11px 13px;
+    border:1px solid var(--autumn-light);border-radius:var(--r-lg);
+    background:var(--autumn-light);font-size:var(--fs-sm);color:#8a6a1f;line-height:1.55}
+  #page-discharge .dsp-notice .tx{flex:1;min-width:220px;display:flex;flex-direction:column;gap:3px}
+  #page-discharge .dsp-notice .tx b{font-size:var(--fs-base);font-weight:600}
+  #page-discharge .dsp-notice .chips{display:flex;gap:6px;flex-wrap:wrap}
+  #page-discharge .dsp-notice .chip{padding:5px 11px;border:1px solid var(--border-ink);
+    border-radius:var(--r-full);background:var(--white);font-size:var(--fs-sm);
+    font-family:inherit;color:#8a6a1f;cursor:pointer;transition:all var(--t-fast)}
+  #page-discharge .dsp-notice .chip:hover{border-color:var(--cinnabar);color:var(--cinnabar)}
   #page-discharge .dsp-subtabs{margin-bottom:var(--sp-4)}
   #page-discharge .dsp-acts{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
   /* 待放归多选：勾选区是「运回单」的唯一入口，行高按触控热区给足 */

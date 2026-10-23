@@ -37,11 +37,12 @@ from business.models import (
 from business.services_chip import count_available_chips
 from business.tests.base import assert_doc_no
 from core.models import District, Institution
+from core.passwords import DEMO_INITIAL_PASSWORD
 
 SEED_USERNAMES = [
     'admin', 'cy_gov', 'hd_gov', 'cy_shelter', 'hd_shelter',
     # `city_shelter` = 市级捕捉点操作员（第四十五轮）。必须一起列进来 ——
-    # 这条清单是「演示账号都能用 123456 登录」的覆盖面，
+    # 这条清单是「演示账号都能用 DEMO_INITIAL_PASSWORD 登录」的覆盖面，
     # 少一个就是**新账号没被这条闸门覆盖**（而不是它不存在）。
     'city_shelter',
     'aixin_hosp', 'ruipeng_hosp', 'babitang_hosp', 'adopter1',
@@ -201,7 +202,9 @@ class SeedDemoAccountSelfHealingTest(SeedDataTestBase):
         self.seed()
         for username in SEED_USERNAMES:
             u = User.objects.get(username=username)
-            self.assertTrue(u.check_password('123456'), f'{username} 的初始密码应为 123456')
+            self.assertTrue(
+                u.check_password(DEMO_INITIAL_PASSWORD),
+                f'{username} 的初始密码应为 {DEMO_INITIAL_PASSWORD}')
             self.assertTrue(u.is_active, f'{username} 应为启用状态')
 
 

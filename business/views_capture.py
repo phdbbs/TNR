@@ -14,6 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
 from business.models import Capture, Pet, OwnerReturn
+from business.services_discharge import discharge_candidate_error
 from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
@@ -967,6 +968,11 @@ def owner_return_create(request, pk=None):
             return json_fail(
                 f'宠物当前状态({pet.get_status_display()})不可领回，'
                 '仅诊疗中/待领养宠物可在医院办理领回')
+        # 建议去向必须是「主人领回」（第五十七轮）：出院四个去向互斥，
+        # 判据见 `services_discharge.discharge_candidate_error`。
+        err = discharge_candidate_error(pet, 'owner')
+        if err:
+            return json_fail(err)
         if pet_has_approved_application(pet):
             return json_fail('该宠物已有已批准的领养申请（待出库），'
                              '请先处理后再办理领回')

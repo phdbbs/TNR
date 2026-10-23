@@ -4,8 +4,6 @@ Task 13: 政府监管后端
 - 业务监管 / 物资监管 / 台账中心 / 操作日志 / 系统配置
 """
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Sum, Count, Q, Prefetch, Max
 from django.views.decorators.csrf import csrf_exempt
@@ -32,6 +30,7 @@ from core.models import (
     AuditLog, District, Institution,
     STATUS_ACTIVE, STATUS_INACTIVE, STATUS_VALUES, status_label,
 )
+from core.passwords import password_policy_error
 from core.privacy import mask_id_card
 from core.scope import is_empty_scope
 from .models import SystemConfig
@@ -730,19 +729,14 @@ def user_create(request):
 
     # 口令必须由建号人显式设置：平台端建的是后台管理/操作账号，
     # 统一默认口令一旦泄漏，拿到的是全院/全区的业务权限。
-    # 密码学判据与 `/api/me/password/` 共用 Django 的校验器，避免两套口径。
-    if not password:
-        return json_fail('请设置初始密码')
-    if len(password) < 6:
-        return json_fail('密码长度不能少于6位')
+    # 强度判据与重置/改密共用 `core.passwords`，避免三处各自漂移。
     # 传一个未落库的 User 给校验器：`UserAttributeSimilarityValidator`
     # 只有在拿到 user 时才比对用户名/姓名。不传会让「口令=用户名」在建号
     # 这一侧放行，而改密接口（传 request.user）却拒绝 —— 同一套判据两个结果。
     probe = User(username=username, first_name=name)
-    try:
-        validate_password(password, probe)
-    except ValidationError as e:
-        return json_fail('；'.join(e.messages))
+    err = password_policy_error(password, probe, empty='请设置初始密码')
+    if err:
+        return json_fail(err)
 
     user = User.objects.create_user(
         username=username,
@@ -847,6 +841,61 @@ def user_update(request, pk):
         'vet_license': user.vet_license,
         'changed': changed,
     }, message='、'.join(changed) + '已更新')
+
+
+# ============================================
+# 9c. 重置账号密码
+# ============================================
+@csrf_exempt
+@role_required('platform_admin')
+@login_required
+def user_reset_password(request, pk):
+    """平台端为**其他账号**重置登录口令。
+
+    与 `/api/me/password/` 的分工：
+
+    - 自助改密要求验证原口令，只适合本人；
+    - 本接口是管理员补救「本人忘记口令」的路径，因此**不能作用于当前登录账号**
+      （否则一个未锁屏的会话就能绕过原口令校验改掉本人密码），也**不能作用于
+      超级管理员**（Django 后台的兜底账号，其口令只应通过服务器侧维护）。
+
+    ⚠ 口令只以哈希落库：审计只记「谁重置了谁的密码」，不记录、不回显明文。
+    改密后目标账号的既有会话会因 `session_auth_hash` 失配而自动失效。
+    """
+    if request.method != 'POST':
+        return json_fail('仅支持 POST 请求', status=405)
+
+    # 与 user_list / user_toggle_status 同一套范围过滤：平台管理员是全局角色，
+    # 这里的 scope 恒为 None；保留它是为了以后角色白名单变化时不留下跨区越权。
+    qs = User.objects.all()
+    scope = get_district_scope(request)
+    if scope is not None:
+        qs = qs.filter(district_id=scope)
+    user = qs.filter(id=pk).first()
+    if user is None:
+        return json_fail('用户不存在或无权访问', status=404)
+
+    if user.id == request.user.id:
+        return json_fail('不能在此重置本人密码，请前往个人中心修改')
+    if user.is_superuser:
+        return json_fail('超级管理员账号的密码不可由平台端重置')
+
+    data = parse_json_body(request)
+    password = body_str(data, 'password').strip()
+    # 相似度校验以**目标账号**为基准：拿操作人做基准会放过「口令=目标用户名」。
+    err = password_policy_error(password, user, empty='请设置新密码')
+    if err:
+        return json_fail(err)
+
+    user.set_password(password)
+    user.save(update_fields=['password'])
+    request.audit_district = user.district
+    request.audit_object_repr = user.username
+    request.audit_detail = '平台端重置登录密码'
+    return json_ok(
+        {'id': user.id, 'username': user.username},
+        message='密码已重置，请将新密码当面转交本人',
+    )
 
 
 # ============================================

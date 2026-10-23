@@ -15,6 +15,7 @@ from business.tests.base import (
     BusinessTestBase, make_institution, make_pet,
 )
 from business.services import pet_has_active_adoption
+from core.passwords import DEMO_INITIAL_PASSWORD
 
 HALL_URL = '/api/business/adoptions/hall/'
 HALL_LISTINGS_URL = '/api/business/hall-listings/'
@@ -81,7 +82,7 @@ class AdoptionRegisterTest(BusinessTestBase):
         self.assertEqual(adopter.role, 'adopter')
         self.assertEqual(adopter.username, '13866667777')
         self.assertEqual(adopter.phone, '13866667777')
-        self.assertTrue(adopter.check_password('123456'))
+        self.assertTrue(adopter.check_password(DEMO_INITIAL_PASSWORD))
         self.assertTrue(Message.objects.filter(user=adopter).exists())
 
     def test_register_reuses_existing_adopter_by_phone(self):

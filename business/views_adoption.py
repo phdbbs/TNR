@@ -18,10 +18,12 @@ from datetime import datetime
 from accounts.decorators import role_required
 from accounts.models import User
 from core.http import to_camel_key
+from core.passwords import DEMO_INITIAL_PASSWORD
 from business.models import (
     Adoption, AdoptionApplication, AdoptionPhoto, Pet, AdoptionHallListing,
     Message, Blacklist,
 )
+from business.services_discharge import discharge_candidate_error
 from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
@@ -325,6 +327,14 @@ def adoption_register(request):
 
     if pet.status not in ('pending_adopt', 'in_treatment'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可领养')
+
+    # 出院去向必须由「诊疗完成时的建议去向」决定（第五十七轮）：
+    # 建议放归 / 领回 / 死亡的动物不能从领养这里被选走。
+    # 判据在后端而不是只在前端列表里 —— 界面挡住了，直接 POST 仍能给
+    # 同一只动物开出两张归宿相反的单据。
+    err = discharge_candidate_error(pet, 'adoption')
+    if err:
+        return json_fail(err)
 
     # 互斥校验：同一只动物不能被放归流程与领养流程同时占用
     if pet_has_pending_release(pet):
@@ -1087,7 +1097,8 @@ def _get_or_create_adopter(name, phone, id_card):
 
     adopter = User.objects.create_user(
         username=username,
-        password='123456',  # 默认密码，领养人可后续修改
+        # 演示期统一初始口令，领养人可登录后自行修改（自助改密要求 ≥8 位）
+        password=DEMO_INITIAL_PASSWORD,
         role='adopter',
         phone=phone,
         first_name=name[:30],

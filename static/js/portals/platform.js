@@ -3,7 +3,7 @@
 
    职责边界（第四十二轮）：全局设置在这里，业务查看在政府端（/gov/）。
    ------------------------------------------------
-   机构基础管理 / 账号权限管理 / 系统配置  ← 本端
+   机构基础管理 / 账号权限管理 / 出院单据维护 / 系统配置  ← 本端
    数据总览大屏 / 全业务监管 / 物料全局监管 / 全局台账中心 ← 政府端
    ============================================ */
 
@@ -11,12 +11,14 @@ const PlatformPortal = {
   currentUser: window.TNR_USER || null,
   instState: { tab: 'district' },
   settingsState: { tab: 'prefix' },
+  docState: { type: '' },
 
   /* ⚠ 键必须与 `platform_base.html` 侧边栏的标签文本一一对应。
      点击是按 label 文本找 render 方法的，两边漂移就是「点了没反应」。 */
   titles: {
     'institutions': '机构基础管理',
     'accounts': '账号权限管理',
+    'docs': '出院单据维护',
     'settings': '系统配置'
   },
 
@@ -32,6 +34,7 @@ const PlatformPortal = {
     const navMap = {
       '机构基础管理': 'institutions',
       '账号权限管理': 'accounts',
+      '出院单据维护': 'docs',
       '系统配置': 'settings'
     };
     document.querySelectorAll('.portal-sidebar-nav .nav-item').forEach(a => {
@@ -590,11 +593,13 @@ const PlatformPortal = {
     const rowActions = r => r.id === selfId
       ? '<span style="font-size:var(--fs-xs);color:var(--ink-light);">当前账号</span>'
       : `<button class="btn-link" data-edit="${r.id}">编辑</button>`
+        + `<button class="btn-link" data-reset-password="${r.id}">重置密码</button>`
         + `<button class="btn-link ${TNR_UI.entityToggleBtnClass(r.status)}" data-toggle="${r.id}">${TNR_UI.entityToggleLabel(r.status)}</button>`;
     TNR_UI.mountTable('acctTableWrapper', { id: 'platform.accounts', columns, data, rowActions, emptyText: '暂无账号' });
     TNR_UI.delegateClick('acctTableWrapper', {
       'data-toggle': (id) => this.toggleAccountStatus(id),
-      'data-edit': (id) => this.showAccountEditModal(data.find(u => u.id === Number(id)))
+      'data-edit': (id) => this.showAccountEditModal(data.find(u => u.id === Number(id))),
+      'data-reset-password': (id) => this.showResetPasswordModal(data.find(u => u.id === Number(id)))
     });
   },
 
@@ -925,7 +930,7 @@ const PlatformPortal = {
         <p class="form-hint">改证号只影响之后的新单据：已开出的诊疗单上仍是当时快照的旧号，
           这是监管要求的（否则历史单据将无法证明当时由哪位执业兽医师签字）。</p>
       </div>` : ''}
-      <p class="form-hint">角色、所属区县、所属机构、密码与启停不在本入口修改。</p>
+      <p class="form-hint">密码请使用列表里的「重置密码」；角色、所属区县、所属机构与启停不在本入口修改。</p>
     `;
     const m = TNR_UI.modal({
       title: `编辑账号 · ${TNR_UI.escape(row.username)}`, body, size: 'md',
@@ -953,6 +958,52 @@ const PlatformPortal = {
     });
   },
 
+  /* 管理员重置他人密码：系统只存哈希，门槛只能是「当场设一个新的」。
+   * 本人不在此入口（列表里当前账号没有按钮）—— 自助改密必须验原密码，
+   * 服务端也拒绝把本接口用在自己身上。
+   */
+  showResetPasswordModal(row) {
+    if (!row) { TNR_UI.toast('账号不存在或已被删除，请刷新列表', 'warning'); return; }
+    const body = `
+      <div class="form-group">
+        <label class="form-label">账号</label>
+        <input type="text" class="form-input" value="${TNR_UI.escape(row.username)}" readonly>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">新密码<span class="req">*</span></label>
+          <input type="password" class="form-input" id="acctReset-password" placeholder="至少 8 位，不能是纯数字" autocomplete="new-password">
+        </div>
+        <div class="form-group">
+          <label class="form-label">确认新密码<span class="req">*</span></label>
+          <input type="password" class="form-input" id="acctReset-confirm" placeholder="再次输入新密码" autocomplete="new-password">
+        </div>
+      </div>
+      <p class="form-hint">重置后该账号已登录的会话会立即失效，须用新密码重新登录。
+        系统只保存密码哈希，看不到原密码 —— 请将新密码当面转交本人，并提醒其登录后自行修改。</p>
+    `;
+    const m = TNR_UI.modal({
+      title: `重置密码 · ${TNR_UI.escape(row.name || row.username)}`, body, size: 'md',
+      actions: `<button class="btn btn-secondary" data-action="cancel">取消</button><button class="btn btn-primary" id="acctResetSave">确认重置</button>`
+    });
+    m.overlay.querySelector('[data-action="cancel"]').addEventListener('click', m.close);
+    m.overlay.querySelector('#acctResetSave').addEventListener('click', async () => {
+      const password = m.overlay.querySelector('#acctReset-password').value.trim();
+      const confirm = m.overlay.querySelector('#acctReset-confirm').value.trim();
+      if (!password) { TNR_UI.toast('请输入新密码', 'warning'); return; }
+      if (password.length < 8) { TNR_UI.toast('密码长度不能少于8位', 'warning'); return; }
+      if (password !== confirm) { TNR_UI.toast('两次输入的新密码不一致', 'warning'); return; }
+      try {
+        const res = await TNR_API.resetUserPassword(row.id, password);
+        TNR_UI.assertOk(res, '重置失败');
+        TNR_UI.toast(res.message || '密码已重置', 'success');
+        m.close();
+      } catch (e) {
+        TNR_UI.toast(e.message || '重置失败', 'danger');
+      }
+    });
+  },
+
   async toggleAccountStatus(id) {
     try {
       const res = await TNR_API.toggleUser(id);
@@ -963,6 +1014,207 @@ const PlatformPortal = {
       TNR_UI.toast(e.message || '操作失败', 'danger');
     }
   },
+  /* ========== 出院单据维护（第六十一轮）==========
+   *
+   * 出院四类单据办结后，机构端就改不动了（动物已出库 / 捕捉点已签收 / 已放归），
+   * 填错时唯一的纠正入口在这里：把**单据**退回上一个状态、顺带回退动物档案状态，
+   * 再由机构重新办理。
+   *
+   * ⚠ 能退回哪些状态、退回去要动哪些字段，全部由服务端
+   * `supervision/doc_maintenance.py` 的白名单决定。本页只渲染接口返回的
+   * `targets` / `target_labels`，**不另写一份状态机** —— 前端自己判
+   * 「这一张应该能退」，要么按钮点下去被服务端 400，要么该退的单据界面上没入口。
+   */
+  /* 标签与服务端 `doc_maintenance.DOC_LABELS` 同源，逐条比对见契约测试。 */
+  DOC_TYPE_LABELS: {
+    '': '全部单据',
+    adoption: '领养单',
+    euthanasia: '死亡出库单',
+    return_order: '运回单',
+    release: '放归单'
+  },
+
+  async render_docs() {
+    const el = document.getElementById('page-docs');
+    el.innerHTML = '<div class="tabs">'
+      + Object.keys(this.DOC_TYPE_LABELS).map(t =>
+        '<div class="tab-item' + (this.docState.type === t ? ' active' : '')
+        + '" data-doc-tab="' + t + '">' + this.DOC_TYPE_LABELS[t] + '</div>').join('')
+      + '</div>'
+      + '<p class="form-hint mb-4">按动物编号或单据编号检索，「退回为…」把单据退回上一状态重办。'
+        + '每次退回都写入操作日志（旧状态 → 新状态｜原因），监管端可查，原因必填。</p>'
+      + TNR_UI.renderFilterBar([
+        { key: 'q', label: '搜索', type: 'search', placeholder: '动物编号 / 单据编号' },
+        { key: 'reversible', label: '可退回', type: 'select',
+          options: [{ value: '1', label: '只看当前可退回' }] }
+      ], '<button type="button" class="btn btn-secondary btn-sm" id="btnDocRefresh">刷新</button>')
+      + '<div class="table-wrapper" id="docTableWrapper">'
+      + '<div class="table-empty"><div class="table-empty-icon">⏳</div>'
+      + '<div class="table-empty-text">加载中...</div></div></div>';
+
+    el.querySelectorAll('[data-doc-tab]').forEach(tab => {
+      tab.addEventListener('click', () => {
+        this.docState.type = tab.dataset.docTab;
+        this.render_docs();
+      });
+    });
+    document.getElementById('btnDocRefresh').addEventListener('click', () => this.loadDocs());
+    await this.loadDocs();
+    // 筛选必须走 `loadDocs()`（重新取数）而不是只重渲染表格：
+    // `q` / `可退回` 是服务端条件，只重渲染的话搜索框等于装饰品。
+    TNR_UI.bindFilter(() => this.loadDocs(), el);
+  },
+
+  async loadDocs() {
+    const f = TNR_UI.getFilterValues(document.getElementById('page-docs'));
+    const query = { doc_type: this.docState.type, limit: 200 };
+    if (f.q) query.q = f.q;
+    if (f.reversible) query.reversible = f.reversible;
+    try {
+      // 严格读：静默读会把 403/500 渲染成「没有可维护的单据」，
+      // 管理员会以为这些流程真的没有错单 —— 与台账、公告同一类谎报。
+      this._docs = (await TNR_API.getDischargeDocs(query)) || [];
+    } catch (e) {
+      this._docs = null;
+      this.showLoadError(document.getElementById('docTableWrapper'),
+        '出院单据加载失败', e, () => this.loadDocs());
+      return;
+    }
+    this.renderDocsTable();
+  },
+
+  /* 空列表要说清是「真没有」还是「筛选没命中」。
+     「该类型下暂无出院单据」在关键字打错、或日期筛错时会把人引向
+     「这类单据一张都没有」这个假结论 —— 而这是维护页，看错就等于漏纠错。 */
+  _docsEmptyText(f) {
+    const scope = this.docState.type
+      ? this.DOC_TYPE_LABELS[this.docState.type] : '全部单据';
+    const conds = [];
+    if (f.q) conds.push('编号「' + f.q + '」');
+    if (f.reversible) conds.push('只看可退回');
+    if (f.start_date || f.end_date) {
+      conds.push((f.start_date || '最早') + ' ~ ' + (f.end_date || '今天'));
+    }
+    return conds.length
+      ? scope + '里没有匹配 ' + conds.join('、') + ' 的单据，可清空搜索或切页签'
+      : scope + '暂无出院单据';
+  },
+
+  renderDocsTable() {
+    if (!this._docs) return;
+    const f = TNR_UI.getFilterValues(document.getElementById('page-docs'));
+    const data = this._docs.filter(r =>
+      TNR_UI.inDateRange(r.created_at, f.start_date, f.end_date));
+    const cell = {
+      doc: r => '<div>' + TNR_UI.escape(r.doc_label) + '</div>'
+        + '<div class="fs-sm text-muted">'
+        + TNR_UI.escape(r.ledger_no || ('#' + r.id)) + '</div>',
+      pet: r => '<div>' + TNR_UI.escape(r.pet_code || '—') + '</div>'
+        + '<div class="fs-sm text-muted">' + TNR_UI.petStatusBadge(r.pet_status) + '</div>',
+      // 建议去向 = 医院在「诊疗完成」时给的方向。退回后机构要重新开单，
+      // 操作员得先看清这张单本来该走哪个去向。
+      advised: r => r.advised_display
+        ? TNR_UI.escape(r.advised_display)
+        : '<span style="color:var(--ink-light);">—</span>',
+      inst: r => '<div>' + TNR_UI.escape(r.institution_name || '—') + '</div>'
+        + '<div class="fs-sm text-muted">' + TNR_UI.escape(r.district_name || '全市') + '</div>',
+      status: r => TNR_UI.statusBadge(TNR_UI.escape(r.status_display || '—'),
+        r.targets.length ? 'warning' : 'default'),
+      created: r => TNR_UI.escape(r.created_at || '—')
+    };
+    // 手机端：主列（单据类型 + 编号）已经由 `cell.doc` 显示，卡片里不再重复一行；
+    // 状态与动物常显，建议去向 / 机构 / 创建时间收进「更多信息」。
+    const mobileCard = r => TNR_UI.mobileLine('状态', cell.status(r))
+      + TNR_UI.mobileLine('动物', cell.pet(r))
+      + TNR_UI.mobileMore(
+        TNR_UI.mobileLine('建议去向', cell.advised(r))
+        + TNR_UI.mobileLine('机构 / 区县', cell.inst(r))
+        + TNR_UI.mobileLine('创建时间', cell.created(r)));
+    const columns = [
+      { key: 'doc_label', title: '单据', render: cell.doc, mobileRender: mobileCard },
+      { key: 'pet_code', title: '动物 / 档案状态', render: cell.pet, mobile: 'hide' },
+      { key: 'advised_display', title: '建议去向', render: cell.advised, mobile: 'hide' },
+      { key: 'institution_name', title: '机构 / 区县', render: cell.inst, mobile: 'hide' },
+      { key: 'status_display', title: '单据状态', render: cell.status, mobile: 'hide' },
+      { key: 'created_at', title: '创建时间', render: cell.created, mobile: 'hide' }
+    ];
+    const rowActions = r => r.targets.length
+      ? r.targets.map((t, i) => '<button class="btn-link" data-rollback="'
+        + TNR_UI.escape(r.doc_type) + ':' + r.id + ':' + TNR_UI.escape(t) + '">'
+        + '退回为「' + TNR_UI.escape(r.target_labels[i] || t) + '」</button>').join('')
+      : '<span class="fs-sm text-muted">无可退回状态</span>';
+    TNR_UI.mountTable('docTableWrapper', {
+      id: 'platform.dischargeDocs', columns, data, rowActions,
+      emptyText: this._docsEmptyText(f)
+    });
+    TNR_UI.delegateClick('docTableWrapper', {
+      'data-rollback': (v) => this.rollbackDoc(v)
+    });
+  },
+
+  /* 退回确认：单据信息与目标状态只读（都来自服务端），操作员只填「原因」。
+     原因必填并进入审计 `detail`，监管侧看日志即可复原这次维护。 */
+  rollbackDoc(spec) {
+    const parts = String(spec || '').split(':');
+    const target = parts[2];
+    const row = (this._docs || []).find(r =>
+      r.doc_type === parts[0] && String(r.id) === parts[1]);
+    if (!row) {
+      TNR_UI.toast('单据不存在或已被删除，请刷新列表', 'warning');
+      return;
+    }
+    const idx = (row.targets || []).indexOf(target);
+    if (idx === -1) {
+      TNR_UI.toast('该单据的状态已变化，请刷新列表', 'warning');
+      return;
+    }
+    const label = row.target_labels[idx] || target;
+    const body = `
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">单据</label>
+          <input type="text" class="form-input" readonly
+            value="${TNR_UI.escape(row.doc_label + ' ' + (row.ledger_no || ('#' + row.id)))}"></div>
+        <div class="form-group"><label class="form-label">动物编号</label>
+          <input type="text" class="form-input" readonly
+            value="${TNR_UI.escape(row.pet_code || '—')}"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">当前状态</label>
+          <input type="text" class="form-input" readonly
+            value="${TNR_UI.escape(row.status_display || '—')}"></div>
+        <div class="form-group"><label class="form-label">退回为</label>
+          <input type="text" class="form-input" readonly value="${TNR_UI.escape(label)}"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">维护原因<span class="req">*</span></label>
+        <textarea class="form-textarea" id="docRollback-reason" maxlength="200"
+          placeholder="必填，不超过 200 字。写清为什么退回，例如「领养人电话填错，需重新出库」"></textarea>
+      </div>
+      <p class="form-hint">退回会同时回退动物档案状态并清掉这一状态写入的交接凭证，
+        之后由机构重新办理。本操作记入操作日志（旧状态 → 新状态｜原因）。</p>`;
+    const m = TNR_UI.modal({
+      title: '出院单据退回 · ' + TNR_UI.escape(row.doc_label), body, size: 'md',
+      actions: '<button class="btn btn-secondary" data-action="cancel">取消</button>'
+        + '<button class="btn btn-danger" id="docRollbackSave">确认退回</button>'
+    });
+    m.overlay.querySelector('[data-action="cancel"]').addEventListener('click', m.close);
+    m.overlay.querySelector('#docRollbackSave').addEventListener('click', async () => {
+      const reason = m.overlay.querySelector('#docRollback-reason').value.trim();
+      if (!reason) { TNR_UI.toast('请填写维护原因', 'warning'); return; }
+      try {
+        const res = await TNR_API.setDischargeDocStatus({
+          doc_type: row.doc_type, doc_id: row.id, target: target, reason: reason
+        });
+        TNR_UI.assertOk(res, '退回失败');
+        TNR_UI.toast(res.message || '已退回', 'success');
+        m.close();
+        await this.loadDocs();
+      } catch (e) {
+        TNR_UI.toast(e.message || '退回失败', 'danger');
+      }
+    });
+  },
+
   /* ========== 7. 系统配置 ========== */
   async render_settings() {
     const el = document.getElementById('page-settings');

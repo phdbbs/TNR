@@ -1,15 +1,14 @@
 from django.shortcuts import render, redirect
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.password_validation import validate_password
 from django.contrib import messages
-from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import api_login_required
 from accounts.models import User
 from core.http import body_str, json_fail, json_ok, read_json_body
+from core.passwords import password_policy_error
 
 
 #: 业务角色 → 门户入口 URL。**这是「系统里到底有几个端」的权威来源**：
@@ -139,10 +138,9 @@ def api_change_password(request):
     if new_password == old_password:
         return JsonResponse({'success': False, 'message': '新密码不能与原密码相同'}, status=400)
 
-    try:
-        validate_password(new_password, request.user)
-    except ValidationError as e:
-        return JsonResponse({'success': False, 'message': '；'.join(e.messages)}, status=400)
+    err = password_policy_error(new_password, request.user)
+    if err:
+        return JsonResponse({'success': False, 'message': err}, status=400)
 
     request.user.set_password(new_password)
     request.user.save(update_fields=['password'])

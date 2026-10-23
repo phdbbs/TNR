@@ -24,6 +24,7 @@ from business.stock_init import init_batch_rows
 from business.services import generate_doc_no
 from business.services_chip import parse_chip_numbers
 from core.models import District, Institution, STATUS_ACTIVE
+from core.passwords import DEMO_INITIAL_PASSWORD
 
 # ============================================
 # 区县（**单一来源**）
@@ -419,7 +420,9 @@ class Command(BaseCommand):
                 # 密码只在新建时设置。已存在账号的密码不自动重置——
                 # 生产环境里静默覆盖人为修改过的凭据是危险的，
                 # 改密按 DEMO_ACCOUNTS.md 的手工流程处理。
-                user.set_password('123456')
+                # 演示初始口令只有 6 位，**刻意绕过强度校验**（见 core.passwords）；
+                # 手工建号/重置仍必须 ≥8 位。
+                user.set_password(DEMO_INITIAL_PASSWORD)
                 changed.append('password')
             if changed:
                 user.save()

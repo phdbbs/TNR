@@ -40,7 +40,7 @@ fi
 # 一次、不落盘 —— 生产环境因此出现过「默认口令登不进去、运维也不知道新口令」
 # 的死局（2026-09-23 实测 `admin/123456` 与 `admin/admin123456` 均不匹配）。
 #
-# 磊哥决策：**上线前固定 123456**（便于演示），上线时手工删号重建。
+# 业务方决策：**上线前固定 111111**（便于演示），上线时手工删号重建。
 #
 # 优先级：命令行传入 > 已有 .env 里的值 > 空。
 # ⚠ 必须继承旧 .env：本脚本第 5 步是 `cat >` **覆盖**写 .env，
@@ -284,13 +284,13 @@ echo "平台管理端: http://$DOMAIN/platform/  （仅平台管理员可登录�
 echo "$ADMIN_SUMMARY"
 echo "$PLATFORM_SUMMARY"
 echo ""
-echo "演示账号（由 seed_data 创建，密码均为 123456，详见 DEMO_ACCOUNTS.md）:"
+echo "演示账号（由 seed_data 创建，密码均为 111111，详见 DEMO_ACCOUNTS.md）:"
 echo "  平台 platform / 政府 admin / 捕捉点 cy_shelter / 医院 aixin_hosp / 领养人 adopter1"
 if [ -n "$ADMIN_CREDENTIALS" ]; then
-    echo "  注意：admin 的密码已被上面的超级管理员口令覆盖，不再是 123456。"
+    echo "  注意：admin 的密码已被上面的超级管理员口令覆盖（以 .env 的 ADMIN_PASSWORD 为准）。"
 fi
 if [ -n "$PLATFORM_CREDENTIALS" ]; then
-    echo "  注意：platform 的密码已被上面的平台管理员口令覆盖，不再是 123456。"
+    echo "  注意：platform 的密码已被上面的平台管理员口令覆盖（以 .env 的 PLATFORM_ADMIN_PASSWORD 为准）。"
 fi
 if [ "$DB_PASS_GENERATED" = "1" ]; then
     echo ""

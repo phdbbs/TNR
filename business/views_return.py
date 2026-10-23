@@ -16,6 +16,7 @@ from django.views.decorators.csrf import csrf_exempt
 from accounts.decorators import role_required
 from core.models import Institution
 from business.models import Pet, ReturnOrder
+from business.services_discharge import discharge_candidate_error
 from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
@@ -210,6 +211,12 @@ def return_order_create(request):
         if pet.status == 'in_treatment' and not pet.treatments.filter(
                 done_at__isnull=False).exists():
             return json_fail(f'{pet.code} 尚未完成诊疗，不能运回捕捉点')
+        # 建议去向必须是「放回原小区」（第五十七轮）：一张运回单会同时
+        # 把整批动物打上 `return_pending`，混进一只建议领养的动物，
+        # 后面捕捉点签收就等于替医院把领养动物放归了。
+        err = discharge_candidate_error(pet, 'release')
+        if err:
+            return json_fail(err)
         if pet_has_active_adoption(pet):
             return json_fail(f'{pet.code} 已有未完结的领养记录，请先撤销')
         if pet_has_approved_application(pet):

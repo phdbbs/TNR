@@ -27,6 +27,8 @@ from business.services_treatment import (
     STERILIZATION_FIELDS, STERILIZATION_REQUIRED,
 )
 from core.models import Institution, STATUS_ACTIVE, STATUS_LABELS, STATUS_VALUES
+from core.passwords import DEMO_INITIAL_PASSWORD
+from supervision.doc_maintenance import DOC_LABELS, REASON_MAX
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -2526,6 +2528,40 @@ class WriteFailureVisibilityTest(SimpleTestCase):
             'assertOk 必须在 success === false 时抛异常，'
             '否则调用方的 catch 仍然是死代码')
 
+    def test_non_json_write_response_is_reported_as_failure(self):
+        """404/502 的 HTML 错误页不能被吞成 `{}` 当成写成功。
+
+        真实案例（第四十九轮本地实测）：`reset-password/` 路由尚未加载时
+        dev server 回 404 HTML 页，`_post` 里 `res.json().catch(() => ({}))`
+        把它变成 `{}`，`assertOk({})` 判 `undefined !== false` 放行 ——
+        弹窗提示「密码已重置」，旧密码仍能登录，数据库里什么都没变。
+
+        业务失败是 HTTP 200 + `{success:false}`；**非 2xx 且解析不出信封**
+        必然是路由/网关/CSRF 拦截等基础设施错误，必须折成失败信封。
+        """
+        source = strip_js_comments(read('static/js/tnr-api.js'))
+        self.assertIn('_envelope(res, data)', source,
+                      '_post / _postForm 没有走统一的响应收口')
+        start = source.find('_envelope(res, data) {')
+        self.assertGreaterEqual(start, 0, '找不到 _envelope 的实现')
+        body = source[start:start + 1200]
+        self.assertIn('typeof data !== \'object\'', body,
+                      '_envelope 必须识别「解析不出 JSON」的响应')
+        self.assertIn('!res.ok && data.success !== false', body,
+                      '_envelope 必须把没有明确信封的非 2xx 判为失败')
+        self.assertGreaterEqual(body.count('success: false'), 3,
+                                '_envelope 的 401 / 非 JSON / 非 2xx 三个分支'
+                                '都必须返回 success:false')
+        for method in ('_post(url, body)', '_postForm(url, formData)'):
+            start = source.find('async ' + method)
+            self.assertGreaterEqual(start, 0, f'找不到 {method}')
+            block = source[start:start + 600]
+            self.assertIn('return this._envelope(res, data);', block,
+                          f'{method} 绕过了 _envelope —— 非 JSON 错误又会被当成成功')
+            self.assertNotIn('catch(() => ({}))', block,
+                             f'{method} 又把非 JSON 响应吞成空对象 —— '
+                             '404/502 会被当成写成功')
+
     def test_blacklist_check_does_not_use_silent_get(self):
         """黑名单校验是**安全控制**的前端预检，**不能用 `_get`**（第二十二轮）。
 
@@ -4895,8 +4931,16 @@ class MobileLayoutTest(SimpleTestCase):
         self.assertIn('col.mobileRender', common,
                       'mountTable 不再渲染 mobileRender —— 隐藏列的信息无法补回')
         platform = _read_raw('static/js/portals/platform.js')
-        self.assertIn('mobileRender: mobileCard', platform,
-                      '账号表主列没有手机端详情 —— 姓名/角色/状态会消失')
+        # ⚠ 不能写 `assertIn('mobileRender: mobileCard', platform)`：platform.js 里
+        # 有**两张**宽表用同一个写法（账号表主列 `key: 'username'`、单据表主列
+        # `key: 'doc_label'`），删掉任意一张的 `mobileRender` 另一张照样让它通过
+        #（变异 M170 实测：整条用例**空转**）。按表逐个点名，缺一处红一处。
+        self.assertRegex(
+            platform, r"\{ key: 'username'[^\n]*mobileRender: mobileCard",
+            '账号表主列没有手机端详情 —— 姓名/角色/状态会消失')
+        self.assertRegex(
+            platform, r"\{ key: 'doc_label'[^\n]*mobileRender: mobileCard",
+            '单据表主列没有手机端详情 —— 状态/单据号会消失')
         self.assertGreaterEqual(
             platform.count("mobile: 'hide'"), 8,
             '账号表应把姓名/角色/区县/机构/证号/电话/开户时间/状态在手机收起')
@@ -5480,6 +5524,27 @@ class PortalLandingPageTest(TestCase):
             missing, [],
             f'门户首页演示账号提示漏了：{missing}（以 {DEMO_ACCOUNTS_DOC} 为准）')
 
+    def test_demo_hints_show_the_current_initial_password(self):
+        """两处公开提示的口令必须与 `DEMO_INITIAL_PASSWORD` 同源。
+
+        口令改了而提示没改时：用户照着页面提示登录必然失败，而系统本身
+        完全正常 —— 排查会被完全带偏。反过来，提示里还留着旧口令也同样
+        会让看旧文档的人登不进来。
+        """
+        for name, url, cls in DEMO_HINT_TARGETS:
+            with self.subTest(target=name):
+                html = self._html(url)
+                m = re.search(
+                    rf'class="{re.escape(cls)}"[^>]*>(.*?)</div>', html, re.S)
+                self.assertIsNotNone(m, f'{url} 找不到 .{cls} 提示块')
+                hint = m.group(1)
+                self.assertIn(
+                    DEMO_INITIAL_PASSWORD, hint,
+                    f'{url} 的演示提示没有写当前初始口令 {DEMO_INITIAL_PASSWORD}')
+                self.assertNotIn(
+                    '123456', hint,
+                    f'{url} 的演示提示还在写旧口令 123456 —— 照着提示登录会失败')
+
     def test_both_hints_mention_the_platform_account(self):
         """两个提示都必须给出平台管理端账号。
 
@@ -5747,8 +5812,9 @@ class DischargeAdviceKeyCoverageTest(SimpleTestCase):
         `suggested` 永远匹配不上任何按钮，高亮与「医生已建议」标签静默失效。
         """
         js = read_js('hospital')
-        # 第五十六轮起诊疗单不再由前端办结，弹窗不再需要 `tid`。
-        start = js.find('openDischargeChoice(petId, advised)')
+        # 第六十一轮起弹窗要能把操作员送到「修改建议去向」，所以又带回 `tid`
+        # （不传的话 `openTreatmentFlow` 会去新建/取「当前单」，可能不是这一张）。
+        start = js.find('openDischargeChoice(petId, advised, tid)')
         self.assertGreater(start, 0, '医院端找不到出院去向选择弹窗')
         opts_end = js.find('];', start)
         self.assertGreater(opts_end, start, '出院弹窗的 OPTS 数组找不到结尾')
@@ -6225,12 +6291,55 @@ class PlatformAdminReadTest(SimpleTestCase):
             self.assertIn(msg, js, '编辑弹窗在记录找不到时会静默退化成新增')
 
     def test_account_creation_has_no_default_password(self):
+        """建号口令必须由管理员显式填写，不得预填或回退任何演示口令。
+
+        `111111` 只是 seed / 自动建号直接写库的演示口令，按强度口径它
+        连 8 位门槛都过不了 —— 一旦前端把它当默认值，建出来的账号
+        要么绕过了校验，要么点提交就被拒。
+        """
         js = self._src()
-        self.assertNotIn('value="123456"', js, '账号创建表单又预填了默认口令')
-        self.assertNotIn("password || '123456'", js, '前端又把空口令回退成 123456')
+        for default in ('123456', DEMO_INITIAL_PASSWORD):
+            self.assertNotIn(f'value="{default}"', js,
+                             f'账号创建表单又预填了默认口令 {default}')
+            self.assertNotIn(f"password || '{default}'", js,
+                             f'前端又把空口令回退成 {default}')
         self.assertIn('type="password" class="form-input" id="acct-password"', js,
                       '初始密码框必须是 password 类型')
         self.assertIn('请设置初始密码', js)
+
+    def test_account_password_reset_entry(self):
+        """管理员重置密码：路由、API 封装、行内按钮与模态框必须连得上。
+
+        平台端原先只有「新增 / 编辑 / 启停」——本人忘记口令后，除了改库
+        没有别的办法；这条同时钉住重置表单不得预填默认口令。
+        """
+        urls = read('supervision/urls.py')
+        self.assertRegex(
+            urls, r"users/<int:pk>/reset-password/'[^)]*views\.user_reset_password",
+            '`users/<pk>/reset-password/` 路由没了 —— 管理员无法重置忘记口令的账号。')
+        api = strip_js_comments(_read_raw('static/js/tnr-api.js'))
+        self.assertRegex(
+            api, r'resetUserPassword\(id,\s*password\)[\s\S]{0,160}users/\$\{id\}/reset-password/',
+            '`TNR_API.resetUserPassword` 没打到 `users/${id}/reset-password/` —— 按钮是空操作。')
+        js = self._src()
+        self.assertIn('data-reset-password', js, '账号列表没有「重置密码」入口')
+        self.assertIn('TNR_API.resetUserPassword(', js, '重置密码模态框没调接口')
+        self.assertIn('id="acctReset-password"', js)
+        self.assertIn('id="acctReset-confirm"', js)
+        self.assertIn('password !== confirm', js, '两次输入没有比对')
+        for default in ('123456', DEMO_INITIAL_PASSWORD):
+            self.assertNotIn(f'value="{default}"', js,
+                             f'重置表单又预填了默认口令 {default}')
+
+    def test_reset_entry_is_not_shown_for_self(self):
+        """当前账号不显示重置按钮：本人必须走验原口令的自助改密。"""
+        js = self._src()
+        start = js.find('const rowActions = r => r.id === selfId')
+        self.assertGreaterEqual(start, 0, '账号列表的行操作结构变了，需要同步断言')
+        seg = js[start:start + 800]
+        self.assertRegex(
+            seg, r'当前账号[\s\S]*?:\s*`[\s\S]*?data-reset-password',
+            '「当前账号」也渲染了重置密码按钮 —— 本人应走验原口令的自助改密')
 
     def test_tables_show_the_date_they_filter_on(self):
         js = self._src()
@@ -6328,3 +6437,129 @@ class DischargeClosesTreatmentContractTest(SimpleTestCase):
         self.assertIn('def dispose_for_discharge(', services)
         self.assertIn('promote_hall=False', services,
                       '出院办结不得按建议去向重新上架领养大厅')
+
+
+class DischargeDocMaintenanceContractTest(SimpleTestCase):
+    """平台端「出院单据维护」页与服务端白名单的契约（第六十一轮）。
+
+    这个页面直接改动监管台账里的**终态**记录，所以两处最容易出事：
+
+      1. 单据类型表 —— 页签少一类，那类单据在维护入口里永远找不到；
+      2. 状态机 —— 前端自己判「这张单能不能退回」会与服务端白名单漂移，
+         结果是按钮亮着、提交 400，或反过来该能退的没给入口。
+    """
+
+    def _docs_js(self):
+        return strip_js_comments(_read_raw('static/js/portals/platform.js'))
+
+    def test_doc_type_labels_match_backend_doc_labels(self):
+        js = self._docs_js()
+        # 它是 Platform 对象上的属性（`DOC_TYPE_LABELS: {`），不是 `const X = {`；
+        # 用错取法会「匹配不到 → 断言静默全绿」。
+        literal = find_property_literal(js, 'DOC_TYPE_LABELS')
+        self.assertIsNotNone(
+            literal,
+            '平台端找不到 `DOC_TYPE_LABELS` —— 维护页的类型表没了？'
+            '改名要同步本判据，悄悄删掉等于页签再不同步后端。')
+        self.assertIn("'': '全部单据'", literal,
+                      '空 key 的「全部单据」页签不在了（默认要一眼看到四类单据）')
+        fe = dict(re.findall(r'([a-z_]+)\s*:\s*\'([^\']*)\'', literal))
+        self.assertEqual(fe, dict(DOC_LABELS),
+                          '页签类型与文案必须逐项等于服务端 DOC_LABELS')
+
+    def test_row_actions_read_server_provided_targets(self):
+        """可退回状态只能来自响应里的 `targets` —— 前端不得再写一份状态机。"""
+        js = self._docs_js()
+        self.assertNotIn('TRANSITIONS', js,
+                         '平台端又复制了一份状态迁移白名单（服务端改一处就漂移）')
+        self.assertIn('r.targets.map', js,
+                      '行按钮不再读 targets，退回入口会与白名单脱节')
+        self.assertIn('target_labels', js, '按钮文案要取服务端的中文状态名')
+
+    def test_reason_cap_matches_backend(self):
+        """原因长度上限两边同一个数：前端放过、后端拒 = 白填一次表单。"""
+        js = self._docs_js()
+        start = js.find('id="docRollback-reason"')
+        self.assertGreater(start, 0, '维护弹窗里没有原因输入框（原因必填是硬要求）')
+        window = js[start:start + 200]
+        cap = re.search(r'maxlength="(\d+)"', window)
+        self.assertIsNotNone(cap, '原因输入框没有 maxlength')
+        self.assertEqual(int(cap.group(1)), REASON_MAX,
+                         '原因上限与后端 REASON_MAX 不一致')
+
+    def test_api_paths_reach_the_supervision_endpoints(self):
+        api = strip_js_comments(_read_raw('static/js/tnr-api.js'))
+        self.assertIn("'/api/supervision/discharge-docs/'", api,
+                      '列表接口路径不在了 —— 维护页会拿不到单据')
+        self.assertIn("'/api/supervision/discharge-docs/status/'", api,
+                      '退回接口路径不在了 —— 按钮点了没反应')
+
+
+class DischargeAdviceCatchUpEntryTest(SimpleTestCase):
+    """「没记建议去向 → 四个去向都选不到」必须配一条走得通的补救路（第六十一轮）。
+
+    后端把候选收紧之后，操作员只剩两种结局：自己找到改建议的入口，或者把
+    出院页当成系统坏了。所以入口本身要成立：出院页的横幅、横幅点进去的
+    诊疗第三步、以及「看板异步加载不能把流程视图覆盖掉」这条竞态守卫。
+    """
+
+    def _js(self):
+        return strip_js_comments(_read_raw('static/js/portals/hospital.js'))
+
+    def test_discharge_shell_renders_the_notice_and_binds_it(self):
+        js = self._js()
+        self.assertIn('this.dspAdviceNotice()', js,
+                      '出院页不再插「待补录建议去向」横幅 —— 收紧后的空建议动物会静默消失')
+        self.assertIn("'data-dspadvice'", js,
+                      '横幅里的动物芯片没有事件委托，点了没反应')
+        self.assertIn('没有记录建议去向', js, '横幅要说清为什么选不到')
+
+    def test_notice_jumps_into_step_three_of_the_flow(self):
+        js = self._js()
+        start = js.find('dspGotoAdvice(petId, tid)')
+        self.assertGreater(start, 0, '找不到横幅跳转诊疗流程的函数')
+        body = js[start:js.find('\n  },', start)]
+        nav = body.find("navigateTo('treatment')")
+        flow = body.find('openTreatmentFlow(')
+        self.assertGreater(nav, -1, '流程视图挂在 #treatmentContent（只在诊疗页里）')
+        self.assertGreater(flow, -1, '跳转没有打开诊疗流程')
+        self.assertLess(nav, flow,
+                        '必须先切到诊疗页再开流程：容器不存在时 openTreatmentFlow 渲染不出东西')
+
+    def test_flow_render_keeps_the_opened_flow(self):
+        """看板数据在途时打开的流程，不能被异步回来的 `renderBoard()` 覆盖。"""
+        js = self._js()
+        start = js.find('async renderTreatmentFlow()')
+        self.assertGreater(start, 0, '找不到诊疗流程渲染函数')
+        body = js[start:js.find('\n  },', start)]
+        guard = "if (this.state.treatmentFlow) { this.renderFlowView(); return; }"
+        self.assertEqual(
+            body.count(guard), 2,
+            '函数里要**两处**守卫：入口一次、await 之后一次。'
+            '少了 await 之后那次 = 出院页横幅点进来会被看板覆盖。')
+        self.assertLess(body.rindex(guard), body.find('this.renderBoard();'),
+                        '守卫必须在 renderBoard() 之前，否则覆盖照样发生')
+
+    def test_discharge_popup_offers_the_edit_entry(self):
+        """「与建议去向不符」的弹窗要现场给出改建议入口，而且**接得上线**。
+
+        早先这判据是三条全文件 `assertIn` —— 空转：`openTreatmentFlow(petId,
+        tid, 3)` 出院页横幅的跳转也在用，把弹窗按钮的接线整段删掉照样全绿
+        （M194 就是这样暴露的）。改成只在弹窗函数体内取体判序。
+        """
+        js = self._js()
+        start = js.find('openDischargeChoice(petId, advised, tid)')
+        self.assertGreater(start, 0, '找不到出院去向选择弹窗')
+        body = js[start:js.find('\n  },', start)]
+        self.assertGreater(len(body), 200, '弹窗函数体被截断，判据会静默失真')
+        self.assertNotIn('openDischargeForm(kind, petId)', body,
+                         '函数体取到了下一个函数，断言会误命中别处的接线')
+        self.assertIn('data-dspedit', body,
+                      '出院弹窗不再给「现在就去修改」—— 换去向成了死胡同')
+        self.assertIn("querySelector('[data-dspedit]')", body,
+                      '按钮没有绑定点击：点了没反应，改建议仍是死胡同')
+        bind = body.find("querySelector('[data-dspedit]')")
+        self.assertGreater(
+            body.find('this.openTreatmentFlow(petId, tid, 3)', bind), -1,
+            '修改入口没有落到第三步（建议去向就在第三步）；'
+            '注意要的是**接线之后**那次调用，函数开头的「没记建议 → 直接送去补录」不算')

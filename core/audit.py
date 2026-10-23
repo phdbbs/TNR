@@ -41,6 +41,7 @@ MODULE_BY_PREFIX = [
     ('/api/supervision/districts/', '区县管理', '区县'),
     ('/api/supervision/users/', '用户管理', '账号'),
     ('/api/supervision/config/', '系统配置', '系统参数'),
+    ('/api/supervision/discharge-docs/', '出院单据维护', '出院单据'),
     ('/api/accounts/', '账户安全', '账户'),
 ]
 
@@ -55,6 +56,7 @@ ACTION_BY_SEGMENT = {
     'update': (ACTION_CHANGE, '修改'),
     'edit': (ACTION_CHANGE, '修改'),
     'edit-info': (ACTION_CHANGE, '修改'),
+    'reset-password': (ACTION_CHANGE, '重置密码'),
     'adjustment': (ACTION_CHANGE, '库存调整'),
     'receive': (ACTION_CHANGE, '签收'),
     'confirm': (ACTION_CHANGE, '确认'),
@@ -67,6 +69,7 @@ ACTION_BY_SEGMENT = {
     'body-receive': (ACTION_CHANGE, '遗体接收'),
     'owner-return': (ACTION_CHANGE, '主人领回'),
     'read': (ACTION_CHANGE, '标记已读'),
+    'status': (ACTION_CHANGE, '修改单据状态'),
     'delete': (ACTION_DELETE, '删除'),
 }
 

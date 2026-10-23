@@ -36,6 +36,7 @@ from .services import (
     adjust_stock, expired_material_error, generate_doc_no, get_hospital_stock,
     parse_int_param, use_chip,
 )
+from . import services_discharge as sd
 
 # ============================================
 # 选项表 —— **只有这一份真源**
@@ -1038,6 +1039,15 @@ def mark_done(treatment, disposal_advised=''):
         raise ValueError('请先完成「医嘱与处方」并点击诊断完成')
     if treatment.done_at is not None:
         raise ValueError('本单已完成诊疗')
+    # ⚠ 宠物**已出院**时禁止补记「诊疗完成」（第五十七轮）。
+    # 出院单据只办结 `done_at` 已落的单（见 `dispose_for_discharge`），
+    # 于是「没点诊疗完成就领养出库 / 登记死亡」的动物会留下一张
+    # `treating` 的旧单：宠物早已是终态，看板却还能打开它、补点完成、
+    # 顺手改建议去向 —— 台账上等于给一只已领养的动物重新安排了去向。
+    pet = treatment.pet
+    if pet is not None and pet.status in Pet.TERMINAL_STATUSES:
+        raise ValueError(f'动物已出院（{pet.get_status_display()}），'
+                         '本单不能再补记「诊疗完成」；如需纠错请由平台端维护出院单据')
 
     left = must_items_not_done(treatment)
     if left:
@@ -1051,6 +1061,35 @@ def mark_done(treatment, disposal_advised=''):
     treatment.done_at = timezone.now()
     treatment.disposal_advised = advised
     treatment.save(update_fields=['done_at', 'disposal_advised'])
+    return treatment
+
+
+def set_advice(treatment, disposal_advised):
+    """待出院阶段修改「建议去向」—— 出院四个去向的唯一分流依据。
+
+    需求口径：出院能选到哪些动物由建议去向决定，所以**换去向 = 先改建议**，
+    改完再回去院办理。与 `mark_done()` 的区别是本函数不动 `done_at`
+    （动物已经在待出院，重落时间会把「诊疗完成」的时间戳改成现在）。
+
+    :raises ValueError: 未诊疗完成 / 已办结 / 建议值不合法 / 动物已被出院单据占用
+    """
+    if treatment is None:
+        raise ValueError('诊疗单不存在')
+    if treatment.disposed_at:
+        raise ValueError('本单已办结，建议去向不能再修改')
+    if treatment.done_at is None:
+        raise ValueError('请先点击「诊疗完成」，动物进入待出院后才能修改建议去向')
+
+    advised = (disposal_advised or '').strip()
+    if advised not in dict(Treatment.DISPOSAL_CHOICES):
+        raise ValueError(f'去向建议「{advised or "空"}」不合法，请选择一个去向')
+
+    err = sd.advice_edit_error(treatment.pet)
+    if err:
+        raise ValueError(err)
+
+    treatment.disposal_advised = advised
+    treatment.save(update_fields=['disposal_advised'])
     return treatment
 
 
@@ -1146,6 +1185,21 @@ def dispose_for_discharge(pet, disposal, user):
         dispose(treatment, disposal, user,
                 defer_pet_status=True, promote_hall=False)
     return treatments
+
+
+def undo_discharge(pet):
+    """出院单据被回退 / 作废时，把该动物**已办结**的诊疗单退回「待出院」。
+
+    平台端单据维护的必备一半：单据退回去了、`disposed_at` 还留着的话，
+    看板会把动物归进「已出院」（判据只看 `disposed_at`），出院管理再也
+    选不到它 —— 动物既不在院、也没出院，成了台账上的孤儿。
+    返回退回的单数。
+    """
+    if pet is None:
+        return 0
+    return Treatment.objects.filter(
+        pet_id=pet.id, disposed_at__isnull=False).update(
+        disposed_at=None, disposal='', status='in_progress')
 
 
 # ============================================

@@ -13,6 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
 from business.models import Euthanasia
+from business.services_discharge import discharge_candidate_error
 from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
@@ -102,6 +103,11 @@ def euthanasia_create(request):
     if pet.status not in ('in_treatment', 'pending_adopt'):
         return json_fail(f'宠物当前状态({pet.get_status_display()})不可{kind_label}，'
                          '仅诊疗中/待领养宠物可登记')
+    # 建议去向必须是「安乐死 / 死亡」（第五十七轮）：建议领养的动物
+    # 不能从这里被登记成死亡，去向分流判据见 `services_discharge`。
+    err = discharge_candidate_error(pet, 'death')
+    if err:
+        return json_fail(err)
     # 已批准的线上申请不写 Pet.status，状态校验拦不住这类预留
     if pet_has_approved_application(pet):
         return json_fail('该宠物已有已批准的领养申请（待出库），'

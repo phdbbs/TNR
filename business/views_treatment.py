@@ -258,6 +258,12 @@ def _board_row(treatment):
         'treatment_id': treatment.id,
         'pet_id': treatment.pet_id,
         'pet_code': treatment.pet_code,
+        # 动物档案状态：看板五态由**诊疗单时间戳**派生，与 `Pet.status` 是两回事。
+        # 出院候选要按「动物现在归谁管」筛（已出院 / 已被单据占用的不能再来一张），
+        # 前端手上没有档案列表时（已出院桶、别的桶）必须能直接读到，
+        # 否则只能靠 `pet_id` 回查，回查失败的行会静默变成可选。
+        'pet_status': pet.status if pet else '',
+        'pet_status_display': pet.get_status_display() if pet else '',
         'pet_name': pet.name if pet else '',
         'species': pet.species if pet else '',
         'gender': pet.gender if pet else '',
@@ -289,6 +295,8 @@ def _pet_board_row(pet):
         'treatment_id': None,
         'pet_id': pet.id,
         'pet_code': pet.code,
+        'pet_status': pet.status,
+        'pet_status_display': pet.get_status_display(),
         'pet_name': pet.name,
         'species': pet.species,
         'gender': pet.gender,
@@ -534,6 +542,38 @@ def treatment_done(request, pk):
     treatment.refresh_from_db()
     return json_ok(_treatment_detail_data(treatment),
                    message='诊疗完成，动物进入待出院')
+
+
+@csrf_exempt
+@role_required('hospital')
+@login_required
+def treatment_advice(request, pk):
+    """待出院阶段修改「建议去向」（第五十七轮）。
+
+    出院四个去向能选到哪些动物，完全由这张诊疗单的 `disposal_advised`
+    决定（判据见 `services_discharge.DISCHARGE_ADVICE`）。所以业务方要的
+    「要改去向就先把建议去向改了，再回去院选择」只能落在这里 ——
+    原先 `mark_done()` 之后界面上的建议是只读的（`adviceLocked`），
+    后端也没有第二个写入口，选错去向只能把整张单作废重来。
+
+    动物一旦被出院单据接管（已出库 / 已登记死亡 / 已在运回单上…）
+    就**不再允许**修改：改了不会动任何单据，只会让单据与建议各说一套。
+    """
+    treatment = _own_treatment(pk, request.user)
+    if treatment is None:
+        return json_fail('诊疗单不存在或无权访问', status=404)
+
+    data = parse_json_body(request)
+    advised = str(body_str(data, 'disposal_advised') or '').strip()
+    try:
+        with transaction.atomic():
+            st.set_advice(treatment, advised)
+    except ValueError as e:
+        return json_fail(str(e))
+    treatment.refresh_from_db()
+    label = _disposal_label(treatment.disposal_advised)
+    return json_ok(_treatment_detail_data(treatment),
+                   message=f'建议去向已改为「{label}」，可到出院管理办理')
 
 
 @csrf_exempt

@@ -70,6 +70,9 @@ urlpatterns = [
     path('treatments/<int:pk>/items/<int:item_id>/undo/',
          views_treatment.treatment_item_undo, name='treatment_item_undo'),
     path('treatments/<int:pk>/done/', views_treatment.treatment_done, name='treatment_done'),
+    # 待出院阶段改「建议去向」：出院四个去向的候选都由它分流（见 services_discharge）。
+    path('treatments/<int:pk>/advice/', views_treatment.treatment_advice,
+         name='treatment_advice'),
     # 诊疗后照片（B2）：第三步办结环节的当场留证，独立接口见视图注释。
     path('treatments/<int:pk>/photo/', views_treatment.treatment_photo, name='treatment_photo'),
     path('treatments/<int:pk>/', views_treatment.treatment_detail, name='treatment_detail'),

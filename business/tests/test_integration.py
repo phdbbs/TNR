@@ -162,7 +162,8 @@ class FullLifecycleTest(BusinessTestBase):
         self.ok(self._post(f'{API}/treatments/{tid}/plan/', {
             'advice': '观察 24 小时', 'items': []}))
         self.ok(self._post(f'{API}/treatments/{tid}/diagnose/', {}))
-        self.ok(self._post(f'{API}/treatments/{tid}/done/', {}))
+        self.ok(self._post(f'{API}/treatments/{tid}/done/',
+                           {'disposal_advised': 'released'}))
 
         # 7. 放归闭环（宠物B 走放归而不是领养）
         #    第五十八轮：捕捉点只能对「医院已运回、本站已签收」的动物开放归单，

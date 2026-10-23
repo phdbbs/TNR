@@ -999,13 +999,13 @@ class DoneAndDisposeTest(FlowBase):
         item_id = self._first_item_id(detail)
         self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
         body = self.ok(self.post_json(
-            f'{URL}{tid}/done/', {'disposal_advised': 'pending_adopt'}))['data']
+            f'{URL}{tid}/done/', {'disposal_advised': 'owner_returned'}))['data']
 
-        self.assertEqual(body['disposal_advised_label'], '领养')
+        self.assertEqual(body['disposal_advised_label'], '主人领回')
         self.assertEqual(body['disposal_label'], '', '建议不得写成办结去向')
         self.assertFalse(body['is_disposed'])
         t = Treatment.objects.get(id=tid)
-        self.assertEqual(t.disposal_advised, 'pending_adopt')
+        self.assertEqual(t.disposal_advised, 'owner_returned')
         self.assertEqual(t.disposal, '')
         self.pet.refresh_from_db()
         self.assertEqual(self.pet.status, 'in_treatment')
@@ -1139,6 +1139,140 @@ class DoneAndDisposeTest(FlowBase):
         self._dispose(tid, 'pending_adopt')
         with self.assertRaisesMessage(ValueError, '已办结'):
             self._dispose(tid, 'released')
+
+
+class AdviceEditTest(FlowBase):
+    """「建议去向」的可改窗口与锁死条件（第六十一轮补全用例）。
+
+    出院四个去向能选到哪些动物**完全**由这张单的 `disposal_advised` 决定，
+    所以业务方要的路径是「先把建议改了，再回去院选择」。反过来，动物一旦被
+    出院单据接管就必须锁死 —— 那时改建议不会改动任何单据，只会造出
+    「单据说领养、建议说放归」两张皮，而且两边都能走到已办结。
+    """
+
+    def _pending(self, advised='pending_adopt'):
+        """推到「诊疗完成、尚未办结」（= 待出院），返回诊疗单 id。"""
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        item_id = self._first_item_id(detail)
+        self.ok(self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {}))
+        self.ok(self.post_json(f'{URL}{tid}/done/', {'disposal_advised': advised}))
+        return tid
+
+    def _give_shelter(self):
+        """运回单 / 放归单要知道送回哪个捕捉点。"""
+        self.pet.shelter = self.shelter_a
+        self.pet.save(update_fields=['shelter'])
+
+    def _advice(self, tid, advised):
+        return self.post_json(f'{URL}{tid}/advice/', {'disposal_advised': advised})
+
+    def test_advice_editable_while_pending_discharge(self):
+        tid = self._pending('pending_adopt')
+        done_at = Treatment.objects.get(id=tid).done_at
+        body = self.ok(self._advice(tid, 'released'))['data']
+
+        self.assertEqual(body['disposal_advised'], 'released')
+        self.assertEqual(body['disposal_advised_label'], '放回原小区')
+        t = Treatment.objects.get(id=tid)
+        self.assertEqual(t.disposal, '', '改建议不等于办结')
+        self.assertIsNone(t.disposed_at)
+        # 「诊疗完成」的时刻是既成事实：重存建议把它改成现在，
+        # 待出院时长会凭空归零，看板与统计跟着骗人。
+        self.assertEqual(t.done_at, done_at)
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'in_treatment')
+
+    def test_advice_edit_re_routes_discharge_candidates(self):
+        """改完建议，出院候选**立刻**跟着分流 —— 用户要的就是这条闭环。"""
+        self._give_shelter()
+        tid = self._pending('pending_adopt')
+        self.expect_fail(self.post_json(
+            '/api/business/return-orders/create/', {'pet_ids': [self.pet.id]}),
+            message='不能按「放归」办理出院')
+        self.ok(self._advice(tid, 'released'))
+        self.ok(self.post_json(
+            '/api/business/return-orders/create/', {'pet_ids': [self.pet.id]}))
+
+    def test_advice_cannot_be_cleared(self):
+        tid = self._pending('released')
+        self.expect_fail(self._advice(tid, ''), message='不合法')
+        self.assertEqual(Treatment.objects.get(id=tid).disposal_advised,
+                         'released', '被拒的清空不得改动建议')
+
+    def test_advice_needs_done_first(self):
+        """还没「诊疗完成」的单没有可改窗口：建议要随「诊疗完成」一起提交。
+
+        放开的话，「先随便填个建议 → 改口 → 再点完成」会绕掉完成那一刻的
+        必执行项校验，看板上的待出院时长也会从一张没做完的单上凭空出现。
+        """
+        detail = self._open()
+        tid = detail['id']
+        self._diagnosed(tid)
+        self.expect_fail(self._advice(tid, 'released'),
+                         message='请先点击「诊疗完成」')
+        self.assertIsNone(Treatment.objects.get(id=tid).done_at)
+
+    def test_advice_locked_while_return_order_pending(self):
+        """动物已在未办结的运回单上 → 建议锁死；运回单撤回后自动放行。"""
+        self._give_shelter()
+        tid = self._pending('released')
+        order = self.ok(self.post_json(
+            '/api/business/return-orders/create/', {'pet_ids': [self.pet.id]}))['data']
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'return_pending')
+
+        self.expect_fail(self._advice(tid, 'pending_adopt'),
+                         message='已经在出院单据流程里')
+        self.assertEqual(Treatment.objects.get(id=tid).disposal_advised,
+                         'released', '拒绝不得把建议改掉')
+
+        # ⚠ 单据还在办、档案状态却被别的流程改过（存量行真出现过这种形状）。
+        # 只信 `Pet.status` 的话，这只动物会变成「运回单承诺放归、建议却改成
+        # 领养」—— 两张出院路径同时认领同一只动物。
+        Pet.objects.filter(pk=self.pet.pk).update(status='in_treatment')
+        self.expect_fail(self._advice(tid, 'pending_adopt'),
+                         message='未办结的运回单')
+
+        self.ok(self.post_json(f'/api/business/return-orders/{order["id"]}/withdraw/', {}))
+        self.ok(self._advice(tid, 'pending_adopt'))
+
+    def test_advice_locked_after_treatment_closed(self):
+        tid = self._pending('pending_adopt')
+        self._dispose(tid, 'pending_adopt')
+        self.expect_fail(self._advice(tid, 'released'), message='本单已办结')
+
+    def test_advice_locked_when_pet_already_discharged(self):
+        """钉死第五十七轮的缺口：`done_at` 已落、`disposed_at` 空，但动物已是终态。
+
+        「没点诊疗完成就先领养出库」会留下这种旧单：看板把它算作待出院、
+        行上还能打开流程。不拦住的话，等于给一只**已被领养**的猫重新建议去向。
+        """
+        tid = self._pending('pending_adopt')
+        Pet.objects.filter(pk=self.pet.pk).update(status='adopted')
+        self.expect_fail(self._advice(tid, 'released'), message='动物已出院')
+        self.assertEqual(Treatment.objects.get(id=tid).disposal_advised,
+                         'pending_adopt', '终态动物的建议必须原样保留')
+
+    def test_mark_done_refused_for_discharged_pet(self):
+        """同样的形状要挡在「补记诊疗完成」上 —— 否则先补一个待出院再改建议。"""
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid)
+        self.ok(self.post_json(
+            f'{URL}{tid}/items/{self._first_item_id(detail)}/execute/', {}))
+        Pet.objects.filter(pk=self.pet.pk).update(status='adopted')
+        self.expect_fail(self.post_json(
+            f'{URL}{tid}/done/', {'disposal_advised': 'released'}),
+            message='动物已出院')
+        self.assertIsNone(Treatment.objects.get(id=tid).done_at,
+                         '拒绝不得把动物打回待出院')
+
+    def test_non_hospital_cannot_edit_advice(self):
+        tid = self._pending('released')
+        self.login_as(self.shelter_user_a)
+        self.assertEqual(self._advice(tid, 'pending_adopt').status_code, 403)
 
 
 # ============================================================

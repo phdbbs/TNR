@@ -465,7 +465,7 @@ class UserApiTest(SupervisionBase):
         self.client.force_login(self.platform_admin)
         self.expect_fail(self.post_json(f'{API}/users/create/',
                                         self._create_payload(password='123')),
-                         message='密码长度不能少于6位')
+                         message='密码长度不能少于8位')
 
     def test_create_without_password_rejected(self):
         """不再回退到统一默认口令：每个后台账号的初始口令必须显式设置。"""
@@ -949,6 +949,141 @@ class UserEditApiTest(SupervisionBase):
         self.assertIsNotNone(log, '账号纠错没有进审计日志')
         self.assertIn('鄂兽医执字20210110号', log.detail, '审计里查不到旧证号')
         self.assertIn('鄂兽医执字20250110号', log.detail, '审计里查不到新证号')
+
+
+class UserPasswordResetApiTest(SupervisionBase):
+    """平台端重置他人登录口令。
+
+    「管理员能重置」与「不能借重置越权」是一件事的两面：前者钉住落库、
+    会话失效与审计，后者钉住本人 / 超级管理员 / 非平台角色三条边界。
+    """
+
+    NEW_PW = 'TnrReset!2026'
+
+    def _target(self, username='reset_target', **kw):
+        kw.setdefault('role', 'shelter')
+        kw.setdefault('district', self.district_a)
+        kw.setdefault('institution', self.shelter_a)
+        return make_user(username, **kw)
+
+    def _url(self, user):
+        return f'{API}/users/{user.id}/reset-password/'
+
+    def test_resets_password_and_invalidates_old_sessions(self):
+        target = self._target(first_name='李四')
+        old_hash = target.get_session_auth_hash()
+        self.client.force_login(self.platform_admin)
+        body = self.ok(self.post_json(self._url(target), {'password': self.NEW_PW}))
+        self.assertEqual(body['data']['username'], 'reset_target')
+
+        target.refresh_from_db()
+        self.assertTrue(target.check_password(self.NEW_PW))
+        self.assertFalse(target.check_password('123456'))
+        self.assertNotEqual(
+            target.get_session_auth_hash(), old_hash,
+            '口令变了，目标账号的旧会话必须失效')
+        # 重置只动口令：角色、归属与启停由别的入口负责
+        self.assertEqual(target.role, 'shelter')
+        self.assertEqual(target.district_id, self.district_a.id)
+        self.assertEqual(target.institution_id, self.shelter_a.id)
+        self.assertTrue(target.is_active)
+        self.assertEqual(target.first_name, '李四')
+
+    def test_self_reset_rejected(self):
+        """本人密码必须走自助改密（验原口令）—— 否则未锁屏的会话就能改密。"""
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(
+            self.post_json(self._url(self.platform_admin), {'password': self.NEW_PW}),
+            message='个人中心')
+        self.platform_admin.refresh_from_db()
+        self.assertTrue(self.platform_admin.check_password('123456'),
+                        '被拒的请求不能改动本人密码')
+
+    def test_superuser_reset_rejected(self):
+        """Django 超管是后台兜底账号，其口令只应在服务器侧维护。"""
+        boss = self._target('reset_boss', role='platform_admin',
+                            district=None, institution=None, is_superuser=True)
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.post_json(self._url(boss), {'password': self.NEW_PW}),
+                         message='超级管理员')
+        boss.refresh_from_db()
+        self.assertTrue(boss.check_password('123456'))
+
+    def test_requires_explicit_password(self):
+        target = self._target()
+        self.client.force_login(self.platform_admin)
+        for payload in ({}, {'password': '   '}):
+            with self.subTest(payload=payload):
+                self.expect_fail(self.post_json(self._url(target), payload),
+                                 message='请设置新密码')
+        target.refresh_from_db()
+        self.assertTrue(target.check_password('123456'))
+
+    def test_short_and_weak_password_rejected(self):
+        target = self._target(username='reset_weak')
+        self.client.force_login(self.platform_admin)
+        for password, message in (
+            ('Ab1!xy', '密码长度不能少于8位'),
+            ('12345678', '密码'),
+            ('reset_weak', '密码'),
+        ):
+            with self.subTest(password=password):
+                self.expect_fail(self.post_json(self._url(target), {'password': password}),
+                                 message=message)
+        target.refresh_from_db()
+        self.assertTrue(target.check_password('123456'), '弱口令不应生效')
+
+    def test_non_platform_admin_forbidden(self):
+        """政府端只读、业务角色无权管理账号：重置口也不能成为例外。"""
+        target = self._target()
+        for user in (self.gov_city, self.gov_a, self.shelter_user,
+                     self.hospital_user, self.adopter):
+            with self.subTest(role=user.role):
+                self.client.force_login(user)
+                self.expect_fail(self.post_json(self._url(target),
+                                                {'password': self.NEW_PW}),
+                                 status=403)
+        target.refresh_from_db()
+        self.assertTrue(target.check_password('123456'))
+
+    def test_unknown_user_404(self):
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(
+            self.post_json(f'{API}/users/999999/reset-password/',
+                           {'password': self.NEW_PW}),
+            status=404, message='用户不存在或无权访问')
+
+    def test_get_method_rejected(self):
+        target = self._target()
+        self.client.force_login(self.platform_admin)
+        self.expect_fail(self.client.get(self._url(target)),
+                         status=405, message='仅支持 POST 请求')
+
+    def test_reset_does_not_reenable_disabled_account(self):
+        """停用账号可先重置好口令再由启停入口恢复，但重置本身不能顺带启用。"""
+        target = self._target('reset_disabled', is_active=False)
+        target.status = 'inactive'
+        target.save(update_fields=['status'])
+        self.client.force_login(self.platform_admin)
+        self.ok(self.post_json(self._url(target), {'password': self.NEW_PW}))
+        target.refresh_from_db()
+        self.assertFalse(target.is_active)
+        self.assertEqual(target.status, 'inactive')
+        self.assertTrue(target.check_password(self.NEW_PW))
+
+    def test_audit_records_reset_without_password(self):
+        target = self._target('reset_audit')
+        self.client.force_login(self.platform_admin)
+        self.ok(self.post_json(self._url(target), {'password': self.NEW_PW}))
+
+        log = AuditLog.objects.filter(user=self.platform_admin,
+                                      object_repr='reset_audit').order_by('-id').first()
+        self.assertIsNotNone(log, '重置密码没有进审计日志')
+        self.assertEqual(log.action_flag, AuditLog.ACTION_CHANGE)
+        self.assertIn('重置密码', log.summary)
+        self.assertEqual(log.district, self.district_a)
+        for field in (log.summary, log.detail, log.object_repr):
+            self.assertNotIn(self.NEW_PW, field, '审计里出现了登录口令明文')
 
 
 class SupervisionDataTest(SupervisionBase):

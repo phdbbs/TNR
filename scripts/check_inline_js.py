@@ -82,7 +82,7 @@ def main():
     checked = 0
     for user, url in PAGES:
         c = Client()
-        if user is not None and not c.login(username=user, password='123456'):
+        if user is not None and not c.login(username=user, password='111111'):
             print(f'  ✗ 登录失败：{user}（先跑 seed_data）')
             failures += 1
             continue

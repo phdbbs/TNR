@@ -724,6 +724,9 @@ const Hospital = {
       ]);
       this.state.treatmentBoard = board;
       this._txMaterials = materials || [];
+      // 看板数据在途时用户可能已经进了某只动物的流程（出院页横幅「去补录」就是这样）。
+      // 流程视图已经渲染，这里再 renderBoard 会把它整块覆盖回看板。
+      if (this.state.treatmentFlow) { this.renderFlowView(); return; }
       this.renderBoard();
     } catch (e) {
       c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div>'
@@ -860,7 +863,7 @@ const Hospital = {
     const petId = el.dataset.v;
     const tid = el.dataset.tid || '';
     if (kind === 'discharge') {
-      this.openDischargeChoice(petId, el.dataset.dsp || '');
+      this.openDischargeChoice(petId, el.dataset.dsp || '', el.dataset.tid || '');
       return;
     }
     const step = { check: 1, diagnose: 2, treat: 3 }[kind] || undefined;
@@ -881,7 +884,7 @@ const Hospital = {
    *   - 领回：领回单当场完成交接（终态）；
    *   - 放归：开运回单 → 捕捉点签收（终态）。
    */
-  openDischargeChoice(petId, advised) {
+  openDischargeChoice(petId, advised, tid) {
     const OPTS = [
       { k: 'adopt', ic: '🏠', n: '领养', d: '开具领养单，动物由领养人领走' },
       { k: 'dead', ic: '🕯️', n: '死亡（含安乐死）', d: '安乐死，或死亡后的无害化处理' },
@@ -895,25 +898,48 @@ const Hospital = {
       owner_returned: 'owner', released: 'release'
     };
     const suggested = ADVISED_KIND[advised] || '';
+    if (!suggested) {
+      // 没记建议 = 后端四个去向**全部** 400。开一个让人「人工选择」的弹窗
+      // 只会让操作员点一次吃一个报错，而且选完仍然办不了（建议没动）。
+      // 直接把他送到第三步的去向建议上补录 —— 改完回来列表里就有这只动物。
+      TNR_UI.confirm(
+        '这张诊疗单在「诊疗完成」时没有记录建议去向，出院管理的四个去向都选不到它。<br>'
+        + '先到诊疗流程补录建议去向，再回来办理出院。',
+        '需要先补录建议去向').then(ok => {
+        if (ok) this.openTreatmentFlow(petId, tid, 3);
+      });
+      return;
+    }
+    const label = (OPTS.find(o => o.k === suggested) || {}).n || suggested;
     TNR_UI.modal({
       title: '办理出院 · 选择去向',
       size: 'lg',
       body: (bodyEl, closeFn) => {
         bodyEl.innerHTML = '<div class="dsp-choice">' + OPTS.map(o =>
-          '<button type="button" class="dsp-opt' + (o.k === suggested ? ' suggested' : '') + '"'
-          + ' data-dsp="' + o.k + '">'
+          '<button type="button" class="dsp-opt'
+          + (o.k === suggested ? ' suggested' : ' disabled') + '"'
+          + (o.k === suggested ? ' data-dsp="' + o.k + '"' : ' disabled') + '>'
           + '<span class="ic">' + o.ic + '</span>'
           + '<span class="tx"><b>' + o.n
           + (o.k === suggested ? '<span class="dsp-tag">医生已建议</span>' : '')
-          + '</b><i>' + o.d + '</i></span>'
+          + '</b><i>' + (o.k === suggested ? o.d : '与建议去向不符，不可办理') + '</i></span>'
           + '<span class="go">›</span></button>').join('')
-          + (suggested ? '' : '<div class="dsp-advice">诊疗完成时没记去向建议，请人工选择。</div>');
+          + '<div class="dsp-advice">出院去向必须与「诊疗完成」时的建议去向一致（现在：'
+          + this.escape(label) + '）。确实要更换，请先到诊疗流程修改建议去向，'
+          + '再回来开单。'
+          + '<button type="button" class="btn btn-link btn-sm" data-dspedit="1">'
+          + '现在就去修改</button></div>';
         bodyEl.querySelectorAll('[data-dsp]').forEach(btn => {
           btn.onclick = () => {
             closeFn();
             this.openDischargeForm(btn.dataset.dsp, petId);
           };
         });
+        const edit = bodyEl.querySelector('[data-dspedit]');
+        if (edit) edit.onclick = () => {
+          closeFn();
+          this.openTreatmentFlow(petId, tid, 3);
+        };
       }
     });
   },
@@ -1775,13 +1801,18 @@ const Hospital = {
       + '诊疗结束后的现场留证（如术后伤口、精神状态），与领养资料「诊疗后」为同一张照片，'
       + '无需重复上传。</div></div></div></div>';
 
-    // 提交「诊疗完成」后建议去向已落库，界面锁定为只读 —— 再点芯片只改
-    // 本地 draft，后端没有任何“改建议”的入口，看着能改实际没保存。
-    const adviceLocked = !!detail.done_at;
+    // 「建议去向」的可改窗口 = 诊疗完成之后、出院办结之前（第五十七轮）。
+    // 出院的四个去向完全按它分流，所以「换去向」必须先在这里改，改完再去
+    // 出院管理开单。动物一旦被出院单据占用，后端 `set_advice()` 会 400 并
+    // 指名要先处理哪张单 —— 占用判据只写在服务端一处，这里只按是否已办结
+    // 决定控件形态（原先 `!!detail.done_at` 就把整段锁死，等于没有改口）。
+    const adviceLocked = !!detail.is_disposed;
+    const adviceLive = !!detail.done_at && !adviceLocked;
     h += '<div class="card mb-5" style="margin-top:14px;"><div class="card-header">'
       + '<div class="card-title"><span class="card-title-bar"></span>建议去向</div>'
       + '<div class="text-muted fs-sm">'
-      + (adviceLocked ? '已记录 · 仅供出院办理参考' : '单选 · 仅供出院办理参考')
+      + (adviceLocked ? '已办结 · 出院单据已确定去向'
+        : adviceLive ? '待出院 · 点击即可修改（立即保存）' : '单选 · 随「诊疗完成」一起提交')
       + '</div></div><div class="card-body">';
     if (!detail.diagnosed_at) {
       h += '<div class="tx-empty">请先完成「医嘱与处方」并点击「诊断完成」。</div>';
@@ -1800,10 +1831,18 @@ const Hospital = {
       if (f.draft.disposal) {
         const sel = (opts.disposals || []).find(x => x.key === f.draft.disposal) || {};
         h += '<div class="tx-tip suc" style="margin-top:12px;"><span>✓</span><div>'
-          + (adviceLocked ? '建议去向：<b>' : '已选建议去向：<b>')
-          + this.escape(sel.label || f.draft.disposal) + '</b>。动物仍在院，诊疗完成后列表显示'
-          + '「待出院」；只有在<b>出院管理</b>里办完单据（领养出库 / 死亡出库 / 运回签收 / '
-          + '主人领回）才算已出院。</div></div>';
+          + (adviceLocked ? '办结去向：<b>' : '建议去向：<b>')
+          + this.escape(sel.label || f.draft.disposal) + '</b>。'
+          + (adviceLive
+            ? '动物已进入「待出院」，出院管理只会把这只动物列在<b>本建议</b>对应的去向里；'
+              + '确实要更换去向，点上面另一个去向即可（立刻保存），再回去院开单。'
+            : '动物仍在院，诊疗完成后列表显示「待出院」；只有在<b>出院管理</b>里办完单据'
+              + '（领养出库 / 死亡出库 / 运回签收 / 主人领回）才算已出院。')
+          + '</div></div>';
+      } else if (adviceLive) {
+        h += '<div class="tx-tip wrn" style="margin-top:12px;"><span>!</span><div>'
+          + '这张单「诊疗完成」时没有记录建议去向，出院管理的<b>四个去向都选不到它</b>。'
+          + '请在上面点选实际去向，再回去院办理。</div></div>';
       }
     }
     h += '</div></div>';
@@ -1970,7 +2009,15 @@ const Hospital = {
     if (act === 'tx-exec') { this.executeTreatmentItem(k); return; }
     if (act === 'tx-undo') { this.undoTreatmentItem(k); return; }
     if (act === 'tx-treat-done') { this.markTreatmentDone(); return; }
-    if (act === 'tx-disposal') { f.draft.disposal = k; this.renderFlowView(); return; }
+    if (act === 'tx-disposal') {
+      const prev = f.draft.disposal;
+      f.draft.disposal = k;
+      this.renderFlowView();
+      // 「诊疗完成」之后点建议 = 直接改库（出院四个去向按它分流），
+      // 之前只是给马上要提交的表单选值。
+      if (f.detail.done_at && prev !== k) this.txSaveAdvice(k, prev);
+      return;
+    }
     if (act === 'tx-photo') { this.txUploadPhoto(); return; }
   },
 
@@ -2246,6 +2293,24 @@ const Hospital = {
       TNR_UI.toast(res.message || '已撤销执行', 'warning');
     } catch (e) {
       TNR_UI.toast(e.message || '撤销失败', 'danger');
+    }
+  },
+
+  /* 待出院阶段改「建议去向」（第五十七轮）。成功后用服务端返回的详情重建
+     流程状态，建议值、提示与出院分流全部跟着刷新；失败时把选中态回滚成
+     服务端仍保留的旧值 —— 否则医生以为改好了，出院管理照旧选不到。 */
+  async txSaveAdvice(key, prev) {
+    const f = this.state.treatmentFlow;
+    if (!f || !f.detail) return;
+    try {
+      const res = await TNR_API.treatmentSetAdvice(f.detail.id, key);
+      TNR_UI.assertOk(res, '建议去向修改失败');
+      this.startTreatmentFlow(res.data, 3);
+      TNR_UI.toast(res.message || '建议去向已保存', 'success');
+    } catch (e) {
+      f.draft.disposal = prev || '';
+      this.renderFlowView();
+      TNR_UI.toast(e.message || '建议去向修改失败', 'danger');
     }
   },
 
@@ -2756,12 +2821,68 @@ const Hospital = {
     return reserved;
   },
 
+  /* 该动物当前的建议去向 key；`undefined` = 不在「待出院」流程里
+     （后端对它不做建议校验，列表按旧口径放行），`''` = 在流程里但没补录。 */
+  dspAdviceOf(petId) {
+    return ((this._dsp || {}).adviceMap || {})[String(petId)];
+  },
+
+  /* 候选列表能否出现这只动物 —— 与后端 `discharge_candidate_error()` 同判据。 */
+  dspAdviceAllows(pet, advisedKeys) {
+    const advised = this.dspAdviceOf(pet.id);
+    if (advised === undefined) return true;
+    return advisedKeys.indexOf(advised) !== -1;
+  },
+
+  /* 诊疗完成却没记建议去向的动物：四个去向都选不到它，
+     必须先到诊疗看板补录（出院页给出直达入口，否则用户只看到「暂无动物」）。 */
+  dspNoAdvicePets() {
+    const d = this._dsp || {};
+    const out = [];
+    (d.boardPending || []).forEach(r => {
+      if (!r.pet_id || (r.disposal_advised || '')) return;
+      const pet = (d.petMap || {})[String(r.pet_id)];
+      if (pet && !pet.is_deleted) out.push({ pet: pet, row: r });
+    });
+    return out;
+  },
+
+  /* 出院页顶部的「待补录建议去向」横幅。
+     这四个去向的候选列表都按建议去向分流，没补录的动物在四个页签里都不出现 ——
+     不给出直达入口的话，操作员看到的只是「暂无动物」，只能去诊疗看板自己翻。 */
+  dspAdviceNotice() {
+    const list = this.dspNoAdvicePets();
+    if (!list.length) return '';
+    const MAX = 12;
+    const chips = list.slice(0, MAX).map(it =>
+      '<button type="button" class="chip" data-dspadvice="1"'
+      + ' data-pet="' + this.escape(it.row.pet_id) + '"'
+      + ' data-tid="' + this.escape(it.row.treatment_id || '') + '">'
+      + this.escape(it.row.pet_code || (it.pet && it.pet.code) || '—')
+      + '</button>').join('');
+    return '<div class="dsp-notice">'
+      + '<div class="tx"><b>' + list.length + ' 只动物「诊疗完成」时没有记录建议去向</b>'
+      + '<i>领养 / 死亡 / 领回 / 放归四个去向都选不到它。点下面的动物编号到诊疗流程第三步'
+      + '补录或修改建议去向，再回来办理出院。'
+      + (list.length > MAX ? '（仅列出前 ' + MAX + ' 只）' : '') + '</i></div>'
+      + '<div class="chips">' + chips + '</div></div>';
+  },
+
+  /* 从出院页跳进诊疗流程：先切到诊疗页（流程视图挂在 #treatmentContent 上），
+     再打开这张单并落在第三步「建议去向」。 */
+  dspGotoAdvice(petId, tid) {
+    this.state.treatmentTab = 'flow';
+    this.state.treatmentFilter = 'pending_discharge';
+    this.navigateTo('treatment');
+    this.openTreatmentFlow(petId, tid, 3);
+  },
+
   /* 诊疗完成、尚未办结的动物（看板 `pending_discharge` 桶）。
      第五十六轮起诊疗页只记「建议去向」，动物仍是 `in_treatment`；
      各去向的候选列表必须把这一类算进来，否则诊疗完成后在出院管理里
      再也找不到它（页面显示「暂无动物」，其实刚治完一只）。
-     `advisedKeys` 传去向 key 列表：医生给了建议就按建议分流，
-     没给建议（空串）的动物在每个去向里都出现，由操作员人工选择。 */
+     `advisedKeys` 传去向 key 列表：**没给建议（空串）的动物不进任何去向** ——
+     后端同样会 400，让它出现在列表里只会让操作员白点一次。 */
   dspPendingPets(advisedKeys) {
     const d = this._dsp || {};
     const reserved = this.dspReservedPetIds();
@@ -2771,8 +2892,7 @@ const Hospital = {
       if (!r.pet_id || reserved.has(String(r.pet_id))) return;
       const pet = (d.petMap || {})[String(r.pet_id)];
       if (!pet || pet.is_deleted) return;
-      const advised = r.disposal_advised || '';
-      if (advised && advisedKeys.indexOf(advised) === -1) return;
+      if (advisedKeys.indexOf(r.disposal_advised || '') === -1) return;
       if (seen.has(String(pet.id))) return;
       seen.add(String(pet.id));
       out.push(pet);
@@ -2783,12 +2903,15 @@ const Hospital = {
   /* 待领养 = 已诊疗完成、尚未被预约的动物。
      捕捉点批准线上申请后**不会**改 `Pet.status`，动物仍是 pending_adopt；
      不按申请单排除的话，同一只动物会同时出现在「待领养」和「已预约」，
-     数量与操作入口都对不上。 */
+     数量与操作入口都对不上。
+     建议去向不是「领养」的待出院动物同样要排除 —— 后端 `adoption_register`
+     会 400，列在这里只会让操作员白点一次（第五十七轮）。 */
   dspReadyPets() {
     const d = this._dsp || {};
     const reserved = this.dspReservedPetIds();
     const ready = (d.pets || []).filter(p =>
-      p.status === 'pending_adopt' && !p.is_deleted && !reserved.has(String(p.id)));
+      p.status === 'pending_adopt' && !p.is_deleted && !reserved.has(String(p.id))
+      && this.dspAdviceAllows(p, ['pending_adopt']));
     const seen = new Set(ready.map(p => String(p.id)));
     this.dspPendingPets(['pending_adopt']).forEach(p => {
       if (!seen.has(String(p.id))) ready.push(p);
@@ -2846,15 +2969,19 @@ const Hospital = {
     return ((this._dsp && this._dsp.adoptions) || []).filter(a => a.status === 'completed');
   },
 
+  /* 领回候选：只有建议去向确实是「主人领回」的待出院动物才列进来。
+     原先这里完全不看建议，医生建议「领养」的猫能从领回页被办成已领回。 */
   dspOwnerPets() {
     const reserved = this.dspReservedPetIds();
     return ((this._dsp && this._dsp.pets) || [])
       .filter(p => (p.status === 'pending_adopt' || p.status === 'in_treatment')
-        && !p.is_deleted && !reserved.has(String(p.id)));
+        && !p.is_deleted && !reserved.has(String(p.id))
+        && this.dspAdviceAllows(p, ['owner_returned']));
   },
 
   /* 待放归 = 待领养动物，且没有未办结的旧版放归单、未被领养流程预留。
-     运回单开出后动物变成 return_pending，自然从本列表消失。 */
+     运回单开出后动物变成 return_pending，自然从本列表消失。
+     建议去向不是「放回原小区」的待出院动物同样排除（后端会 400）。 */
   dspReleaseCandidates() {
     const d = this._dsp || {};
     const reserved = this.dspReservedPetIds();
@@ -2866,7 +2993,8 @@ const Hospital = {
     });
     const candidates = (d.pets || []).filter(p =>
       p.status === 'pending_adopt' && !p.is_deleted
-      && !reserved.has(String(p.id)) && !openReleasePets.has(String(p.id)));
+      && !reserved.has(String(p.id)) && !openReleasePets.has(String(p.id))
+      && this.dspAdviceAllows(p, ['released']));
     const seen = new Set(candidates.map(p => String(p.id)));
     this.dspPendingPets(['released']).forEach(p => {
       if (!seen.has(String(p.id)) && !openReleasePets.has(String(p.id))) {
@@ -2907,8 +3035,19 @@ const Hospital = {
       ]);
       const petMap = {};
       (pets || []).forEach(p => { petMap[String(p.id)] = p; });
+      const boardPending = (board && board.pending_discharge) || [];
+      /* 待出院动物的建议去向索引（petId → disposal_advised，空串 = 没记）。
+         出院四个去向的候选列表全部按它分流，判据与后端
+         `services_discharge.discharge_candidate_error()` 一一对应：
+         在 `pending_discharge` 桶里 = 有一张「诊疗完成、未办结」的单，
+         后端会校验建议；不在里面的（历史存量、没走诊疗流程）不校验。 */
+      const adviceMap = {};
+      boardPending.forEach(r => {
+        if (r.pet_id) adviceMap[String(r.pet_id)] = r.disposal_advised || '';
+      });
       this._dsp = {
-        boardPending: (board && board.pending_discharge) || [],
+        boardPending: boardPending,
+        adviceMap: adviceMap,
         pets: pets || [],
         petMap: petMap,
         adoptions: adoptions || [],
@@ -2947,7 +3086,7 @@ const Hospital = {
         + (cnt === null ? '' : '<span class="cnt">' + cnt + '</span>')
         + '</button>';
     });
-    html += '</div><div id="dspContent"></div>';
+    html += '</div>' + this.dspAdviceNotice() + '<div id="dspContent"></div>';
     page.innerHTML = html;
 
     /* 委托绑在稳定容器 `#page-discharge` 上，一次注册全部动作。
@@ -2962,6 +3101,8 @@ const Hospital = {
         this.renderDischargeShell();
       },
       'data-dsprefresh': () => this.render_discharge(),
+      'data-dspadvice': (v, el) => this.dspGotoAdvice(
+        el.dataset.pet, el.dataset.tid || ''),
       'data-dspact': (v, el) => this.onDspAction(v, el)
     }, 'discharge');
     this.renderDspTab();
@@ -3800,11 +3941,15 @@ const Hospital = {
   /* ---------- 死亡登记 / 死亡出库 ---------- */
   dspOpenEuthCreate() {
     const reserved = this.dspReservedPetIds();
+    // 建议去向已给「领养 / 放归 / 领回」的动物不在本列表里：后端
+    // `euthanasia_create` 会 400，要登记死亡得先改建议去向（第五十七轮）。
     const eligible = ((this._dsp && this._dsp.pets) || [])
       .filter(p => (p.status === 'in_treatment' || p.status === 'pending_adopt')
-        && !reserved.has(String(p.id)));
+        && !reserved.has(String(p.id))
+        && this.dspAdviceAllows(p, ['euthanized', 'dead']));
     if (!eligible.length) {
-      TNR_UI.toast('暂无可登记的动物（需诊疗中或待领养）', 'warning');
+      TNR_UI.toast('暂无可登记的动物（需诊疗中或待领养，且建议去向为死亡 / 安乐死）',
+        'warning');
       return;
     }
     TNR_UI.modal({
@@ -5088,7 +5233,7 @@ const Hospital = {
       const confirmPwd = document.getElementById('pf_confirmPwd').value;
       if (!oldPwd || !newPwd || !confirmPwd) { TNR_UI.toast('请填写完整', 'warning'); return; }
       if (newPwd !== confirmPwd) { TNR_UI.toast('两次新密码不一致', 'warning'); return; }
-      if (newPwd.length < 6) { TNR_UI.toast('新密码至少6位', 'warning'); return; }
+      if (newPwd.length < 8) { TNR_UI.toast('新密码至少8位', 'warning'); return; }
       btn.disabled = true;
       try {
         const res = await TNR_API.post('/api/me/password/', {

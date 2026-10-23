@@ -72,18 +72,39 @@ const TNR_API = {
       go();
     }
   },
+  /* 写接口信封的统一收口：**非 JSON / 非 2xx 一律折成失败**。
+   *
+   * 以前这里是 `res.json().catch(() => ({}))`，而调用方一律只过
+   * `TNR_UI.assertOk(res)`（判据是 `res.success === false`）：
+   * 404 的 HTML 错误页、网关 502、CSRF 拦截页被吞成 `{}` 后
+   * `undefined !== false`，于是界面弹出「操作成功」，服务端什么都没写。
+   * 第四十九轮本地实测就撞上：`reset-password/` 路由未加载返回 404，
+   * 弹窗却提示「密码已重置」，旧密码照样能登录。
+   *
+   * 业务失败是 **HTTP 200 + `{success:false}`**，不是非 2xx；所以
+   * 「非 2xx 且没有明确信封」必然是基础设施层错误，不能当成功。
+   */
+  _envelope(res, data) {
+    if (res.status === 401) {
+      this._handleUnauthorized(data && data.message);
+      return {success: false, message: (data && data.message) || '请先登录'};
+    }
+    if (!data || typeof data !== 'object') {
+      return {success: false, message: `服务器返回异常（HTTP ${res.status}），请稍后重试`};
+    }
+    if (!res.ok && data.success !== false) {
+      return {success: false, message: data.message || `操作失败（HTTP ${res.status}）`};
+    }
+    return data;
+  },
   async _post(url, body) {
     const res = await fetch(url, {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-CSRFToken': this._getCSRF()},
       body: JSON.stringify(body)
     });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 401) {
-      this._handleUnauthorized(data.message);
-      return {success: false, message: data.message || '请先登录'};
-    }
-    return data;
+    const data = await res.json().catch(() => null);
+    return this._envelope(res, data);
   },
   async _postForm(url, formData) {
     const res = await fetch(url, {
@@ -91,12 +112,8 @@ const TNR_API = {
       headers: {'X-CSRFToken': this._getCSRF()},
       body: formData
     });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 401) {
-      this._handleUnauthorized(data.message);
-      return {success: false, message: data.message || '请先登录'};
-    }
-    return data;
+    const data = await res.json().catch(() => null);
+    return this._envelope(res, data);
   },
   _getCSRF() {
     return document.querySelector('[name=csrfmiddlewaretoken]')?.value ||
@@ -206,6 +223,13 @@ const TNR_API = {
   async treatmentDone(id, disposalAdvised) {
     return this._post('/api/business/treatments/' + id + '/done/',
       { disposal_advised: disposalAdvised || '' });
+  },
+  /* 待出院阶段修改「建议去向」（第五十七轮）。出院的四个去向按它分流，
+     所以「换去向 = 先改建议，改完再回去院办理」。动物已被出院单据占用时
+     后端 400，文案会指名要先处理哪张单。 */
+  async treatmentSetAdvice(id, disposalAdvised) {
+    return this._post('/api/business/treatments/' + id + '/advice/',
+      { disposal_advised: disposalAdvised });
   },
   /* 诊疗后照片（B2）：multipart 走诊疗单独立接口。⚠ 不能复用领养
      edit-info —— 它会顺带把动物挂进领养大厅，给「放归 / 无害化」动物
@@ -391,6 +415,10 @@ const TNR_API = {
   // 只能改「抄错」的三类字段：姓名 / 电话 / 执业兽医师证号（服务端 `user_update`
   // 收了范围，传别的键会被忽略）；角色、区县、机构、口令与启停各有专属入口。
   async updateUser(id, data) { return this._post(`/api/supervision/users/${id}/edit/`, data); },
+  // 管理员为**他人**重置口令；本人改密走 `/api/me/password/`（必须验原口令）。
+  async resetUserPassword(id, password) {
+    return this._post(`/api/supervision/users/${id}/reset-password/`, { password });
+  },
   async toggleUser(id) { return this._post(`/api/supervision/users/${id}/toggle/`, {}); },
   async getBusinessSupervision(type) {
     const url = type ? `/api/supervision/business/?business_type=${type}` : '/api/supervision/business/';
@@ -458,6 +486,21 @@ const TNR_API = {
    */
   async getNotices() { return this.getData('/api/supervision/notices/'); },
   async publishNotice(data) { return this._post('/api/supervision/notices/publish/', data); },
+  /* 出院单据状态维护（第五十七轮，仅平台端）。
+   * 列表必须走 `getData()`：用 `_get()` 的话 403/500 会渲染成「没有可维护的
+   * 单据」，管理员以为天下太平 —— 与公告/台账同一类谎报。 */
+  async getDischargeDocs(filters) {
+    const params = new URLSearchParams();
+    Object.keys(filters || {}).forEach(k => {
+      const v = filters[k];
+      if (v !== undefined && v !== null && v !== '') params.append(k, v);
+    });
+    const qs = params.toString();
+    return this.getData('/api/supervision/discharge-docs/' + (qs ? '?' + qs : ''));
+  },
+  async setDischargeDocStatus(data) {
+    return this._post('/api/supervision/discharge-docs/status/', data);
+  },
   async generatePetCodes(count) {
     try {
       const res = await fetch('/api/business/captures/codes-preview/?count=' + count, { credentials: 'same-origin' });

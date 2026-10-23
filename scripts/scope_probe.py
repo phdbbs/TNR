@@ -67,7 +67,7 @@ from business.models import (                                        # noqa: E40
 )
 
 ROLES = {'gov_city', 'gov_district', 'shelter', 'hospital', 'adopter'}
-PASSWORD = '123456'
+PASSWORD = '111111'
 
 # 对照组的 id：必然不存在（表里不会有这个主键）
 GHOST_ID = 99999999
