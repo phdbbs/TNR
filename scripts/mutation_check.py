@@ -17,6 +17,15 @@
 
        .venv/bin/python scripts/mutation_check.py
 
+   只验本轮新增的几条（全表 190+ 条并逐轮递增，一轮约 1 分钟，跑完要几小时
+   —— 准确条数看启动时的 `[n/total]` 心跳）：
+
+       MUTATION_LABELS=M18,M19 .venv/bin/python scripts/mutation_check.py
+
+   只验「本轮改动波及的那批」（一行一条完整标签）：
+
+       MUTATION_LABELS_FILE=/tmp/mut.txt .venv/bin/python scripts/mutation_check.py
+
    退出码 0 = 全部变异被捕获；非 0 = 存在空转，测试判别力不足。
 
 4. 脚本**改完即还原**，并在退出前断言还原成功；不会把变异体留在工作区。
@@ -49,12 +58,14 @@
 所以这里装了 SIGTERM / SIGINT / SIGHUP 处理器，收到信号先还原再退出。
 另外：**跑完务必 `git status` 看一眼**，确认没有被改动的文件残留。
 """
+import fcntl
 import os
 import pathlib
 import re
 import signal
 import subprocess
 import sys
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -91,6 +102,9 @@ _preflight_asset_gate()
 # 第二十二轮就漏了 `business.tests.test_blacklist_views`（4 条按旧口径写的用例），
 # 变异脚本当时「全绿」，是**全量套件**才把它们翻出来。
 # 所以凡涉及角色集合的变异，目标列表里必须带上受影响的存量模块。
+# ⚠ 每条变异的「期望失败用例」所在模块**必须登记在下面**，否则那条变异只会
+# 得到「变异体下测试全部通过 —— 空转!」的**假指控**（用例根本没被跑到，
+# 与「断言空转」是两回事）。补新用例开了新模块，这里要一并加上。
 TEST_TARGETS = sys.argv[1:] or [
     'business.tests.test_write_scope',
     'business.tests.test_own_institution_scope',
@@ -100,35 +114,80 @@ TEST_TARGETS = sys.argv[1:] or [
     'business.tests.test_material_views',
     'business.tests.test_endpoint_role_scope',
     'business.tests.test_blacklist_views',
+    'business.tests.test_euthanasia_views',
+    'business.tests.test_portal_views',
+    'business.tests.test_treatment_flow',
+    'business.tests.test_discharge_views',
+    # 打印取单的「本机构 ∪ 区县」口径（M195–M197）。单号/打印页用例只在**全量套件**
+    # 里跑到过，本表以前没收它 → 这三条判据的判别力长期无人验证。
+    'business.tests.test_doc_numbers',
+    # 放归两段的守卫用例（M81/M82）住在这两个模块里，本表以前没登记它们 ——
+    # 第六十一轮全表复扫时它们各吃到一条**假指控**「变异体下测试全部通过 —— 空转!」：
+    # 用例根本没被跑到，与「断言空转」是两回事（见上面第 103 行的老警告）。
+    'business.tests.test_adoption_views',
+    'business.tests.test_release_views',
     'core.tests_audit',
     'core.tests_frontend_consistency',
+    'core.tests_data_integrity',
+    'supervision.tests',
+    'supervision.tests_doc_maintenance',
 ]
+
+# 全表 190+ 条 × 一轮 1 分钟 ≈ 3 小时，本轮改判据不可能每次都等它。
+# `MUTATION_LABELS=M18,M19` 只跑标签含这些片段的变异（预检仍然扫全表，
+# 所以失效锚点照样会在测试启动前点名）；收尾仍需不带过滤地全表复扫。
+#
+# `MUTATION_LABELS_FILE=/tmp/x.txt`（一行一条**完整标签**）用于「本轮改动波及
+# 哪几条就跑哪几条」这种批量定点复扫 —— 逗号分隔那种表达不了带逗号的标签
+# （例：`M60 入库时间改用 slice(0,10) 取 UTC 日期`），也不会被 shell 的
+# 引号/分词问题绊倒。
+MUTATION_LABELS = [s for s in os.environ.get('MUTATION_LABELS', '').split(',') if s]
+_LABELS_FILE = os.environ.get('MUTATION_LABELS_FILE', '')
+if _LABELS_FILE:
+    MUTATION_LABELS += [
+        ln.strip() for ln in pathlib.Path(_LABELS_FILE).read_text().splitlines()
+        if ln.strip() and not ln.startswith('#')]
 
 # (标签, 目标文件相对路径, old, new, 期望失败的测试名)
 # new 为 None 表示「删除该段」；配合 move_after 可表达「挪位」
 MUTATIONS = [
     (
+        # 第六十一轮重挂：`adoption_info_edit` 的机构判据已不带
+        # `user.role == 'hospital'` 前缀（角色由装饰器分流），且单行串在
+        # `adoption_application_outbound` 里同名出现 → 锚点必须带注释行。
         'M1 删掉机构判据（复现原洞）', 'business/views_adoption.py',
-        "    if user.role == 'hospital' and pet.hospital_id != user.institution_id:\n"
+        "    # 医院只能动**当前挂在本院名下**的宠物 —— 与同类写接口口径一致。\n"
+        "    # 放在任何落库动作之前：否则会先建/改 listing 再报错，留下半截写入。\n"
+        "    if pet.hospital_id != user.institution_id:\n"
         "        return json_fail('无权编辑此动物的领养信息')\n",
         None,
-        'cross_institution',
+        # ⚠ 不能指 `cross_institution` —— 那条用例的受害宠物压根不在本院的
+        # 取单范围里，`get_hospital_scoped_pet()` 先 404，判据删了它照样绿
+        #（第六十一轮实测：M1 长期 WEAK，红的全是源码契约用例）。
+        'test_edit_info_refused_for_pet_moved_to_other_hospital',
     ),
     (
         'M2 判据反转（!= 改 ==）', 'business/views_adoption.py',
-        "pet.hospital_id != user.institution_id",
-        "pet.hospital_id == user.institution_id",
+        "    if pet.hospital_id != user.institution_id:\n"
+        "        return json_fail('无权编辑此动物的领养信息')\n",
+        "    if pet.hospital_id == user.institution_id:\n"
+        "        return json_fail('无权编辑此动物的领养信息')\n",
         'own_pet_ok',
     ),
     (
+        # 判据换成区县维度：同区县另一家医院的宠物照样放行（原洞的形状）。
         'M3 比错字段（institution_id → district_id）', 'business/views_adoption.py',
-        "pet.hospital_id != user.institution_id",
-        "pet.hospital_id != user.district_id",
+        "    if pet.hospital_id != user.institution_id:\n"
+        "        return json_fail('无权编辑此动物的领养信息')\n",
+        "    if pet.hospital_id != user.district_id:\n"
+        "        return json_fail('无权编辑此动物的领养信息')\n",
         'own_pet_ok',
     ),
     (
         'M4 判据挪到落库之后', 'business/views_adoption.py',
-        "    if user.role == 'hospital' and pet.hospital_id != user.institution_id:\n"
+        "    # 医院只能动**当前挂在本院名下**的宠物 —— 与同类写接口口径一致。\n"
+        "    # 放在任何落库动作之前：否则会先建/改 listing 再报错，留下半截写入。\n"
+        "    if pet.hospital_id != user.institution_id:\n"
         "        return json_fail('无权编辑此动物的领养信息')\n",
         None,
         'checks_before_any_write',
@@ -146,7 +205,7 @@ MOVE_AFTER = {
     'M4 判据挪到落库之后': (
         'business/views_adoption.py',
         "        listing.save()\n",
-        "\n    if user.role == 'hospital' and pet.hospital_id != user.institution_id:\n"
+        "\n    if pet.hospital_id != user.institution_id:\n"
         "        return json_fail('无权编辑此动物的领养信息')\n",
     ),
 }
@@ -636,11 +695,13 @@ MUTATIONS += [
     ),
     (
         # 严格读退回软版本 —— catch 又变成「承诺了却兑现不了」。
+        # 第六十一轮重挂：一宠一档随 `showPetArchive` 迁到了 `tnr-common.js`，
+        # shelter.js 只剩一行委派（旧锚点命中 0 次，只会 SKIP）。
         'M39 一宠一档退回静默读（死 catch 复现）',
-        'static/js/portals/shelter.js',
+        'static/js/tnr-common.js',
         'data = await TNR_API.getPetLifecycleStrict(petId);',
         'data = await TNR_API.getPetLifecycle(petId);',
-        'test_no_dead_catch_anywhere',
+        'test_archive_impl_is_shared',
     ),
     (
         # 严格读内核不抛错 —— 整轮修复的地基没了（`XxxStrict` 全变成软版本）。
@@ -883,19 +944,21 @@ MUTATIONS += [
     (
         # 把列退回「直绑 DateTimeField」：界面上就是
         # `2026-10-16T16:33:51.504093+00:00`。不报错、不 500，只是没人会念给它听。
-        'M59 领养登记时间列退回直绑 created_at',
+        # 第六十一轮重挂：领养「登记时间」列已随出院看板改版换成了 `_date` 派生列，
+        # 这里改钉物料入库时间列（同一类判据：直绑 created_at 的列必须配 render）。
+        'M59 入库时间列退回直绑 created_at',
         'static/js/portals/hospital.js',
-        "{ title: '登记时间', key: 'created_at', render: r => this.formatDateTime(r.created_at) },",
-        "{ title: '登记时间', key: 'created_at' },",
+        "{ title: '入库时间', key: 'created_at', render: r => this.formatDateTime(r.created_at) },",
+        "{ title: '入库时间', key: 'created_at' },",
         'test_no_column_binds_a_datetime_field_raw',
     ),
     (
         # 格式化写了，但用的是 `.slice(0, 10)` —— 拿的是 **UTC 日期**，
         # 北京时间 00:00–08:00 的记录显示成前一天。肉眼看界面完全正常。
-        'M60 登记时间改用 slice(0,10) 取 UTC 日期',
+        'M60 入库时间改用 slice(0,10) 取 UTC 日期',
         'static/js/portals/hospital.js',
-        "{ title: '登记时间', key: 'created_at', render: r => this.formatDateTime(r.created_at) },",
-        "{ title: '登记时间', key: 'created_at', render: r => r.created_at.slice(0, 10) },",
+        "{ title: '入库时间', key: 'created_at', render: r => this.formatDateTime(r.created_at) },",
+        "{ title: '入库时间', key: 'created_at', render: r => r.created_at.slice(0, 10) },",
         'test_formatter_used_by_those_columns_is_the_shared_one',
     ),
     (
@@ -915,10 +978,12 @@ MUTATIONS += [
         'test_create_unparseable_date_rejected',
     ),
     (
-        'M63 安乐死列表处置日期空值不再显示破折号',
+        # 第六十一轮重挂：出院看板的死亡列表改用派生列 `_date`，
+        # 台账那一列仍由 M64 钉住。
+        'M63 出院看板死亡列表的处置日期不再兜底格式化',
         'static/js/portals/hospital.js',
-        "            { title: '原因', key: 'reason' },\n            { title: '处置日期', key: 'euthanized_at', render: r => this.formatDate(r.euthanized_at) },",
-        "            { title: '原因', key: 'reason' },\n            { title: '处置日期', key: 'euthanized_at' },",
+        "          {title: '处置日期', key: '_date', sortable: false,\n            render: r => this.formatDate(r._date)},",
+        "          {title: '处置日期', key: '_date', sortable: false},",
         'test_euthanasia_date_column_shows_dash_when_null',
     ),
     (
@@ -1081,14 +1146,18 @@ MUTATIONS += [
     ),
     (
         # 医院端重新自带一份（还带回那条后端根本不存在的 cancelled）。
-        'M80 医院端出院看板自带放归状态表（含幽灵 cancelled）',
+        # 第六十一轮改成**注入型**变异：出院看板改版后 hospital.js 里已经没有
+        # 那份 `map:`（旧锚点命中 0 次）。判据是「别处不许出现 `transferred:`
+        # 这种本地放归表」，所以注入一份本地表才能证明扫描本身有效。
+        'M80 医院端又自带一份放归状态表（含幽灵 cancelled）',
         'static/js/portals/hospital.js',
-        "        map: Object.fromEntries(Object.entries(TNR_UI.RELEASE_STATUS)\n"
-        "          .map(([k, v]) => [k, [v.text, 'badge-' + v.badge]])),",
-        "        map: { pending: ['待转运回小区', 'badge-warning'],\n"
-        "               transferred: ['已回小区待放归', 'badge-info'],\n"
-        "               released: ['已放归', 'badge-success'],\n"
-        "               cancelled: ['已撤销', 'badge-default'] },",
+        "  openDischargeChoice(petId, advised, tid) {",
+        "  _LOCAL_RELEASE_STATUS: {\n"
+        "    transferred: ['已回小区待放归', 'badge-info'],\n"
+        "    released: ['已放归', 'badge-success'],\n"
+        "    cancelled: ['已撤销', 'badge-default']\n"
+        "  },\n"
+        "  openDischargeChoice(petId, advised, tid) {",
         'test_no_other_frontend_file_maps_release_status',
     ),
     (
@@ -1111,10 +1180,11 @@ MUTATIONS += [
     (
         # 一宠一档时间线（捕捉点端与领养人端各一处）也中过同样的二值兜底：
         # 放归两段在时间线上只显示「待放归」，看不出动物在车上还是在小区。
+        # 第六十一轮重挂：时间线已随 `showPetArchive` 迁到 `tnr-common.js`。
         'M83 时间线放归状态退回二值兜底',
-        'static/js/portals/shelter.js',
-        "            + '<br>状态：' + esc(TNR_UI.releaseStatusText(ev.status));",
-        "            + '<br>状态：' + esc(ev.status === 'released' ? '已放归' : '待放归');",
+        'static/js/tnr-common.js',
+        "            + '<br>状态：' + this.escape(TNR_UI.releaseStatusText(ev.status));",
+        "            + '<br>状态：' + this.escape(ev.status === 'released' ? '已放归' : '待放归');",
         'test_no_binary_release_status_fallback',
     ),
     (
@@ -1234,13 +1304,13 @@ MUTATIONS += [
         'test_pet_archive_release_detail_shows_stage',
     ),
     (
-        'M96 医院出院看板自带领养状态表（旧叫法）',
+        # 同 M80：出院看板改版后那份本地领养表已经不在 hospital.js 里，
+        # 用**注入**来表达「旧叫法回到前端」。
+        'M96 医院端把 completed 叫成「已领出」（旧叫法）',
         'static/js/portals/hospital.js',
-        "        map: Object.fromEntries(Object.entries(TNR_UI.ADOPTION_STATUS)\n"
-        "          .map(([k, v]) => [k, [v.text, 'badge-' + v.badge]])),",
-        "        map: { pending_claim: ['待领养', 'badge-cinnabar'],\n"
-        "               completed: ['已领出', 'badge-success'],\n"
-        "               cancelled: ['已撤销', 'badge-default'] },",
+        "  openDischargeForm(kind, petId) {",
+        "  _LEGACY_ADOPTION_LABEL: { completed: '已领出', cancelled: '已撤销' },\n"
+        "  openDischargeForm(kind, petId) {",
         'test_no_legacy_adoption_wording',
     ),
     (
@@ -1552,8 +1622,8 @@ MUTATIONS += [
     (
         'M133 账号列表角色列不再走徽章真源',
         'static/js/portals/platform.js',
-        "      { key: 'role', title: '角色', render: r => TNR_UI.roleBadge(r.role) },",
-        "      { key: 'role', title: '角色', render: r => TNR_UI.roleText(r.role) },",
+        "      role: r => TNR_UI.roleBadge(r.role),",
+        "      role: r => '<span class=\"badge badge-info\">' + (r.role_display || r.role) + '</span>',",
         'test_platform_portal_reads_the_enum_sources',
     ),
     (
@@ -1592,17 +1662,17 @@ MUTATIONS += [
     ),
     (
         'M138 流转时间线转运状态退回本地表（漏 partial，印英文码）',
-        'static/js/portals/shelter.js',
-        "            + '<br>状态：' + esc(TNR_UI.transferStatusText(ev.status))",
-        "            + '<br>状态：' + esc(({ pending: '待签收', received: '已签收',"
+        'static/js/tnr-common.js',
+        "            + '<br>状态：' + this.escape(TNR_UI.transferStatusText(ev.status))",
+        "            + '<br>状态：' + this.escape(({ pending: '待签收', received: '已签收',"
         " rejected: '已驳回' })[ev.status] || ev.status)",
         'test_shelter_lifecycle_timeline_uses_the_sources',
     ),
     (
         'M139 流转时间线诊疗状态退回「已完成 / 进行中」二分',
-        'static/js/portals/shelter.js',
-        "            + '<br>状态：' + esc(TNR_UI.treatmentStatusText(ev.status))",
-        "            + '<br>状态：' + esc(ev.status === 'completed' ? '已完成' : '进行中')",
+        'static/js/tnr-common.js',
+        "            + '<br>状态：' + this.escape(TNR_UI.treatmentStatusText(ev.status))",
+        "            + '<br>状态：' + this.escape(ev.status === 'completed' ? '已完成' : '进行中')",
         'test_shelter_lifecycle_timeline_uses_the_sources',
     ),
     (
@@ -1680,10 +1750,10 @@ MUTATIONS += [
         'test_edit_modals_abort_instead_of_falling_back_to_create',
     ),
     (
-        'M149 平台建号前端回退默认口令 123456',
+        'M149 平台建号前端回退默认口令 111111',
         'static/js/portals/platform.js',
         '          username, password, name, role,',
-        "          username, password: password || '123456', name, role,",
+        "          username, password: password || '111111', name, role,",
         'test_account_creation_has_no_default_password',
     ),
     (
@@ -1691,18 +1761,10 @@ MUTATIONS += [
         # 直接 POST 就能建出一个「口令为空」的管理账号。
         'M150 建号接口放弃口令必填与强度校验',
         'supervision/views.py',
-        '    if not password:\n'
-        "        return json_fail('请设置初始密码')\n"
-        '    if len(password) < 6:\n'
-        "        return json_fail('密码长度不能少于6位')\n"
-        '    # 传一个未落库的 User 给校验器：`UserAttributeSimilarityValidator`\n'
-        '    # 只有在拿到 user 时才比对用户名/姓名。不传会让「口令=用户名」在建号\n'
-        '    # 这一侧放行，而改密接口（传 request.user）却拒绝 —— 同一套判据两个结果。\n'
         '    probe = User(username=username, first_name=name)\n'
-        '    try:\n'
-        '        validate_password(password, probe)\n'
-        '    except ValidationError as e:\n'
-        "        return json_fail('；'.join(e.messages))\n",
+        "    err = password_policy_error(password, probe, empty='请设置初始密码')\n"
+        '    if err:\n'
+        '        return json_fail(err)\n',
         '',
         'test_create_without_password_rejected',
     ),
@@ -1908,13 +1970,256 @@ MUTATIONS += [
         '',
         'test_released_document_on_non_terminal_pet_is_reported',
     ),
+    (
+        'M175 重置密码不再拦截本人',
+        'supervision/views.py',
+        '    if user.id == request.user.id:\n'
+        "        return json_fail('不能在此重置本人密码，请前往个人中心修改')\n",
+        '',
+        'test_self_reset_rejected',
+    ),
+    (
+        'M176 重置密码不再拦截超级管理员',
+        'supervision/views.py',
+        '    if user.is_superuser:\n'
+        "        return json_fail('超级管理员账号的密码不可由平台端重置')\n",
+        '',
+        'test_superuser_reset_rejected',
+    ),
+    (
+        'M177 重置密码跳过强度校验',
+        'supervision/views.py',
+        "    err = password_policy_error(password, user, empty='请设置新密码')\n"
+        '    if err:\n'
+        '        return json_fail(err)\n',
+        '',
+        'test_short_and_weak_password_rejected',
+    ),
+    (
+        'M178 重置密码把明文写进审计',
+        'supervision/views.py',
+        "    request.audit_detail = '平台端重置登录密码'\n",
+        "    request.audit_detail = f'平台端重置登录密码：{password}'\n",
+        'test_audit_records_reset_without_password',
+    ),
+    (
+        # 非 JSON 的 404/502 被吞成 `{}`，`assertOk` 的 `success === false`
+        # 判据放行 —— 界面谎报「密码已重置」，实际数据库里什么都没写。
+        'M179 写接口把非 JSON 错误页当成功',
+        'static/js/tnr-api.js',
+        "    if (!data || typeof data !== 'object') {\n"
+        "      return {success: false, message: `服务器返回异常（HTTP ${res.status}），请稍后重试`};\n"
+        '    }\n',
+        '    if (!data) data = {};\n',
+        'test_non_json_write_response_is_reported_as_failure',
+    ),
+]
+
+# ---------- 第六十一轮：出院候选按「建议去向」分流 + 平台端单据状态维护 ----------
+MUTATIONS += [
+    (
+        # 四个出院去向只认「诊疗完成」时给的建议。去掉比对 = 建议领养的动物
+        # 也能被开成放归/运回单，同一只动物同时出现在两张终态单据上。
+        'M180 出院候选不再比对办结建议去向',
+        'business/services_discharge.py',
+        "    if advised not in DISCHARGE_ADVICE[kind]:\n"
+        "        return (f'{pet.code} 的办结建议去向是「{disposal_label(advised)}」，'\n"
+        "                f'不能按「{label}」办理出院；确需更换去向，请先修改建议去向')\n",
+        None,
+        'test_adoption_advice_blocks_other_three',
+    ),
+    (
+        # 动物已是终态时改建议不会动任何单据，只会让「单据说领养、建议说放归」
+        # 同时成立 —— 纠错得由平台端维护单据，不能靠改建议绕过。
+        'M181 已出院动物仍可改建议去向',
+        'business/services_discharge.py',
+        "    if pet.status in Pet.TERMINAL_STATUSES:\n"
+        "        return (f'动物已出院（{pet.get_status_display()}），建议去向不能再修改；'\n"
+        "                '确需纠错请由平台端维护对应出院单据')\n",
+        None,
+        'test_advice_locked_when_pet_already_discharged',
+    ),
+    (
+        'M182 在办运回单不再占用建议去向',
+        'business/services_discharge.py',
+        "    if pet_has_pending_return(pet):\n"
+        "        return '该动物已在未办结的运回单上，请先撤回运回单再修改建议去向'\n",
+        None,
+        'test_advice_locked_while_return_order_pending',
+    ),
+    (
+        # 「没点诊疗完成就出库」的动物会留下一张 treating 旧单：宠物早已终态，
+        # 看板却还能打开它补点完成、顺手安排去向。
+        'M183 终态动物仍可补记「诊疗完成」',
+        'business/services_treatment.py',
+        "    pet = treatment.pet\n"
+        "    if pet is not None and pet.status in Pet.TERMINAL_STATUSES:\n"
+        "        raise ValueError(f'动物已出院（{pet.get_status_display()}），'\n"
+        "                         '本单不能再补记「诊疗完成」；如需纠错请由平台端维护出院单据')\n",
+        None,
+        'test_mark_done_refused_for_discharged_pet',
+    ),
+    (
+        # 未诊疗完成 = 动物还没进待出院；此时放开改建议，建议就成了
+        # 「诊疗中途改口」，出院候选会被一张还没做完的单子分流。
+        'M184 未诊疗完成也能改建议去向',
+        'business/services_treatment.py',
+        "    if treatment.done_at is None:\n"
+        "        raise ValueError('请先点击「诊疗完成」，动物进入待出院后才能修改建议去向')\n",
+        None,
+        'test_advice_needs_done_first',
+    ),
+    (
+        # 建议**不可清空**（`DISPOSAL_CHOICES` 没有空 key）：清空后动物
+        # 从四个去向的候选里同时消失，出院页只会显示「暂无动物」。
+        'M185 建议去向可以被清空',
+        'business/services_treatment.py',
+        "    advised = (disposal_advised or '').strip()\n"
+        "    if advised not in dict(Treatment.DISPOSAL_CHOICES):\n",
+        "    advised = (disposal_advised or '').strip()\n"
+        "    if advised and advised not in dict(Treatment.DISPOSAL_CHOICES):\n",
+        'test_advice_cannot_be_cleared',
+    ),
+    (
+        # 本轮实测打出的真实缺陷：`ReturnOrder` 是「多宠一单」，没有 `pet_id`
+        # 属性，默认「全部单据」的检索会整页 500，四类单据一起看不见。
+        'M186 维护列表按 doc.pet_id 取动物（运回单 500）',
+        'supervision/doc_maintenance.py',
+        "    return getattr(doc, 'pet_id', None)\n",
+        "    return doc.pet_id\n",
+        'test_return_order_row_survives_without_pet_fk',
+    ),
+    (
+        'M187 回退不再查白名单',
+        'supervision/doc_maintenance.py',
+        "    if target not in allowed_targets(doc, doc_type):\n"
+        "        raise MaintenanceError(\n",
+        "    if False:\n"
+        "        raise MaintenanceError(\n",
+        'test_target_must_be_in_whitelist',
+    ),
+    (
+        # 白名单只列**回退方向**：往前推是业务角色自己的流程，平台端只纠错。
+        'M188 白名单放进一个「前进」方向',
+        'supervision/doc_maintenance.py',
+        "    'release': {\n"
+        "        'released': ('transferred', 'pending'),\n",
+        "    'release': {\n"
+        "        'pending': ('released',),\n"
+        "        'released': ('transferred', 'pending'),\n",
+        'test_forward_transitions_are_not_the_platform_job',
+    ),
+    (
+        # 这类操作直接改监管台账里的终态记录，无理由不可执行；
+        # 原因还要进审计 detail，不设上限等于允许往台账塞任意大的文本。
+        'M189 维护原因不再必填',
+        'supervision/doc_maintenance.py',
+        "    if not reason:\n"
+        "        return json_fail('请填写维护原因')\n",
+        None,
+        'test_reason_is_required',
+    ),
+    (
+        'M190 维护原因不再限长',
+        'supervision/doc_maintenance.py',
+        "    if len(reason) > REASON_MAX:\n"
+        "        return json_fail(f'维护原因不能超过 {REASON_MAX} 字')\n",
+        None,
+        'test_reason_length_is_capped',
+    ),
+    (
+        # 出院页横幅是「建议不符 → 去补录」的唯一入口；不渲染就等于
+        # 操作员只看到四个空页签，看不出是「没动物」还是「去向不对」。
+        'M191 出院页不再渲染建议去向横幅',
+        'static/js/portals/hospital.js',
+        "    html += '</div>' + this.dspAdviceNotice() + '<div id=\"dspContent\"></div>';\n",
+        "    html += '</div>' + '<div id=\"dspContent\"></div>';\n",
+        'test_discharge_shell_renders_the_notice_and_binds_it',
+    ),
+    (
+        # 先切页再开流程：`navigateTo` 会重渲染诊疗页，顺序颠倒则
+        # 「现在就去修改」点开的是上一次的看板，建议照旧改不了。
+        'M192 横幅跳转先开流程再切页',
+        'static/js/portals/hospital.js',
+        "    this.navigateTo('treatment');\n"
+        "    this.openTreatmentFlow(petId, tid, 3);\n",
+        "    this.openTreatmentFlow(petId, tid, 3);\n"
+        "    this.navigateTo('treatment');\n",
+        'test_notice_jumps_into_step_three_of_the_flow',
+    ),
+    (
+        # 看板数据在途时用户已经进了某只动物的流程（横幅「去补录」就是这样），
+        # 少掉第二次守卫会把刚渲染的流程整块覆盖回看板。
+        'M193 看板渲染丢掉「流程已在途」守卫',
+        'static/js/portals/hospital.js',
+        "      if (this.state.treatmentFlow) { this.renderFlowView(); return; }\n"
+        "      this.renderBoard();\n",
+        "      this.renderBoard();\n",
+        'test_flow_render_keeps_the_opened_flow',
+    ),
+    (
+        'M194 出院弹窗不再接「现在就去修改」',
+        'static/js/portals/hospital.js',
+        "        const edit = bodyEl.querySelector('[data-dspedit]');\n"
+        "        if (edit) edit.onclick = () => {\n"
+        "          closeFn();\n"
+        "          this.openTreatmentFlow(petId, tid, 3);\n"
+        "        };\n",
+        None,
+        'test_discharge_popup_offers_the_edit_entry',
+    ),
+]
+
+# ---------- 第六十一轮：打印取单的「本机构 ∪ 区县」口径 ----------
+# 这四条用例（`CrossDistrictPrintTest`）一直只在**全量套件**里跑，变异表以前
+# 既没收这个模块、也没给它们配过变异 —— 也就是说「跨区县送医的医院能不能打出
+# 自己的单」这条判据**从来没被验证过有没有判别力**。本轮补上：先给
+# TEST_TARGETS 加上 `business.tests.test_doc_numbers`，再挂三条变异。
+MUTATIONS += [
+    (
+        # 复现原洞：只按区县收敛 → 动物在甲区、手术在乙区，乙区医院点打印 404。
+        'M195 打印取单退回「只按区县」（复现原洞）', 'business/services.py',
+        "    if user.institution_id:\n"
+        "        own_q = Q(institution_id=user.institution_id)\n"
+        "        for field in extra_own_fields:\n"
+        "            own_q |= Q(**{field: user.institution_id})\n"
+        "        own = model.objects.filter(own_q, pk=pk).first()\n"
+        "        if own is not None:\n"
+        "            return own\n",
+        None,
+        'test_hospital_prints_own_doc_across_district',
+    ),
+    (
+        # 机构分支在，但**没接** `extra_own_fields`：转运单的 `institution` 是
+        # 发出捕捉点，接收医院挂在 `to_hospital` 上 → 它签收后打不出自己那张单。
+        'M196 打印取单忽略 extra_own_fields', 'business/services.py',
+        "        for field in extra_own_fields:\n"
+        "            own_q |= Q(**{field: user.institution_id})\n",
+        None,
+        'test_receiving_hospital_prints_transfer',
+    ),
+    (
+        # 反向对照：放宽成「按 pk 直取」时，隔离判据必须变红。
+        # 只挂「打不开」那两条的话，`get_printable_object` 被改成无条件放行
+        # 也能全绿 —— 那正是第四十八轮修复最容易走过头的方向。
+        'M197 打印取单取消越权收敛（存在性预言机 + 越权打印）', 'business/services.py',
+        "    return get_scoped_object(model, pk, user)\n",
+        "    return model.objects.filter(pk=pk).first()\n",
+        'test_other_hospital_cannot_print',
+    ),
 ]
 
 # 允许 5 元组（单文件变异）与 6 元组（+ 附加改动，用于「复现原缺陷」这类跨文件变异）
 MUTATIONS = [m if len(m) == 6 else m + ([],) for m in MUTATIONS]
 
 ENV = dict(os.environ, DEBUG='on', SECRET_KEY='t',
-           ALLOWED_HOSTS='localhost,testserver')
+           # ⚠ `127.0.0.1` 不能省。`business.tests.test_doc_numbers` 里的跨区县
+           # 打印用例固定用 `HTTP_HOST='127.0.0.1'`（打印页要拿它拼二维码绝对链接），
+           # 而这里的 ENV 会**覆盖** settings 的 DEBUG 兜底列表 —— 少了它，
+           # Django 直接回 400 DisallowedHost，用例全红，而红的**不是被打磨的那条判据**。
+           # 夹具的环境变量必须**不比真实测试环境更窄**，否则「期望失败的用例名
+           # 没出现在失败列表」会伪装成 WEAK，「别的用例也红了」会伪装成 PASS。
+           ALLOWED_HOSTS='localhost,testserver,127.0.0.1')
 for _k in ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'):
     ENV.pop(_k, None)
 
@@ -1951,6 +2256,8 @@ def _short(line):
 
 # 信号处理器要用的「原始内容」快照（在 main 里填）
 _SNAPSHOT = {}
+# 单实例锁的 fd（在 main 里填）—— 关掉它就等于放锁
+_LOCK_KEEPALIVE = None
 
 
 def _restore_all():
@@ -1968,6 +2275,26 @@ def _on_signal(signum, _frame):
 
 
 def main():
+    # ---- 同一时刻只允许一个扫描进程 ----
+    # 两条变异扫描**并发跑会毁代码**：每个进程都在启动时对目标文件拍一份
+    # 「原始内容」快照，跑完（或收到信号）再把快照写回。第二个进程拍到的
+    # 往往是第一个进程**正在变异**的那一版，于是它的「还原」会把变异体
+    # 永久写进工作区 —— 而它自己的预检只会抱怨「锚点命中 0 次」，
+    # 看起来像旧锚点失效，不像数据损坏。（第六十一轮实测踩到：三条扫描同时在跑，
+    # 预检报 M1/M4 命中 0 次，而 `business/views_adoption.py` 的机构判据
+    # 一度只剩半截。）锁必须在**拍快照之前**拿。
+    _lock = open('/tmp/tnr-mutation-check.lock', 'w')
+    try:
+        fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(
+            '另一个 mutation_check 正在跑（锁：/tmp/tnr-mutation-check.lock）。\n'
+            '并发扫描会互相覆盖快照、把变异体永久留在工作区 —— 请先结束它：\n'
+            '  pgrep -fl mutation_check   # 看 pid\n'
+            '  pkill -TERM -f mutation_check   # 收到信号会先还原再退出')
+    global _LOCK_KEEPALIVE
+    _LOCK_KEEPALIVE = _lock          # 关掉 fd 会释放锁，必须持有到进程结束
+
     files = sorted({m[1] for m in MUTATIONS} | {e[0] for m in MUTATIONS for e in m[5]})
     originals = {f: (ROOT / f).read_text() for f in files}
     _SNAPSHOT.update(originals)
@@ -2008,22 +2335,43 @@ def main():
         print('!' * 76)
 
     results = []
+    filtered = 0
+    # 进度行：**每条变异跑完立刻打一行**（带序号、累计耗时）。
+    # 收尾才打表 + 重定向到文件时 stdout 是块缓冲的，几小时里日志一片空白，
+    # 既看不出跑到哪、也看不出是不是卡住了 —— 全表 ≈3 小时的复扫必须有心跳。
+    total = len([t for t in MUTATIONS
+                 if not MUTATION_LABELS or any(s in t[0] for s in MUTATION_LABELS)])
+    started = time.time()
+    done = 0
+
+    def record(label, verdict, detail):
+        nonlocal done
+        results.append((label, verdict, detail))
+        done += 1
+        mins = (time.time() - started) / 60
+        print(f'[{done}/{total}] {verdict} {label} '
+              f'({mins:.1f} 分钟，均 {mins / max(done, 1) * 60:.0f}s/条)',
+              flush=True)
+
     try:
         for label, rel, old, new, expect, extras in MUTATIONS:
+            if MUTATION_LABELS and not any(s in label for s in MUTATION_LABELS):
+                filtered += 1
+                continue
             original = originals[rel]
             hits = original.count(old)
             if hits != 1:
-                results.append((label, 'SKIP', f'目标串命中 {hits} 次（应恰好 1 次）'))
+                record(label, 'SKIP', f'目标串命中 {hits} 次（应恰好 1 次）')
                 continue
 
             mutated = original.replace(old, new if new is not None else '', 1)
             if label in MOVE_AFTER:
                 arel, anchor, payload = MOVE_AFTER[label]
                 if arel != rel:
-                    results.append((label, 'SKIP', 'MOVE_AFTER 与目标文件不一致'))
+                    record(label, 'SKIP', 'MOVE_AFTER 与目标文件不一致')
                     continue
                 if mutated.count(anchor) != 1:
-                    results.append((label, 'SKIP', f'锚点不唯一：{anchor!r}'))
+                    record(label, 'SKIP', f'锚点不唯一：{anchor!r}')
                     continue
                 mutated = mutated.replace(anchor, anchor + payload, 1)
 
@@ -2038,7 +2386,7 @@ def main():
                     break
                 payloads[erel] = esrc.replace(eold, enew, 1)
             if bad:
-                results.append((label, 'SKIP', bad))
+                record(label, 'SKIP', bad)
                 continue
 
             for f, text in payloads.items():
@@ -2048,13 +2396,13 @@ def main():
                 (ROOT / f).write_text(text)
 
             if code == 0:
-                results.append((label, 'FAIL', '变异体下测试**全部通过** —— 空转！'))
+                record(label, 'FAIL', '变异体下测试**全部通过** —— 空转！')
             else:
                 failed = [ln for ln in out.splitlines()
                           if ln.startswith('FAIL:') or ln.startswith('ERROR:')]
                 hit = any(expect in ln for ln in failed)
                 detail = '; '.join(_short(ln) for ln in failed[:4]) or '?'
-                results.append((label, 'PASS' if hit else 'WEAK', f'捕获={detail}'))
+                record(label, 'PASS' if hit else 'WEAK', f'捕获={detail}')
     finally:
         for f, text in originals.items():
             (ROOT / f).write_text(text)
@@ -2068,6 +2416,8 @@ def main():
             ok = False
         print(f'{mark} {label}\n     {verdict}: {detail}')
     print('=' * 76)
+    if filtered:
+        print(f'（本轮按 MUTATION_LABELS 过滤：跑 {len(results)} 条、跳过 {filtered} 条）')
     print('全部变异均被捕获' if ok else '存在未被捕获的变异 —— 测试判别力不足')
     return 0 if ok else 1
 
