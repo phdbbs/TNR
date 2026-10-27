@@ -8,7 +8,10 @@ from django.test import override_settings
 from django.utils import timezone
 
 from business.models import Capture, OwnerReturn, Pet, Transfer
-from business.services import capture_states_bulk, capture_transfer_state
+from business.services import (
+    capture_states_bulk, capture_status_code, capture_transfer_state,
+    recalc_capture_status,
+)
 from business.tests.base import (
     assert_doc_no,
     BusinessTestBase, make_capture, make_district, make_image_file,
@@ -596,6 +599,111 @@ class CaptureStatusTest(BusinessTestBase):
         self.ok(self.post_json(f'{CAPTURES_URL}{capture.id}/owner-return/',
                                {'pet_id': pet.id, 'owner_name': '原主人',
                                 'owner_phone': '13811110000', 'reason': '主人找回'}))
+
+
+class CaptureStatusSingleSourceTest(BusinessTestBase):
+    """捕捉单状态只许有一个真源：**按当前转运单据派生**。
+
+    `Capture.status` 列是这份派生的缓存，作废 / 驳回 / 平台端回退单据后缓存
+    可能停在旧值。现网实测就有库里「已完成」、按单据算「待转运 0/1」
+    （CAP-T0001）与「部分转运 3/4」（CAP2600013）两张 —— 以前列表读派生值、
+    详情与监管台账读缓存列、前端徽标再自己算一档，同一张单三个说法。
+    """
+
+    def _api_capture(self, pet_count=1):
+        """走创建接口造一张**带真宠物**的捕捉单（新单状态是 pending）。"""
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{CAPTURES_URL}create/', {
+            'property_name': '真源测试物业', 'community_name': '真源测试小区',
+            'contact_person': '王五', 'contact_phone': '13800000000',
+            'pet_count': pet_count,
+        }))
+        capture = Capture.objects.get(id=body['data']['capture']['id'])
+        return capture, body['data']['pet_codes']
+
+    def _stale(self, stored='completed', pet_count=1):
+        """造一张「缓存列与单据脱节」的捕捉单（不去改缓存列的写路径）。"""
+        capture, codes = self._api_capture(pet_count)
+        Capture.objects.filter(id=capture.id).update(status=stored)
+        capture.refresh_from_db()
+        self.assertEqual(capture.status, stored)
+        return capture, codes
+
+    def _list_rows(self, query=''):
+        self.login_as(self.shelter_user_a)
+        data = self.ok(self.get_json(CAPTURES_URL + query))['data']
+        return {r['id']: r for r in data}
+
+    def test_list_status_is_derived_when_column_is_stale(self):
+        capture, _ = self._stale('completed')
+        row = self._list_rows()[capture.id]
+        self.assertEqual(row['status'], 'pending')
+        self.assertEqual(row['status_display'], '待转运')
+        self.assertEqual(row['transfer_state']['status'], 'pending')
+
+    def test_detail_status_matches_list(self):
+        capture, _ = self._stale('completed')
+        self.login_as(self.shelter_user_a)
+        detail = self.ok(self.get_json(f'{CAPTURES_URL}{capture.id}/'))
+        self.assertEqual(detail['data']['status'], 'pending')
+        self.assertEqual(detail['data']['status_display'], '待转运')
+
+    def test_status_filter_uses_displayed_value(self):
+        """筛选判据必须与显示同真源，否则「筛已完成」筛出一屏「待转运」。"""
+        capture, _ = self._stale('completed')
+        self.assertEqual(self._list_rows('?status=completed'), {})
+        self.assertIn(capture.id, self._list_rows('?status=pending'))
+
+    def test_partial_shows_partial_not_counts(self):
+        capture, codes = self._stale('pending', pet_count=2)
+        self.login_as(self.shelter_user_a)
+        self.ok(self.post_json('/api/business/transfers/create/', {
+            'to_hospital_id': self.hospital_a.id, 'pet_codes': codes[:1]}))
+        row = self._list_rows()[capture.id]
+        self.assertEqual(row['status'], 'partial')
+        self.assertEqual(row['status_display'], '部分转运')
+
+    def test_voided_capture_status_is_void(self):
+        """作废单派生成 void：以前前端自己按计数推档，作废单会被显示成「未转运」。"""
+        capture, _ = self._stale('completed')
+        Capture.objects.filter(id=capture.id).update(is_deleted=True)
+        rows = self._list_rows('?include_deleted=1&status=void')
+        self.assertIn(capture.id, rows)
+        self.assertEqual(rows[capture.id]['status_display'], '已作废')
+
+    def test_supervision_and_ledger_agree_with_capture_list(self):
+        """监管端两张表（业务监管 + 台账）与捕捉点端列表必须同一个结论。"""
+        capture, _ = self._stale('completed')
+        expected = self._list_rows()[capture.id]['status']
+        self.assertEqual(expected, 'pending')
+
+        self.login_as(self.gov_city)
+        sup = self.ok(self.get_json('/api/supervision/business/?business_type=capture'))
+        row = next(r for r in sup['data']['captures'] if r['id'] == capture.id)
+        self.assertEqual(row['status'], expected)
+        self.assertEqual(row['status_display'], '待转运')
+
+        ledger = self.ok(self.get_json('/api/supervision/ledger/?business_type=capture'))
+        rec = next(r for r in ledger['data']['records'] if r['id'] == capture.id)
+        self.assertEqual(rec['status'], expected)
+
+    def test_write_back_and_read_use_the_same_rule(self):
+        """写回（`recalc_capture_status`）与下发（`capture_transfer_state`）同判据。
+
+        这条盯的是「规则别再拆成两份」：任一改动让两边结论不同时必须失败。
+        """
+        capture, _ = self._stale('completed', pet_count=2)
+        state = capture_transfer_state(capture)
+        self.assertEqual(capture_status_code(False, state['total'],
+                                             state['transferred']),
+                         state['status'])
+        self.assertEqual(recalc_capture_status(capture, save=False),
+                         capture_transfer_state(capture)['status'])
+        # 作废单不看转运计数，两边都必须是 void
+        Capture.objects.filter(id=capture.id).update(is_deleted=True)
+        capture.refresh_from_db()
+        self.assertEqual(capture_transfer_state(capture)['status'], 'void')
+        self.assertEqual(recalc_capture_status(capture, save=False), 'void')
 
 
 class CaptureUpdateTest(BusinessTestBase):

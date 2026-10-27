@@ -24,6 +24,7 @@ from business.services import (
     is_valid_phone, normalize_vet_license, validate_vet_license,
     validate_vet_license_unique,
     parse_int_param, parse_date_param, date_upper_exclusive, aware_day_start,
+    capture_states_bulk,
 )
 from core.audit import ACTION_LABELS
 from core.models import (
@@ -992,8 +993,11 @@ def business_supervision(request):
         qs = _scope_filter(Capture.objects.all(), request).prefetch_related(
             Prefetch('pet_set', queryset=Pet.objects.filter(is_deleted=False)
                      .select_related('district', 'shelter', 'hospital')))
+        captures_raw = list(qs)
+        # 一次性批量派生本批捕捉单的转运情况（含状态），避免逐单查询
+        states = capture_states_bulk(captures_raw)
         captures = []
-        for c in qs:
+        for c in captures_raw:
             item = serialize_instance(c)
             item['district_name'] = c.district.name if c.district else ''
             # pet_codes 字段是逗号分隔字符串，转成列表
@@ -1002,6 +1006,15 @@ def business_supervision(request):
             else:
                 item['pet_codes'] = []
             item['group_photo'] = c.group_photo.url if c.group_photo else ''
+            # 状态与捕捉点端列表**同一个派生源**：`Capture.status` 只是「本单宠物
+            # 转运情况」的缓存，转运单作废/驳回或平台端回退单据后缓存可能还是旧值。
+            # 监管端直接读列，就会出现库里「已完成」、按单据算「待转运 0/1」
+            # （现网 CAP-T0001 正是这一条），监管与执行两端对不上账。
+            state = states.get(c.id) or {}
+            if state:
+                item['status'] = state['status']
+            item['status_display'] = (state.get('status_display')
+                                      or c.get_status_display())
             # 逐只动物明细（编号/类别/品种/性别/芯片/状态 + 各阶段照片），
             # 与捕捉端「一宠一档」、政府端「台账中心」共用 pet_brief，字段口径一致。
             item['pets'] = [_pet_brief(p) for p in c.pet_set.all()]
@@ -1352,7 +1365,13 @@ def ledger_center(request):
         qs = _date_filter(qs)
         if institution_id:
             qs = qs.filter(shelter_id=institution_id)
-        for c in qs:
+        ledger_captures = list(qs)
+        # 状态取**派生值**，与「业务监管」表、捕捉点端列表同一个判据
+        # （`capture_states_bulk` / `capture_status_code`）：`Capture.status` 只是
+        # 缓存，台账第三处单独读列，等于第三个真源 —— 现网就有库里「已完成」、
+        # 按单据算「部分转运 3/4」的单（CAP2600013）。
+        cap_states = capture_states_bulk(ledger_captures)
+        for c in ledger_captures:
             pet_codes = [p.strip() for p in (c.pet_codes or '').split(',') if p.strip()]
             records.append({
                 'business_type': 'capture',
@@ -1362,7 +1381,7 @@ def ledger_center(request):
                 'shelter_name': c.shelter_name,
                 'community_name': c.community_name,
                 'pet_count': c.pet_count,
-                'status': c.status,
+                'status': (cap_states.get(c.id) or {}).get('status') or c.status,
                 'operator_name': c.operator_name,
                 'district_name': c.district.name if c.district else '',
                 'detail': {

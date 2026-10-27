@@ -566,6 +566,25 @@ class CaptureTransferTreatmentSingleSourceTest(SimpleTestCase):
                     token, src,
                     f'{rel} 不再取用 TNR_UI 的 {token} —— 状态显示/待办判定又分叉成本地表')
 
+    def test_capture_badge_translates_the_derived_state(self):
+        """捕捉点端的「转运状态」徽标必须翻译派生状态，不再自己数只数。
+
+        `Capture.status` 只是缓存，列表/详情下发的是按当前单据派生的
+        `transfer_state.status`。以前徽标拿**缓存**判色、再拿「已转运只数」
+        自己拼一档文案，于是库里「已完成」而派生「待转运 0/1」的单会渲染成
+        「已完成 + 0/1 已转运」这种自相矛盾的组合（现网 CAP-T0001 实测），
+        而监管端读派生值显示另一套 —— 同一张单在两端说法不一样，
+        操作员按台账办事就白跑。
+        """
+        src = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        i = src.find('transferStatusBadge(rec) {')
+        self.assertNotEqual(i, -1, 'shelter.js 的 transferStatusBadge 不在了')
+        win = src[i:i + 700]
+        self.assertIn('rec.transferState || rec.transfer_state', win,
+                      '徽标不再读派生状态 —— 缓存与单据不一致时又开始各说各话')
+        self.assertIn('st.status || rec.status', win,
+                      '徽标颜色不再取派生状态（只把派生值当计数用了）')
+
     def test_shelter_lifecycle_timeline_uses_the_sources(self):
         """捕捉点端「流转全过程」时间线的转运/诊疗状态必须取真源。
 
@@ -1343,6 +1362,62 @@ class CheckInStatusSingleSourceTest(SimpleTestCase):
             "cnt > 0 ? 'badge-success'",
             strip_js_comments(_read_raw('static/js/portals/gov.js')),
             '监管端回访打卡列恢复了「有条数就绿」的旧判据')
+
+    def test_shelter_reject_dialog_collects_a_reason(self):
+        """捕捉点端驳回必须走「填原因」弹层，不许一键静默驳回。
+
+        后端把 `review_note` 设成驳回的硬前置（没有原因领养人不知道该补什么，
+        而驳回后同月允许重交，没原因就成了「原样重交 → 再次驳回」的死循环）。
+        前端若绕过弹层直接 `status: 'rejected'`，服务端只会回
+        「驳回需要填写原因」，操作员在界面上看到的就是驳回失败。
+        """
+        src = strip_js_comments(_read_raw('static/js/portals/shelter.js'))
+        for anchor in ('checkinRejectDialog(rec) {', "act === 'reject'",
+                       "getElementById('btnFuCheckinReject').addEventListener"):
+            self.assertNotEqual(src.find(anchor), -1, f'shelter.js 里 {anchor} 不在了')
+        dialog = src[src.find('checkinRejectDialog(rec) {'):][:1400]
+        self.assertIn('id="fuCheckinRejectNote"', dialog,
+                      '驳回弹层里的原因输入框不在了')
+        ok = src[src.find("getElementById('btnFuCheckinReject').addEventListener"):]
+        self.assertIn("if (!note) { TNR_UI.toast('请填写驳回原因'", ok[:300],
+                      '驳回弹层不再强制填写原因 —— 空原因会被服务端拦回，'
+                      '而领养人只看到「已驳回」却不知道要改什么')
+        call = src[src.find("act === 'reject'"):][:400]
+        self.assertIn('review_note: note', call,
+                      '驳回请求不再带原因（后端会拒绝，界面变成驳回失败）')
+        self.assertIn('if (note === null) return;', call,
+                      '取消弹层后仍会发出驳回 —— 「不想驳回」变成了「驳回且无理由」')
+
+    def test_adopter_pending_month_treats_rejected_as_unmet(self):
+        """领养人端「本月待打卡」必须把已驳回的那条算成**没打卡**。
+
+        判据必须与后端 `checkin_create` 的重复拦截
+        （`status__in=('pending','approved')`）同口径：被驳回的那条不算数。
+        前端若仍按「有记录就算已打卡」，动物从待打卡列表里消失，
+        领养人再也不知道这个月要补交 —— 驳回就成了死路。
+        """
+        src = strip_js_comments(_read_raw('static/js/portals/adopter.js'))
+        i = src.find("!petCheckIns.some(c => c.month === currentMonth")
+        self.assertNotEqual(i, -1, '领养人端待打卡判据不在了（换写法了？同步本用例）')
+        self.assertIn("!== 'rejected'", src[i:i + 160],
+                      '待打卡判据又把所有打卡都算成已办结 —— 被驳回的月份不再提示补交')
+
+    def test_adopter_shows_the_reject_reason(self):
+        """驳回原因必须跟着打卡历史渲染出来，且有样式规则。
+
+        只把 `review_note` 存进库、界面不显示，等于让领养人猜要改什么；
+        而类名拼错时 CSS 里没有对应规则，文案会渲染成无边框无底色的普通文本，
+        在手机端那片灰色里根本看不见。
+        """
+        src = strip_js_comments(_read_raw('static/js/portals/adopter.js'))
+        self.assertIn('checkin.review_note || checkin.reviewNote', src,
+                      '打卡历史不再取审核意见字段')
+        self.assertIn('class="checkin-history-review"', src,
+                      '打卡历史不再渲染驳回原因那一段')
+        css = _read_raw(PORTALS['adopter'])
+        self.assertIsNotNone(css_rule(css, '.checkin-history-review'),
+                             '.checkin-history-review 在页面上没有样式规则，'
+                             '驳回原因会渲染成看不出来的普通文本')
 
     def test_shelter_checkin_words_match_backend_label(self):
         """机构端不许再自创「未通过」。

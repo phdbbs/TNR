@@ -11,7 +11,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.decorators import role_required
-from business.models import CheckIn, Blacklist, Pet
+from business.models import CheckIn, Blacklist, Message, Pet
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
@@ -49,7 +49,15 @@ def checkin_list(request):
     if status:
         qs = qs.filter(status=status)
 
+    qs = qs.select_related('operator')
     data = [serialize_instance(c) for c in qs]
+    if user.role != 'adopter':
+        # 「谁判的」是机构处理回访纠纷要看的信息（与诊疗医嘱后署操作人同口径）；
+        # `CheckIn` 只存了 `operator` 外键，列表里不补姓名，详情抽屉就永远是一根「—」。
+        # 领养人端不下发：他需要的是**为什么**驳回，不是审核员的账号名。
+        for c, item in zip(qs, data):
+            item['operator_name'] = (
+                c.operator.get_full_name() or c.operator.username) if c.operator_id else ''
     return json_ok(data)
 
 
@@ -93,8 +101,14 @@ def checkin_create(request):
         # 用 localdate()：now() 是 UTC，月初凌晨会把月份记成上一个月
         month = timezone.localdate().strftime('%Y-%m')
 
-    # 检查是否已打卡
-    exists = CheckIn.objects.filter(pet=pet, month=month, adopter=user).exists()
+    # 检查是否已打卡。**只拦待审核与已通过**：被驳回的那一条不能继续占位，
+    # 否则「驳回 → 领养人按意见更正 → 重新提交」这条路走不通，驳回就是死路
+    # ——服务端拦「请勿重复提交」，而 `checkin_review` 又不允许复审非 pending
+    # 的记录，这一月的回访永远补不回来（现网 2026-10-27 实测复现）。
+    # 重交后同一月份会留下「一条已驳回 + 一条新的待审核」，正是应有的审计痕迹。
+    exists = CheckIn.objects.filter(
+        pet=pet, month=month, adopter=user,
+        status__in=('pending', 'approved')).exists()
     if exists:
         return json_fail(f'{month} 已打卡，请勿重复提交')
 
@@ -133,9 +147,13 @@ def checkin_review(request, pk):
 
     请求体示例:
     {
-        "status": "approved",  // 或 "rejected"
-        "note": "审核通过"
+        "status": "rejected",
+        "review_note": "照片过暗看不清伤口，请重拍"
     }
+
+    驳回**必须带原因**：领养人看到「已驳回」却不知道为什么，就只能原样
+    再交一次；而驳回后这一月允许重交（见 `checkin_create`），没有原因
+    就成了「反复提交—反复驳回」的死循环。
     """
     data = parse_json_body(request)
     user = request.user
@@ -163,9 +181,25 @@ def checkin_review(request, pk):
     if new_status not in ('approved', 'rejected'):
         return json_fail('status 必须为 approved 或 rejected')
 
+    review_note = (body_str(data, 'review_note') or '').strip()
+    if new_status == 'rejected' and not review_note:
+        return json_fail('驳回需要填写原因，领养人据此更正后才能重新提交')
+
     checkin.status = new_status
+    checkin.review_note = review_note
     checkin.operator = request.user
-    checkin.save(update_fields=['status', 'operator'])
+    checkin.save(update_fields=['status', 'review_note', 'operator'])
+
+    # 让驳回真的能「被回应」：除了打卡历史里那一行意见，再推一条站内消息。
+    # 领养人不一定每天翻打卡页，但消息页是他们会看的。
+    if new_status == 'rejected' and checkin.adopter_id:
+        Message.objects.create(
+            user_id=checkin.adopter_id,
+            type='checkin_reminder',
+            title=f'{checkin.month} 回访打卡被驳回',
+            content=f'{checkin.pet_code} 的 {checkin.month} 打卡未通过审核：{review_note}。'
+                    '请按意见更正后重新提交本月打卡。',
+        )
 
     request.audit_district = checkin.pet.district if checkin.pet_id else None
 

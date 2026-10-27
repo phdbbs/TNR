@@ -280,8 +280,9 @@ def capture_list(request):
         qs = qs.filter(is_deleted=False)
 
     status = request.GET.get('status')
-    if status:
-        qs = qs.filter(status=status)
+    # ⚠ 状态筛选**不在 SQL 里做**，见下面循环：列表显示的是按单据派生的状态，
+    # `Capture.status` 只是缓存（作废/驳回转运单后可能仍是旧值）。
+    # 用缓存列筛选，会出现「筛『已完成』，界面显示一堆待转运」。
 
     # `district` 既可能是**区县 id**（前端下拉的 value），也可能是**区县名称**
     # （手输 / URL 分享）。原先写成
@@ -338,7 +339,12 @@ def capture_list(request):
         item['transfer_state'] = state
         item['can_edit'] = state.get('can_edit', False)
         item['can_delete'] = state.get('can_delete', False)
-        item['status_display'] = cap.get_status_display()
+        # 状态以**派生值**下发（与 `transfer_state` 同源），前端只需照译，
+        # 不再按 `transferred/total` 自己推一档 —— 那才是第二个真源。
+        item['status'] = state.get('status') or cap.status
+        item['status_display'] = state.get('status_display') or cap.get_status_display()
+        if status and item['status'] != status:
+            continue
         data.append(item)
     return json_ok(data)
 
@@ -1069,8 +1075,6 @@ def capture_detail(request, pk):
         return json_fail('捕捉记录不存在', status=404)
 
     data = serialize_instance(capture)
-    # ⚠ 全部只写 snake_case，camel 孪生由 `json_ok` → `with_camel_keys()` 补。
-    data['status_display'] = capture.get_status_display()
 
     pets = Pet.objects.filter(capture=capture, is_deleted=False)
     data['pets'] = [serialize_instance(p) for p in pets]
@@ -1079,4 +1083,10 @@ def capture_detail(request, pk):
     data['transfer_state'] = state
     data['can_edit'] = state['can_edit']
     data['can_delete'] = state['can_delete']
+    # ⚠ 全部只写 snake_case，camel 孪生由 `json_ok` → `with_camel_keys()` 补。
+    # 状态与列表同一口径，取 `transfer_state` 里的**派生值**：详情若读库里的
+    # `Capture.status` 缓存，就会出现「列表已完成 / 详情待转运」（第四十八轮
+    # 就是单张版与批量版各算一遍导致的）。
+    data['status'] = state.get('status') or capture.status
+    data['status_display'] = state.get('status_display') or capture.get_status_display()
     return json_ok(data)

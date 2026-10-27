@@ -100,28 +100,26 @@ const Shelter = {
     return 0;
   },
 
-  /* 合并后的转运状态列：未转运 / x/y 转运中 / x/y 部分完成 / 完成
-     判定依据（全部来自后端 capture_transfer_state / capture_states_bulk）：
-       total      本单动物总数
-       transferred 已提交转运单的动物数（待签收 + 已签收）
-       received   医院已签收的动物数
-       settled    已离开本单流程的动物数（医院签收 / 主人领回 / 已死亡…）
-     规则：
-       全部动物都已离开本单流程        → 完成
-       有动物被医院签收但尚未全部完成  → x/y 部分完成
-       有动物提交了转运单但都未签收    → x/y 转运中
-       一只都没提交转运单              → 未转运 */
+  /* 捕捉单「状态 + 转运进度」合并列。
+     状态一律读后端派生的 `transfer_state.status`（判据唯一，见
+     `services.capture_status_code`），本函数**不再自己推一档**：
+     以前这里按 received/settled 算出「完成 / 部分完成 / 转运中 / 未转运」，
+     而台账同一张单读的是 `Capture.status`（待转运 / 部分转运 / 已完成 / 已作废）——
+     两套词汇两套判据，作废的单这里显示「未转运」、台账显示「已作废」，
+     库里的缓存与当前单据不一致时两边还会各说各话。
+     进度数字（转了几只 / 签收了几只）是状态之外的信息，保留成灰色计数。 */
   transferStatusBadge(rec) {
     const st = rec.transferState || rec.transfer_state || {};
     const total = st.total || rec.petCount || 0;
+    const badge = TNR_UI.captureStatusBadge(st.status || rec.status || '');
+    if (!total || (st.status || rec.status) === 'void') return badge;
     const submitted = st.transferred || 0;
     const received = st.received || 0;
-    const settled = st.settled || 0;
-
-    if (total > 0 && settled >= total) return '<span class="badge badge-success">完成</span>';
-    if (received > 0) return '<span class="badge badge-info">' + received + '/' + total + ' 部分完成</span>';
-    if (submitted > 0) return '<span class="badge badge-info">' + submitted + '/' + total + ' 转运中</span>';
-    return '<span class="badge badge-warning">未转运</span>';
+    const text = submitted === 0 ? '0/' + total + ' 已转运'
+      : (received > 0 && received < submitted
+        ? submitted + '/' + total + ' 已转运（' + received + ' 已签收）'
+        : submitted + '/' + total + ' 已转运');
+    return badge + ' <span class="fs-sm text-muted">' + text + '</span>';
   },
 
   /* 照片放大查看：点击图片弹出全屏遮罩（实现下沉到 TNR_UI，各端共用） */
@@ -4212,6 +4210,65 @@ const Shelter = {
   },
 
   /* ========== 9. 领养回访管控 ========== */
+  /* 驳回打卡的原因弹窗 → Promise<原因字符串 | null>，null = 取消（调用方不发请求）。
+     原因必填：后端 `checkin_review` 会挡空原因的驳回，领养人端也只认这一句话
+     决定「补什么、重交哪个月」——回访被驳回的常见原因就是「照片看不清 / 近况写得太少」，
+     没有原因等于让领养人猜。快捷短语是给手机端的：摇一摇弹出的框里打字太慢。 */
+  checkinRejectDialog(rec) {
+    return new Promise(resolve => {
+      let settled = false;
+      const quick = ['照片看不清，请重拍', '近况写得太少，请补充食欲和精神', '打卡月份与实际不符'];
+      const { overlay, close } = TNR_UI.modal({
+        title: '驳回 ' + TNR_UI.escape(rec.month || '') + ' 回访打卡',
+        body: `
+          <div class="text-muted fs-sm mb-3">
+            <span class="pet-code-chip">${TNR_UI.escape(rec.petCode || '')}</span>
+            ${TNR_UI.escape(rec.adopterName || '')}；驳回后领养人会在打卡记录里看到下面的原因，
+            并按它重新提交本月打卡。
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
+            ${quick.map(q => '<button class="btn btn-sm btn-secondary" data-quick="'
+              + TNR_UI.escape(q) + '">' + TNR_UI.escape(q) + '</button>').join('')}
+          </div>
+          <div class="form-group"><label class="form-label">驳回原因<span class="req">*</span></label>
+            <textarea class="form-textarea" id="fuCheckinRejectNote" rows="3"
+              placeholder="如：照片不清晰，请重新上传能看清动物近况的照片"></textarea>
+          </div>
+        `,
+        actions: '<button class="btn btn-secondary" data-action="close">取消</button>'
+          + '<button class="btn btn-danger" id="btnFuCheckinReject">确认驳回</button>'
+      });
+      const onEsc = (e) => { if (e.key === 'Escape') settle(null); };
+      function settle(v) {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener('keydown', onEsc);
+        resolve(v);
+      }
+      /* TNR_UI.modal 没有关闭回调，而取消有三条路径（页脚取消、头部 ×、Esc / 遮罩）。
+         漏掉任何一条，调用方的 `await` 就永远挂着。 */
+      overlay.querySelectorAll('[data-action="close"]').forEach(btn => {
+        btn.addEventListener('click', () => settle(null));
+      });
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) settle(null); });
+      document.addEventListener('keydown', onEsc);
+      setTimeout(() => {
+        const ta = document.getElementById('fuCheckinRejectNote');
+        if (!ta) { settle(null); return; }
+        ta.focus();
+        overlay.querySelectorAll('[data-quick]').forEach(btn => {
+          btn.addEventListener('click', () => { ta.value = btn.dataset.quick; });
+        });
+        document.getElementById('btnFuCheckinReject').addEventListener('click', () => {
+          const note = ta.value.trim();
+          if (!note) { TNR_UI.toast('请填写驳回原因', 'warning'); return; }
+          settle(note);
+          close();
+        });
+      }, 100);
+    });
+  },
+
   async render_followup() {
     const el = document.getElementById('page-followup');
     const checkins = await TNR_API.getCheckins();
@@ -4288,8 +4345,13 @@ const Shelter = {
             if (res && res.success !== false) { TNR_UI.toast('已通过审核', 'success'); this.render_followup(); }
             else TNR_UI.toast('操作失败：' + ((res && res.message) || ''), 'danger');
           } else if (act === 'reject') {
-            const res = await TNR_API.reviewCheckin(rec.id, { status: 'rejected' });
-            if (res && res.success !== false) { TNR_UI.toast('已驳回', 'warning'); this.render_followup(); }
+            // 驳回必须写原因：领养人只看到「已驳回」时不知道该补什么，
+            // 而后端现在允许驳回后重交同月打卡 —— 没有原因就成了
+            // 「原样重交 → 再次驳回」的循环。
+            const note = await this.checkinRejectDialog(rec);
+            if (note === null) return;
+            const res = await TNR_API.reviewCheckin(rec.id, { status: 'rejected', review_note: note });
+            if (res && res.success !== false) { TNR_UI.toast('已驳回，领养人可见驳回原因', 'warning'); this.render_followup(); }
             else TNR_UI.toast('操作失败：' + ((res && res.message) || ''), 'danger');
           } else if (act === 'view') {
             TNR_UI.drawer({ title: '打卡详情', body: TNR_UI.renderDescList([
@@ -4298,6 +4360,8 @@ const Shelter = {
               { label: '打卡月份', value: rec.month },
               { label: '近况说明', value: rec.note, full: true },
               { label: '状态', value: TNR_UI.checkinStatusBadge(rec.status) },
+              { label: '审核人', value: rec.operator_name || rec.operatorName || '—' },
+              { label: '审核意见', value: rec.reviewNote || rec.review_note || '—', full: true },
               { label: '提交时间', value: TNR_UI.formatDateTime(rec.createdAt) }
             ]) });
           }

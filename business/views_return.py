@@ -17,6 +17,7 @@ from accounts.decorators import role_required
 from core.models import Institution
 from business.models import Pet, ReturnOrder
 from business.services_discharge import discharge_candidate_error
+from business.services_lifecycle import pet_stage
 from business.services_treatment import dispose_for_discharge
 from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
@@ -38,6 +39,27 @@ def _restore_pet_status(pet):
     if getattr(pet, 'hall_listing', None) is not None:
         return 'pending_adopt'
     return 'in_treatment'
+
+
+def _restored_stage_text(pets):
+    """按动物退回后的**实际阶段**拼提示，别写死「待领养」。
+
+    `_restore_pet_status` 会把「出院还没办结」的动物退回 `in_treatment`，
+    而一宠一档派生的阶段这时是「待出院」：以前前端固定提示「动物已回到待领养」，
+    操作员照话去待领养列表找，找不到这只动物，只能以为撤回没生效。
+    文案与 `pet_stage()` 同源 —— 动物在哪，提示就说哪。
+    """
+    if not pets:
+        return ''
+    counts = {}
+    for pet in pets:
+        _, display = pet_stage(pet)
+        counts[display] = counts.get(display, 0) + 1
+    if len(counts) == 1:
+        display, count = next(iter(counts.items()))
+        return f'{count} 只动物已回到「{display}」'
+    return '动物已回到：' + '、'.join(
+        f'「{d}」{n} 只' for d, n in counts.items())
 
 
 def _allowed_shelter_q(hospital):
@@ -367,7 +389,8 @@ def return_order_reject(request, pk):
         order.save(update_fields=['status', 'reject_reason'])
 
     pets_by_code = {p.code: p for p in pets}
-    return json_ok(_serialize_order(order, pets_by_code), message='已驳回运回单')
+    return json_ok(_serialize_order(order, pets_by_code),
+                   message='已驳回运回单，' + _restored_stage_text(pets))
 
 
 @csrf_exempt
@@ -395,4 +418,5 @@ def return_order_withdraw(request, pk):
         order.save(update_fields=['status'])
 
     pets_by_code = {p.code: p for p in pets}
-    return json_ok(_serialize_order(order, pets_by_code), message='运回单已撤回')
+    return json_ok(_serialize_order(order, pets_by_code),
+                   message='运回单已撤回，' + _restored_stage_text(pets))

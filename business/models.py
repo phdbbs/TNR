@@ -1101,6 +1101,11 @@ class CheckIn(models.Model):
     photo = models.ImageField('回访照片', upload_to='checkins/', null=True, blank=True)
     note = models.TextField('备注', blank=True, default='')
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
+    # 审核意见。驳回**必填**：领养人只看到「已驳回」时不知道要补什么，
+    # 而回访驳回的常见原因就是「照片看不清 / 近况写得太少」——这类
+    # 一句话就能改的问题，没有原因就等于让领养人猜。
+    # 与 `AdoptionApplication.review_note` 同一口径（字段名、语义、下发方式都对齐）。
+    review_note = models.TextField('审核意见', blank=True, default='')
     operator = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='checkins_reviewed', verbose_name='操作员')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 

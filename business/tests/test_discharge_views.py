@@ -219,6 +219,57 @@ class ReturnOrderShelterTest(ReturnOrderBase):
         self.expect_fail(self.post_json(f'{RTN_URL}{received.id}/withdraw/', {}),
                          message='不可撤回')
 
+    def test_withdraw_message_reports_actual_stage(self):
+        """撤回提示要说动物**实际退回的阶段**，不能写死「待领养」。
+
+        `_restore_pet_status` 对「诊疗完成但出院未办结」的动物退回 `in_treatment`，
+        这时一宠一档派生的阶段是「待出院」。以前前端固定提示「动物已回到待领养」，
+        操作员照话去待领养列表找，找不到这只动物，只能以为撤回没生效。
+        """
+        pet = make_pet(code='RTN-A-007', status='in_treatment',
+                       district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a)
+        Treatment.objects.create(
+            pet=pet, pet_code=pet.code, hospital=self.hospital_a,
+            hospital_name=self.hospital_a.name, institution=self.hospital_a,
+            status='completed', done_at=timezone.now(), district=self.district_a,
+            disposal_advised='released')
+        order = self._order(self._create_order([pet.id]))
+
+        body = self.ok(self.post_json(f'{RTN_URL}{order.id}/withdraw/', {}))
+        self.assertIn('待出院', body['message'])
+        self.assertNotIn('待领养', body['message'])
+        pet.refresh_from_db()
+        self.assertEqual(pet.status, 'in_treatment')
+
+    def test_withdraw_message_lists_mixed_stages(self):
+        """一张单混着两种动物时，提示必须把两个阶段都报出来。
+
+        只报第一个（或写死一个）就等于漏报：操作员会以为另一只也在那个列表里。
+        """
+        undone = make_pet(code='RTN-A-008', status='in_treatment',
+                          district=self.district_a, shelter=self.shelter_a,
+                          hospital=self.hospital_a)
+        Treatment.objects.create(
+            pet=undone, pet_code=undone.code, hospital=self.hospital_a,
+            hospital_name=self.hospital_a.name, institution=self.hospital_a,
+            status='completed', done_at=timezone.now(), district=self.district_a,
+            disposal_advised='released')
+        order = self._order(self._create_order([self.pet.id, undone.id]))
+
+        body = self.ok(self.post_json(f'{RTN_URL}{order.id}/withdraw/', {}))
+        self.assertIn('待领养', body['message'])
+        self.assertIn('待出院', body['message'])
+
+    def test_reject_message_reports_actual_stage(self):
+        order = self._order(self._create_order())
+        self.login_as(self.shelter_user_a)
+        body = self.ok(self.post_json(f'{RTN_URL}{order.id}/reject/',
+                                      {'reject_reason': '动物状态与单据不符'}))
+        # 办结过的动物确实退回待领养 —— 这条要成立，但必须是**算出来的**，
+        # 不是写死的（见 test_withdraw_message_reports_actual_stage）
+        self.assertIn('待领养', body['message'])
+
     def test_receive_closes_done_treatment(self):
         """第五十六轮：诊疗页只记建议去向，捕捉点签收才是出院终态。"""
         pet = make_pet(code='RTN-A-006', status='in_treatment',

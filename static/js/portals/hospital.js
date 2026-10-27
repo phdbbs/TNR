@@ -4298,14 +4298,17 @@ const Hospital = {
   },
 
   async dspWithdrawReturn(id) {
+    /* 确认框不说动物退回后的具体阶段：一张运回单可能混着「办结待领养」和
+       「出院未办结」两种动物，写死「回到待领养」会让人去错的列表里找。
+       撤回后的实际阶段由后端按 `pet_stage()` 派生，直接播 `res.message`。 */
     const ok = await TNR_UI.confirm(
-      '确定撤回该运回单？撤回后动物回到「待领养」，可重新选择出院去向。',
+      '确定撤回该运回单？撤回后动物退回本院，可重新选择出院去向。',
       '撤回运回单');
     if (!ok) return;
     try {
       const res = await TNR_API.withdrawReturnOrder(id);
       TNR_UI.assertOk(res, '撤回失败');
-      TNR_UI.toast('运回单已撤回，动物已回到待领养', 'success');
+      TNR_UI.toast(res.message || '运回单已撤回', 'success');
       this.render_discharge();
     } catch (e) {
       TNR_UI.toast(e.message || '撤回失败', 'danger');

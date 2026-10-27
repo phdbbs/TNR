@@ -342,6 +342,16 @@
   .checkin-history-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-1); }
   .checkin-history-month { font-family: var(--font-display); font-size: var(--fs-md); font-weight: 600; }
   .checkin-history-note { font-size: var(--fs-sm); color: var(--ink-muted); margin-top: var(--sp-1); }
+  /* 驳回原因必须显性：只打个「已驳回」的红标，领养人不知道该补什么，
+     而本月打卡重交的判据就挂在这句话上。 */
+  .checkin-history-review {
+    font-size: var(--fs-sm);
+    color: var(--rouge);
+    background: var(--rouge-light);
+    border-radius: var(--r-sm);
+    padding: var(--sp-2);
+    margin-top: var(--sp-1);
+  }
   .checkin-history-date { font-size: var(--fs-xs); color: var(--ink-light); }
 
   .message-item {

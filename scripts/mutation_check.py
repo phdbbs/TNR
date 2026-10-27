@@ -128,6 +128,11 @@ TEST_TARGETS = sys.argv[1:] or [
     'business.tests.test_release_views',
     # 一宠一档 A4 档案打印页（M200–M203）的用例住在这里。
     'business.tests.test_pet_archive',
+    # 第六十六轮：回访驳回闭环（M230–M234）与捕捉单状态单一真源（M236–M243）
+    # 的判据用例分别住在这两个模块里。本表以前没登记它们 —— 不登记就是
+    # 「变异体下测试全部通过 —— 空转!」的**假指控**（用例根本没跑到）。
+    'business.tests.test_checkin_views',
+    'business.tests.test_capture_views',
     'core.tests_audit',
     'core.tests_frontend_consistency',
     'core.tests_data_integrity',
@@ -2560,6 +2565,145 @@ MUTATIONS += [
         "    src = blank_comments(read_js(rel_path))\n",
         "    src = read_js(rel_path)\n",
         'test_comment_paths_are_not_counted_as_calls',
+    ),
+]
+
+# ---------- 第六十六轮：回访「驳回 → 更正 → 重交」闭环 + 捕捉单状态单一真源 ----------
+# 这一轮的缺陷全部是**不报错的口径错**：驳回存不下原因、被驳回的月份再也交不进去、
+# 撤回运回单把「待出院」的动物说成「待领养」、库里「已完成」而按单据算「待转运」的单
+# 在捕捉点端和监管端各显示一套。变异表里必须留一条钉子，否则下一次重构又会把
+# 判据写回两份。
+MUTATIONS += [
+    (
+        # 驳回不再要求原因：`review_note` 字段照收，但没人校验，
+        # 领养人端就只剩一条「已驳回」——本轮修的就是这件事。
+        'M230 驳回不再强制填写原因', 'business/views_checkin.py',
+        "    if new_status == 'rejected' and not review_note:\n"
+        "        return json_fail('驳回需要填写原因，领养人据此更正后才能重新提交')\n",
+        "    if new_status == 'rejected' and False:\n"
+        "        return json_fail('驳回需要填写原因，领养人据此更正后才能重新提交')\n",
+        'test_reject_without_reason_refused',
+    ),
+    (
+        # 重复打卡判据退回「不看状态」：被驳回的那一条继续占位，
+        # 「驳回 → 更正 → 重交」这条路就断了（现网 2026-10-27 实测复现）。
+        'M231 被驳回的月份仍占住打卡名额', 'business/views_checkin.py',
+        "        status__in=('pending', 'approved')).exists()\n",
+        "        status__in=('pending', 'approved', 'rejected')).exists()\n",
+        'test_rejected_month_can_be_checked_in_again',
+    ),
+    (
+        # 驳回不再推站内消息：领养人不一定每天翻打卡页，消息页才是他们会看的
+        # 地方；少了这一条，「更正后重交」根本传不到人。
+        'M232 驳回不再推站内消息', 'business/views_checkin.py',
+        "    if new_status == 'rejected' and checkin.adopter_id:\n",
+        "    if new_status == 'rejected' and checkin.adopter_id is None:\n",
+        'test_reject_reason_is_trimmed_stored_and_pushed',
+    ),
+    (
+        # 领养人端「本月待打卡」退回把所有打卡都算已办结：被驳回的动物
+        # 从待打卡列表消失，而它其实还欠一次 —— 与 M231 是同一口径的两端。
+        'M233 领养人端把已驳回的打卡算成已办结', 'static/js/portals/adopter.js',
+        "      return !petCheckIns.some(c => c.month === currentMonth\n"
+        "        && c.status !== 'rejected');\n",
+        "      return !petCheckIns.some(c => c.month === currentMonth);\n",
+        'test_adopter_pending_month_treats_rejected_as_unmet',
+    ),
+    (
+        # 打卡历史不再渲染驳回原因：原因存进了库、接口也下发了，
+        # 界面上不显示就等于让人猜。
+        'M234 打卡历史不渲染驳回原因', 'static/js/portals/adopter.js',
+        "        ${checkin.status === 'rejected' && reviewNote\n"
+        "          ? `<div class=\"checkin-history-review\">驳回原因：${TNR_UI.escape(reviewNote)}（更正后请重新提交本月打卡）</div>`\n"
+        "          : ''}\n",
+        None,
+        'test_adopter_shows_the_reject_reason',
+    ),
+    (
+        # 驳回弹层取消非空校验：空原因交给服务端拒，操作员看到的是「驳回失败」，
+        # 而领养人收到的仍是没有原因的驳回。
+        'M235 驳回弹层不再校验原因非空', 'static/js/portals/shelter.js',
+        "          if (!note) { TNR_UI.toast('请填写驳回原因', 'warning'); return; }\n",
+        None,
+        'test_shelter_reject_dialog_collects_a_reason',
+    ),
+    (
+        # 关掉「取消 = 不发请求」这条路：`checkinRejectDialog` 取消时 resolve(null)，
+        # 判据写坏后 null 会被当成原因提交出去（服务端拒 / 领养人收到空原因）。
+        'M236 取消驳回弹层仍发出请求', 'static/js/portals/shelter.js',
+        "            if (note === null) return;\n",
+        "            if (note === undefined) return;\n",
+        'test_shelter_reject_dialog_collects_a_reason',
+    ),
+    (
+        # 运回单撤回/驳回文案退回写死「待领养」：诊疗中建议放归的动物被打回后
+        # 其实是「待出院」，操作员按提示去领养登记页白跑一趟。
+        'M237 撤回运回单文案退回写死待领养', 'business/views_return.py',
+        "        _, display = pet_stage(pet)\n",
+        "        display = '待领养'\n",
+        'test_withdraw_message_reports_actual_stage',
+    ),
+    (
+        # 派生规则不再认「部分转运」这一档：转了 3 只（共 4 只）的单显示成已完成，
+        # 剩下的那只从待办里消失。
+        'M238 派生规则吃掉部分转运', 'business/services.py',
+        "    if transferred < total:\n        return 'partial'\n",
+        "    if transferred < total:\n        return 'completed'\n",
+        'test_partial_shows_partial_not_counts',
+    ),
+    (
+        # 作废单不再派生成 void：已作废的捕捉单显示成「待转运」，
+        # 监管端还会把它当成未办完的活。
+        'M239 作废单不再派生成 void', 'business/services.py',
+        "    if is_deleted:\n        return 'void'\n",
+        "    if is_deleted:\n        return 'pending'\n",
+        'test_voided_capture_status_is_void',
+    ),
+    (
+        'M240 状态中文退回直接印枚举码', 'business/services.py',
+        "    return dict(Capture.STATUS_CHOICES).get(status, status)\n",
+        "    return status\n",
+        'test_list_status_is_derived_when_column_is_stale',
+    ),
+    (
+        # 列表下发退回读缓存列：派生值仍在 `transfer_state` 里，
+        # 而顶层 `status`（前端徽章与筛选都读它）回到旧缓存 —— 一页两种说法。
+        'M241 捕捉列表退回读缓存状态', 'business/views_capture.py',
+        "        item['status'] = state.get('status') or cap.status\n",
+        "        item['status'] = cap.status\n",
+        'test_list_status_is_derived_when_column_is_stale',
+    ),
+    (
+        # 筛选也退回按缓存判：界面显示「待转运」而 `?status=completed` 能把它筛出来。
+        'M242 捕捉筛选退回按缓存状态', 'business/views_capture.py',
+        "        if status and item['status'] != status:\n            continue\n",
+        "        if status and cap.status != status:\n            continue\n",
+        'test_status_filter_uses_displayed_value',
+    ),
+    (
+        # 监管业务表退回读列：现网 CAP-T0001 正是这一条（库里已完成、按单据算待转运），
+        # 监管与执行两端对不上账。
+        'M243 监管业务表退回读缓存状态', 'supervision/views.py',
+        "            state = states.get(c.id) or {}\n            if state:\n                item['status'] = state['status']\n",
+        "            state = states.get(c.id) or {}\n            if False:\n                item['status'] = state['status']\n",
+        'test_supervision_and_ledger_agree_with_capture_list',
+    ),
+    (
+        # 监管台账同一条判据单独钉：两处各写各的，只修一处时另一处照样旧值
+        # （本文件同类前例：M218/M219 分钉两处下拉）。
+        'M244 监管台账退回读缓存状态', 'supervision/views.py',
+        "                'status': (cap_states.get(c.id) or {}).get('status') or c.status,\n",
+        "                'status': c.status,\n",
+        'test_supervision_and_ledger_agree_with_capture_list',
+    ),
+    (
+        # 捕捉点端徽标退回自己判色：`st` 取空后徽章落回缓存 `rec.status`，
+        # 而进度数字仍按派生值算 —— 「已完成 + 0/1 已转运」这种自相矛盾的组合
+        # 就是这么来的。
+        'M245 捕捉点徽标不再翻译派生状态', 'static/js/portals/shelter.js',
+        "  transferStatusBadge(rec) {\n    const st = rec.transferState || rec.transfer_state || {};\n",
+        "  transferStatusBadge(rec) {\n    const st = {};\n",
+        'test_capture_badge_translates_the_derived_state',
     ),
 ]
 

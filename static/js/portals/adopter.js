@@ -848,7 +848,12 @@ async function renderCheckin() {
       // 于是本月已打卡的动物仍挂在「待打卡月份」里，点提交又被服务端「请勿重复提交」拦回。
       const petId = (adoption.pet && adoption.pet.id) || adoption.pet || adoption.pet_id || adoption.petId;
       const petCheckIns = checkIns.filter(c => String(c.pet ?? c.pet_id ?? c.petId) === String(petId));
-      return !petCheckIns.some(c => c.month === currentMonth);
+      /* 「本月还欠一次打卡」= 本月没有**未办结**的打卡。
+         判据与后端 `checkin_create` 的重复拦截（`status__in=('pending','approved')`）
+         必须是同一口径：被驳回的那条不算数 —— 驳回的意义就是让领养人改完重交，
+         把它算成「已打卡」会让本月从待打卡列表里消失，领养人再也不知道要补交。 */
+      return !petCheckIns.some(c => c.month === currentMonth
+        && c.status !== 'rejected');
     });
 
     let html = '';
@@ -961,6 +966,9 @@ function renderCheckinHistory() {
     + rows.length + ' 条打卡记录' + dateRangeText('checkin') + '</div>';
   sorted.forEach(checkin => {
     const petName = checkin.pet_name || checkin.adopter_name || '';
+    /* 驳回原因跟着记录走：后端允许驳回后重交同月打卡，
+       「为什么被驳回」就是领养人要改的那一件事，不显示就等于让人猜。 */
+    const reviewNote = checkin.review_note || checkin.reviewNote || '';
     html += `
       <div class="checkin-history-item">
         <div class="checkin-history-header">
@@ -969,6 +977,9 @@ function renderCheckinHistory() {
         </div>
         <div style="font-size:12px;color:var(--ink-light);">${TNR_UI.escape(petName)} · ${TNR_UI.escape(checkin.pet_code || '')}</div>
         ${checkin.note ? `<div class="checkin-history-note">${TNR_UI.escape(checkin.note)}</div>` : ''}
+        ${checkin.status === 'rejected' && reviewNote
+          ? `<div class="checkin-history-review">驳回原因：${TNR_UI.escape(reviewNote)}（更正后请重新提交本月打卡）</div>`
+          : ''}
         <div class="checkin-history-date">提交时间：${TNR_UI.escape(TNR_UI.formatDateTime(checkin.created_at))}</div>
       </div>`;
   });

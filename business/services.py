@@ -1341,6 +1341,29 @@ def _split_codes(raw):
     return [c.strip() for c in (raw or '').split(',') if c.strip()]
 
 
+def capture_status_code(is_deleted, total, transferred):
+    """捕捉单状态的**唯一推导规则**：写回库的 `recalc_capture_status` 与
+    列表/详情下发的派生状态都走这一份。
+
+    `Capture.status` 本就不是人工填的字段，而是「本单宠物的转运情况」的缓存。
+    以前规则存在两份（写回一份、前端徽标自己再算一份），库里出现「已完成」而
+    按当前单据算是「待转运」的单（转运单作废/驳回后缓存没回滚）——
+    界面显示与筛选各说各话。谁都不许再另算一遍。
+    """
+    if is_deleted:
+        return 'void'
+    if total == 0 or transferred == 0:
+        return 'pending'
+    if transferred < total:
+        return 'partial'
+    return 'completed'
+
+
+def capture_status_display(status):
+    """状态码 → 中文（与 `TNR_UI.CAPTURE_STATUS` 同一套取值）。"""
+    return dict(Capture.STATUS_CHOICES).get(status, status)
+
+
 def busy_transfer_codes(codes, district_id=None):
     """返回其中**已被未结转运单占用**的动物编号。
 
@@ -1410,6 +1433,9 @@ def capture_transfer_state(capture):
       rejected     被医院退回、已回到未转运状态的宠物数
       can_edit     是否允许编辑（未作废 且 无任何宠物处于已转运状态）
       can_delete   是否允许删除（同上；须医院全部退回）
+      status / status_display
+                   按上述计数**派生**的捕捉单状态（`capture_status_code`）：
+                   界面显示与 `?status=` 筛选都读它，不读 `Capture.status` 缓存列
 
     ⚠ **只保留一份实现**：直接转调 `capture_states_bulk()`。
       这两个函数原先各写一遍推导逻辑（一个按单、一个按编号），第四十八轮加
@@ -1483,6 +1509,9 @@ def capture_states_bulk(captures):
         rejected = len(codes & rejected_codes)
         total = len(codes)
         not_deleted = not cap.is_deleted
+        # `status` 是**按当前单据派生**的状态；`Capture.status` 列只是它的缓存。
+        # 列表/详情下发的就是这个值，前端不再另算一份（见 `capture_status_code`）。
+        derived = capture_status_code(cap.is_deleted, total, transferred)
         result[cap.id] = {
             'total': total,
             'transferred': transferred,
@@ -1492,6 +1521,8 @@ def capture_states_bulk(captures):
             'untouched': max(total - transferred - rejected, 0),
             'can_edit': not_deleted and transferred == 0,
             'can_delete': not_deleted and transferred == 0,
+            'status': derived,
+            'status_display': capture_status_display(derived),
         }
     return result
 
@@ -1499,22 +1530,20 @@ def capture_states_bulk(captures):
 def recalc_capture_status(capture, save=True):
     """按宠物转运情况重新推导并写回捕捉单状态。
 
-    规则：
+    判据只有 `capture_status_code` 一份：写回与列表下发必须同结论，
+    否则库里「已完成」、界面「待转运」各说各话。
+
     - 已逻辑删除 → void 已作废
     - 无宠物 / 无任何有效转运单 → pending 待转运
     - 部分宠物已提交转运单 → partial 部分转运
     - 全部宠物已提交转运单 → completed 已完成
     """
     if capture.is_deleted:
+        # 作废单不统计转运情况，省掉一次查询
         new_status = 'void'
     else:
         state = capture_transfer_state(capture)
-        if state['total'] == 0 or state['transferred'] == 0:
-            new_status = 'pending'
-        elif state['transferred'] < state['total']:
-            new_status = 'partial'
-        else:
-            new_status = 'completed'
+        new_status = capture_status_code(False, state['total'], state['transferred'])
 
     if save and capture.status != new_status:
         capture.status = new_status
