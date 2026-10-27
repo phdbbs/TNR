@@ -671,6 +671,8 @@ class DisposalReservationTest(BusinessTestBase):
             applicant_name='另一位申请人', applicant_phone='13800009000',
             status='pending', hospital=self.hospital_a,
             hospital_name=self.hospital_a.name)
+        # 第六十四轮：审核在捕捉点，医院没有这个权力（此处 setUp 登录的是医院）
+        self.login_as(self.shelter_user_a)
         self.expect_fail(
             self.post_json(f'{ADOPT_URL}applications/{second.id}/review/',
                            {'action': 'approve'}),

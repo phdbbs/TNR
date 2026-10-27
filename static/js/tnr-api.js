@@ -331,6 +331,11 @@ const TNR_API = {
   async cancelAdoptionApplication(id) {
     return this._post(`/api/business/adoptions/applications/${id}/cancel/`, {});
   },
+  /* 审核领养申请（捕捉点端）：`action` = approve | reject。 */
+  async reviewAdoptionApplication(id, action, reviewNote) {
+    return this._post(`/api/business/adoptions/applications/${id}/review/`,
+      {action, review_note: reviewNote || ''});
+  },
   async registerAdoption(data) { return this._post('/api/business/adoptions/register/', data); },
   async outboundAdoption(id, formData) { return this._postForm(`/api/business/adoptions/${id}/outbound/`, formData); },
   async outboundAdoptionApplication(id, formData) { return this._postForm(`/api/business/adoptions/applications/${id}/outbound/`, formData); },
@@ -565,9 +570,9 @@ const TNR_API = {
     return parts.length ? parts.join(sep || ' · ') : '—';
   },
   getMaterialCategoryText(cat) {
-    // 与后端 `Material.CATEGORY_CHOICES` 逐项对齐。`medicine`（药品）是
-    // 第四十六轮为「处方药品走现有物料体系」加的（R46 口径 1）——
-    // 这里漏一项，界面上就会把类别直接显示成英文枚举码 `medicine`。
+    // 与后端 `Material.CATEGORY_CHOICES` 逐项对齐；漏一项，界面上就会把
+    // 类别直接显示成英文枚举码。`medicine` 已退出库存（第六十四轮），
+    // 只为历史行保留「药品」这个标签（后端 `LEGACY_CATEGORY_LABELS` 同口径）。
     const map = {'vaccine':'疫苗','dewormer':'驱虫药','chip':'芯片','medicine':'药品'};
     return map[cat] || cat;
   }

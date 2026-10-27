@@ -3081,6 +3081,71 @@ class PrintEntryPointTest(SimpleTestCase):
                 f'{name} 门户没有任何打印入口（单据打印在该端不可达）')
 
 
+# ============================================================
+# 台账导出与一宠一档 PDF 入口（第六十三轮）
+# ============================================================
+#
+# 事故：捕捉点端「全量台账中心 → 一宠一档 → 导出」，打开 CSV 只有表头。
+# 那是 `shelter.js` 里自拼的导出器：取值写的是
+# `typeof c.render === 'function' ? '' : r[c.key]`，而**一宠一档 11 列全部
+# 用 `render`**（编号是可点链接、状态是徽章），于是每行都是 11 个空单元格。
+# 政府端更彻底：按钮只弹一句「导出成功（模拟）」，**没有任何文件**。
+#
+# 两个错都来自「各端各写一份导出」。所以判据不是「能导出」，而是
+# **`text/csv` 只有一处实现**，且两个有导出的端都调到它。
+class LedgerExportConsistencyTest(SimpleTestCase):
+    """台账 CSV 导出只允许有 `tnr-common.js` 一份实现。"""
+
+    def test_csv_blob_is_implemented_only_in_common_layer(self):
+        offenders = []
+        for rel in FRONTEND_FILES:
+            if rel == 'static/js/tnr-common.js':
+                continue
+            if 'text/csv' in _read_raw(rel):
+                offenders.append(rel)
+        self.assertEqual(
+            offenders, [],
+            '以下文件自己拼了 CSV：`text/csv` 只允许出现在 '
+            '`static/js/tnr-common.js` 的 `exportCsv` 里。\n'
+            '各端各写一份的后果是「导出只有表头 / 少一列」这类缺陷逐端复发，'
+            '而且**不报错** —— 用户打开 CSV 才发现。\n  ' + '\n  '.join(offenders))
+
+    def test_ledger_pages_call_the_shared_exporter(self):
+        """捕捉点端与政府端的「导出」按钮都必须走 `TNR_UI.exportCsv`。"""
+        for role in ('shelter', 'gov'):
+            src = strip_js_comments(read_js(role))
+            self.assertIn(
+                'TNR_UI.exportCsv(', src,
+                f'{role} 端的台账导出没有调用公共实现 `TNR_UI.exportCsv` '
+                '（自拼 CSV 会丢掉 `render` 列的内容）')
+
+
+class PetArchivePdfEntryTest(SimpleTestCase):
+    """一宠一档详情必须能「导出 PDF」，且打印路由不被单据路由吞掉。"""
+
+    def test_archive_drawer_has_pdf_export_button(self):
+        src = strip_js_comments(_read_raw('static/js/tnr-common.js'))
+        self.assertIn(
+            "printDocBtn('pet-archive'", src,
+            '一宠一档档案抽屉里没有「导出 PDF」入口：'
+            '`print_pet_archive` 写好了，但用户在界面上点不到 = 功能不存在')
+
+    def test_pet_archive_route_precedes_generic_print_route(self):
+        """`print/pet-archive/<pk>/` 必须排在 `print/<str:doc>/<int:pk>/` 之前。
+
+        Django 按顺序匹配：写在后面会被当成 doc='pet-archive' 命中单据打印，
+        用户看到「单据不存在或无权查看」——看起来像越权，实际是路由没抢到。
+        """
+        src = _read_raw('tnr_system/urls.py')
+        archive = src.index("'print/pet-archive/<int:pk>/'")
+        generic = src.index("'print/<str:doc>/<int:pk>/'")
+        self.assertLess(
+            archive, generic,
+            '`print/pet-archive/<int:pk>/` 排在 `print/<str:doc>/<int:pk>/` 之后，'
+            '会被单据路由抢先匹配掉')
+
+
+
 
 
 
@@ -5902,6 +5967,169 @@ class HospitalDischargeTodoTest(SimpleTestCase):
             '首页仍按 `Pet.status` 一刀切生成待办 —— 本条判据要防的正是这个写法')
 
 
+class HospitalDischargePetStageCopyTest(SimpleTestCase):
+    """出院办理弹窗的动物阶段文案要走派生真源（第五十九轮界面录入巡检）。
+
+    实测：TNR261026014/016 的诊疗单已经「诊疗完成」（`done_at` 有、
+    `disposed_at` 空），后端 `services_lifecycle.pet_stage()` 派生为
+    `pending_discharge`「待出院」；医院端「办理领回」「登记安乐死 / 死亡」
+    两个弹窗的动物下拉却仍读 `Pet.status` 的原始文案，显示成「（待诊疗）」——
+    第五十六轮起诊疗完成**不再改** `Pet.status`，读原始状态必然说错。
+
+    同一个「阶段」在列表列、一宠一档、弹窗选项三处三个说法：任务 #23/#24
+    已收口前两处，这里是漏网的第三处。表现是操作员以为动物还没治完，
+    转去诊疗页白跑一趟，回来又在领回列表里看到同一只。
+    """
+
+    def test_pet_dropdowns_use_the_derived_stage(self):
+        js = strip_js_comments(read_js('hospital'))
+        for sel in ('dspOrPet', 'dspEuthPet'):
+            start = js.find('id="' + sel + '"')
+            self.assertGreater(start, 0, f'出院弹窗找不到动物下拉 {sel}')
+            body = js[start:start + 500]
+            self.assertIn('this.dspPetStageText(p)', body,
+                          f'{sel} 的动物下拉还在读原始 `Pet.status` —— '
+                          '诊疗完成未办结的动物会被说成「待诊疗」')
+        self.assertNotIn(
+            "TNR_UI.petStatusText(p.status) + '）</option>'", js,
+            '出院弹窗的动物下拉里又出现了直接读原始状态的写法')
+
+    def test_stage_helper_follows_the_board_bucket(self):
+        """派生判据要和 `pet_stage()` 同源：看板 `pending_discharge` 桶里有它 = 待出院。"""
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('dspPetStageText(pet) {')
+        self.assertGreater(start, 0, '派生阶段取值函数被删了 —— 弹窗会退回读原始状态')
+        end = _close_brace(js, js.find('{', start))
+        self.assertGreater(end, start, '派生阶段函数没有闭合，判据取不到')
+        body = js[start:end + 1]
+        self.assertIn('this.dspAdviceOf(pet.id)', body,
+                      '判据没读「待出院」桶的建议去向索引 —— 等于没走派生源')
+        self.assertIn('!== undefined', body,
+                      '判据没区分「不在桶里」（undefined，按原始状态显示）'
+                      '与「在桶里但没补录」（空串）')
+        self.assertIn("TNR_UI.boardStageText('pending_discharge')", body,
+                      '「待出院」文案没走 `BOARD_STAGE` 真源')
+        self.assertIn('TNR_UI.petStatusText(pet.status)', body,
+                      '桶外动物（历史存量）的兜底分支没了，它们会被统一说成待出院')
+
+
+class HospitalAdoptInfoTodoTest(SimpleTestCase):
+    """「待领养资料待维护」要按资料完成度筛（第五十九轮界面录入巡检）。
+
+    实测：TNR261026003 花卷 的简介与照片都已在「维护资料」里补齐、也已上架，
+    首页待办仍对它写死「请完善照片和简介」，卡片也照样计数。待办的意义是
+    「还有事要做」，谎报的待办会把真缺口淹没 —— 操作员学会忽略整张卡片之后，
+    真正缺照片的那只也一样被忽略。
+    """
+
+    def test_gap_check_is_one_shared_source(self):
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('function adoptInfoGaps(pet, listing) {')
+        self.assertGreater(start, 0, '领养资料缺口判据被删了')
+        end = _close_brace(js, js.find('{', start))
+        body = js[start:end + 1]
+        self.assertIn('listing.intro', body,
+                      '简介没优先读大厅清单 —— 只填进大厅、没回写 Pet.description 的资料会被判成缺')
+        self.assertIn('pet.description', body, '简介缺了 `Pet.description` 兜底')
+        self.assertIn('visible', body,
+                      '照片只数张数不看显隐 —— 把全部照片都隐藏掉的资料会被判成「齐了」')
+
+    def test_dashboard_filters_and_counts_by_gaps(self):
+        js = strip_js_comments(read_js('hospital'))
+        self.assertIn('.filter(it => it.gaps.length)', js,
+                      '待办没有按缺口过滤：资料已齐的动物仍挂在待办里')
+        self.assertRegex(js, r'const pendAdopt = adoptTodo\.length',
+                         '卡片数字与待办列表不同源 —— 会出现「卡片 5 / 列表 2 条」')
+        self.assertIn("'请完善' + it.gaps.join('和')", js,
+                      '待办文案不随缺口变化，又写死成一句')
+        self.assertNotIn("'请完善照片和简介'", js,
+                         '谎报缺口的固定文案回来了')
+
+    def test_dashboard_reads_hall_listings_strictly(self):
+        js = strip_js_comments(read_js('hospital'))
+        start = js.find('async render_dashboard() {')
+        self.assertGreater(start, 0, '找不到首页看板')
+        body = js[start:start + 1400]
+        self.assertIn('getHallListingsStrict()', body,
+                      '首页读大厅清单用了静默读：接口拒绝时 `[]` 会被当成「所有动物都缺资料」，'
+                      '恰好把这条待办的意义反过来')
+        self.assertNotIn('TNR_API.getHallListings()', body,
+                          '首页用了静默版 `getHallListings()`')
+
+    def test_system_photo_fields_have_one_frontend_source(self):
+        js = strip_js_comments(read_js('hospital'))
+        self.assertEqual(js.count('const PET_SYSTEM_PHOTOS = ['), 1,
+                         '系统照片清单不止一处定义')
+        self.assertNotIn('const SYSTEM_PHOTOS = [', js,
+                         '「维护资料」弹窗又另写了一份系统照片清单 —— '
+                         '加一个照片环节时两处必有一处把新照片当「没有照片」')
+        self.assertIn('PET_SYSTEM_PHOTOS\n      .map', js.replace('\r\n', '\n'),
+                      '弹窗没复用共享清单')
+
+
+class ShelterAdoptionCandidateTest(SimpleTestCase):
+    """捕捉点两个领养下拉的候选口径要和后端守卫一致（第五十九轮界面录入巡检）。
+
+    - 「领养登记」`#ad_pet` 列出了 5 只 `status=adopted` 的动物（老流程
+      「先把状态改成已领养、再补一张单」留下的过滤条件）。现在
+      `adoption_register` 只认 `pending_adopt` / `in_treatment`，选中已领出的
+      必报「宠物当前状态(已领养)不可领养」。
+    - 「违规收回」`#fu_adoption` 直接用未筛选的 `getAdoptions()`，把「已取消」
+      也灌进下拉；选中后被 `adoption_reclaim` 以「该领养记录已撤销，请勿重复操作」
+      挡回。
+
+    界面摆出必然报错的选项，等于把后端判据的活推给操作员逐只试。
+    """
+
+    def test_register_dropdown_excludes_adopted_and_claimed(self):
+        js = strip_js_comments(read_js('shelter'))
+        start = js.find('async render_adoption() {')
+        self.assertGreater(start, 0, '找不到领养审核页')
+        body = js[start:js.find('const adFilters', start)]
+        self.assertIn("p.status === 'pending_adopt'", body,
+                      '领养登记候选里没有「待领养」判据')
+        self.assertNotIn("=== 'adopted'", body,
+                         '领养登记下拉又列出已领出的动物 —— 后端必拒，选中只会报错')
+        self.assertIn("a.status === 'pending_claim'", body,
+                      '没有排除已挂着未完结领养单的动物（后端 `pet_has_active_adoption` 同样拒）')
+
+    def test_reclaim_dropdown_only_lists_established_adoptions(self):
+        js = strip_js_comments(read_js('shelter'))
+        start = js.find('async render_followup() {')
+        self.assertGreater(start, 0, '找不到领养回访页')
+        head = js[start:js.find('const fuFilters', start)]
+        self.assertIn("adoptions.filter(a => a.status === 'completed')", head,
+                      '违规收回候选没有限定「领养关系已成立」的单')
+        sel = js.find('id="fu_adoption"')
+        self.assertGreater(sel, 0, '找不到违规收回的领养记录下拉')
+        body = js[sel:sel + 400]
+        self.assertIn('reclaimable.map(a =>', body,
+                      '下拉又直接用整份 `adoptions`（含已取消、待领出）')
+
+
+class ShelterDispatchTargetKeepTest(SimpleTestCase):
+    """物料下发换物料后必须保住已选的接收方（第五十九轮界面录入巡检）。
+
+    `loadTargets()` 每次重建 `#ob_target` 的 innerHTML 而不回填选中值：
+    操作员先选「爱心医院」、再把物料从麻醉剂换成芯片，接收方静默落到第一项，
+    提交时货发去了另一家 —— 界面上没有任何一句话说过这件事，
+    而下拉框看起来「有值」，不会引起怀疑。
+    """
+
+    def test_selected_target_is_restored_after_reload(self):
+        js = strip_js_comments(read_js('shelter'))
+        start = js.find('const loadTargets = async () => {')
+        self.assertGreater(start, 0, '找不到下发接收方的加载函数')
+        end = js.find('\n      };', start)
+        self.assertGreater(end, start, '接收方加载函数没有闭合，判据取不到')
+        body = js[start:end]
+        self.assertIn('const keep = targetSel.value;', body,
+                      '重建下拉前没有记下操作员已选的接收方')
+        self.assertIn('list.some(t => String(t.id) === String(keep))', body,
+                      '回填前没校验新清单里还有没有那一家 —— 直接赋值会静默落回空')
+        self.assertIn('targetSel.value = keep;', body, '已选接收方没有回填')
+
+
 class HospitalMaterialLoadTest(SimpleTestCase):
     """物料页的读取失败必须说出来（第五十三轮电脑端巡检）。
 
@@ -6563,3 +6791,58 @@ class DischargeAdviceCatchUpEntryTest(SimpleTestCase):
             body.find('this.openTreatmentFlow(petId, tid, 3)', bind), -1,
             '修改入口没有落到第三步（建议去向就在第三步）；'
             '注意要的是**接线之后**那次调用，函数开头的「没记建议 → 直接送去补录」不算')
+
+
+class NoNativeBlockingDialogTest(SimpleTestCase):
+    """四端门户 JS 不得用原生 `alert` / `confirm` / `prompt` 收集输入。
+
+    第六十四轮实测踩到的：捕捉点拒绝领养申请时走 `window.prompt` 取原因，
+    原生对话框**阻塞 JS 线程** —— 在自动化与内嵌 webview 里点了「确认拒绝」
+    之后既不报错也不发请求，操作员以为审核完成，申请其实还挂在待审列表里。
+    同一页面上的通过走 `TNR_UI.confirm`，两条按钮一套自研弹层、一套原生框，
+    风格也不一致。
+
+    只查**函数调用**形态（`window.prompt(` / 裸 `prompt(`），注释与字符串
+    字面量里的字样不算 —— 本文件大量注释就在引用这些 API。
+    """
+
+    #: 允许出现在提示文案里的词（如「请输入拒绝原因」），只拦真正的调用。
+    CALL = re.compile(r'(?<![\w.$])(?:window\s*\.\s*)?(alert|confirm|prompt)\s*\(')
+
+    def test_portal_js_has_no_native_dialog_calls(self):
+        offenders = []
+        for role, rel in sorted(PORTAL_JS.items()):
+            src = strip_js_comments(_read_raw(rel))
+            for no, line in enumerate(src.split('\n'), 1):
+                m = self.CALL.search(line)
+                if not m:
+                    continue
+                # `TNR_UI.confirm(` / `this.confirm(` 是自研弹层，合法。
+                pre = line[:m.start()]
+                if pre.rstrip().endswith('.'):
+                    continue
+                offenders.append(f'{rel}:{no}  {line.strip()[:70]}')
+        self.assertFalse(
+            offenders,
+            '这些门户代码在用原生对话框收输入（阻塞线程、webview 里会静默失效，'
+            '请改用 TNR_UI.modal / TNR_UI.confirm）：\n  ' + '\n  '.join(offenders))
+
+    def test_shelter_adoption_reject_collects_reason_in_modal(self):
+        """拒绝领养申请的原因必须来自弹窗，且**必填**。
+
+        审核意见会原样下发到领养人端（`adopter.js` 的「审核意见」）和站内信，
+        空着等于把人拒了却不给理由。
+        """
+        src = strip_js_comments(_read_raw(PORTAL_JS['shelter']))
+        start = src.find("title: '拒绝领养申请'")
+        self.assertGreater(start, 0,
+                           '捕捉点端拒绝领养申请不再有专门的弹窗（退回原生 prompt 了）')
+        body = src[start:src.find('\n      };', start)]
+        self.assertGreater(len(body), 200, '拒绝弹窗函数体被截断，断言会静默失真')
+        self.assertIn('adRejectNote', body, '弹窗里没有拒绝原因输入框')
+        self.assertIn('请填写拒绝原因', body,
+                      '拒绝原因不再必填：领养人会收到一条没有说明的拒绝')
+        bind = body.find("getElementById('btnAdoptReject')")
+        self.assertGreater(bind, -1, '「确认拒绝」按钮没有接线')
+        self.assertGreater(body.find("submit(id, 'reject'", bind), -1,
+                           '按钮没有把原因提交出去（只关了弹窗）')

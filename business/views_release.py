@@ -17,8 +17,9 @@ from business.services import (
     json_ok, json_fail, parse_json_body, serialize_instance,
     body_str, body_int,
     generate_doc_no, get_district_filtered_queryset,
-    get_active_pet, get_hospital_scoped_pet, get_scoped_object,
-    get_printable_object,
+    get_hospital_scoped_pet, get_shelter_scoped_pet,
+    get_printable_object, shelter_scope,
+
     hospital_pet_write_error, pet_has_active_adoption,
     pet_has_approved_application,
     pet_has_pending_release, pet_has_pending_return,
@@ -46,6 +47,11 @@ def release_list(request):
             )
         else:
             qs = Release.objects.none()
+    elif user.role == 'shelter':
+        # 捕捉点 = 本区县 ∪ 本站开出的单（`institution` 记的是开单时动物所在机构）。
+        # 只按区县的话，跨区县运回签收后由本站发起的放归单会**从列表里消失**，
+        # 而动物正躺在「发起放归」备选框里 —— 单开出去了却查不到、也点不了确认。
+        qs = Release.objects.filter(shelter_scope(user, 'institution'))
     else:
         qs = get_district_filtered_queryset(Release, user)
 
@@ -79,12 +85,14 @@ def release_create(request):
     if not pet_id:
         return json_fail('缺少宠物ID')
 
-    # 取单口径按角色分叉：医院走「本院在治 ∪ 本院诊疗过」（跨区县送医也能发起放归），
-    # 其余角色仍按区县。写单据前再校一次「动物当前是否挂在本院」。
+    # 取单口径按角色分叉，且**与各自列表口径一致**（看得见就得点得开）：
+    #   医院 = 本院在治 ∪ 本院诊疗过（跨区县送医也能发起放归）；
+    #   捕捉点 = 本区县 ∪ 本站名下（跨区县运回签收后动物挂在本站、区县仍是捕捉地）。
+    # 写单据前再校一次「动物当前是否挂在本院」（`hospital_pet_write_error`）。
     if user.role == 'hospital':
         pet = get_hospital_scoped_pet(pet_id, user)
     else:
-        pet = get_active_pet(pet_id, user)
+        pet = get_shelter_scoped_pet(pet_id, user)
     if pet is None:
         return json_fail('宠物不存在或无权访问', status=404)
 
@@ -230,7 +238,11 @@ def release_confirm(request, pk):
     data = parse_json_body(request)
     user = request.user
 
-    release = get_scoped_object(Release, pk, user)
+    # 取单口径与 `release_transfer` / `release_list` 保持一致：本机构 ∪ 本区县。
+    # 只按区县（`get_scoped_object`）会让**签收跨区县运回单的捕捉点**卡在最后一步：
+    # 单是它开的（`institution` = 本站），动物区县却写着捕捉地，
+    # 「转运回小区」成功、「小区确认放归」404，放归永远办不到终态。
+    release = Release.objects.filter(shelter_scope(user, 'institution'), pk=pk).first()
     if release is None:
         return json_fail('放归记录不存在或无权访问', status=404)
 

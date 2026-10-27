@@ -926,16 +926,21 @@ def adoption_application_list(request):
     user = request.user
     qs = AdoptionApplication.objects.select_related('pet').order_by('-id')
 
-    # 机构数据权限：医院只看到本机构；区级看本区；市级看全部
+    # 机构数据权限：医院只看到本机构；区级看本区；市级看全部。
+    # 审核在捕捉点（第六十四轮）：医院只拿**已通过**的申请办出库，
+    # 未审的申请不进入医院视野 —— 避免同一张单两边都能改状态。
     if user.role == 'hospital':
         if user.institution_id:
-            qs = qs.filter(hospital_id=user.institution_id)
+            qs = qs.filter(hospital_id=user.institution_id, status='approved')
         else:
             qs = qs.none()
     elif user.role == 'gov_district':
         qs = qs.filter(pet__district_id=user.district_id)
     elif user.role == 'shelter':
-        qs = qs.filter(pet__shelter_id=user.institution_id)
+        # 没有挂靠机构时必须**空集**：`filter(pet__shelter_id=None)` 会匹配上
+        # 所有「动物未挂靠捕捉点」的申请，等于完全不设限（同 hospital 分支）。
+        qs = (qs.filter(pet__shelter_id=user.institution_id)
+              if user.institution_id else qs.none())
 
     status = request.GET.get('status')
     if status:
@@ -951,10 +956,14 @@ def adoption_application_list(request):
 
 
 @csrf_exempt
-@role_required('hospital', 'shelter')
+@role_required('shelter')
 @login_required
 def adoption_application_review(request, pk):
-    """机构审核领养申请（通过 / 拒绝）。
+    """**捕捉点**审核领养申请（通过 / 拒绝）。
+
+    第六十四轮把审核从医院挪到捕捉点：医院只负责维护资料、上架，
+    以及在审核通过后填出院单；申请是否通过由动物来源捕捉点判定。
+    医院调用本接口一律 403（`role_required`）。
 
     请求体示例:
     {
@@ -965,12 +974,9 @@ def adoption_application_review(request, pk):
     data = parse_json_body(request)
     user = request.user
 
-    # 按角色/区县收敛可见范围（申请单本身无 district 字段，故按机构/宠物归属过滤）
-    qs = AdoptionApplication.objects.all()
-    if user.role == 'hospital':
-        qs = qs.filter(hospital_id=user.institution_id) if user.institution_id else qs.none()
-    elif user.role == 'shelter':
-        qs = qs.filter(pet__shelter_id=user.institution_id)
+    # 申请单本身无 district 字段，按「动物所属捕捉点」收敛。
+    qs = (AdoptionApplication.objects.filter(pet__shelter_id=user.institution_id)
+          if user.institution_id else AdoptionApplication.objects.none())
 
     application = qs.filter(id=pk).first()
     if application is None:

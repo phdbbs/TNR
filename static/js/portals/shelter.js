@@ -1827,7 +1827,7 @@ const Shelter = {
           { title: '备注', key: 'note', render: r => esc(r.note || '—') },
           { title: '操作', render: r => '<div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;">'
               + '<button class="btn btn-success btn-sm" data-return-receive="' + r.id + '">签收</button>'
-              + '<button class="btn btn-danger btn-sm" data-return-reject="' + r.id + '">驳货</button>'
+              + '<button class="btn btn-danger btn-sm" data-return-reject="' + r.id + '">驳回</button>'
               + '</div>' }
         ],
         data: pendingReturns,
@@ -2058,11 +2058,7 @@ const Shelter = {
             { key: 'category', label: '分类', type: 'select', options: [
               { value: 'vaccine', label: '疫苗' },
               { value: 'dewormer', label: '驱虫药' },
-              { value: 'chip', label: '芯片' },
-              /* 「药品」是第四十六轮为处方加上的类别（R46 口径 1）。
-                 下拉里缺这一项 = 医院开处方时选不到药，而服务端是放行的
-                 —— 属于「服务端放行、前端藏选项」的静默做不到。 */
-              { value: 'medicine', label: '药品' }
+              { value: 'chip', label: '芯片' }
             ]},
             { key: 'stock_state', label: '库存状态', type: 'select', options: [
               { value: 'out', label: '耗尽' },
@@ -2129,7 +2125,7 @@ const Shelter = {
     } else if (tab === 'purchase') {
       let html = '<div class="card mb-4"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>采购入库登记</div></div><div class="card-body">';
       html += '<div class="form-row-3">';
-      html += '<div class="form-group"><label class="form-label">物料类型<span class="req">*</span></label><select class="form-select" id="pu_category"><option value="vaccine">疫苗</option><option value="dewormer">驱虫药</option><option value="medicine">药品</option><option value="chip">芯片</option></select></div>';
+      html += '<div class="form-group"><label class="form-label">物料类型<span class="req">*</span></label><select class="form-select" id="pu_category"><option value="vaccine">疫苗</option><option value="dewormer">驱虫药</option><option value="chip">芯片</option></select></div>';
       html += '<div class="form-group"><label class="form-label">物料名称<span class="req">*</span></label><input class="form-input" id="pu_name" placeholder="如：狂犬疫苗"></div>';
       html += '<div class="form-group"><label class="form-label">采购数量<span class="req">*</span></label><input type="number" class="form-input" id="pu_qty" min="1" value="1"></div>';
       html += '</div><div class="form-row-3">';
@@ -2326,6 +2322,7 @@ const Shelter = {
        */
       const loadTargets = async () => {
         const mat = materials.find(m => String(m.id) === String(matSel.value));
+        const keep = targetSel.value;
         targetSel.innerHTML = '';
         hintEl.textContent = '';
         if (!mat) { hintEl.textContent = '暂无可下发的物料'; return; }
@@ -2352,6 +2349,12 @@ const Shelter = {
           + TNR_UI.escape(t.name)
           + (t.districtName ? '（' + TNR_UI.escape(t.districtName) + '）' : '')
           + '</option>').join('');
+        /* 换物料/换类型会重拉清单并重建 `<select>`，重建后默认落到第一项。
+           操作员已经选好的那一家只要还在新清单里就必须保住 —— 以前不回填，
+           界面看起来什么都没动，提交时货却发去了另一家（第五十九轮界面录入巡检）。 */
+        if (keep && list.some(t => String(t.id) === String(keep))) {
+          targetSel.value = keep;
+        }
       };
 
       // 芯片「首号 + 数量」预览（C1）：dispatch 预检还会逐颗校验
@@ -2709,7 +2712,7 @@ const Shelter = {
         + (listRows.length ? '<div id="shelterOutboundTable"></div>'
                            : '<div class="empty-state" style="padding:var(--sp-6);">'
                              + '<div class="empty-state-icon">📤</div>'
-                             + '<div class="empty-state-text">暂无关库记录</div></div>')
+                             + '<div class="empty-state-text">暂无出库记录</div></div>')
         + '</div></div>';
       wrap.innerHTML = html;
       if (listRows.length) {
@@ -2724,7 +2727,7 @@ const Shelter = {
             { title: '日期', key: 'date' },
             { title: '操作人', key: 'operator_name' }
           ],
-          data: listRows, emptyText: '暂无关库记录'
+          data: listRows, emptyText: '暂无出库记录'
         });
       }
       // 允许负数：`bindQtyStepper` 的 min 不传 → 默认 1 会把盘盈挡在 step 上，
@@ -3255,7 +3258,14 @@ const Shelter = {
       (captures || []).forEach(c => { captureById[String(c.id)] = c; });
       const captureCommunityOf = (p) => {
         const cap = captureById[String(p.captureId ?? p.capture_id)] || {};
-        return cap.communityName || cap.community_name || '';
+        /* `captureCommunity` 是 `/api/business/pets/` 直接带出的捕捉单小区名。
+           为什么不能只查本站的捕捉单列表：`/captures/` 按机构收敛，而**跨区县
+           运回签收**进来的动物，它的捕捉单属于别的站（市级站或原捕捉点）。
+           早先只查本地映射，这只动物的「默认带出捕捉单登记的小区」就是空 →
+           点「发起放归」被界面拦在「请填写放归小区」，流程看着像坏了，
+           而服务端其实知道小区名（`release_create` 会取捕捉单登记值）。 */
+        return cap.communityName || cap.community_name
+          || p.captureCommunity || p.capture_community || '';
       };
 
       let html = '';
@@ -3942,7 +3952,22 @@ const Shelter = {
     const el = document.getElementById('page-adoption');
     const pets = await TNR_API.getPets();
     const adoptions = await TNR_API.getAdoptions();
-    const adoptablePets = pets.filter(p => p.status === 'pending_adopt' || p.status === 'adopted');
+    // 领养人在大厅提交的申请，审核权在捕捉点（第六十四轮）。
+    // 医院只维护资料 / 上架，审核通过后由医院填出院单。
+    const applications = await TNR_API.getAdoptionApplications('pending');
+    /* 领养登记只列「还能为它开一张领养单」的动物（第五十九轮界面录入巡检）：
+       以前把 `adopted` 也放进来，选中的动物到后端必被
+       `pet.status not in ('pending_adopt','in_treatment')` 挡回 ——
+       界面摆了 5 个必然报错的选项，操作员要逐只试才知道不行。
+       在院/待出院的动物也不列：领养单要由医院在「出院管理 · 领养」里按
+       建议去向开（后端还要校 `discharge_candidate_error`），捕捉点这一页
+       手上没有诊疗看板，列出来只会多一批白点。
+       再排一次已挂着未完结领养单的动物 —— 后端 `pet_has_active_adoption` 同样拒。 */
+    const claimedPetIds = new Set(adoptions
+      .filter(a => a.status === 'pending_claim')
+      .map(a => String(a.petId || a.pet_id)));
+    const adoptablePets = pets.filter(p => p.status === 'pending_adopt'
+      && !claimedPetIds.has(String(p.id)));
 
     /* 列表上方的筛选条放**页面级**，不嵌进列表卡片里 ——
        嵌在卡片内时 sticky 的可钉范围被卡片高度限制住，一滚过卡片就失效。 */
@@ -3956,6 +3981,16 @@ const Shelter = {
 
     el.innerHTML = `
       <div class="card mb-4">
+        <div class="card-header">
+          <div class="card-title"><span class="card-title-bar"></span>待审核领养申请（${applications.length}）</div>
+          <div class="fs-sm text-muted">申请人在领养大厅提交材料；通过后由医院在出院管理中填写出库单</div>
+        </div>
+        <div class="card-body" style="padding:0;">
+          <div class="table-wrapper" id="adoptionApplTableWrap"></div>
+        </div>
+      </div>
+
+      <div class="card mb-4">
         <div class="card-header"><div class="card-title"><span class="card-title-bar"></span>领养登记</div></div>
         <div class="card-body">
           <div class="form-row-3">
@@ -3964,7 +3999,7 @@ const Shelter = {
             <div class="form-group"><label class="form-label">身份证号</label><input class="form-input" id="ad_idCard" placeholder="身份证号"></div>
           </div>
           <div class="form-row-3">
-            <div class="form-group"><label class="form-label">选择宠物<span class="req">*</span></label><select class="form-select" id="ad_pet">${adoptablePets.map(p => '<option value="' + p.id + '" data-code="' + p.code + '">' + p.code + '</option>').join('')}</select></div>
+            <div class="form-group"><label class="form-label">选择宠物<span class="req">*</span></label><select class="form-select" id="ad_pet">${adoptablePets.length ? adoptablePets.map(p => '<option value="' + p.id + '" data-code="' + p.code + '">' + p.code + (p.name ? ' · ' + TNR_UI.escape(p.name) : '') + '</option>').join('') : '<option value="">本院暂无待领养动物</option>'}</select></div>
             <div class="form-group"><label class="form-label">领养人地址</label><input class="form-input" id="ad_address" placeholder="居住地址"></div>
             <div class="form-group"><label class="form-label">资质情况</label><select class="form-select" id="ad_qualification"><option value="有稳定住所，有养宠经验">有稳定住所，有养宠经验</option><option value="有稳定住所，无养宠经验">有稳定住所，无养宠经验</option><option value="需进一步审核">需进一步审核</option></select></div>
           </div>
@@ -3985,6 +4020,104 @@ const Shelter = {
         </div>
       </div>
     `;
+
+    /* 待审申请：通过 / 拒绝 / 详情。审核结论写回 `AdoptionApplication`，
+       医院端只在「已预约」里看到通过的那部分。 */
+    const renderApplications = () => {
+      const submit = async (id, action, note) => {
+        try {
+          const res = await TNR_API.reviewAdoptionApplication(id, action, note);
+          TNR_UI.assertOk(res, '审核失败');
+          TNR_UI.toast(res.message || '审核完成', 'success');
+          this.render_adoption();
+        } catch (e) {
+          TNR_UI.toast(e.message || '审核失败', 'danger');
+        }
+      };
+      const review = (id, action) => {
+        if (action === 'approve') {
+          TNR_UI.confirm('确认通过该领养申请？', '审核领养申请')
+            .then(ok => { if (ok) submit(id, 'approve', ''); });
+          return;
+        }
+        /* 拒绝原因走弹窗收集，不用 `window.prompt`：原生对话框会阻塞 JS 线程，
+           内嵌 webview 里点了就没反应，风格也与本系统其它弹层不一致。
+           原因必填 —— 领养人端会看到这条说明，空着等于让人不明不白被拒。 */
+        const { close } = TNR_UI.modal({
+          title: '拒绝领养申请',
+          size: 'md',
+          body: `
+            <div class="text-muted fs-sm mb-3">拒绝后申请人在「我的领养」里会看到下面的说明。</div>
+            <div class="form-group"><label class="form-label">拒绝原因<span class="req">*</span></label>
+              <textarea class="form-textarea" id="adRejectNote" rows="3" placeholder="如：居住条件不具备 / 材料不完整，请补充后重新申请"></textarea>
+            </div>
+          `,
+          actions: '<button class="btn btn-secondary" data-action="close">取消</button><button class="btn btn-danger" id="btnAdoptReject">确认拒绝</button>'
+        });
+        setTimeout(() => {
+          const ta = document.getElementById('adRejectNote');
+          if (ta) ta.focus();
+          document.getElementById('btnAdoptReject').addEventListener('click', () => {
+            const note = ta.value.trim();
+            if (!note) { TNR_UI.toast('请填写拒绝原因', 'warning'); return; }
+            close();
+            submit(id, 'reject', note);
+          });
+        }, 100);
+      };
+      const detail = (a) => {
+        const p = a.pet || {};
+        TNR_UI.drawer({ title: '领养申请 · ' + (p.code || a.pet_code || ''), body: TNR_UI.renderDescList([
+          { label: '动物', value: p.code || a.pet_code || '—' },
+          { label: '品种', value: TNR_API.petAttrText(p) },
+          { label: '申请人', value: a.applicant_name || '—' },
+          { label: '联系电话', value: a.applicant_phone || '—' },
+          { label: '身份证', value: a.applicant_id_card || '—' },
+          { label: '住址', value: a.applicant_address || '—', full: true },
+          { label: '资质说明', value: a.qualification || '—', full: true },
+          { label: '申请理由', value: a.reason || '—', full: true },
+          { label: '申请时间', value: TNR_UI.formatDateTime(a.applied_at || a.created_at) }
+        ]) });
+      };
+      const rows = applications.map(a => {
+        const p = a.pet || {};
+        return {
+          _pet: '<div><span class="pet-code-chip">' + TNR_UI.escape(p.code || a.pet_code || '—')
+            + '</span><div class="fs-sm text-muted">' + TNR_UI.escape(TNR_API.petAttrText(p)) + '</div></div>',
+          applicant_name: a.applicant_name || '',
+          applicant_phone: a.applicant_phone || '',
+          _qual: TNR_UI.escape((a.qualification || '').slice(0, 40)),
+          applied_at: a.applied_at || a.created_at || '',
+          _actions: '<div class="dsp-acts">'
+            + '<button class="btn btn-sm btn-success" data-aact="approve" data-id="' + a.id + '">通过</button>'
+            + '<button class="btn btn-sm btn-danger" data-aact="reject" data-id="' + a.id + '">拒绝</button>'
+            + '<button class="btn btn-sm btn-secondary" data-aact="detail" data-id="' + a.id + '">详情</button>'
+            + '</div>'
+        };
+      });
+      TNR_UI.mountTable('adoptionApplTableWrap', {
+        id: 'shelter.adoption.applications',
+        columns: [
+          { title: '动物', key: '_pet', sortable: false },
+          { title: '申请人', key: 'applicant_name' },
+          { title: '电话', key: 'applicant_phone' },
+          { title: '资质说明', key: '_qual', sortable: false },
+          { title: '申请时间', key: 'applied_at', render: r => TNR_UI.formatDateTime(r.applied_at) },
+          { title: '操作', key: '_actions', sortable: false, align: 'right' }
+        ],
+        data: rows,
+        emptyText: '暂无待审核申请'
+      });
+      TNR_UI.delegateClick('adoptionApplTableWrap', {
+        'data-aact': (act, node) => {
+          const app = applications.find(x => String(x.id) === String(node.dataset.id));
+          if (!app) return;
+          if (act === 'detail') detail(app);
+          else review(app.id, act);
+        }
+      });
+    };
+    renderApplications();
 
     const renderTable = () => {
       const vals = TNR_UI.getFilterValues(el);
@@ -4083,6 +4216,11 @@ const Shelter = {
     const el = document.getElementById('page-followup');
     const checkins = await TNR_API.getCheckins();
     const adoptions = await TNR_API.getAdoptions();
+    /* 违规收回只列「领养关系已经成立」的单（第五十九轮界面录入巡检）。
+       `getAdoptions()` 不带筛选，以前把「已取消」「待领出」也灌进下拉：
+       已取消的选中后被后端 `adoption_reclaim` 以「该领养记录已撤销，请勿重复操作」
+       挡回；待领出的动物还没离院，「收回动物」根本无从谈起。 */
+    const reclaimable = adoptions.filter(a => a.status === 'completed');
 
     // 与 CheckIn.status 的 choices 对齐（pending/approved/rejected）。
     // 选项直接从显示真源生成：本页以前自己写了一套「未通过」，
@@ -4106,7 +4244,7 @@ const Shelter = {
         <div class="card-body">
           <p class="text-muted fs-sm mb-3">如发现领养人存在弃养、私自转赠、打卡不合格等违规行为，可在此收回动物并加入黑名单。</p>
           <div class="form-row">
-            <div class="form-group"><label class="form-label">选择领养记录<span class="req">*</span></label><select class="form-select" id="fu_adoption">${adoptions.map(a => '<option value="' + a.id + '" data-pet="' + a.petId + '" data-petcode="' + a.petCode + '" data-name="' + TNR_UI.escape(a.adopterName) + '" data-phone="' + TNR_UI.escape(a.adopterPhone) + '" data-idcard="' + TNR_UI.escape(a.adopterIdCard || '') + '">' + a.petCode + ' - ' + TNR_UI.escape(a.adopterName) + '</option>').join('')}</select></div>
+            <div class="form-group"><label class="form-label">选择领养记录<span class="req">*</span></label><select class="form-select" id="fu_adoption">${reclaimable.map(a => '<option value="' + a.id + '" data-pet="' + a.petId + '" data-petcode="' + a.petCode + '" data-name="' + TNR_UI.escape(a.adopterName) + '" data-phone="' + TNR_UI.escape(a.adopterPhone) + '" data-idcard="' + TNR_UI.escape(a.adopterIdCard || '') + '">' + a.petCode + ' - ' + TNR_UI.escape(a.adopterName) + '</option>').join('') || '<option value="">暂无已成立的领养记录</option>'}</select></div>
             <div class="form-group"><label class="form-label">违规原因<span class="req">*</span></label><select class="form-select" id="fu_reason"><option value="弃养">弃养</option><option value="私自转赠">私自转赠</option><option value="打卡不合格">打卡不合格</option><option value="虐待动物">虐待动物</option><option value="其他">其他</option></select></div>
           </div>
           <button class="btn btn-danger" id="btnReclaim">收回动物并加入黑名单</button>
@@ -4640,23 +4778,14 @@ const Shelter = {
       </div>
     `;
     TNR_UI.mountTable('ledgerTableHolder', { id: 'shelter.ledger', columns, data, emptyText: '暂无台账数据' });
-    // 当前页签的行数据，供「行内点击」的事件委托取用（见 render_ledger）
+    // 当前页签的行数据/列定义，供「行内点击」与「导出」取用（见 render_ledger）
     this._ledgerRows = data;
+    this._ledgerColumns = columns;
     document.getElementById('btnExportLedger').addEventListener('click', () => {
-      const csv = [];
-      csv.push(columns.map(c => c.title).join(','));
-      data.forEach(r => {
-        csv.push(columns.map(c => {
-          const v = typeof c.render === 'function' ? '' : (r[c.key] ?? '');
-          return '"' + String(v).replace(/"/g, '""') + '"';
-        }).join(','));
-      });
-      const blob = new Blob(['\ufeff' + csv.join('\n')], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = title + '.csv'; a.click();
-      URL.revokeObjectURL(url);
-      TNR_UI.toast('已导出 CSV', 'success');
+      // 走公共实现：旧代码在这里逐列取 `c.key`，而 render 列一律写空串，
+      // 一宠一档 11 列全是 render，导出就只剩表头（见 TNR_UI.exportCsv 注释）。
+      const n = TNR_UI.exportCsv(columns, data, title);
+      TNR_UI.toast(n ? `已导出 ${n} 条到 CSV` : '当前筛选结果为空，已导出表头', n ? 'success' : 'warning');
     });
     document.getElementById('btnPrintLedger').addEventListener('click', () => {
       const printWin = window.open('', '_blank');

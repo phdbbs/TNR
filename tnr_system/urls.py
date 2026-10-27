@@ -18,7 +18,7 @@ from business.views_portal import (
     adopter_portal, adoption_hall_public, hospital_portal, shelter_portal,
     gov_portal, platform_portal,
 )
-from business.views_print import print_doc
+from business.views_print import print_doc, print_pet_archive
 from core.http import is_api_request
 
 urlpatterns = [
@@ -37,6 +37,11 @@ urlpatterns = [
     #   「一律 JSON 信封」（`core/tests.py::AllApiRoutesContractTest` 会枚举
     #   每条 `/api/` 路由并断言 `Content-Type: application/json`）。
     #   挂进去会被闸门正确地拦下 —— 该改的是路由，不是闸门。
+    # ⚠ **必须排在 `print/<str:doc>/<int:pk>/` 之前**：Django 按顺序匹配，
+    #   放在后面的话 `print/pet-archive/5/` 会先命中 doc='pet-archive'，
+    #   用户在打印页看到的是「单据不存在或无权查看」—— 看起来像越权，
+    #   实际是路由没抢到。
+    path('print/pet-archive/<int:pk>/', print_pet_archive, name='print_pet_archive'),
     path('print/<str:doc>/<int:pk>/', print_doc, name='print_doc'),
     path('api/business/', include('business.urls')),
     path('api/supervision/', include('supervision.urls')),

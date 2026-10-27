@@ -17,6 +17,33 @@ const TX_DISPOSAL_DESC = {
   dead: '需另开无害化单'
 };
 
+/* 「系统照片」字段清单（捕捉 / 诊疗环节自动带入领养资料页）。
+   与后端 `views_adoption.HALL_SYSTEM_PHOTO_FIELDS` 逐位相同。
+   首页看板的资料完成度判据和「维护资料」弹窗的显隐开关都读这一份，
+   两处各写一份的话，加一个照片环节就会有一处把新照片当「没有照片」。 */
+const PET_SYSTEM_PHOTOS = [
+  ['photo_capture', '捕捉照片'],
+  ['photo_group', '整体合影'],
+  ['photo_before', '术前照片'],
+  ['photo_after', '术后照片'],
+  ['photo_treatment', '诊疗后照片']
+];
+
+/* 领养资料的缺口 —— 首页「待领养资料待维护」与出院页共用的判据。
+   简介取大厅 `listing.intro`，退回 `Pet.description`；照片取大厅清单里
+   **仍在显示**的那些（含补充照片），没有 listing 时退回动物档案上的系统照片。
+   返回缺失项文案；空数组 = 资料已齐，不该再挂在待办里。 */
+function adoptInfoGaps(pet, listing) {
+  if (!pet) return [];
+  const gaps = [];
+  if (!(((listing && listing.intro) || pet.description || '')).trim()) gaps.push('简介');
+  const hasPhoto = listing
+    ? (listing.photos || []).some(p => p.visible)
+    : PET_SYSTEM_PHOTOS.some(f => !!pet[f[0]]);
+  if (!hasPhoto) gaps.push('照片');
+  return gaps;
+}
+
 const Hospital = {
   titles: {
     'dashboard': '首页看板',
@@ -132,14 +159,22 @@ const Hospital = {
   /* ========== 1. 首页看板 ========== */
   async render_dashboard() {
     try {
-      const [transfers, pets, materials, txns, treatments, euthanasia] = await Promise.all([
+      const [transfers, pets, materials, txns, treatments, euthanasia, listings] = await Promise.all([
         TNR_API.getTransfersStrict(),
         TNR_API.getHospitalPetsStrict(),
         TNR_API.getMaterialsStrict(),
         TNR_API.getMaterialTransactionsStrict(),
         TNR_API.getTreatmentsStrict(),
-        TNR_API.getEuthanasiaStrict()
+        TNR_API.getEuthanasiaStrict(),
+        /* 领养资料完成度判据要读大厅清单（简介 + 照片显隐）。读失败不能退化成
+           「所有动物都缺资料」—— 那正好把这条待办的意义反过来。 */
+        TNR_API.getHallListingsStrict()
       ]);
+      const listingByPet = {};
+      (listings || []).forEach(l => {
+        const id = l.pet_id || (l.pet && l.pet.id);
+        if (id) listingByPet[String(id)] = l;
+      });
 
       // 待签收 = pending + partial（部分签收的单还有剩余动物没到）
       const pendRecv = transfers.filter(t => TNR_UI.isOpenTransferStatus(t.status)).length;
@@ -165,14 +200,20 @@ const Hospital = {
       const pendTreat = pendTreatPets.length;
       const pendDischarge = pendDischargePets.length;
       const stockWarn = materials.filter(m => (m.hospital_stock || 0) <= (m.safety_stock || 0)).length;
-      // 待领养资料维护 = 历史「待领养」状态 ∪ 诊疗完成且医生建议领养的待出院动物。
+      // 待领养 = 历史「待领养」状态 ∪ 诊疗完成且医生建议领养的待出院动物。
       // 第五十六轮起诊疗完成不再改 `Pet.status`，只按状态筛会漏掉全部新数据。
       const legacyAdoptPets = pets.filter(p => p.status === 'pending_adopt');
       const advisedAdoptPets = pendDischargePets.filter(p => {
         const t = latestTxByPet.get(p.id);
         return t && t.disposal_advised === 'pending_adopt';
       });
-      const pendAdopt = legacyAdoptPets.length + advisedAdoptPets.length;
+      /* 卡片写的是「资料**待维护**」，就得只统计资料真有缺口的动物
+         （第五十九轮电脑端巡检：花卷简介照片都齐了、也已上架，仍被写成
+         「请完善照片和简介」）。资料齐的从待办里出局，不再假报缺口。 */
+      const adoptTodo = legacyAdoptPets.concat(advisedAdoptPets)
+        .map(p => ({ pet: p, gaps: adoptInfoGaps(p, listingByPet[String(p.id)]) }))
+        .filter(it => it.gaps.length);
+      const pendAdopt = adoptTodo.length;
       const pendingDisp = txns.filter(t => t.type === 'dispatch' && !(t.note || '').includes('[已签收]'));
 
       const todoItems = [];
@@ -196,9 +237,10 @@ const Hospital = {
       pendingDisp.forEach(t => {
         todoItems.push({icon: '📦', title: '待接收物料：' + (t.material_name || ''), desc: '数量：' + (t.quantity || 0) + (t.unit || ''), nav: 'material'});
       });
-      legacyAdoptPets.concat(advisedAdoptPets).forEach(p => {
+      adoptTodo.forEach(it => {
+        const p = it.pet;
         todoItems.push({icon: '🐾', title: '待领养资料维护：' + (p.code || ''),
-          desc: TNR_UI.joinInfo([p.name, '请完善照片和简介']),
+          desc: TNR_UI.joinInfo([p.name, '请完善' + it.gaps.join('和')]),
           nav: 'discharge', tab: 'adopt', sub: 'ready'});
       });
 
@@ -1152,9 +1194,9 @@ const Hospital = {
     const draft = {
       species: pet.species || '', gender: pet.gender || '',
       breed: pet.breed || '', color: pet.color || '', weight: pet.weight || '',
+      // 新单默认 38℃（实测读数仍要医生核对/改填）；已提交的单拿到什么显示什么。
       temperature: detail.temperature === null || detail.temperature === undefined
-        ? '' : String(detail.temperature),
-      temperatureFlag: detail.temperature_flag || '',
+        ? (detail.checked_at ? '' : '38') : String(detail.temperature),
       commonFindings: (detail.common_findings_list || []).slice(),
       commonOther: detail.common_other || '',
       commonOtherOn: !!detail.common_other,
@@ -1328,20 +1370,22 @@ const Hospital = {
       + '<div class="card-title"><span class="card-title-bar"></span>体检项目</div>'
       + '<div class="text-muted fs-sm">带 * 为提交必填</div></div><div class="card-body">';
 
+    // 体温**只填读数**（第六十四轮）：不再让医生在「正常 / 发烧」里点一个。
+    // 判定由服务端按读数派生，界面只把这条规则说明白，避免同一事实答两次
+    // （36.8 与 39.4 被点成同一边的脏数据不会再产生）。
     h += '<div class="tx-fld"><label>1. 体温检测<span class="req">*</span></label>'
-      + '<div class="tx-chips">'
-      + '<span class="tx-chip ' + (d.temperatureFlag === 'normal' ? 'active ok' : '')
-      + '" data-act="tx-temp" data-v="normal" data-d="38.5">正常 38.5℃</span>'
-      + '<span class="tx-chip ' + (d.temperatureFlag === 'fever' ? 'active warn' : '')
-      + '" data-act="tx-temp" data-v="fever" data-d="40.5">发烧 40.5℃</span>'
+      + '<div class="tx-temp">'
+      + '<button type="button" class="tx-temp-step" data-act="tx-temp-step" data-d="-0.1"'
+      + dis + '>−</button>'
+      + '<div class="tx-unit">'
+      + '<input class="tx-inp" type="number" step="0.1" min="30" max="45" inputmode="decimal"'
+      + ' data-inp="temperature" value="' + this.escape(d.temperature) + '" placeholder="38"'
+      + dis + '><span class="u">℃</span></div>'
+      + '<button type="button" class="tx-temp-step" data-act="tx-temp-step" data-d="0.1"'
+      + dis + '>＋</button>'
       + '</div>'
-      + '<div class="tx-unit" style="margin-top:9px;max-width:200px;">'
-      + '<input class="tx-inp" data-inp="temperature" value="' + this.escape(d.temperature)
-      + '" placeholder="点上方快速填入，或直接输入数值"' + dis + '><span class="u">℃</span></div>'
-      // 手改数值会自动刷新判定（`syncTempFlag`），把规则提前亮出来，
-      // 医生才不会困惑「chip 怎么自己亮了」。阈值来自 `check_options()`。
-      + '<div class="text-muted fs-sm" style="margin-top:5px;">手改数值后，判定按 ≥'
-      + this.escape(opts.fever_threshold) + '℃ 自动刷新</div></div>';
+      + '<div class="text-muted fs-sm" style="margin-top:5px;">直接填写实测读数（30~45℃），'
+      + '发烧判定按 ≥' + this.escape(opts.fever_threshold) + '℃ 自动记录</div></div>';
 
     const common = opts.common_findings || [];
     h += '<div class="tx-fld"><label>2. 常见病检查</label><div class="tx-chips">'
@@ -1615,21 +1659,36 @@ const Hospital = {
         + '</div></div>';
     }
 
-    h += '<div class="tx-fld"><label>处方 <span class="auto">库存用药 · 固定 1 头份</span></label>';
-    if (!locked) {
-      h += '<button class="btn btn-sm btn-secondary" data-act="tx-med-open" data-v="'
-        + meta.key + '">＋ 从库存药品中选择</button>';
+    // 处方只对**可从库存开药**的项目渲染（第六十四轮）：驱虫、免疫。
+    // 芯片是耗材，走上面的芯片号；绝育的麻药不进库存，只留手写用药记录。
+    if (meta.rx_stock) {
+      h += '<div class="tx-fld"><label>处方 <span class="auto">库存用药 · 固定 1 头份</span></label>';
+      if (!locked) {
+        h += '<button class="btn btn-sm btn-secondary" data-act="tx-med-open" data-v="'
+          + meta.key + '">＋ 从库存药品中选择</button>';
+      }
+      h += '<div class="tx-rx-list">' + this.rxListHTML(meta.key) + '</div>';
+      if (!locked) {
+        h += '<input class="tx-inp" style="margin-top:8px;" data-plan="' + meta.key
+          + '" data-f="rxOther" placeholder="其他药品及数量（手写，仅记录、不统计库存）" value="'
+          + this.escape(item.rxOther) + '">';
+      } else if (item.rxOther) {
+        h += '<div class="tx-rx-empty" style="text-align:left;">手写：'
+          + this.escape(item.rxOther) + '</div>';
+      }
+      h += '</div>';
+    } else if (meta.key !== 'chip') {
+      h += '<div class="tx-fld"><label>用药记录 <span class="auto">手写 · 不占库存</span></label>';
+      if (!locked) {
+        h += '<input class="tx-inp" data-plan="' + meta.key
+          + '" data-f="rxOther" placeholder="麻醉 / 药品及用量（仅记录，不统计库存）" value="'
+          + this.escape(item.rxOther) + '">';
+      } else if (item.rxOther) {
+        h += '<div class="tx-rx-empty" style="text-align:left;">'
+          + this.escape(item.rxOther) + '</div>';
+      }
+      h += '</div>';
     }
-    h += '<div class="tx-rx-list">' + this.rxListHTML(meta.key) + '</div>';
-    if (!locked) {
-      h += '<input class="tx-inp" style="margin-top:8px;" data-plan="' + meta.key
-        + '" data-f="rxOther" placeholder="其他药品及数量（手写，仅记录、不统计库存）" value="'
-        + this.escape(item.rxOther) + '">';
-    } else if (item.rxOther) {
-      h += '<div class="tx-rx-empty" style="text-align:left;">手写：'
-        + this.escape(item.rxOther) + '</div>';
-    }
-    h += '</div>';
 
     const noteTpl = meta.note_tpl || [];
     h += '<div class="tx-fld"><label>注意事项</label>'
@@ -1918,7 +1977,7 @@ const Hospital = {
     //   `disabled` 拦不住点击 —— 点了照样改 `draft`，只是保存时被服务端 400。
     const step1Locked = f.step === 1
       && (f.detail.checked_at || f.detail.is_disposed);
-    if (step1Locked && ['tx-temp', 'tx-common', 'tx-common-other',
+    if (step1Locked && ['tx-temp-step', 'tx-common', 'tx-common-other',
                         'tx-test', 'tx-skin'].indexOf(act) >= 0) {
       return;
     }
@@ -1928,10 +1987,14 @@ const Hospital = {
       if (n <= f.maxStep) { f.step = n; this.renderFlowView(); }
       return;
     }
-    if (act === 'tx-temp') {
-      const d = f.draft;
-      if (d.temperatureFlag === k) { d.temperatureFlag = ''; d.temperature = ''; }
-      else { d.temperatureFlag = k; d.temperature = el.dataset.d; }
+    if (act === 'tx-temp-step') {
+      const cur = parseFloat(f.draft.temperature);
+      // 空着点步进时从 38℃ 起步（与默认值一致），并在 30~45 内夹紧，
+      // 避免连点把输入框顶到 0 或 99 —— 与服务端范围校验同口径。
+      const base = isNaN(cur) ? 38 : cur;
+      const next = Math.min(45, Math.max(30,
+        Math.round((base + Number(el.dataset.d)) * 10) / 10));
+      f.draft.temperature = next.toFixed(1);
       this.renderFlowView();
       return;
     }
@@ -2074,11 +2137,6 @@ const Hospital = {
       // 传染病快检项**按物种**下发，改了种类必须重渲染，否则「猫的 FPV」
       // 会跟着狗的检查单一起提交，被服务端 400 拒绝。
       if (d.inp === 'species') this.renderFlowView();
-      // 体温手改后自动刷新判定：点 chip 会自动填数值，但反过来「手改数值」
-      // 原本不联动判定 —— 测出 40.2℃ 判定却停在「正常」，会被服务端的
-      // 交叉校验 400 打回。阈值从 `check_options()` 下发，与服务端
-      // `fever_judge()` 同一条线，前端不另抄一份。
-      if (d.inp === 'temperature') this.syncTempFlag(target.value);
       return;
     }
     if (d.plan) {
@@ -2087,27 +2145,6 @@ const Hospital = {
       item[d.f] = target.value;
       this.refreshItemState(d.plan);
     }
-  },
-
-  /* 体温数值 → 判定 chip 的实时同步（≥ 阈值判发烧，阈值由 check_options 下发）。
-     只直接 toggle chip 的 class，**不整块重渲染** —— renderFlowView 会让
-     输入框失焦，用户一次只能输一个字符。清空 / 输入到一半（非数字）时
-     不动判定：草稿判定保留，提交前的必填校验与服务端交叉校验兜底。 */
-  syncTempFlag(raw) {
-    const f = this.state.treatmentFlow;
-    if (!f) return;
-    const th = ((f.detail || {}).options || {}).fever_threshold;
-    if (th === undefined || th === null) return;
-    const v = parseFloat(raw);
-    if (String(raw).trim() === '' || isNaN(v)) return;
-    const flag = v >= Number(th) ? 'fever' : 'normal';
-    f.draft.temperatureFlag = flag;
-    document.querySelectorAll('#page-treatment [data-act="tx-temp"]').forEach(ch => {
-      const on = ch.dataset.v === flag;
-      ch.classList.toggle('active', on);
-      ch.classList.toggle('ok', on && flag === 'normal');
-      ch.classList.toggle('warn', on && flag === 'fever');
-    });
   },
 
   addDays(n) {
@@ -2127,7 +2164,6 @@ const Hospital = {
       species: d.species, gender: d.gender, breed: d.breed,
       color: d.color, weight: d.weight,
       temperature: String(d.temperature).trim() === '' ? null : d.temperature,
-      temperature_flag: d.temperatureFlag,
       common_findings: d.commonFindings,
       common_other: d.commonOther,
       infectious_tests: d.infectious,
@@ -2144,9 +2180,6 @@ const Hospital = {
     if (!isDraft) {
       if (String(d.temperature).trim() === '') {
         TNR_UI.toast('请先完成「体温检测」再提交', 'warning'); return;
-      }
-      if (!d.temperatureFlag) {
-        TNR_UI.toast('请选择体温判定（正常 / 发烧）再提交', 'warning'); return;
       }
     }
     try {
@@ -2329,9 +2362,9 @@ const Hospital = {
     }
   },
 
-  /* ==================== 药品弹层 ====================
-     处方药品走**现有物料体系**（`Material` 的「药品 / 疫苗 / 驱虫药」三类），
-     不新建独立药品字典 —— 与后端 `services_treatment.RX_CATEGORIES` 同口径。
+  /* ==================== 库存用药弹层 ====================
+     处方只从**现有物料体系**的「疫苗 / 驱虫药」两类里开（第六十四轮）：
+     药品（含麻药）不再进库存，绝育用药在项目里手写记录。
      类别常量在这里再写一份是**故意**的：它是「前端筛选口径」而不是业务真源，
      真源仍是后端 `_replace_items()` 的校验（类别不对会被 400 拒绝）。 */
   openMedPicker(key) {
@@ -2339,17 +2372,17 @@ const Hospital = {
     if (!f) return;
     const item = f.draft.items[key];
     if (!item) return;
-    const RX_CATS = ['medicine', 'vaccine', 'dewormer'];
-    const CATS = [['all', '全部'], ['medicine', '药品'], ['vaccine', '疫苗'], ['dewormer', '驱虫药']];
+    const RX_CATS = ['vaccine', 'dewormer'];
+    const CATS = [['all', '全部'], ['vaccine', '疫苗'], ['dewormer', '驱虫药']];
     let group = 'all';
     let kw = '';
 
     TNR_UI.modal({
-      title: '从库存药品中选择',
+      title: '从库存选择疫苗 / 驱虫药',
       size: 'lg',
       body: (bodyEl) => {
         bodyEl.innerHTML = '<div class="form-group" style="margin-bottom:0;">'
-          + '<input class="form-input" data-role="kw" placeholder="搜索药品名称 / 批号">'
+          + '<input class="form-input" data-role="kw" placeholder="搜索名称 / 批号">'
           + '</div>'
           + '<div data-role="cats" style="display:flex;gap:var(--sp-2);flex-wrap:wrap;margin:var(--sp-3) 0;"></div>'
           + '<div data-role="rows"></div>';
@@ -2834,6 +2867,19 @@ const Hospital = {
     return advisedKeys.indexOf(advised) !== -1;
   },
 
+  /* 出院弹窗里动物该显示的阶段文案（第五十九轮巡检）。
+     诊疗办结前 `Pet.status` 一直停在 `in_treatment`，直接读原始状态会把
+     「刚治完、正在办出院」的动物说成「待诊疗」——操作员会以为点错了单。
+     派生判据与后端 `services_lifecycle.pet_stage()` 一致：有未办结的完成单
+     就是「待出院」。本函数的调用方（领回 / 死亡登记候选）只列在院动物，
+     已被运回单或放归单占用的动物状态已离开这两张列表，优先级不会冲突。 */
+  dspPetStageText(pet) {
+    if (this.dspAdviceOf(pet.id) !== undefined) {
+      return TNR_UI.boardStageText('pending_discharge');
+    }
+    return TNR_UI.petStatusText(pet.status);
+  },
+
   /* 诊疗完成却没记建议去向的动物：四个去向都选不到它，
      必须先到诊疗看板补录（出院页给出直达入口，否则用户只看到「暂无动物」）。 */
   dspNoAdvicePets() {
@@ -3151,7 +3197,8 @@ const Hospital = {
 
   renderDspAdoptReady(body) {
     const d = this._dsp || {};
-    const pendingApps = (d.applications || []).filter(a => a.status === 'pending');
+    // 领养申请由捕捉点审核（第六十四轮）：医院这一页只管资料 / 上架，
+    // 审核通过的申请在「已预约」里办出库，未审的不进医院视野。
     // 诊疗完成、等出院的动物：状态列显示「待出院」而不是 Pet.status 的「诊疗中」。
     const pendingIds = new Set(
       this.dspPendingPets(['pending_adopt']).map(p => String(p.id)));
@@ -3169,44 +3216,10 @@ const Hospital = {
       ]}
     ], '<button type="button" class="btn btn-secondary btn-sm" data-dsprefresh="1">刷新</button>',
       {id: 'dspAdoptBar'})
-      + (pendingApps.length
-        ? '<div class="card mb-4"><div class="card-header"><div class="card-title">'
-          + '<span class="card-title-bar"></span>待审核领养申请 (' + pendingApps.length + ')</div>'
-          + '<div class="fs-sm text-muted">申请人在领养大厅提交，审核通过后进入「已预约」</div></div>'
-          + '<div class="card-body-flush"><div id="dspApplTable"></div></div></div>'
-        : '')
       + '<div class="card"><div class="card-body-flush"><div id="dspReadyTable"></div></div></div>';
 
     const mount = () => {
       const v = TNR_UI.getFilterValues(document.getElementById('dspAdoptBar'));
-      if (pendingApps.length) {
-        const appRows = pendingApps.map(a => ({
-          _pet: this.dspPetCell(this.dspPet(a.pet_id), a.pet_code),
-          applicant_name: a.applicant_name || '',
-          applicant_phone: a.applicant_phone || '',
-          _qual: this.escape((a.qualification || '').slice(0, 40)),
-          applied_at: a.applied_at || a.created_at || '',
-          _actions: '<div class="dsp-acts">'
-            + '<button class="btn btn-sm btn-success" data-dspact="appl-review" data-id="' + a.id + '" data-action="approve">通过</button>'
-            + '<button class="btn btn-sm btn-danger" data-dspact="appl-review" data-id="' + a.id + '" data-action="reject">拒绝</button>'
-            + '<button class="btn btn-sm btn-secondary" data-dspact="appl-detail" data-id="' + a.id + '">详情</button>'
-            + '</div>'
-        })).filter(r => this.dspKeyword(v, [r._pet, r.applicant_name, r.applicant_phone, r._qual]));
-        TNR_UI.mountTable('#dspApplTable', {
-          id: 'hospital.discharge.applications',
-          columns: [
-            {title: '动物', key: '_pet', sortable: false},
-            {title: '申请人', key: 'applicant_name'},
-            {title: '电话', key: 'applicant_phone'},
-            {title: '资质说明', key: '_qual', sortable: false},
-            {title: '申请时间', key: 'applied_at', render: r => this.formatDateTime(r.applied_at)},
-            {title: '操作', key: '_actions', sortable: false, align: 'right'}
-          ],
-          data: appRows,
-          emptyText: '暂无待审核申请'
-        });
-      }
-
       let rows = this.dspReadyPets().map(p => {
         const listing = listingByPet[String(p.id)] || null;
         const inHall = !!(listing && listing.is_active);
@@ -3587,8 +3600,6 @@ const Hospital = {
     const id = el.dataset.id || '';
     if (act === 'adopt-info') this.dspOpenAdoptInfo(el.dataset.pet);
     else if (act === 'adopt-hall') this.dspToggleHall(el.dataset.pet, el.dataset.active === '1');
-    else if (act === 'appl-review') this.dspReviewApplication(id, el.dataset.action);
-    else if (act === 'appl-detail') this.dspViewApplication(id);
     else if (act === 'adopt-outbound') this.dspOpenAdoptionOutbound(el.dataset.src, id);
     else if (act === 'adopt-detail') this.dspViewAdoption(el.dataset.src, id);
     else if (act === 'euth-create') this.dspOpenEuthCreate();
@@ -3622,16 +3633,9 @@ const Hospital = {
     /* 系统照片全部来自捕捉 / 诊疗档案，这里只决定"显不显示"。
        `listing.photos` 是后端按可见性整理后的清单（含隐藏项与 visible 标记），
        没有 listing 时退回到动物档案字段。 */
-    const SYSTEM_PHOTOS = [
-      ['photo_capture', '捕捉照片'],
-      ['photo_group', '整体合影'],
-      ['photo_before', '术前照片'],
-      ['photo_after', '术后照片'],
-      ['photo_treatment', '诊疗后照片']
-    ];
     const listed = (listing && listing.photos) || [];
     const hiddenSet = new Set((listing && (listing.hidden_photos || listing.hiddenPhotos)) || []);
-    const systemPhotos = SYSTEM_PHOTOS
+    const systemPhotos = PET_SYSTEM_PHOTOS
       .map(([field, label]) => {
         const row = listed.find(p => p.field === field);
         return {field: field, label: label, url: (row && row.url) || pet[field] || '',
@@ -3753,23 +3757,6 @@ const Hospital = {
       this.render_discharge();
     } catch (e) {
       TNR_UI.toast(e.message || '操作失败', 'danger');
-    }
-  },
-
-  async dspReviewApplication(id, action) {
-    const label = action === 'approve' ? '通过' : '拒绝';
-    const ok = await TNR_UI.confirm('确认' + label + '该领养申请？', '审核领养申请');
-    if (!ok) return;
-    try {
-      const reviewNote = action === 'reject' ? (window.prompt('请输入拒绝原因：') || '') : '';
-      const res = await TNR_API.post(
-        TNR_API.BASE + 'adoptions/applications/' + id + '/review/',
-        {action: action, review_note: reviewNote});
-      TNR_UI.assertOk(res, '审核失败');
-      TNR_UI.toast(res.message || '审核完成', 'success');
-      this.render_discharge();
-    } catch (e) {
-      TNR_UI.toast(e.message || '审核失败', 'danger');
     }
   },
 
@@ -3963,7 +3950,7 @@ const Hospital = {
           + '<select class="form-select" id="dspEuthPet"><option value="">请选择</option>'
           + eligible.map(p => '<option value="' + p.id + '">' + this.escape(p.code)
             + (p.name ? ' · ' + this.escape(p.name) : '') + '（'
-            + TNR_UI.petStatusText(p.status) + '）</option>').join('')
+            + this.dspPetStageText(p) + '）</option>').join('')
           + '</select></div>'
           + '<div class="dsp-fld full"><label>处置方式<span class="req">*</span></label>'
           + '<div class="dsp-chips" id="dspEuthKind">'
@@ -4140,7 +4127,7 @@ const Hospital = {
           + '<select class="form-select" id="dspOrPet"><option value="">请选择</option>'
           + eligible.map(p => '<option value="' + p.id + '">' + this.escape(p.code)
             + (p.name ? ' · ' + this.escape(p.name) : '') + '（'
-            + TNR_UI.petStatusText(p.status) + '）</option>').join('')
+            + this.dspPetStageText(p) + '）</option>').join('')
           + '</select></div>'
           + '<div class="dsp-fld"><label>主人姓名<span class="req">*</span></label>'
           + '<input class="form-input" id="dspOrName"></div>'
@@ -4181,20 +4168,13 @@ const Hospital = {
           const btn = bodyEl.querySelector('#dspOrSubmit');
           btn.disabled = true;
           try {
-            let bl = null;
-            try {
-              const r = await TNR_API.checkBlacklist(idCard, phone);
-              bl = r && r.data;
-            } catch (err) {
-              TNR_UI.toast('黑名单校验失败，请重试：' + (err.message || '未知错误'), 'danger');
-              btn.disabled = false;
-              return;
-            }
-            if (bl && (bl.name || bl.idCard)) {
-              TNR_UI.toast('该主人在黑名单中，无法办理领回：' + (bl.reason || ''), 'danger');
-              btn.disabled = false;
-              return;
-            }
+            /* 这里**不做**黑名单预检：`/blacklist/check/` 的放行集合是
+               `shelter / gov_*`（`test_endpoint_role_scope.py` 锁死，医院拿到
+               的是姓名+拉黑原因，属个人信息）。服务端
+               `owner_return_create()` 本来就会 `check_blacklist()` 并返回
+               「该主人已在黑名单中：…」，界面照原样提示即可。
+               早先在此调用该接口，会让医院端「办理领回」点确认就吃一个 403，
+               整个领回流程走不下去。 */
             const res = await TNR_API.createOwnerReturn({
               pet_id: Number(petId), owner_name: name, owner_phone: phone,
               owner_id_card: idCard, owner_address: address, reason: reason,
@@ -4737,7 +4717,7 @@ const Hospital = {
     const REASON_TEXT = { scrap: '报废', return: '退回', transfer: '调拨', inventory: '盘点' };
     const listHtml = outRows.length > 0
       ? '<div id="hospitalOutboundTable"></div>'
-      : '<div class="empty-state" style="padding:var(--sp-6);"><div class="empty-state-icon">📤</div><div class="empty-state-text">暂无关库记录</div></div>';
+      : '<div class="empty-state" style="padding:var(--sp-6);"><div class="empty-state-icon">📤</div><div class="empty-state-text">暂无出库记录</div></div>';
 
     c.innerHTML = '<div class="card"><div class="card-header"><div class="card-title"><span class="card-title-bar"></span>物料出库报备</div></div><div class="card-body">' +
       '<div class="form-section"><div class="form-section-header"><div class="form-section-header-icon">📤</div><div class="form-section-title">新增出库</div></div><div class="form-section-body">' +
@@ -4785,7 +4765,7 @@ const Hospital = {
           note: t.note || '—',
           date: t.date,
           operator_name: t.operator_name || '',
-        })), emptyText: '暂无关库记录' });
+        })), emptyText: '暂无出库记录' });
     }
 
     // 允许负数：`bindQtyStepper` 缺省 min 会读 input 的 min 属性、

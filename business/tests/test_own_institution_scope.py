@@ -287,8 +287,9 @@ class AdoptionApplicationReviewOracleTest(OracleMixin, BusinessTestBase):
     """领养申请审核：**探针在演示库上跳过了这条**（库里没有跨区县申请）。
 
     「跳过」不等于「通过」—— 所以这组用例必须由单测夹具补上。
-    该接口的实现本来就对（按角色收敛 + `.first()` + 同一个 404），
-    这组用例的作用是把它**锁住**，防止以后被改回裸取。
+    第六十四轮审核从医院移到捕捉点后，这里钉的是「同一角色内的归属收敛」：
+    捕捉点 A 审核捕捉点 B 的申请，必须与「申请不存在」完全不可区分。
+    角色闸门（医院 / 政府 403）另有对应用例。
     """
 
     @classmethod
@@ -306,9 +307,14 @@ class AdoptionApplicationReviewOracleTest(OracleMixin, BusinessTestBase):
             pet=cls.pet_a2, hospital=cls.hospital_a, status='pending',
             applicant_name='甲区申请人二')
 
-    def test_other_hospital_cannot_review(self):
-        self.assert_indistinguishable(APP_REVIEW_URL, self.app_a.id,
-                                      self.hospital_user_b, '审核·跨机构医院')
+    def test_hospital_cannot_review_at_all(self):
+        """角色闸门：审核不再是医院的权力，本院申请也只回 403。"""
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(
+            APP_REVIEW_URL.format(pk=self.app_a.id), {'action': 'approve'}),
+            status=403)
+        self.app_a.refresh_from_db()
+        self.assertEqual(self.app_a.status, 'pending')
 
     def test_other_district_shelter_cannot_review(self):
         """乙区捕捉点审甲区的申请 —— 必须与「不存在」不可区分。
@@ -321,19 +327,19 @@ class AdoptionApplicationReviewOracleTest(OracleMixin, BusinessTestBase):
         self.assert_indistinguishable(APP_REVIEW_URL, self.app_a.id,
                                       self.shelter_user_b, '审核·跨区县捕捉点')
 
-    def test_own_hospital_can_review(self):
-        """正向对照：本院审本院的申请，必须成功。"""
-        self.login_as(self.hospital_user_a)
+    def test_own_shelter_can_review(self):
+        """正向对照：动物来源捕捉点审自己的申请，必须成功。"""
+        self.login_as(self.shelter_user_a)
         self.ok(self.post_json(APP_REVIEW_URL.format(pk=self.app_a.id),
                                {'action': 'approve'}),
-                '本院审核被拦了')
+                '本机构审核被拦了')
         self.app_a.refresh_from_db()
         self.assertEqual(self.app_a.status, 'approved')
 
     def test_gov_cannot_review_even_own_district(self):
         """政府端只读（第四十九轮）：本区县监管也不能审领养申请。
 
-        正向对照由 `test_own_hospital_can_review` 用合法角色承担；这里补的是
+        正向对照由 `test_own_shelter_can_review` 用合法角色承担；这里补的是
         「被拒之后申请还是 pending」—— 只断 403 抓不到「先落库再拒绝」。
         """
         for user in (self.gov_a, self.gov_city):

@@ -5,7 +5,6 @@ import json
 
 from django.contrib.auth.decorators import login_required
 from django.db.models import Q
-from django.utils import timezone
 from django.shortcuts import render
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
@@ -13,15 +12,16 @@ from django.views.decorators.csrf import csrf_exempt
 from accounts.decorators import role_required
 from business.models import (
     Pet, AdoptionHallListing, Adoption, Message,
-    Transfer, Treatment, Release, Euthanasia, OwnerReturn, ReturnOrder,
 )
 from business.services import (
     json_ok, json_fail, serialize_instance,
-    get_district_filtered_queryset, get_scoped_object, hospital_pet_scope,
-    pet_archive_records, pet_brief, pet_photo_list, is_city_shelter,
+    get_district_filtered_queryset, hospital_pet_scope,
+    pet_archive_records, shelter_scope,
+)
+from business.services_lifecycle import (
+    build_pet_lifecycle, pet_for_lifecycle,
 )
 from business.views_adoption import serialize_hall_listing
-from core.privacy import mask_id_card, mask_phone
 
 
 def _portal_user_data(user):
@@ -164,29 +164,23 @@ def hospital_pets(request):
         else:
             qs = Pet.objects.none()
     elif user.role == 'shelter':
-        # 捕捉点只看**本机构所在区县**的宠物，与 ``transfer_create`` 的归属区县口径
-        # 对齐（转运单的 anchor 是捕捉点机构 → 机构所在区县）。
+        # 捕捉点可见范围 = **机构所在区县 ∪ 挂在本机构名下**（`shelter_scope`）。
         #
         # 不能按 ``user.district`` 过滤：现场把捕捉点操作员都挂在「全市（市级）」下，
         # 那样会返回**全市**宠物，备选框里混进其他区县的动物，用户点了「下发」必然
         # 被后端的跨区县校验拦下（"以下动物不属于本区县，无法转运"）——
         # 备选框里出现永远选不中的选项，比空列表更糟。
         #
-        # ⚠ 市级捕捉点（第四十五轮）例外：它的捕捉单按**实际捕捉区县**归属
-        #   （R45 Q2 口径），机构自身挂在「全市（市级）」下 —— 若仍按机构区县
-        #   过滤，刚捕捉的外区动物会从「待转运」里凭空消失（2026-10-05 生产实测：
-        #   bzd 建单 CAP2600023 落襄城区，列表恒空）。可见范围 = 本机构名下的
-        #   动物（自己捕捉的，无论落在哪个区县）∪ 机构区县兜底；
-        #   ``transfer_create`` 侧的锚点解析（按动物所在区县）本就能接住这类单。
-        inst = user.institution
-        if inst is None or not inst.district_id:
-            qs = Pet.objects.none()
-        elif is_city_shelter(inst):
-            qs = Pet.objects.filter(
-                Q(district_id=inst.district_id) | Q(shelter_id=inst.id),
-                is_deleted=False)
-        else:
-            qs = Pet.objects.filter(district_id=inst.district_id, is_deleted=False)
+        # 「挂在本机构名下」这一支对**所有**捕捉点都要开，不只是市级（第五十九轮）：
+        # 市级捕捉点的捕捉单按**实际捕捉区县**归属（R45 Q2 口径），机构自身挂在
+        # 「全市（市级）」下 —— 若仍按机构区县过滤，刚捕捉的外区动物会从「待转运」
+        # 里凭空消失（2026-10-05 生产实测：bzd 建单 CAP2600023 落襄城区，列表恒空）。
+        # 而区县的捕捉点接了**跨区县**运回单之后同理：签收时 `pet.shelter` 落到本站、
+        # `pet.district` 仍是原捕捉地（放归要回原小区，不能跟着改），只按区县会让
+        # 本站签收的动物在「发起放归」里凭空消失。
+        # ``transfer_create`` 侧的锚点解析（按动物所在区县）本就能接住这类单。
+        qs = Pet.objects.filter(is_deleted=False).filter(
+            shelter_scope(user, 'shelter'))
     else:
         qs = get_district_filtered_queryset(Pet, user).filter(is_deleted=False)
 
@@ -194,11 +188,16 @@ def hospital_pets(request):
     if status:
         qs = qs.filter(status=status)
 
-    qs = qs.select_related('shelter')
+    qs = qs.select_related('shelter', 'capture')
     data = []
     for p in qs:
         item = serialize_instance(p)
         item['shelter_name'] = p.shelter.name if p.shelter_id else ''
+        # 捕捉单登记的「所在小区」文本：放归要送回这个小区，而**捕捉单本身按机构
+        # 收敛**，跨区县运回签收进来的动物，它的捕捉单不属于本站（`/captures/`
+        # 查不到）。前端只从本站捕捉单列表里找小区，就会把「默认带出捕捉单登记的
+        # 小区」这句承诺落空 —— 界面拦在「请填写放归小区」，而服务端明明知道答案。
+        item['capture_community'] = (p.capture.community_name if p.capture_id else '')
         data.append(item)
     return json_ok(data)
 
@@ -227,9 +226,14 @@ def pet_archive(request):
     if user.role == 'hospital':
         qs = Pet.objects.filter(is_deleted=False).filter(
             hospital_pet_scope(user)).distinct()
+    elif user.role == 'shelter':
+        # 捕捉点 = 本区县 ∪ 挂本站名下，与 `/pets/`（``hospital_pets``）**同一条口径**。
+        # 只按区县的话，跨区县运回签收进来的动物会从「全量台账 → 一宠一档」里消失，
+        # 而放归备选框里正躺着这只（列表有、台账没有 = 两个页面互相打脸）。
+        qs = Pet.objects.filter(is_deleted=False).filter(
+            shelter_scope(user, 'shelter'))
     else:
-        # 捕捉点与政府端按区县：捕捉点就是本区县的收容入口（与 `/pets/`
-        # 的捕捉点分支同口径），政府端本就该看全区。
+        # 政府端按区县：本就该看全区。
         qs = get_district_filtered_queryset(Pet, user).filter(is_deleted=False)
 
     status = request.GET.get('status')
@@ -378,55 +382,9 @@ def mark_message_read(request, pk):
 # ============================================
 # 宠物全生命周期溯源（领养人端）
 # ============================================
-def _stage_photos(pet, *fields):
-    """取动物的指定阶段照片（只返回确实有图的），供时间线内嵌展示。"""
-    wanted = set(fields)
-    return [p for p in pet_photo_list(pet) if p['field'] in wanted]
-
-
-def _return_order_pet_q(code):
-    """在逗号分隔的 `ReturnOrder.pet_codes` 里精确匹配一个编号。
-
-    直接 `pet_codes__contains=code` 会把 `TNR26101800` 当成
-    `TNR261018002` 的前缀命中 —— 一张单子会让另一只动物也显示「待运回」。
-    """
-    return (Q(pet_codes=code)
-            | Q(pet_codes__startswith=code + ',')
-            | Q(pet_codes__endswith=',' + code)
-            | Q(pet_codes__contains=',' + code + ','))
-
-
-def _pet_stage(pet):
-    """一宠一档的「当前状态」：按业务单据派生，不只看 `Pet.status`。
-
-    `Pet.status` 只在几个节点被改写，放归单创建 / 转运回小区两段都
-    不改它（`release_create`、`release_transfer`），于是动物已经回到小区
-    等签字、档案却还写着「待诊疗」/「待领养」——TNR261018002 就是这样：
-    诊疗早已办结、`Release` 停在 transferred，档案显示的却是 in_treatment。
-
-    派生顺序按「最具体的未办结单据」优先：
-      未办结运回单 → 待运回捕捉点
-      未办结放归单（pending / transferred）→ 待放归
-      诊疗已完成但未办结出院 → 待出院
-      其余仍以 `Pet.status` 为准（含全部终态）。
-    """
-    if pet.status in Pet.TERMINAL_STATUSES:
-        return pet.status, pet.get_status_display()
-
-    if ReturnOrder.objects.filter(status='pending').filter(
-            _return_order_pet_q(pet.code)).exists():
-        return 'return_pending', dict(Pet.STATUS_CHOICES)['return_pending']
-
-    if Release.objects.filter(pet=pet, status__in=Release.OPEN_STATUSES).exists():
-        return 'pending_release', dict(Pet.STATUS_CHOICES)['pending_release']
-
-    if Treatment.objects.filter(
-            pet=pet, done_at__isnull=False, disposed_at__isnull=True).exists():
-        return 'pending_discharge', '待出院'
-
-    return pet.status, pet.get_status_display()
-
-
+# 阶段派生、范围收敛、PII 脱敏与事件拼装都在 `business/services_lifecycle.py`
+# —— 打印页（`views_print.print_pet_archive`）必须与这个接口共用同一份实现，
+# 否则「打印页能不能看」与「接口能不能看」会各走各的。
 @csrf_exempt
 @role_required('adopter', 'gov_city', 'gov_district', 'shelter', 'hospital')
 @login_required
@@ -442,189 +400,10 @@ def pet_lifecycle(request, pet_id):
     （襄城区有 2 家），按区县会让 A 院读到 B 院名下动物的完整溯源记录 ——
     含主人姓名与电话。判据与 ``pet_archive`` 共用 ``hospital_pet_scope()``。
     """
-    user = request.user
-    if user.role == 'adopter':
-        pet = Pet.objects.filter(id=pet_id).filter(
-            Q(adoptions__adopter=user) | Q(adoption_applications__applicant=user)
-        ).distinct().first()
-    elif user.role == 'hospital':
-        pet = Pet.objects.filter(id=pet_id).filter(
-            hospital_pet_scope(user)).distinct().first()
-    else:
-        pet = get_scoped_object(Pet, pet_id, user)
-
+    pet = pet_for_lifecycle(request.user, pet_id)
     if pet is None:
         return json_fail('宠物不存在或无权访问', status=404)
-
-    # PII 最小化（第五十七轮）：同一份时间线，不同角色看到的主人字段不同。
-    # 领养人只需要「这只动物经历过什么」，不需要前任主人的电话、住址、
-    # 身份证与签名；监管端保留脱敏号用于比对；捕捉点/医院要执行领回与
-    # 回访，保留完整联系方式。
-    is_adopter = user.role == 'adopter'
-    is_regulator = user.role in ('gov_city', 'gov_district')
-
-    def owner_contact(record):
-        if is_adopter:
-            return {'owner_phone': '', 'owner_id_card': '',
-                    'owner_address': '', 'signature': ''}
-        if is_regulator:
-            return {
-                'owner_phone': mask_phone(record.owner_phone),
-                'owner_id_card': mask_id_card(record.owner_id_card),
-                'owner_address': record.owner_address,
-                'signature': record.signature or '',
-            }
-        return {
-            'owner_phone': record.owner_phone,
-            'owner_id_card': record.owner_id_card,
-            'owner_address': record.owner_address,
-            'signature': record.signature or '',
-        }
-
-    events = []
-
-    # 捕捉记录
-    if pet.capture:
-        cap = pet.capture
-        capture_photos = _stage_photos(pet, 'photo_capture')
-        if cap.group_photo:
-            capture_photos.append(
-                {'field': 'group_photo', 'label': '整体合影', 'url': cap.group_photo.url})
-        events.append({
-            'type': 'capture',
-            'type_display': '捕捉登记',
-            'date': timezone.localdate(cap.created_at).isoformat() if cap.created_at else '',
-            'ledger_no': cap.ledger_no,
-            'shelter_name': cap.shelter_name,
-            'community_name': cap.community_name,
-            'address': cap.address,
-            'property_name': cap.property_name,
-            # 物业交接人是捕捉点/监管端的操作联系人；领养人不需要。
-            'contact_person': '' if is_adopter else cap.contact_person,
-            'contact_phone': '' if is_adopter else cap.contact_phone,
-            'operator_name': cap.operator_name,
-            'photos': capture_photos,
-        })
-
-    # 转运记录
-    transfers = Transfer.objects.filter(pet_codes__contains=pet.code).order_by('created_at')
-    for t in transfers:
-        events.append({
-            'type': 'transfer',
-            'type_display': '转运交接',
-            'date': timezone.localdate(t.created_at).isoformat() if t.created_at else '',
-            'ledger_no': t.ledger_no,
-            'from_shelter_name': t.from_shelter_name,
-            'to_hospital_name': t.to_hospital_name,
-            'status': t.status,
-            'received_at': t.received_at.isoformat() if t.received_at else '',
-            'operator_name': t.operator_name,
-        })
-
-    # 诊疗记录
-    treatments = Treatment.objects.filter(pet=pet).order_by('created_at')
-    for t in treatments:
-        items = []
-        if t.items_sterilization: items.append('绝育')
-        if t.items_vaccine: items.append('疫苗')
-        if t.items_deworming: items.append('驱虫')
-        if t.items_chip: items.append('芯片')
-        events.append({
-            'type': 'treatment',
-            'type_display': '诊疗记录',
-            'date': timezone.localdate(t.created_at).isoformat() if t.created_at else '',
-            'ledger_no': t.ledger_no,
-            'hospital_name': t.hospital_name,
-            'items': items,
-            'chip_no': t.chip_no,
-            'status': t.status,
-            'operator_name': t.operator_name,
-            'photos': _stage_photos(pet, 'photo_before', 'photo_after', 'photo_treatment'),
-        })
-
-    # 放归记录
-    releases = Release.objects.filter(pet=pet).order_by('created_at')
-    for r in releases:
-        events.append({
-            'type': 'release',
-            'type_display': '放归记录',
-            'date': r.released_at.isoformat() if r.released_at else (timezone.localdate(r.created_at).isoformat() if r.created_at else ''),
-            'ledger_no': r.ledger_no,
-            'community_name': r.community_name,
-            'receiver_name': r.receiver_name,
-            'status': r.status,
-            'operator_name': r.operator_name,
-        })
-
-    # 领养记录
-    adoptions = Adoption.objects.filter(pet=pet).order_by('created_at')
-    for a in adoptions:
-        events.append({
-            'type': 'adoption',
-            'type_display': '领养记录',
-            'date': a.adopted_at.isoformat() if a.adopted_at else (timezone.localdate(a.created_at).isoformat() if a.created_at else ''),
-            'ledger_no': a.ledger_no,
-            'adopter_name': a.adopter_name,
-            'hospital_name': a.hospital_name,
-            'status': a.status,
-            'operator_name': a.operator_name,
-        })
-
-    # 安乐死记录
-    euthanasias = Euthanasia.objects.filter(pet=pet).order_by('created_at')
-    for e in euthanasias:
-        events.append({
-            'type': 'euthanasia',
-            'type_display': '安乐死记录',
-            'date': e.euthanized_at.isoformat() if e.euthanized_at else (timezone.localdate(e.created_at).isoformat() if e.created_at else ''),
-            'ledger_no': e.ledger_no,
-            'hospital_name': e.hospital_name,
-            'reason': e.reason,
-            'operator_name': e.operator_name,
-        })
-
-    # 主人领回记录
-    # 每只动物只可能有一条 OwnerReturn（owner_returned 状态互斥），但保留循环以兼容历史数据
-    owner_returns = OwnerReturn.objects.filter(pet=pet).order_by('created_at')
-    for r in owner_returns:
-        events.append({
-            'type': 'owner_return',
-            'type_display': '领回登记',
-            # ⚠ `date` 字段一律是**本地日期**（前端当 `YYYY-MM-DD` 用）。
-            # 本行原来写的是 `r.return_time.isoformat()` —— `return_time` 是
-            # DateTimeField，`.isoformat()` 给的是 **UTC 带偏移**的时间串，于是：
-            #   ① `date` 字段语义不一致（同文件其它 6 处都是纯日期）；
-            #   ② 前端 `.slice(0, 10)` / `formatDate` 拿到 **UTC 日期**，
-            #      北京时间 00:00–08:00 的回收记录会显示成**前一天**。
-            # 与 `created_at` 分支、以及 `views_capture` 里
-            # `return_time__date__gte`（Django 转本地时区）的口径对齐。
-            'date': timezone.localdate(r.return_time).isoformat() if r.return_time else (timezone.localdate(r.created_at).isoformat() if r.created_at else ''),
-            'ledger_no': r.ledger_no,
-            'owner_name': r.owner_name,
-            # 签字是 base64 data URL；领养人拿到空串，前端据此不渲染。
-            **owner_contact(r),
-            'reason': r.reason,
-            'operator_name': r.operator_name,
-            'created_at': r.created_at.isoformat() if r.created_at else '',
-        })
-
-    # 按日期排序（空日期排最后）
-    events.sort(key=lambda x: x.get('date') or '', reverse=False)
-
-    # `stage` 是派生的**当前阶段**（见 `_pet_stage`）：放归单已开到一半、
-    # 诊疗完成待出院这类中间态，`Pet.status` 不会改，档案必须按单据算。
-    # 保留原始 `status` 供调用方核对，展示一律用 stage。
-    brief = pet_brief(pet)
-    stage, stage_display = _pet_stage(pet)
-    brief['stage'] = stage
-    brief['stage_display'] = stage_display
-
-    return json_ok({
-        'pet': serialize_instance(pet),
-        # pet_brief / photos 为「一宠一档」详情抽屉补充：统一的中文字段标签 +
-        # 按阶段排好序的照片列表（前端据此渲染照片墙并点击放大）。
-        # 保留原有 pet/events 结构，领养人端的时间线不受影响。
-        'pet_brief': brief,
-        'photos': pet_photo_list(pet),
-        'events': events,
-    })
+    # 事件拼装、阶段派生、主人 PII 分档都在 services_lifecycle 里：
+    # 打印页（`/print/pet-archive/<id>/`）调的是同一个函数，两条路径的
+    # 「谁能看」与「能看到什么」不可能漂移。
+    return json_ok(build_pet_lifecycle(pet, request.user))

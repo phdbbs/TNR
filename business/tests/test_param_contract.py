@@ -1289,12 +1289,14 @@ class MalformedBodyRejectedTest(BusinessTestBase):
         self.login_as(self.hospital_user_a)
         tid = self.ok(self.post_json('/api/business/treatments/open/',
                                      {'pet_id': pet.id}))['data']['id']
+        # 项目用驱虫：第六十四轮起只有驱虫 / 免疫能带 `rx`，用 `other` 会先撞上
+        # 「该项目不从库存出处方」的新判据，参数守卫本身反而测不到了。
         for value in ('[1,2,3]', '"abc"', '{"a":1}',
                       '999999999999999999999999'):
             with self.subTest(value=value):
                 resp = self.post(
                     f'/api/business/treatments/{tid}/plan/',
-                    '{"items": [{"key": "other",'
+                    '{"items": [{"key": "deworming",'
                     ' "planned_date": "2026-03-01", "rx": [%s]}]}' % value)
                 self.assertEqual(resp.status_code, 400, resp.content[:400])
                 self.assertIn('处方药品ID', resp.json().get('message', ''),

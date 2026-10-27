@@ -107,6 +107,13 @@
   #page-treatment .tx-unit{position:relative}
   #page-treatment .tx-unit .u{position:absolute;right:11px;top:50%;transform:translateY(-50%);font-size:var(--fs-sm);color:var(--ink-light);pointer-events:none}
   #page-treatment .tx-unit .tx-inp{padding-right:38px}
+  /* 体温：数值输入 + 步进按钮（第六十四轮）。36px 是能放进左侧一列的宽度，
+     手机上按 44px 热区放大（见下方媒体查询）。 */
+  #page-treatment .tx-temp{display:flex;align-items:center;gap:8px;max-width:260px}
+  #page-treatment .tx-temp .tx-unit{flex:1}
+  #page-treatment .tx-temp-step{flex:none;width:38px;height:38px;border:1px solid var(--border-ink);border-radius:var(--r-md);background:var(--white);color:var(--ink-text);font-size:18px;line-height:1;cursor:pointer;transition:background var(--t-fast)}
+  #page-treatment .tx-temp-step:hover:not(:disabled){background:var(--rice-light)}
+  #page-treatment .tx-temp-step:disabled{opacity:.45;cursor:not-allowed}
   @media(max-width:560px){
     #page-treatment .tx-row3{grid-template-columns:1fr 1fr}
     #page-treatment .tx-row3>.tx-fld:nth-child(3){grid-column:1/-1}
@@ -336,6 +343,7 @@
      真正被点的控件，桌面尺寸（30~32px）在手机上按不中。
      医护人员多数时候是单手 + 另一只手扶动物，44px 是下限而不是偏好。 */
   @media(max-width:768px){
+    #page-treatment .tx-temp-step{width:44px;height:44px}
     #page-treatment .tx-chip{min-height:44px;padding:9px 14px}
     #page-treatment .tx-chip.qk{min-height:44px;padding:9px 14px}
     #page-treatment .tx-seg button{min-height:44px;padding:10px 14px}

@@ -303,7 +303,7 @@ class TreatmentFlowViewTest(BusinessTestBase):
         """没勾绝育的单子不该收病历 —— 收下就会印出「没做绝育却有手术日期」，
         而政府端绝育数量统计读的正是这几列。"""
         pet = self._pet()
-        material = make_material(category='medicine', name='驱虫药',
+        material = make_material(category='dewormer', name='驱虫药',
                                  district=self.district_a)
         make_hospital_txn(material, self.hospital_a, 'receive', 5)
         tid = self._open(pet)['id']
@@ -317,13 +317,13 @@ class TreatmentFlowViewTest(BusinessTestBase):
     def test_sterilization_submit_rejected_after_dispose(self):
         """办结后的病历是归档事实，改不得（与检查单/医嘱同一口径）。"""
         pet = self._pet()
-        material = make_material(category='medicine', name='头孢',
+        material = make_material(category='dewormer', name='驱虫药',
                                  district=self.district_a)
         make_hospital_txn(material, self.hospital_a, 'receive', 5)
         tid = self._open(pet)['id']
         self.ok(self._plan(tid, [{'key': 'sterilization',
                                   'planned_date': '2026-03-05'},
-                                 {'key': 'other', 'planned_date': '2026-03-05',
+                                 {'key': 'deworming', 'planned_date': '2026-03-05',
                                   'rx': [material.id]}]))
         detail = self._diagnose(tid)
         self.ok(self._ster(tid, self.STER_RECORD))

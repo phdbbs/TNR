@@ -14,7 +14,8 @@
 from django.utils import timezone
 
 from business.models import (
-    Adoption, Capture, Euthanasia, OwnerReturn, Pet, Release, Treatment,
+    Adoption, Capture, Euthanasia, OwnerReturn, Pet, Release, Transfer,
+    Treatment,
 )
 from business.services import pet_archive_records, pet_photo_list
 from business.tests.base import (
@@ -504,3 +505,120 @@ class PetPhotoAndLifecycleTest(BusinessTestBase):
         self.assertEqual(
             {p['label'] for p in trt_ev['photos']},
             {'术前', '术后', '诊疗'})
+
+
+# ============================================================
+# 一宠一档 A4 打印页（= 界面上的「导出 PDF」）
+# ============================================================
+PRINT_URL = '/print/pet-archive/{}/'
+
+
+class PetArchivePrintTest(BusinessTestBase):
+    """打印页必须：内容完整、范围与 lifecycle 同源、PII 同档、404 不可区分。
+
+    ⚠ 这一组用例的价值在于「同源」：打印页与 `/api/business/pets/<id>/lifecycle/`
+      共用 `services_lifecycle`。若哪天有人图省事在打印页里另写一遍取数，
+      下面的范围与脱敏断言会分别亮起 —— 而不是等到某次对账才发现
+      「医院能打印出别的医院的动物档案」。
+    """
+
+    def setUp(self):
+        self.capture = make_capture(
+            district=self.district_a, shelter=self.shelter_a,
+            pet_codes=['TNRPRN001'])
+        self.pet = make_pet(
+            code='TNRPRN001', status='owner_returned', district=self.district_a,
+            capture=self.capture, shelter=self.shelter_a)
+        self.pet.photo_capture = 'photos/cap.png'
+        self.pet.photo_after = 'photos/after.png'
+        self.pet.save()
+        Transfer.objects.create(
+            capture=self.capture, from_shelter=self.shelter_a,
+            from_shelter_name='甲区捕捉点', to_hospital=self.hospital_a,
+            to_hospital_name='甲区医院', pet_codes=self.pet.code,
+            pet_count=1, status='received', district=self.district_a,
+            ledger_no='TRF-T0001')
+        Treatment.objects.create(
+            pet=self.pet, pet_code=self.pet.code, hospital_name='甲区医院',
+            items_sterilization=True, district=self.district_a)
+        OwnerReturn.objects.create(
+            pet=self.pet, pet_code=self.pet.code, owner_name='王五',
+            owner_phone='13900001234', owner_id_card='420602199001011234',
+            owner_address='乙区某路 1 号', reason='走失寻回',
+            signature='data:image/png;base64,AAAA', district=self.district_a,
+            ledger_no='OWN-T0001')
+
+    def _get(self, user, pet_id=None):
+        self.login_as(user)
+        return self.client.get(PRINT_URL.format(pet_id or self.pet.id))
+
+    def test_scoped_shelter_gets_the_whole_archive(self):
+        """本区捕捉点拿到：基本信息 + 全部照片 + 每一段流转记录。"""
+        resp = self._get(self.shelter_user_a)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        for needle in ('一宠一档档案', 'TNRPRN001', '基本信息', '动物照片',
+                       '捕捉登记', '转运交接', '诊疗记录', '领回登记',
+                       '甲区捕捉点', '甲区医院', '王五', 'TRF-T0001', 'OWN-T0001'):
+            self.assertIn(needle, body)
+        # 照片墙与事件内嵌照片都要真的指到媒体文件
+        self.assertIn('/media/photos/cap.png', body)
+        self.assertIn('/media/photos/after.png', body)
+        # 领回人电子签名（data URL）原样内嵌 —— 纸质档案要能核对签名
+        self.assertIn('data:image/png;base64,AAAA', body)
+        # 捕捉点要看得到完整联系方式（执行领回与回访）
+        self.assertIn('13900001234', body)
+
+    def test_out_of_scope_and_missing_are_indistinguishable(self):
+        """跨区县与不存在的响应必须**逐字节相同**，否则就是存在性预言机。"""
+        self.login_as(self.shelter_user_b)
+        cross = self.client.get(PRINT_URL.format(self.pet.id))
+        missing = self.client.get(PRINT_URL.format(99999999))
+        self.assertEqual(cross.status_code, 404)
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(cross.content, missing.content)
+
+    def test_regulator_gets_masked_owner_pii(self):
+        """监管端：电话/身份证掩码，但掩码后的号要能用于比对。"""
+        resp = self._get(self.gov_a)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        self.assertIn('139****1234', body)
+        self.assertIn('420602********1234', body)
+        self.assertNotIn('13900001234', body)
+        self.assertNotIn('420602199001011234', body)
+
+    def test_adopter_needs_own_adoption_and_gets_no_owner_pii(self):
+        """领养人只能打印自己领养过的动物，且看不到前任主人任何联系方式与签名。"""
+        self.login_as(self.adopter)
+        self.assertEqual(
+            self.client.get(PRINT_URL.format(self.pet.id)).status_code, 404)
+
+        Adoption.objects.create(
+            pet=self.pet, pet_code=self.pet.code, adopter=self.adopter,
+            adopter_name='李四', status='completed', district=self.district_a)
+        resp = self.client.get(PRINT_URL.format(self.pet.id))
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        self.assertIn('李四', body)
+        self.assertNotIn('13900001234', body)
+        self.assertNotIn('139****1234', body)
+        self.assertNotIn('data:image/png;base64,AAAA', body)
+
+    def test_hospital_scope_is_institution_not_district(self):
+        """医院按「本院在治 ∪ 本院诊疗过」收敛，同区县另一家医院打不开。"""
+        Treatment.objects.create(
+            pet=self.pet, pet_code=self.pet.code, hospital=self.hospital_b,
+            hospital_name='乙区医院', district=self.district_a)
+        self.login_as(self.hospital_user_b)
+        self.assertEqual(
+            self.client.get(PRINT_URL.format(self.pet.id)).status_code, 200)
+        self.login_as(self.hospital_user_a)
+        self.assertEqual(
+            self.client.get(PRINT_URL.format(self.pet.id)).status_code, 404)
+
+    def test_anonymous_is_redirected_to_login(self):
+        """页面语义：未登录跳登录页（而不是 JSON 401 / 404）。"""
+        resp = self.client.get(PRINT_URL.format(self.pet.id))
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn('/login', resp['Location'])

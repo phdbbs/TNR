@@ -134,14 +134,14 @@ class FullLifecycleTest(BusinessTestBase):
                            {'is_active': True, 'intro': '亲人待领养'}))
         self.assertTrue(AdoptionHallListing.objects.get(pet=pet_a).is_active)
 
-        # 6a. 在线申请支线：领养人申请 → 医院审核通过
+        # 6a. 在线申请支线：领养人申请 → **捕捉点**审核通过（第六十四轮）
         self._login(self.adopter)
         body = self.ok(self._post(f'{API}/adoptions/apply/', {
             'pet_id': pet_a.id, 'applicant_name': '在线领养人',
             'applicant_phone': '13877778888', 'reason': '有爱心有条件',
         }))
         application_id = body['data']['id']
-        self._login(self.hospital_user_a)
+        self._login(self.shelter_user_a)
         self.ok(self._post(
             f'{API}/adoptions/applications/{application_id}/review/',
             {'action': 'approve', 'review_note': '符合条件'}))

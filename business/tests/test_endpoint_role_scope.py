@@ -20,7 +20,7 @@
 「这人在黑名单里吗、叫什么、为什么被拉黑」。实测 `adopter1`（襄城区）
 读到了**东津新区**某条记录的姓名与原因「弃养」—— 既跨机构也**跨区县**。
 
-本文件锁两件事：
+本文件锁三件事：
 
 1. **通用规则**（`AuxiliaryEndpointRoleSubsetTest`）：同一资源前缀下，
    「只读辅助接口」（名字含 check/validate/query/preview/probe）
@@ -28,8 +28,12 @@
    这正是"同类接口漂移"的机械判据，能挡住下一个。
 2. **行为**（`BlacklistCheckRoleTest`）：多出来的两个角色必须被拒（403），
    而捕捉点/政府端**照常放行**（守卫不能做成一律禁止）。
+3. **反方向**（第三十轮的 `PortalCallRoleMatchTest`，见文件末尾）：
+   接口没问题、**调用方**有问题 —— 门户前端不得调用自己角色进不去的接口。
 """
+import os
 import re
+import sys
 from collections import defaultdict
 
 from django.urls import get_resolver
@@ -38,6 +42,9 @@ from business.models import Blacklist
 from business.tests.base import BusinessTestBase, make_district, make_user
 
 ROLES = {'gov_city', 'gov_district', 'shelter', 'hospital', 'adopter'}
+# `api_routes()` 用这个更宽集合：`platform_admin` 是平台端专用角色，
+# 第三十轮的「门户调用点」检查要判 `platform.js`，漏了它就整片扫不到。
+ALL_ROLES = ROLES | {'platform_admin'}
 
 # 只读辅助接口的命名特征。**必须带词边界** ——
 # 资源名本身含 "check" 时（如 `checkin_list`）会误报，
@@ -49,12 +56,13 @@ AUX_RE = re.compile(r'(?:^|_)(check|validate|query|preview|probe)(?:_|$)')
 EXEMPT = {}
 
 
-def roles_of(callback):
+def roles_of(callback, valid=None):
     """从 `role_required` 的闭包里取允许角色集合。
 
     `role_required(...)` 把角色元组塞在装饰器闭包的 cell 里，
     顺着 `__closure__` → `cell_contents` 找「全部元素都是合法角色名」的那个元组。
     """
+    valid = ROLES if valid is None else valid
     f = callback
     for _ in range(6):
         for cell in getattr(f, '__closure__', None) or []:
@@ -63,7 +71,7 @@ def roles_of(callback):
             except Exception:
                 continue
             if isinstance(v, (tuple, list)) and v and all(
-                    isinstance(x, str) and x in ROLES for x in v):
+                    isinstance(x, str) and x in valid for x in v):
                 return set(v)
         f = getattr(f, '__wrapped__', None)
         if f is None:
@@ -87,7 +95,7 @@ def api_routes():
     for pat, cb in pairs:
         if '/api/' not in pat:
             continue
-        rs = roles_of(cb)
+        rs = roles_of(cb, ALL_ROLES)
         if rs is None:
             continue
         out.append((pat, getattr(cb, '__name__', ''), rs, cb))
@@ -249,3 +257,234 @@ class BlacklistRoleSetCharacterizationTest(BusinessTestBase):
                 f'{pat} 的角色集合变了：{sorted(actual[pat])} != {sorted(expected)}。'
                 '若是刻意放宽，请同时确认该角色**前端有调用点**且返回体不含多余个人信息；'
                 '若是把政府端放回去，先回答「监管代录」这个问题（见 `gov_portal` 的说明）')
+
+
+# ---------------------------------------------------------------- 第三十轮：
+# 同一张矩阵的**第三个方向**：接口没多放行、也没少放行，是**前端多调用**了。
+#
+# 实测案例（本轮修的）：医院端「办理领回」在提交前调 `TNR_API.checkBlacklist()`
+# 做黑名单预检。接口本身没问题 —— 第二十二轮刚把它的放行集合收回到
+# `shelter / gov_*`；问题是**医院端根本不该调它**。结果每次点「确认领回」
+# 都吃一个 403，界面报「黑名单校验失败，请重试」，领回流程整个走不下去
+# （实测卡在 TNR261026 系列第 3 条）。而服务端 `owner_return_create()`
+# 本来就会 `check_blacklist()` 并返回「该主人已在黑名单中：…」，预检纯属多余。
+#
+# 上面 `AuxiliaryEndpointRoleSubsetTest` 抓不到这一类：它比的是**接口之间**的
+# 角色并集，这里接口是对的、调用方是错的。本类把判据反过来 ——
+# **每个门户 JS 调用的接口，都必须放行该门户自己的角色**。
+# 顺带把 `views_checkin.blacklist_check()` 文档里那句「前端零调用点」
+# 从**口头断言**变成**机器检查**：以前它只写在注释里、没人验证，
+# 所以医院端加一行调用时它照样"成立"。
+PORTAL_JS_ROLES = {
+    'shelter.js': {'shelter'},
+    'hospital.js': {'hospital'},
+    'gov.js': {'gov_city', 'gov_district'},
+    'adopter.js': {'adopter'},
+    'platform.js': {'platform_admin'},
+}
+
+# (门户文件, 接口路径) → 理由。同样**没有理由的豁免就是下一个洞**。
+PORTAL_EXEMPT = {}
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+# 判据扫的是「JS 里有没有出现这个路径」，所以**必须先把注释抹平**：
+# 说明注释里写一句「`/api/business/adoptions/` 的 `pet` 是嵌套对象」，
+# 不剥注释就会被当成一个真实调用点，报出「领养人端调用了不放行 adopter 的
+# 接口（点即 403）」的假警 —— 而全量测试会因为这条假警红掉。
+# 用 `scripts/jslex.blank_comments`（只抹注释、保留字符串字面量、**等长**），
+# 不用 `strip_js`：那个连字符串一起抹，路径会被抹没，判据反过来恒假。
+_SCRIPTS = os.path.join(ROOT, 'scripts')
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+
+from jslex import blank_comments  # noqa: E402
+
+WILD = '{*}'
+_LIT = re.compile(r"['\"`]([^'\"`]*)['\"`]")
+# 拼接续接：先试「+ 字面量」，再试「+ 变量 + 字面量」（变量段还原成 WILD）。
+_NEXT_LIT = re.compile(r"^\s*\+\s*['\"`]([^'\"`]*)['\"`]")
+_NEXT_VAR = re.compile(r"^\s*\+\s*[^+;,\n)]{1,80}?\s*\+\s*['\"`]([^'\"`]*)['\"`]")
+# 相对路径只认「紧跟在 get/post 之后」这一种写法（`TNR_API.post('a/b/', …)`），
+# 否则会把 `'Content-Type'`、`'application/json'` 之类当成路径。
+_RELATIVE_HEAD = re.compile(r"(?:this|TNR_API)\._?(?:get|post)\(\s*$")
+_METHOD_DEF = re.compile(r'(?m)^  (?:async )?([A-Za-z_]\w*)\s*\([^)]*\)\s*\{')
+_METHOD_CALL = re.compile(r'TNR_API\.([A-Za-z_]\w*)\(')
+
+
+def read_js(rel_path):
+    with open(os.path.join(ROOT, rel_path), encoding='utf-8') as fobj:
+        return fobj.read()
+
+
+def _js_src(rel_path):
+    """读 JS、抹掉注释，并把 `BASE` / `KEYS.x` 常量展开成完整路径字面量。"""
+    src = blank_comments(read_js(rel_path))
+    keys = {}
+    block = re.search(r'KEYS:\s*\{(.*?)\n  \}', src, re.S)
+    if block:
+        keys = dict(re.findall(r"(\w+):\s*'([^']+)'", block.group(1)))
+    src = re.sub(r'this\.KEYS\.(\w+)',
+                 lambda m: "'/api/business/%s'" % keys.get(m.group(1), 'x'), src)
+    return (src.replace('this.BASE', "'/api/business/'")
+               .replace('TNR_API.BASE', "'/api/business/'"))
+
+
+def js_api_paths(src):
+    """JS 源码里出现过的 `/api/...` 路径。
+
+    模板串（`` `/x/${id}/` ``）和字符串拼接（`'/x/' + id + '/'`）都还原成一条
+    路径，变量段统一成 `WILD`；`this.BASE` / `TNR_API.BASE` 先展开成
+    `'/api/business/'`，所以 `BASE + 'a/b/'` 也能拼成完整路径。
+    """
+    out = set()
+    for m in _LIT.finditer(src):
+        lit = re.sub(r'\$\{[^}]*\}', WILD, m.group(1))
+        tail = src[m.end():]
+        while True:
+            nxt = _NEXT_LIT.match(tail)
+            if nxt:
+                lit += nxt.group(1)
+                tail = tail[nxt.end():]
+                continue
+            nxt = _NEXT_VAR.match(tail)
+            if nxt:
+                lit += WILD + nxt.group(1)
+                tail = tail[nxt.end():]
+                continue
+            break
+        # `BASE + KEYS.x` 展开后会出现两遍前缀
+        lit = lit.replace('/api/business//api/business/', '/api/business/')
+        if not lit.startswith('/api/'):
+            if not (lit and '/' in lit
+                    and _RELATIVE_HEAD.search(src[:m.start()])):
+                continue
+            lit = '/api/business/' + lit
+        out.add(lit.split('?')[0])
+    return out
+
+
+def api_method_paths():
+    """`tnr-api.js` 的方法名 → 它实际请求的路径集合。
+
+    门户 JS 基本不写裸路径，走的全是 `TNR_API.xxx()`；判据要落在门户文件上，
+    就得先把方法名翻译回路径 —— 这一步就是这个用例的全部价值所在。
+    """
+    src = _js_src('static/js/tnr-api.js')
+    defs = list(_METHOD_DEF.finditer(src))
+    bodies = {}
+    for i, m in enumerate(defs):
+        end = defs[i + 1].start() if i + 1 < len(defs) else len(src)
+        bodies[m.group(1)] = src[m.end():end]
+    out = {name: js_api_paths(body) for name, body in bodies.items()}
+    # 方法套方法（`async getX() { return this.getData('/api/…') }`）再展开一层
+    for name, body in bodies.items():
+        for callee in (_METHOD_CALL.findall(body)
+                       + re.findall(r'\bthis\.(\w+)\(', body)):
+            out[name] = out[name] | out.get(callee, set())
+    return out
+
+
+def portal_api_paths(fname):
+    """某门户 JS 实际会打到的接口路径（直接字面量 + 经 `TNR_API` 方法间接调用）。"""
+    src = _js_src(f'static/js/portals/{fname}')
+    paths = js_api_paths(src)
+    methods = api_method_paths()
+    for name in _METHOD_CALL.findall(src):
+        paths |= methods.get(name, set())
+    return paths
+
+
+
+def segs(path):
+    return tuple(s for s in path.split('/') if s)
+
+
+def _seg_match(js_seg, pat_seg):
+    """一个路径段的比对。`WILD`（JS 变量段）能顶任何路由段。"""
+    if js_seg == WILD:
+        return True
+    if pat_seg.startswith('<'):
+        # ⚠ 必须校验转换器类型，否则 `/adoptions/hall/{*}` 会**同时**命中
+        # `/adoptions/<int:pk>/edit-info/`（`hall` 顶上了 `<int:pk>`），
+        # 于是拿了一堆不相干接口的角色并集，误报成"领养人越权"。
+        inner = pat_seg[1:-1]
+        converter = inner.split(':')[0]
+        if converter == 'int':
+            return js_seg.isdigit()
+        if converter == 'slug':
+            return bool(re.fullmatch(r'[-\w]+', js_seg))
+        return True
+    return js_seg == pat_seg
+
+
+def match_routes(shape, routes):
+    """JS 路径形状 → 命中的路由（段数相同，`<pk>`/`WILD` 按类型通配）。"""
+    hits = []
+    for pat, rs in routes:
+        psegs = segs(pat)
+        if len(psegs) != len(shape):
+            continue
+        if all(_seg_match(a, b) for a, b in zip(shape, psegs)):
+            hits.append((pat, rs))
+    return hits
+
+
+class PortalCallRoleMatchTest(BusinessTestBase):
+    """通用规则：门户前端调用的接口必须放行该门户自己的角色。"""
+
+    def test_portal_calls_match_own_role(self):
+        routes = [(pat, rs) for pat, _n, rs, _cb in api_routes()]
+        checked = []
+        offenders = []
+        for fname, portal_roles in sorted(PORTAL_JS_ROLES.items()):
+            for path in sorted(portal_api_paths(fname)):
+                hits = match_routes(segs(path), routes)
+                if not hits:
+                    # 路由表里没有这条（或该视图不带 `role_required`）—— 无从判定，
+                    # 但不计入 checked，避免"扫了 0 条还说通过"。
+                    continue
+                checked.append(f'{fname} -> {path}')
+                if (fname, path) in PORTAL_EXEMPT:
+                    continue
+                allowed = set().union(*[rs for _p, rs in hits])
+                missing = portal_roles - allowed
+                if missing:
+                    offenders.append(
+                        f'{fname} 调用 {path}（命中 '
+                        f'{sorted(p for p, _ in hits)}）放行 {sorted(allowed)}，'
+                        f'缺 {sorted(missing)}')
+
+        self.assertGreater(len(checked), 100,
+                           f'只扫到 {len(checked)} 个调用点 —— 解析逻辑失效了，不是"全部通过"')
+        self.assertEqual(offenders, [],
+                         '门户前端调用了自己角色被挡在门外的接口（点即 403）：\n  '
+                         + '\n  '.join(offenders))
+
+    def test_comment_paths_are_not_counted_as_calls(self):
+        """注释里出现的接口名**不是调用点** —— 判据只能看见真代码。
+
+        实测成因：`adopter.js` 的说明注释里写了 `/api/business/adoptions/`
+        （解释列表接口的 `pet` 是嵌套对象、打卡记录里是数字 id）。不剥注释时
+        这条路径被当成领养人端的真实调用点，于是报「放行 shelter/hospital/gov_*、
+        缺 ['adopter']，点即 403」——**假指控**，接口根本没人调，全量测试却红掉。
+        反方向更危险：注释里写「这里曾经调用过 X」也会让「X 已被移除」的判据恒假。
+        """
+        raw = read_js('static/js/portals/adopter.js')
+        self.assertIn('/api/business/adoptions/', raw,
+                      '锚点已失效：注释里那条路径不见了，本用例不再能证明剥离器在工作')
+        self.assertNotIn(
+            '/api/business/adoptions/', portal_api_paths('adopter.js'),
+            '注释里的路径被当成调用点 —— `_js_src` 必须先用 `jslex.blank_comments` '
+            '抹注释；否则说明文字会造出假 403 指控，也会把「已删掉的调用」算还在')
+
+    def test_hospital_does_not_call_blacklist_check(self):
+        """行为锚：本轮那条具体缺陷 —— 医院端不该再碰黑名单查询。
+
+        （通用规则已能拦住，这条是**变异锚**：把 `js_api_paths` 的解析改坏时，
+        通用用例可能整片扫不到而"通过"，这条点名到接口，删一行调用就红。）
+        """
+        called = portal_api_paths('hospital.js')
+        self.assertNotIn('/api/business/blacklist/check/', called,
+                         '医院端不应调用 `/blacklist/check/`：放行集合是 shelter/gov_*'
+                         '（`BlacklistRoleSetCharacterizationTest` 钉死），服务端已做校验')

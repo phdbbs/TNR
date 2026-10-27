@@ -102,10 +102,15 @@ class HospitalScopeBase(BusinessTestBase):
         cls.adopt_nohosp = Adoption.objects.create(
             pet=cls.plain, district=d, hospital=None,
             adopter_name='受理医院已删除', ledger_no='ADP-T-E')
+        # 第六十四轮起医院侧申请列表只返回**已通过**的申请（审核在捕捉点），
+        # 所以夹具要给 approved —— 否则这条「与孪生接口口径一致」的用例
+        # 会退化成「两边都是空集」，测不到机构收敛。
         cls.app_a = AdoptionApplication.objects.create(
-            pet=cls.a_in, hospital=cls.hospital_a, applicant_name='甲院申请人')
+            pet=cls.a_in, hospital=cls.hospital_a, applicant_name='甲院申请人',
+            status='approved')
         cls.app_a2 = AdoptionApplication.objects.create(
-            pet=cls.a2_in, hospital=cls.hospital_a2, applicant_name='乙院申请人')
+            pet=cls.a2_in, hospital=cls.hospital_a2, applicant_name='乙院申请人',
+            status='approved')
         # 乙区的一条领养记录（甲的捕捉点不该看到）
         cls.adopt_b = Adoption.objects.create(
             pet=cls.b_pet, district=cls.district_b, hospital=cls.hospital_b,
@@ -277,16 +282,27 @@ class HospitalScopeContractTest(HospitalScopeBase):
                       '必须并上「本院诊疗过」，否则医院查不到自己经手过的历史动物')
 
     def test_both_pet_endpoints_use_it(self):
-        src = self._read('business/views_portal.py')
-        self.assertEqual(src.count('hospital_pet_scope('), 3,
-                         '定义处 1 次 + 档案 1 次 + 溯源 1 次；少一处就是漏收口')
-        self.assertNotIn("Q(district_id=user.district_id)", src,
-                         '医院分支不得再按区县收敛')
+        """档案列表与一宠一档详情都必须走这份判据。
+
+        ⚠ 详情那一支在第六十三轮搬进了 `services_lifecycle.pet_for_lifecycle`
+        （接口与打印页共用）。这条用例原先只读 `views_portal.py` 并数
+        `hospital_pet_scope(` 的出现次数 —— 搬迁后计数掉到 2，用例红了，
+        **红的是「文件布局变了」，不是「判据漏了」**。所以改成按端点名：
+        档案列表在 portal，详情在 shared 模块，两边都得有带参数的
+        `hospital_pet_scope(user)` 调用，且都不许退回区县口径。
+        """
+        for rel in ('business/views_portal.py', 'business/services_lifecycle.py'):
+            src = self._read(rel)
+            self.assertIn('hospital_pet_scope(user)', src,
+                          f'{rel} 的医院分支没有走共用判据（漏收口）')
+            self.assertNotIn("Q(district_id=user.district_id)", src,
+                             f'{rel} 的医院分支不得再按区县收敛')
 
     def test_adoption_list_has_institution_branch(self):
         src = self._read('business/views_adoption.py')
         self.assertIn("if user.role == 'hospital':", src)
-        self.assertIn('qs.filter(hospital_id=user.institution_id)', src)
+        # 申请列表第六十四轮起还多一个 `status='approved'` 条件，所以按前缀匹配
+        self.assertRegex(src, r'qs\.filter\(hospital_id=user\.institution_id')
 
 
 class HospitalCrossDistrictDischargeTest(BusinessTestBase):

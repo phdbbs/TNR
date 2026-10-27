@@ -993,6 +993,54 @@ def get_hospital_scoped_pet(pk, user):
             .filter(pk=pk).distinct().first())
 
 
+def shelter_scope(user, housed_field):
+    """**捕捉点角色**的可见范围：机构所在区县 ∪ 挂在本机构名下的对象。
+
+    `housed_field` 是「这个东西当前归谁管」的外键名，调用方按模型给出：
+      - `Pet` 用 `shelter`（动物当前所在的捕捉点）；
+      - 单据（`Release`）用 `institution`（开单时动物所在的机构）。
+
+    为什么必须并上「挂在本机构名下」（第五十九轮界面实测）：
+    医院开运回单时可选**市级**或**本院所在区县**的捕捉点（需求明写，
+    见 `views_return._allowed_shelter_q`），签收时 `pet.shelter` 改成接收站，
+    而 `pet.district` **仍是原捕捉地** —— 放归要回原小区、政府按捕捉地统计，
+    这个字段不能跟着接收站改。于是「动物在襄城站、区县写樊城」这类单子，
+    只按区县收敛会让**签收方既看不到也办不了**：
+    放归备选框空（「暂无可放归动物」）、`release_create` 回 404，
+    整条放归链在界面上断在签收之后，而且不报错。
+
+    与市级分支的关系：`hospital_pets` 早先只为市级捕捉点开过
+    「本机构名下 ∪ 机构区县」，普通区县站没有 —— 两个分支的差别从来不是
+    「市级可以看外区」这种业务规则，而是这条签收链路只在市级先暴露。
+    这里把两端合并成一条口径，别再分叉。
+
+    兜底方向是**收紧**而不是放开：账号没挂机构 → 空集（不是跳过校验）；
+    机构没挂区县 → 只认「挂在本机构名下」，不因此看到全部区县。
+    """
+    inst_id = getattr(user, 'institution_id', None)
+    if not inst_id:
+        return Q(pk__in=[])
+    q = Q(**{housed_field: inst_id})
+    district_id = getattr(getattr(user, 'institution', None), 'district_id', None)
+    if district_id:
+        q |= Q(district_id=district_id)
+    return q
+
+
+def get_shelter_scoped_pet(pk, user):
+    """按「本区县 ∪ 本站名下」取**单条**宠物档案（与捕捉点列表口径一致）。
+
+    捕捉点**不能**沿用 `get_active_pet`（只按区县）：跨区县运回签收后
+    动物挂在本站、区县写的是捕捉地，按区县取单会 404「宠物不存在或无权访问」
+    —— 列表里明明有这只，点「发起放归」就报错（看得见、点不开）。
+    """
+    if not user.institution_id:
+        return None
+    return (Pet.objects.filter(is_deleted=False)
+            .filter(shelter_scope(user, 'shelter'))
+            .filter(pk=pk).first())
+
+
 def hospital_pet_write_error(pet, user):
     """医院端**写单据前**的归属校验，返回错误文案或 None。
 

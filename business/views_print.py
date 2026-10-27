@@ -16,6 +16,9 @@
 权限：页面语义 —— 未登录走 `login_required` 的 302 跳登录页（而不是 JSON 401），
 角色限 `shelter / hospital / gov_city / gov_district`（有打印入口的四端）。
 取数按区县隔离，**跨区县与不存在完全不可区分**（同一个 404，不暴露存在性）。
+
+另有 `/print/pet-archive/<pk>/`（一宠一档完整档案，见文件末尾）：不走
+`DOC_SPECS`，因为它的正文是「基本信息 + 照片 + 全部流转记录」而不是字段清单。
 """
 import qrcode
 import base64
@@ -32,6 +35,9 @@ from business.models import (
     ReturnOrder, Treatment, MaterialTransaction,
 )
 from business.services import get_printable_object
+from business.services_lifecycle import (
+    build_pet_lifecycle, event_print_rows, pet_for_lifecycle,
+)
 from business import services_treatment as st
 from accounts.decorators import role_required
 
@@ -494,3 +500,80 @@ def print_doc(request, doc, pk):
         'printed_at': timezone.localtime(timezone.now()).strftime('%Y-%m-%d %H:%M'),
     }
     return render(request, 'print/doc.html', ctx)
+
+
+# ---------------------------------------------------------------------------
+# 一宠一档完整档案（第六十三轮）
+# ---------------------------------------------------------------------------
+# 与「单张单据」是两类东西：这里是**一只动物从捕捉到出库的全部记录**
+# （基本信息 + 全阶段照片 + 流转时间线），供纸质归档与向监管报送。
+#
+# ⚠ 项目里没有 PDF 库（requirements 只有 Django/Pillow/qrcode…），
+#   「导出 PDF」= 服务端渲染 A4 页 + 浏览器「另存为 PDF」。不引新依赖的
+#   理由与单张单据打印一致：中文字体嵌入、分页、图片体积在浏览器侧天然
+#   处理得好，服务端合成反而要自带 CJK 字体子集。
+#
+# ⚠ 取数与权限**必须**走 `services_lifecycle` 的同一份实现（接口
+#   `/api/business/pets/<id>/lifecycle/` 也用它）。打印页另查一遍数据库，
+#   就会出现「接口按医院收敛、打印页按区县收敛」这类漂移 —— 那等于给
+#   越权者开了一个只读后门。
+@login_required
+@role_required('shelter', 'hospital', 'gov_city', 'gov_district', 'adopter')
+def print_pet_archive(request, pk):
+    pet = pet_for_lifecycle(request.user, pk)
+    if pet is None:
+        # 与单据打印同一模板：**不存在**与**存在但无权**不可区分。
+        return render(request, 'print/doc_missing.html', status=404)
+
+    data = build_pet_lifecycle(pet, request.user)
+    brief = data['pet_brief']
+
+    info = [
+        ('一宠一档', brief['code']),
+        ('昵称', brief['name'] or '—'),
+        ('类别', brief['species'] or '—'),
+        ('品种', brief['breed'] or '—'),
+        ('性别', brief['gender'] or '—'),
+        ('年龄', brief['age'] or '—'),
+        ('毛色', brief['color'] or '—'),
+        ('体重', brief['weight'] or '—'),
+        ('芯片号', brief['chip_no'] or '—'),
+        ('当前状态', brief['stage_display']),
+        ('所属区县', brief['district_name'] or '—'),
+        ('捕捉点', brief['shelter_name'] or '—'),
+        ('所在医院', brief['hospital_name'] or '—'),
+    ]
+    # 两对「标签+值」并作一行，13 项收成 7 行 —— 单列排下来第一页全被
+    # 基本信息占满，时间线要翻到第二页才看得到。
+    info_rows = []
+    for i in range(0, len(info), 2):
+        pair = info[i:i + 2]
+        while len(pair) < 2:
+            pair.append(('', ''))
+        (l1, v1), (l2, v2) = pair
+        info_rows.append((l1, v1, l2, v2))
+
+    events = []
+    for ev in data['events']:
+        events.append({
+            'date': ev.get('date') or '—',
+            'title': ev.get('type_display') or ev.get('type') or '',
+            'rows': event_print_rows(ev),
+            'photos': ev.get('photos') or [],
+            'signature': ev.get('signature') or '',
+        })
+
+    print_url = request.build_absolute_uri()
+    org = getattr(getattr(request.user, 'institution', None), 'name', '') or '襄阳市流浪动物 TNR 管理平台'
+    return render(request, 'print/pet_archive.html', {
+        'org': org,
+        'doc_no': brief['code'],
+        'stage_display': brief['stage_display'],
+        'info_rows': info_rows,
+        'photos': data['photos'],
+        'events': events,
+        'qr': _qr_data_uri(print_url),
+        'print_url': print_url,
+        'printed_by': request.user.get_full_name() or request.user.username,
+        'printed_at': timezone.localtime(timezone.now()).strftime('%Y-%m-%d %H:%M'),
+    })

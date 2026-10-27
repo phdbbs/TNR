@@ -84,9 +84,13 @@ ITEM_META = [
      'hint': '母猫卵巢子宫摘除 / 公猫去势',
      'needs_record': True,
      'note_tpl': ['术前禁食 12h、禁水 4h', '术后 7 日复查拆线', '术后戴伊丽莎白圈 7 日']},
+    # `rx_stock` = 该项目可以从**库存**开处方（第六十四轮）。只有驱虫与免疫：
+    # 绝育的麻药、芯片的耗材都不进药品库存，芯片只认芯片号。
     {'key': 'deworming', 'icon': '💊', 'name': '驱虫', 'hint': '体内外驱虫',
+     'rx_stock': True,
      'note_tpl': ['驱虫后 7 日内避免洗澡', '空腹口服效果更佳']},
     {'key': 'vaccine', 'icon': '💉', 'name': '免疫', 'hint': '猫三联 / 犬四联免疫接种',
+     'rx_stock': True,
      'note_tpl': ['接种后留观 30 分钟', '与三联间隔 7 日']},
     {'key': 'chip', 'icon': '📡', 'name': '芯片', 'hint': '颈部皮下植入并绑定档案',
      'needs_chip': True, 'note_tpl': ['植入后扫码核对芯片号', '同步录入管理平台']},
@@ -103,9 +107,11 @@ LEGACY_ITEM_FLAGS = {
     'chip': 'items_chip',
 }
 
-# 可以开进处方的物料类别。**药品是第四十六轮新加的**（R46 口径 1）：
-# 处方药品走现有物料体系，不新建独立药品字典。
-RX_CATEGORIES = ('medicine', 'vaccine', 'dewormer')
+# 可以开进处方的物料类别。第六十四轮按业务口径收窄到两类：
+# **库存里只有驱虫药、疫苗、芯片**；药品（含麻药）不再进库存，
+# 绝育用药在项目里手写成记录（`rx_other`），不占库存、不产生消耗流水。
+# 芯片虽然还在库存里，但它是耗材、走「芯片号」那条路，不能当处方药开。
+RX_CATEGORIES = ('vaccine', 'dewormer')
 
 MAX_RX_ITEMS = 30          # 单个项目的处方条目上限（防误输）
 MAX_ITEM_COUNT = len(ITEM_META)
@@ -298,7 +304,9 @@ def apply_check(treatment, body, submit=False):
         pet.save(update_fields=pet_fields)
 
     # ---- 体检项 ----
-    # 体温：数值 + 判定。原型点「正常 38.5℃」自动填数值、可手改，两者独立存。
+    # 体温：**只收数值**（第六十四轮）。医生直接填读数，判定由服务端按
+    # 发烧线派生 —— 原来让医生在「正常 / 发烧」里点一个：36.8 与 39.4
+    # 都可能被点成同一边，判定与实际读数对不上；而且同一个事实要答两次。
     if 'temperature' in body:
         raw = body.get('temperature')
         value = None
@@ -312,32 +320,14 @@ def apply_check(treatment, body, submit=False):
             if not (30 <= value <= 45):
                 raise ValueError(f'体温 {value}℃ 超出合理范围（30~45）')
         treatment.temperature = value
+        # 判定**一律由数值派生**，忽略客户端传来的 `temperature_flag`：
+        # 界面已经没有这个选项，直调 API 传入的判定若被采信，就会出现
+        # 「40.2℃ + 正常」这种互相矛盾、却照常落库的数据（打印单与
+        # 疫病监测各说各话）。
+        treatment.temperature_flag = (
+            fever_judge(value) if value is not None else '')
         updated.append('temperature')
-
-    if 'temperature_flag' in body:
-        flag = str(body.get('temperature_flag') or '').strip()
-        valid = [k for k, _ in Treatment.TEMP_FLAG_CHOICES]
-        if flag and flag not in valid:
-            raise ValueError(f'体温判定「{flag}」不合法')
-        treatment.temperature_flag = flag
         updated.append('temperature_flag')
-
-    # 数值与判定的交叉校验：两者都有值时必须落在发烧线（`FEVER_THRESHOLD`）
-    # 的同侧 —— 「40.2℃ + 正常」一旦落库，打印单、体温趋势、疫病监测会
-    # 互相矛盾，而且没人会去核对。前端手改数值时已自动点亮判定，这里兜底
-    # 拦 API 直调 / 前端漏拦的矛盾组合。⚠ 对**最终组合**校验而不是「本次
-    # 请求是否传了体温」：暂存分两次填（先数值后判定）不会误拦，而库里
-    # 已是矛盾组合的旧单，任何一次保存都会被拦下来逼着修正 —— 渐进清洗。
-    if treatment.temperature is not None and treatment.temperature_flag:
-        expect = fever_judge(treatment.temperature)
-        if treatment.temperature_flag != expect:
-            labels = dict(Treatment.TEMP_FLAG_CHOICES)
-            expect_label = '发烧' if expect == 'fever' else '正常'
-            picked_label = labels.get(treatment.temperature_flag,
-                                      treatment.temperature_flag)
-            raise ValueError(
-                f'体温 {treatment.temperature}℃ 与判定「{picked_label}」矛盾：'
-                f'按发烧线 {FEVER_THRESHOLD}℃ 应判「{expect_label}」，请修正')
 
     if submit:
         # 提交门禁**只卡体温**这两项，其它检查项（常见病 / 传染病 / 皮肤黏膜）
@@ -348,8 +338,6 @@ def apply_check(treatment, body, submit=False):
         # 空着会让下游算错，所以只有这一项卡死。
         if treatment.temperature is None:
             raise ValueError('请先完成「体温检测」再提交')
-        if not treatment.temperature_flag:
-            raise ValueError('请选择体温判定（正常 / 发烧）再提交')
 
     # 常见病检查：多选，顿号分隔的**文本快照**（选项以后会变，历史单据不能跟着变）
     if 'common_findings' in body:
@@ -614,6 +602,13 @@ def _replace_items(treatment, items, hospital, record_keys=()):
         if not isinstance(rx_ids, list):
             raise ValueError('处方必须是数组')
         rx_ids = [i for i in rx_ids if i not in (None, '')]
+        # 库存处方只对「驱虫 / 免疫」开放（第六十四轮）：绝育的麻药不进库存、
+        # 芯片走芯片号。不拦的话，界面藏了选择器、直调 API 仍能给绝育扣药，
+        # 库存账与实际用药就分家了，而且不会报错。
+        if rx_ids and not _item_meta(key).get('rx_stock'):
+            raise ValueError(
+                f'{_item_meta(key)["name"]}：该项目不从库存出处方'
+                '（用药请写在手写记录里）')
         # ⚠ 元素形态同样要守卫（与旧「快速登记」的 `material_id` 同族）：
         # `{"rx": [[1,2,3]]}` / `{"rx": ["abc"]}` 会让
         # `Material.objects.filter(pk=<值>)` 抛 `TypeError`/`ValueError`

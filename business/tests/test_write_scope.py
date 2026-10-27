@@ -160,11 +160,18 @@ class HospitalWriteCrossInstitutionTest(HospitalWriteScopeBase):
         self.v_adoption.refresh_from_db()
         self.assertEqual(self.v_adoption.status, 'pending_claim', '被拒后状态被改')
 
-    def test_application_review_cross_institution_refused(self):
+    def test_application_review_no_longer_hospital(self):
+        """第六十四轮：审核移到捕捉点，医院对**任何**申请都是 403。
+
+        原先这里是「跨机构被拒」—— 判据是 `AdoptionApplication.hospital`。
+        审核改由动物来源捕捉点做以后，医院连本院申请也不能批；
+        归属判据变成 `pet__shelter_id`，在捕捉点侧由
+        `AdoptionApplicationReviewTest` 的跨机构用例承担。
+        """
         resp = self.post_as(self.me,
                             f'/api/business/adoptions/applications/{self.v_app.id}/review/',
                             {'action': 'approve'})
-        self.assert_refused(resp, 'application review 跨机构')
+        self.assertEqual(resp.status_code, 403, resp.content)
         self.v_app.refresh_from_db()
         self.assertEqual(self.v_app.status, 'pending', '被拒后申请状态被改')
 
@@ -238,11 +245,14 @@ class HospitalWriteOwnRecordsTest(HospitalWriteScopeBase):
                             f'/api/business/adoptions/{self.o_adoption.id}/confirm-claim/')
         self.assert_ok(resp, 'confirm-claim 本院')
 
-    def test_application_review_own_ok(self):
+    def test_application_review_own_refused(self):
+        """本院申请也一样：审核不是医院的权力（不是「只拦别院」）。"""
         resp = self.post_as(self.me,
                             f'/api/business/adoptions/applications/{self.o_app.id}/review/',
                             {'action': 'approve'})
-        self.assert_ok(resp, 'application review 本院')
+        self.assertEqual(resp.status_code, 403, resp.content)
+        self.o_app.refresh_from_db()
+        self.assertEqual(self.o_app.status, 'pending')
 
     def test_material_receive_own_ok(self):
         resp = self.post_as(self.me, f'/api/business/materials/{self.o_txn.id}/receive/')

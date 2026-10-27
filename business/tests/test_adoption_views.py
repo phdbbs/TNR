@@ -12,7 +12,7 @@ from business.models import (
 )
 from business.tests.base import (
     assert_doc_no,
-    BusinessTestBase, make_institution, make_pet,
+    BusinessTestBase, make_institution, make_pet, make_user,
 )
 from business.services import pet_has_active_adoption
 from core.passwords import DEMO_INITIAL_PASSWORD
@@ -226,8 +226,10 @@ class AdoptionApplyTest(BusinessTestBase):
     URL = '/api/business/adoptions/apply/'
 
     def _pet(self):
-        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
-                       status='pending_adopt')
+        # 审核在捕捉点（第六十四轮）：`review` 按 `pet.shelter` 收敛，
+        # 夹具必须给出动物的来源捕捉点，否则审核用例永远 404。
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a, status='pending_adopt')
         # 在线申请要求宠物仍处于大厅上架状态
         AdoptionHallListing.objects.create(pet=pet, hospital=self.hospital_a,
                                            is_active=True)
@@ -258,7 +260,7 @@ class AdoptionApplyTest(BusinessTestBase):
         pet = self._pet()
         self.login_as(self.adopter)
         first = self.ok(self.post_json(self.URL, self._payload(pet)))['data']['id']
-        self.login_as(self.hospital_user_a)
+        self.login_as(self.shelter_user_a)
         self.ok(self.post_json(
             f'/api/business/adoptions/applications/{first}/review/',
             {'action': 'reject', 'review_note': '不符合'}))
@@ -326,29 +328,50 @@ class AdoptionApplyTest(BusinessTestBase):
 
 
 class AdoptionApplicationReviewTest(BusinessTestBase):
-    def _application(self, status='pending'):
-        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
+    """申请审核在**捕捉点**（第六十四轮）。
+
+    医院只负责维护资料、上架，以及在审核通过后填出院单；申请是否通过由
+    动物来源捕捉点判定。因此本类所有审核动作都登录 `shelter_user_a`，
+    并保留一条「医院审核 → 403」的反向对照 —— 否则把接口角色放宽成
+    `role_required('shelter', 'hospital')` 也能让其余用例全绿。
+    """
+
+    def _application(self, status='pending', shelter=None, hospital=None):
+        pet = make_pet(district=self.district_a,
+                       shelter=shelter or self.shelter_a,
+                       hospital=hospital or self.hospital_a,
                        status='pending_adopt')
-        applicant = User.objects.create_user(username='app_user', password='x',
-                                             role='adopter')
+        applicant = User.objects.create_user(username=f'app_user_{pet.id}',
+                                             password='x', role='adopter')
         return AdoptionApplication.objects.create(
             pet=pet, pet_code=pet.code, applicant=applicant,
             applicant_name='申请者', applicant_phone='13911112222',
-            hospital=self.hospital_a, status=status)
+            hospital=hospital or self.hospital_a, status=status)
+
     def test_review_approve_sends_message(self):
         application = self._application()
-        self.login_as(self.hospital_user_a)
+        self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(
             f'/api/business/adoptions/applications/{application.id}/review/',
             {'action': 'approve', 'review_note': '资质符合'}))
         self.assertEqual(body['data']['status'], 'approved')
         application.refresh_from_db()
-        self.assertEqual(application.reviewed_by, self.hospital_user_a)
+        self.assertEqual(application.reviewed_by, self.shelter_user_a)
         self.assertTrue(Message.objects.filter(user=application.applicant).exists())
+
+    def test_hospital_cannot_review(self):
+        """反向对照：医院不能审核 —— 这是「谁批谁办」的分工边界。"""
+        application = self._application()
+        self.login_as(self.hospital_user_a)
+        self.expect_fail(self.post_json(
+            f'/api/business/adoptions/applications/{application.id}/review/',
+            {'action': 'approve'}), status=403)
+        application.refresh_from_db()
+        self.assertEqual(application.status, 'pending')
 
     def test_review_reject(self):
         application = self._application()
-        self.login_as(self.hospital_user_a)
+        self.login_as(self.shelter_user_a)
         body = self.ok(self.post_json(
             f'/api/business/adoptions/applications/{application.id}/review/',
             {'action': 'reject', 'review_note': '资质不足'}))
@@ -358,14 +381,14 @@ class AdoptionApplicationReviewTest(BusinessTestBase):
 
     def test_review_invalid_action(self):
         application = self._application()
-        self.login_as(self.hospital_user_a)
+        self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(
             f'/api/business/adoptions/applications/{application.id}/review/',
             {'action': 'maybe'}), message='无效的审核操作')
 
     def test_review_twice_rejected(self):
         application = self._application()
-        self.login_as(self.hospital_user_a)
+        self.login_as(self.shelter_user_a)
         self.ok(self.post_json(
             f'/api/business/adoptions/applications/{application.id}/review/',
             {'action': 'approve'}))
@@ -373,28 +396,48 @@ class AdoptionApplicationReviewTest(BusinessTestBase):
             f'/api/business/adoptions/applications/{application.id}/review/',
             {'action': 'approve'}), message='该申请已处理')
 
-    def test_review_wrong_hospital(self):
+    def test_review_other_shelter_404(self):
         application = self._application()
-        # 跨区县越权按约定返回 404（不暴露记录是否存在）
-        self.login_as(self.hospital_user_b)
+        # 跨机构越权按约定返回 404（不暴露记录是否存在）
+        self.login_as(self.shelter_user_b)
         self.expect_fail(self.post_json(
             f'/api/business/adoptions/applications/{application.id}/review/',
             {'action': 'approve'}), status=404, message='无权访问')
 
-    def test_application_list_scoping(self):
-        mine = self._application()
+    def test_hospital_list_only_shows_approved(self):
+        """医院只拿已通过的申请办出库：未审 / 已拒都不进医院视野。"""
+        approved = self._application(status='approved')
+        self._application()                    # pending
+        self._application(status='rejected')
         other_hospital = make_institution(type='hospital', district=self.district_b)
-        pet_other = make_pet(district=self.district_b, hospital=other_hospital,
-                             status='pending_adopt')
-        applicant = User.objects.create_user(username='app_user2', password='x',
-                                             role='adopter')
-        AdoptionApplication.objects.create(
-            pet=pet_other, pet_code=pet_other.code, applicant=applicant,
-            applicant_name='别人', applicant_phone='13800000001',
-            hospital=other_hospital)
+        self._application(status='approved', shelter=self.shelter_b,
+                          hospital=other_hospital)
         self.login_as(self.hospital_user_a)
         data = self.ok(self.get_json('/api/business/adoptions/applications/'))['data']
-        self.assertEqual([a['id'] for a in data], [mine.id])
+        self.assertEqual([a['id'] for a in data], [approved.id])
+
+    def test_shelter_list_scopes_by_own_pet(self):
+        """捕捉点能看到本机构动物**全部状态**的申请（审核入口要待审核的）。"""
+        mine_pending = self._application()
+        mine_approved = self._application(status='approved')
+        self._application(shelter=self.shelter_b, hospital=self.hospital_b)
+        self.login_as(self.shelter_user_a)
+        data = self.ok(self.get_json('/api/business/adoptions/applications/'))['data']
+        self.assertEqual({a['id'] for a in data},
+                         {mine_pending.id, mine_approved.id})
+
+    def test_shelter_without_institution_sees_nothing(self):
+        """没有挂靠机构的捕捉点账号必须是空集，不能匹配 `shelter_id=None` 的申请。"""
+        pet = make_pet(district=self.district_a, shelter=None,
+                       hospital=self.hospital_a, status='pending_adopt')
+        AdoptionApplication.objects.create(
+            pet=pet, pet_code=pet.code, applicant_name='无捕捉点申请人',
+            hospital=self.hospital_a, status='pending')
+        orphan = make_user('app_no_inst', role='shelter',
+                           district=self.district_a, institution=None)
+        self.login_as(orphan)
+        data = self.ok(self.get_json('/api/business/adoptions/applications/'))['data']
+        self.assertEqual(data, [])
 
     def test_my_applications(self):
         application = self._application()
@@ -846,15 +889,15 @@ class AdoptionScopeGuardTest(BusinessTestBase):
 
     def test_approve_rejected_when_pet_taken(self):
         """宠物已被领出时，审核通过应被拦截，避免重复批准。"""
-        pet = make_pet(district=self.district_a, hospital=self.hospital_a,
-                       status='pending_claim')
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       hospital=self.hospital_a, status='pending_claim')
         applicant = User.objects.create_user(username='guard_app', password='x',
                                              role='adopter')
         application = AdoptionApplication.objects.create(
             pet=pet, pet_code=pet.code, applicant=applicant,
             applicant_name='申请者', applicant_phone='13900000001',
             hospital=self.hospital_a, status='pending')
-        self.login_as(self.hospital_user_a)
+        self.login_as(self.shelter_user_a)
         self.expect_fail(self.post_json(
             f'/api/business/adoptions/applications/{application.id}/review/',
             {'action': 'approve'}), message='已不可领养')

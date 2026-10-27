@@ -69,13 +69,12 @@ class MaterialModelTest(TestCase):
         self.assertEqual(material.shelter_stock, 0)
 
     def test_category_choices(self):
-        # `medicine`（药品）是第四十六轮加的：R46 口径 1 —— 处方药品走
-        # **现有物料体系**（从已下发的药品里选、扣医院侧库存），
-        # 不新建独立药品字典。
+        # 第六十四轮：库存只有疫苗 / 驱虫药 / 芯片。
+        # 药品（含绝育麻药）不再进库存 —— 绝育用药写在诊疗单的用药记录里。
         # 产生点：采购入库 `views_material.purchase_create()` 的 `category` 参数；
         # 消费点：`services_treatment` 的 `RX_CATEGORIES`（可开处方的类别）。
         self.assertEqual({c for c, _ in Material.CATEGORY_CHOICES},
-                         {'vaccine', 'dewormer', 'chip', 'medicine'})
+                         {'vaccine', 'dewormer', 'chip'})
 
 
 class TransactionModelTest(TestCase):

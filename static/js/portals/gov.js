@@ -1165,8 +1165,18 @@ const GovPortal = {
       <button class="btn btn-secondary btn-sm" id="btnPrintLedger">🖨️ 打印</button>
     `) + '<div class="table-wrapper" id="ledgerTableWrapper"></div>';
     document.getElementById('btnExportLedger').addEventListener('click', () => {
-      const tabLabels = { capture: '捕捉', transfer: '转运', treatment: '诊疗', release: '放归', adoption: '领养', material: '物料', euthanasia: '安乐死' };
-      TNR_UI.toast(`${tabLabels[this.ledgerState.tab] || ''}台账导出成功（模拟）`, 'success');
+      // 以前这里只弹一句「导出成功（模拟）」，**没有任何文件产出** ——
+      // 监管方以为导出好了，去文件夹里找不到东西。现在走公共实现，
+      // 列定义与当前行数据由 renderLedgerTable 缓存（各页签列不同）。
+      const columns = this._ledgerColumns;
+      const rows = this._ledgerRecords;
+      if (!columns || !columns.length) {
+        TNR_UI.toast('台账还没加载完，请稍后再试', 'warning');
+        return;
+      }
+      const tabLabels = { pet: '一宠一档', capture: '捕捉台账', transfer: '转运台账', treatment: '诊疗台账', release: '放归台账', adoption: '领养台账', material: '物料台账', euthanasia: '安乐死台账' };
+      const n = TNR_UI.exportCsv(columns, rows || [], tabLabels[this.ledgerState.tab] || '监管台账');
+      TNR_UI.toast(n ? `已导出 ${n} 条到 CSV` : '当前筛选结果为空，已导出表头', n ? 'success' : 'warning');
     });
     document.getElementById('btnPrintLedger').addEventListener('click', () => window.print());
     await this.renderLedgerTable();
@@ -1348,8 +1358,9 @@ const GovPortal = {
 
     TNR_UI.mountTable('ledgerTableWrapper', { id: 'gov.ledger.' + tab, columns, data: records, emptyText: '暂无台账数据' });
 
-    // 当前页签的行数据，供「点单号弹详情」的事件委托取用（见 render_ledger）
+    // 当前页签的行数据/列定义，供「点单号弹详情」与「导出」取用（见 render_ledger/btnExportLedger）
     this._ledgerRecords = records;
+    this._ledgerColumns = columns;
   },
 
   /* 台账详情抽屉 */

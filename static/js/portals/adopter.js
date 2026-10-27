@@ -843,7 +843,11 @@ async function renderCheckin() {
     const now = new Date();
     const currentMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
     const pendingPets = adoptions.filter(adoption => {
-      const petCheckIns = checkIns.filter(c => String(c.pet) === String(adoption.pet) || String(c.pet_id) === String(adoption.pet));
+      // `/api/business/adoptions/` 里 `pet` 是**嵌套对象**，打卡记录里是**数字 id**；
+      // 两边直接 `String()` 比就是 "165" 对 "[object Object]"，永远不相等，
+      // 于是本月已打卡的动物仍挂在「待打卡月份」里，点提交又被服务端「请勿重复提交」拦回。
+      const petId = (adoption.pet && adoption.pet.id) || adoption.pet || adoption.pet_id || adoption.petId;
+      const petCheckIns = checkIns.filter(c => String(c.pet ?? c.pet_id ?? c.petId) === String(petId));
       return !petCheckIns.some(c => c.month === currentMonth);
     });
 

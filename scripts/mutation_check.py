@@ -126,6 +126,8 @@ TEST_TARGETS = sys.argv[1:] or [
     # 用例根本没被跑到，与「断言空转」是两回事（见上面第 103 行的老警告）。
     'business.tests.test_adoption_views',
     'business.tests.test_release_views',
+    # 一宠一档 A4 档案打印页（M200–M203）的用例住在这里。
+    'business.tests.test_pet_archive',
     'core.tests_audit',
     'core.tests_frontend_consistency',
     'core.tests_data_integrity',
@@ -1868,14 +1870,16 @@ MUTATIONS += [
     ),
     (
         # 领养人本来只该看到流转事实；退回完整 PII 后端点判据必须报出来。
+        # 第六十三轮：一宠一档的事件拼装从 `views_portal.pet_lifecycle` 抽到
+        # `services_lifecycle.owner_contact_fields`（打印页与接口共用），锚点跟着挪。
         'M163 生命周期把前任主人完整联系方式下发给领养人',
-        'business/views_portal.py',
-        '        if is_adopter:\n'
-        "            return {'owner_phone': '', 'owner_id_card': '',\n"
-        "                    'owner_address': '', 'signature': ''}",
-        '        if is_adopter and False:\n'
-        "            return {'owner_phone': '', 'owner_id_card': '',\n"
-        "                    'owner_address': '', 'signature': ''}",
+        'business/services_lifecycle.py',
+        "    if user.role == 'adopter':\n"
+        "        return {'owner_phone': '', 'owner_id_card': '',\n"
+        "                'owner_address': '', 'signature': ''}\n",
+        "    if user.role == 'adopter' and False:\n"
+        "        return {'owner_phone': '', 'owner_id_card': '',\n"
+        "                'owner_address': '', 'signature': ''}\n",
         'test_adopter_gets_no_previous_owner_contact',
     ),
     (
@@ -2206,6 +2210,356 @@ MUTATIONS += [
         "    return get_scoped_object(model, pk, user)\n",
         "    return model.objects.filter(pk=pk).first()\n",
         'test_other_hospital_cannot_print',
+    ),
+]
+
+# ---------- 第六十三轮：台账 CSV 导出 + 一宠一档 A4 档案 ----------
+# 两处现场缺陷：
+#   ① 捕捉点端「一宠一档 → 导出」的 CSV 只有表头（本端自拼导出器，取值只认
+#      `column.key`，而该页 11 列全用 `render`）；政府端干脆只弹「模拟成功」。
+#   ② 一宠一档档案没有可归档/报送的整份文书。
+# M198/M199 验的是「公共实现与入口」这两条静态判据真的有判别力；
+# M200–M203 验的是打印页的取数范围、PII 分档与事件行完整度。
+MUTATIONS += [
+    (
+        # 复现原缺陷的起点：导出不再调公共实现（自拼 CSV 必然丢掉 render 列）。
+        'M198 台账导出不再走公共实现', 'static/js/portals/shelter.js',
+        "      const n = TNR_UI.exportCsv(columns, data, title);\n",
+        "      const n = data.length;\n",
+        'test_ledger_pages_call_the_shared_exporter',
+    ),
+    (
+        # 「档案抽屉没有导出按钮」= 后端写得再好，用户在界面上也点不到。
+        'M199 一宠一档抽屉摘掉导出 PDF 入口', 'static/js/tnr-common.js',
+        "      + this.printDocBtn('pet-archive', petId, '导出 PDF（本动物全部档案）')\n",
+        "",
+        'test_archive_drawer_has_pdf_export_button',
+    ),
+    (
+        # 打印页不分角色、直接按主键取 → 「猜到主键就能读全档」。
+        # 这条同时会打红 adopter / hospital 的范围用例，expect 取最早暴露的
+        # 「越权与不存在不可区分」。
+        'M200 一宠一档取数退回「按 pk 直取」', 'business/services_lifecycle.py',
+        "    if user.role == 'adopter':\n"
+        "        return Pet.objects.filter(id=pet_id).filter(\n"
+        "            Q(adoptions__adopter=user) | Q(adoption_applications__applicant=user)\n"
+        "        ).distinct().first()\n"
+        "    if user.role == 'hospital':\n"
+        "        return Pet.objects.filter(id=pet_id).filter(\n"
+        "            hospital_pet_scope(user)).distinct().first()\n"
+        "    return get_scoped_object(Pet, pet_id, user)\n",
+        "    return Pet.objects.filter(id=pet_id).first()\n",
+        'test_out_of_scope_and_missing_are_indistinguishable',
+    ),
+    (
+        # 医院支退回按区县收敛：同区县另一家医院能打印别人的动物档案（含主人 PII）。
+        'M201 一宠一档医院支退回按区县收敛', 'business/services_lifecycle.py',
+        "    if user.role == 'hospital':\n"
+        "        return Pet.objects.filter(id=pet_id).filter(\n"
+        "            hospital_pet_scope(user)).distinct().first()\n",
+        "    if user.role == 'hospital':\n"
+        "        return get_scoped_object(Pet, pet_id, user)\n",
+        'test_hospital_scope_is_institution_not_district',
+    ),
+    (
+        # 监管端不脱敏：整页明文的电话/身份证随「导出 PDF」进纸质报表。
+        'M202 档案打印页监管端不再脱敏主人 PII', 'business/services_lifecycle.py',
+        "    if user.role in ('gov_city', 'gov_district'):\n"
+        "        return {\n"
+        "            'owner_phone': mask_phone(record.owner_phone),\n"
+        "            'owner_id_card': mask_id_card(record.owner_id_card),\n"
+        "            'owner_address': record.owner_address,\n"
+        "            'signature': record.signature or '',\n"
+        "        }\n",
+        None,
+        'test_regulator_gets_masked_owner_pii',
+    ),
+    (
+        # 事件字段漏一行：纸上少一个单号，且不报错（只能靠对账发现）。
+        'M203 档案打印的事件行漏掉单据号', 'business/services_lifecycle.py',
+        "            ('转运单号', ev.get('ledger_no')),\n",
+        "",
+        'test_scoped_shelter_gets_the_whole_archive',
+    ),
+]
+
+# ---------- 第六十四轮：体温读数派生 / 库存处方收窄 / 领养审核移到捕捉点 ----------
+# 本批三处判据都不靠界面，必须由后端钉死：
+#   ① 体温判定若采信客户端传值，「40.2℃ + 正常」会照常落库；
+#   ② 库存处方若不对项目收口，绝育麻药会被记进库存并扣耗；
+#   ③ 审核若留在医院，同一张申请两边都能改状态。
+MUTATIONS += [
+    (
+        # 客户端传什么 flag 就存什么 —— 读数与判定再次可以互相矛盾。
+        'M204 体温判定退回采信客户端传值', 'business/services_treatment.py',
+        "        treatment.temperature_flag = (\n"
+        "            fever_judge(value) if value is not None else '')\n",
+        "        treatment.temperature_flag = body.get('temperature_flag') or ''\n",
+        'test_temperature_flag_is_derived_server_side',
+    ),
+    (
+        # 绝育 / 芯片 / 其他也能从药品库存开方 → 麻药被记进库存并扣耗。
+        'M205 非驱虫免疫项目也允许从库存开处方', 'business/services_treatment.py',
+        "        if rx_ids and not _item_meta(key).get('rx_stock'):\n"
+        "            raise ValueError(\n"
+        "                f'{_item_meta(key)[\"name\"]}：该项目不从库存出处方'\n"
+        "                '（用药请写在手写记录里）')\n",
+        "",
+        'test_stock_rx_rejected_for_non_prescription_items',
+    ),
+    (
+        # 审核退回医院：同一张申请两边都能改状态。
+        'M206 领养申请审核放宽回医院', 'business/views_adoption.py',
+        "@role_required('shelter')\n"
+        "@login_required\n"
+        "def adoption_application_review(request, pk):",
+        "@role_required('shelter', 'hospital')\n"
+        "@login_required\n"
+        "def adoption_application_review(request, pk):",
+        'test_hospital_cannot_review',
+    ),
+    (
+        # 未审 / 已拒的申请也进医院视野 → 医院能绕过捕捉点看到申请人材料。
+        'M207 医院申请列表不再只给已通过', 'business/views_adoption.py',
+        "            qs = qs.filter(hospital_id=user.institution_id, status='approved')\n",
+        "            qs = qs.filter(hospital_id=user.institution_id)\n",
+        'test_hospital_list_only_shows_approved',
+    ),
+    (
+        # 审核取单取消归属收敛：别的捕捉点能审，且与「不存在」可区分。
+        'M208 审核取单取消捕捉点归属收敛', 'business/views_adoption.py',
+        "    qs = (AdoptionApplication.objects.filter(pet__shelter_id=user.institution_id)\n"
+        "          if user.institution_id else AdoptionApplication.objects.none())\n",
+        "    qs = AdoptionApplication.objects.all()\n",
+        'test_review_other_shelter_404',
+    ),
+    (
+        # 拒绝原因退回原生 `window.prompt`：阻塞式对话框在自动化 / 内嵌 webview
+        # 里点了「确认拒绝」既不报错也不发请求，申请还挂在待审列表上。
+        'M209 领养拒绝原因退回原生 prompt', 'static/js/portals/shelter.js',
+        "        const { close } = TNR_UI.modal({\n"
+        "          title: '拒绝领养申请',\n",
+        "        const note = window.prompt('请输入拒绝原因：') || '';\n"
+        "        const close = () => {};\n"
+        "        TNR_UI.modal({\n"
+        "          title: '拒绝领养申请',\n",
+        'test_portal_js_has_no_native_dialog_calls',
+    ),
+    (
+        # 第三十轮：医院端「办理领回」重新去调 `/blacklist/check/`。
+        # 这条验的是**新判据的判别力** —— 「门户调用点 ↔ 接口放行集合」不是
+        # 靠注释里那句「前端零调用点」保证的：把调用加回去，界面立刻 403、
+        # 领回整个流程走不下去（实测），而接口侧的用例一条都不会红。
+        'M210 医院端恢复黑名单预检（调用点越过放行集合）',
+        'static/js/portals/hospital.js',
+        "            const res = await TNR_API.createOwnerReturn({\n",
+        "            const bl = await TNR_API.checkBlacklist(idCard, phone);\n"
+        "            if (bl && bl.name) { TNR_UI.toast('该主人在黑名单中', 'danger'); return; }\n"
+        "            const res = await TNR_API.createOwnerReturn({\n",
+        'test_portal_calls_match_own_role',
+    ),
+    (
+        # 第五十九轮：跨区县运回签收后的放归链路。
+        # 根判据 = `shelter_scope()` 的「挂本站名下」这一支。动物签收后
+        # `pet.shelter` 落到接收站、`pet.district` 仍是捕捉地（放归回原小区），
+        # 砍掉这一支就等于退回「只按区县」—— 签收方既看不到也办不了。
+        'M211 捕捉点可见范围退回只按区县（砍掉挂本站名下支）',
+        'business/services.py',
+        "    q = Q(**{housed_field: inst_id})\n"
+        "    district_id = getattr(getattr(user, 'institution', None), 'district_id', None)\n"
+        "    if district_id:\n"
+        "        q |= Q(district_id=district_id)\n",
+        "    district_id = getattr(getattr(user, 'institution', None), 'district_id', None)\n"
+        "    return Q(district_id=district_id) if district_id else Q(pk__in=[])\n",
+        'test_signing_shelter_lists_the_pet_it_received',
+    ),
+    (
+        # 反向：把「放开」写成「一律放开」（机构收口失效）= 跨机构越权。
+        # 没有这条，`shelter_scope` 被改成不认机构也能让正面用例全绿。
+        'M212 捕捉点范围一律放开（机构收口失效）', 'business/services.py',
+        "    q = Q(**{housed_field: inst_id})\n",
+        "    q = Q(pk__isnull=False)\n",
+        'test_third_district_shelter_still_cannot_reach_it',
+    ),
+    (
+        # 账号没挂机构时必须**收紧**（空集），不能当「跳过校验」。
+        # 这条复现的是 `core/scope.py` 顶部记录的老坑：字段为空 → 判据静默失效。
+        'M213 捕捉点账号未挂机构时跳过范围校验', 'business/services.py',
+        "    inst_id = getattr(user, 'institution_id', None)\n"
+        "    if not inst_id:\n"
+        "        return Q(pk__in=[])\n",
+        "    inst_id = getattr(user, 'institution_id', None)\n"
+        "    if not inst_id:\n"
+        "        return Q(pk__isnull=False)\n",
+        'test_third_district_shelter_still_cannot_reach_it',
+    ),
+    (
+        # 调用点也要钉：口径正确但某个页面退回区县过滤，就会出现
+        # 「放归备选框有这只、一宠一档里没有」的两页打脸。
+        'M214 一宠档捕捉点分支退回只按区县', 'business/views_portal.py',
+        "        # 而放归备选框里正躺着这只（列表有、台账没有 = 两个页面互相打脸）。\n"
+        "        qs = Pet.objects.filter(is_deleted=False).filter(\n"
+        "            shelter_scope(user, 'shelter'))\n",
+        "        # 而放归备选框里正躺着这只（列表有、台账没有 = 两个页面互相打脸）。\n"
+        "        qs = Pet.objects.filter(is_deleted=False).filter(\n"
+        "            district_id=getattr(user.institution, 'district_id', None))\n",
+        'test_signing_shelter_pet_archive_lists_the_pet',
+    ),
+    (
+        # 写入口径必须与列表口径一致，否则「点得开却报错」。
+        'M215 发起放归取单退回按区县（看得见点不开）', 'business/views_release.py',
+        "        pet = get_shelter_scoped_pet(pet_id, user)\n",
+        "        from business.services import get_active_pet\n"
+        "        pet = get_active_pet(pet_id, user)\n",
+        'test_signing_shelter_can_create_transfer_and_confirm_release',
+    ),
+    (
+        # 最后一步（小区确认）单独钉一条：`Release.district` 是捕捉地、
+        # `institution` 才是签收站，只按区县会把放归永远卡在「已转运」。
+        'M216 确认放归取单退回按区县', 'business/views_release.py',
+        "    release = Release.objects.filter(shelter_scope(user, 'institution'), pk=pk).first()\n",
+        "    from business.services import get_scoped_object\n"
+        "    release = get_scoped_object(Release, pk, user)\n",
+        'test_signing_shelter_can_create_transfer_and_confirm_release',
+    ),
+    (
+        # 放归小区带出：前端只查本站捕捉单，跨机构捕捉单的动物就填不出小区，
+        # 界面拦在「请填写放归小区」（服务端明明知道）。
+        'M217 动物列表不再下发捕捉单小区名', 'business/views_portal.py',
+        "        item['capture_community'] = (p.capture.community_name if p.capture_id else '')\n",
+        "",
+        'test_pet_list_carries_capture_community',
+    ),
+]
+
+# ---------- 第五十九轮：界面录入巡检查出的五处候选/文案口径 ----------
+# 这一批全是「界面摆了必错的选项」或「界面谎报待办」这一族：服务端判据都对，
+# 红不了任何接口用例，只有源码契约能钉住 —— 所以每条都要有变异证明守卫不是摆设。
+MUTATIONS += [
+    (
+        # 领回弹窗动物下拉退回读 `Pet.status`：诊疗完成未办结的动物会被说成
+        # 「待诊疗」（实测 TNR261026014/016），操作员转去诊疗页白跑一趟。
+        'M218 领回弹窗动物下拉退回原始状态', 'static/js/portals/hospital.js',
+        "          + '<select class=\"form-select\" id=\"dspOrPet\"><option value=\"\">请选择</option>'\n"
+        "          + eligible.map(p => '<option value=\"' + p.id + '\">' + this.escape(p.code)\n"
+        "            + (p.name ? ' · ' + this.escape(p.name) : '') + '（'\n"
+        "            + this.dspPetStageText(p) + '）</option>').join('')\n",
+        "          + '<select class=\"form-select\" id=\"dspOrPet\"><option value=\"\">请选择</option>'\n"
+        "          + eligible.map(p => '<option value=\"' + p.id + '\">' + this.escape(p.code)\n"
+        "            + (p.name ? ' · ' + this.escape(p.name) : '') + '（'\n"
+        "            + TNR_UI.petStatusText(p.status) + '）</option>').join('')\n",
+        'test_pet_dropdowns_use_the_derived_stage',
+    ),
+    (
+        # 死亡登记弹窗同一条判据单独钉：两处下拉是各写各的，
+        # 只修一处时另一处照样说错（本文件的同类前例：M30/M31 分钉两处）。
+        'M219 死亡登记下拉退回原始状态', 'static/js/portals/hospital.js',
+        "          + '<select class=\"form-select\" id=\"dspEuthPet\"><option value=\"\">请选择</option>'\n"
+        "          + eligible.map(p => '<option value=\"' + p.id + '\">' + this.escape(p.code)\n"
+        "            + (p.name ? ' · ' + this.escape(p.name) : '') + '（'\n"
+        "            + this.dspPetStageText(p) + '）</option>').join('')\n",
+        "          + '<select class=\"form-select\" id=\"dspEuthPet\"><option value=\"\">请选择</option>'\n"
+        "          + eligible.map(p => '<option value=\"' + p.id + '\">' + this.escape(p.code)\n"
+        "            + (p.name ? ' · ' + this.escape(p.name) : '') + '（'\n"
+        "            + TNR_UI.petStatusText(p.status) + '）</option>').join('')\n",
+        'test_pet_dropdowns_use_the_derived_stage',
+    ),
+    (
+        # 派生判据本身：不看看板桶 = 恒等于读原始状态，两个下拉同时说错，
+        # 而上面的 M218/M219 抓不到（它们只看调用点写没写对）。
+        'M220 派生阶段不再看看板 pending_discharge 桶', 'static/js/portals/hospital.js',
+        "    if (this.dspAdviceOf(pet.id) !== undefined) {\n"
+        "      return TNR_UI.boardStageText('pending_discharge');\n"
+        "    }\n",
+        "    if (false) {\n"
+        "      return TNR_UI.boardStageText('pending_discharge');\n"
+        "    }\n",
+        'test_stage_helper_follows_the_board_bucket',
+    ),
+    (
+        # 首页「待领养资料待维护」不按缺口过滤：资料已齐、已上架的动物
+        # 仍被写「请完善照片和简介」（实测 TNR261026003 花卷）。
+        'M221 首页领养待办不按资料缺口过滤', 'static/js/portals/hospital.js',
+        "        .filter(it => it.gaps.length);\n"
+        "      const pendAdopt = adoptTodo.length;\n",
+        "      const pendAdopt = adoptTodo.length;\n",
+        'test_dashboard_filters_and_counts_by_gaps',
+    ),
+    (
+        # 待办文案写死：缺口判据算出来了却不读，等于回到谎报。
+        'M222 首页领养待办文案写死照片和简介', 'static/js/portals/hospital.js',
+        "          desc: TNR_UI.joinInfo([p.name, '请完善' + it.gaps.join('和')]),\n",
+        "          desc: TNR_UI.joinInfo([p.name, '请完善照片和简介']),\n",
+        'test_dashboard_filters_and_counts_by_gaps',
+    ),
+    (
+        # 大厅清单换成静默读：接口拒绝时返回 `[]`，首页会把**所有**待领养动物
+        # 判成「缺资料」—— 与「真的都缺」在界面上完全一样，方向正好相反。
+        'M223 首页改用静默读大厅清单', 'static/js/portals/hospital.js',
+        "        TNR_API.getHallListingsStrict()\n      ]);",
+        "        TNR_API.getHallListings()\n      ]);",
+        'test_dashboard_reads_hall_listings_strictly',
+    ),
+    (
+        # 照片只数张数、不看显隐：把系统照片逐张关掉「大厅显示」的动物
+        # 会被判成资料齐全，待办提前消失（真正缺的是「大厅里一张都不剩」）。
+        'M224 资料缺口判据不看照片显隐', 'static/js/portals/hospital.js',
+        "    ? (listing.photos || []).some(p => p.visible)\n",
+        "    ? (listing.photos || []).length > 0\n",
+        'test_gap_check_is_one_shared_source',
+    ),
+    (
+        # 弹窗另抄一份系统照片清单：加一个照片环节（如术后再加一栏）时，
+        # 首页的「有没有照片」判据不认识新字段，会把有照片的说成没照片。
+        'M225 维护资料弹窗另抄一份系统照片清单', 'static/js/portals/hospital.js',
+        "    const systemPhotos = PET_SYSTEM_PHOTOS\n      .map(([field, label]) => {\n",
+        "    const SYSTEM_PHOTOS = [\n"
+        "      ['photo_capture', '捕捉照片'],\n"
+        "      ['photo_group', '整体合影'],\n"
+        "      ['photo_before', '术前照片'],\n"
+        "      ['photo_after', '术后照片'],\n"
+        "      ['photo_treatment', '诊疗后照片']\n"
+        "    ];\n"
+        "    const systemPhotos = SYSTEM_PHOTOS\n      .map(([field, label]) => {\n",
+        'test_system_photo_fields_have_one_frontend_source',
+    ),
+    (
+        # 领养登记候选放回 `adopted`（原缺陷）：5 只已领出的动物进下拉，
+        # 选中必被 `adoption_register` 的状态判据挡回，操作员只能逐只试。
+        'M226 领养登记候选放回已领出动物', 'static/js/portals/shelter.js',
+        "    const adoptablePets = pets.filter(p => p.status === 'pending_adopt'\n"
+        "      && !claimedPetIds.has(String(p.id)));\n",
+        "    const adoptablePets = pets.filter(p => p.status === 'pending_adopt'\n"
+        "      || p.status === 'adopted');\n",
+        'test_register_dropdown_excludes_adopted_and_claimed',
+    ),
+    (
+        # 违规收回候选退回整份 `getAdoptions()`（原缺陷）：
+        # 「已取消」的记录被列进来，选中后 `adoption_reclaim` 报「请勿重复操作」。
+        'M227 违规收回候选退回整份领养单', 'static/js/portals/shelter.js',
+        "id=\"fu_adoption\">${reclaimable.map(a =>",
+        "id=\"fu_adoption\">${adoptions.map(a =>",
+        'test_reclaim_dropdown_only_lists_established_adoptions',
+    ),
+    (
+        # 下发换物料后不回填已选接收方（原缺陷）：`<select>` 静默落到第一项，
+        # 提交时货发去了另一家，而界面看起来「有值」，不会引起怀疑。
+        'M228 下发重建接收方后不回填已选值', 'static/js/portals/shelter.js',
+        "        if (keep && list.some(t => String(t.id) === String(keep))) {\n"
+        "          targetSel.value = keep;\n"
+        "        }\n",
+        "",
+        'test_selected_target_is_restored_after_reload',
+    ),
+    (
+        # 「门户调用点 × 角色」巡检自己也得有锚：这条判据扫的是源码里有没有
+        # 出现某个路径，**不剥注释**时，说明注释里提一句接口名就会被当成真实
+        # 调用点，造出「领养人端点即 403」的假指控（实测把全量测试打红）。
+        # 变异打在巡检的剥离器上 —— 它坏了，整片判据都在看假数据。
+        'M229 调用点巡检不再抹 JS 注释', 'business/tests/test_endpoint_role_scope.py',
+        "    src = blank_comments(read_js(rel_path))\n",
+        "    src = read_js(rel_path)\n",
+        'test_comment_paths_are_not_counted_as_calls',
     ),
 ]
 

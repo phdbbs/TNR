@@ -429,12 +429,16 @@ class AuditWriteCoverageTest(BusinessTestBase):
         self._assert_attributed(self.district_a, '领养业务')
 
     def test_adoption_application_review(self):
-        pet = make_pet(district=self.district_a, status='pending_adopt')
+        # 第六十四轮审核移到捕捉点，`review` 的写角色只剩 `shelter`；
+        # 审计归属判据要求「日志里能读出区县」，与操作角色无关 —— 这里为了
+        # 走通写路径，动物的来源捕捉点必须是操作者所在机构。
+        pet = make_pet(district=self.district_a, shelter=self.shelter_a,
+                       status='pending_adopt')
         application = AdoptionApplication.objects.create(
             pet=pet, pet_code=pet.code, applicant=self.adopter,
             applicant_name='王领养', applicant_phone='13800000009',
             hospital=self.hospital_a, status='pending')
-        self.login_as(self.hospital_user_a)
+        self.login_as(self.shelter_user_a)
         self.ok(self.post_json(
             f'/api/business/adoptions/applications/{application.id}/review/',
             {'action': 'reject', 'review_note': '资质不符'}))

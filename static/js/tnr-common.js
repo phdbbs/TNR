@@ -348,6 +348,14 @@ const TNR_UI = {
 
     let html = this.renderDescList(items);
 
+    // 导出本档案（A4 打印页 → 浏览器「打印 / 另存为 PDF」）。
+    // 走 `/print/pet-archive/<id>/`：服务端渲染**同一份** lifecycle 数据
+    // （基本信息 + 全部照片 + 流转记录），权限与 PII 口径也在服务端复用，
+    // 不在前端拼 PDF —— 前端拼出来的「档案」要自己再查一遍数据。
+    html += '<div style="padding:0 var(--sp-4) var(--sp-3);">'
+      + this.printDocBtn('pet-archive', petId, '导出 PDF（本动物全部档案）')
+      + '</div>';
+
     // 照片墙：捕捉 / 整体合影 / 术前 / 术后 / 诊疗
     html += '<div class="desc-item desc-full"><div class="desc-label">动物照片（点击可放大）</div><div class="desc-value">';
     html += photos.length
@@ -2439,6 +2447,81 @@ const TNR_UI = {
   escape(str) {
     if (str == null) return '';
     return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  },
+
+  /* ============ 台账 CSV 导出（第六十三轮） ============
+   *
+   * ⚠ 旧实现逐列写 `typeof c.render === 'function' ? '' : r[c.key]`，
+   *   于是**凡是用 `render` 的列一律导出空串**。一宠一档的 11 列**全部**
+   *   是 `render`（编号是可点链接、状态是徽章…），导出的 CSV 就只剩表头 ——
+   *   用户看到的是「点了导出、打开只有一行标题」。
+   *
+   * 取值优先级：`column.csv`（显式取值）→ `column.render(row)` 去标签 →
+   * `column.key`（行里的原值）。
+   *
+   * ⚠ `render` 必须排在 `key` **前面**：两者同时存在的列，`key` 里是原始值，
+   *   而屏幕上显示的是渲染后的文案 —— 状态列 `key:'status'` 原始值是
+   *   `completed`，渲染出来是「已完成」；时间列原始值是 ISO 串，渲染出来是
+   *   `YYYY-MM-DD HH:mm`。按 key 优先导出，监管方拿到的 CSV 全是英文状态码
+   *   和带 T/时区的 ISO 串，跟界面对不上（这类错不报错，只有人打开 CSV 才看得出）。
+   */
+  csvCellText(column, row) {
+    if (typeof column.csv === 'function') {
+      const v = column.csv(row);
+      return v == null ? '' : String(v);
+    }
+    if (typeof column.render === 'function') {
+      return this.htmlToText(column.render(row));
+    }
+    if (column.key) {
+      const v = row[column.key];
+      if (v !== undefined && v !== null && v !== '') return String(v);
+    }
+    return '';
+  },
+
+  /* HTML → 纯文本（CSV 单元格专用）。
+   * ① 块级边界先换行，脚本拼出来的 `<div>甲</div><div>乙</div>` 不会粘成「甲乙」；
+   * ② 行内元素（span/a/td）收尾补空格，多个编号 chip 才不会连成一串；
+   * ③ 再解 `escape()` 产出的那几个实体（顺序：先去标签、后解实体）。 */
+  htmlToText(html) {
+    if (html == null) return '';
+    return String(html)
+      .replace(/<(br|\/p|\/div|\/tr|\/li)[^>]*>/gi, '\n')
+      .replace(/<\/(span|a|td|th)>/gi, ' ')
+      .replace(/<[^>]*>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\s*\n\s*/g, '\n')
+      .trim();
+  },
+
+  /* 按列定义把当前行导出成 CSV；返回实际导出的数据行数（不含表头）。
+   * 一律加引号并转义内部引号：小区叫「幸福里,二期」或姓名带引号时，
+   * 不加引号会把一列劈成两列，Excel 里**看不出来**是错的。
+   * 换行用 CRLF、开头加 BOM —— 不这样 Excel（中文 Windows）会按本地编码解成乱码。 */
+  exportCsv(columns, rows, filename) {
+    const quote = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    const lines = [columns.map(c => quote(c.title)).join(',')];
+    (rows || []).forEach(row => {
+      lines.push(columns.map(c => quote(this.csvCellText(c, row))).join(','));
+    });
+    const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (filename || '导出台账') + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // 立即 revoke 会让部分浏览器拿到空文件，延后一拍再释放。
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return lines.length - 1;
   },
 
   /* 上传前压缩图片（手机原相机照片必过这一关）。

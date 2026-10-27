@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>一宠一档档案 {{ doc_no }} · 打印</title>
+<style>
+  /* A4 竖版：与 `print/doc.html` 同一套版式，纸面上两类文书看起来是一家人 */
+  @page { size: A4 portrait; margin: 14mm; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Songti SC","STSong","SimSun",serif; color:#111; font-size:13.5px; background:#EEE; }
+  .paper { width:210mm; min-height:290mm; margin:16px auto; background:#fff; padding:16mm 15mm;
+           box-shadow:0 2px 14px rgba(0,0,0,.15); position:relative; }
+  .head { display:flex; align-items:flex-start; gap:14px; border-bottom:2.5px solid #111; padding-bottom:10px; }
+  .head .org { font-size:14px; color:#555; }
+  .head h1 { font-size:22px; letter-spacing:6px; text-align:center; flex:1; margin-top:4px; }
+  .qr-box { flex:none; text-align:center; }
+  .qr-box img { width:74px; height:74px; display:block; }
+  .qr-box .cap { font-size:9.5px; color:#777; margin-top:2px; }
+  .no-line { text-align:center; margin:10px 0 14px; }
+  .no-line .no { font-size:17px; font-weight:700; font-family:ui-monospace,Menlo,monospace;
+                 letter-spacing:2px; color:#9D2933; }
+  .no-line .stage { margin-left:12px; font-size:12.5px; padding:1px 8px; border:1px solid #9D2933;
+                    border-radius:10px; color:#9D2933; letter-spacing:0; }
+  table { width:100%; border-collapse:collapse; }
+  td { border:1px solid #444; padding:7px 10px; vertical-align:top;
+       word-break:break-word; overflow-wrap:anywhere; }
+  tr { break-inside:avoid; page-break-inside:avoid; }
+  td.lbl { background:#F7F3EC; color:#333; white-space:nowrap; }
+  /* 信息区两对并排：label 固定宽度，value 吃掉剩余空间 */
+  .info td.lbl { width:88px; }
+  .sec-title { margin:16px 0 6px; font-weight:700; letter-spacing:2px; }
+  .photo-grid { display:flex; flex-wrap:wrap; gap:8px; }
+  .photo-grid figure { width:31mm; }
+  .photo-grid img { width:31mm; height:31mm; object-fit:cover; border:1px solid #888; display:block; }
+  .photo-grid figcaption { font-size:10.5px; color:#555; text-align:center; margin-top:2px; }
+  .ev { margin-bottom:12px; }
+  .ev-head { display:flex; align-items:baseline; gap:10px; border-left:4px solid #9D2933;
+             padding-left:8px; margin-bottom:5px; }
+  .ev-date { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:#555; }
+  .ev-title { font-weight:700; letter-spacing:1px; }
+  .ev-photos { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .ev-photos img { width:24mm; height:24mm; object-fit:cover; border:1px solid #888; }
+  .sig { max-width:62mm; max-height:28mm; border:1px solid #888; background:#fff; padding:2px; margin-top:6px; }
+  .foot { margin-top:22px; }
+  .meta { margin-top:14px; font-size:11.5px; color:#777; display:flex; justify-content:space-between; }
+  .toolbar { width:210mm; margin:0 auto 8px; display:flex; gap:10px; }
+  .toolbar button { padding:8px 22px; font-size:14px; border:1px solid #9D2933; background:#9D2933; color:#fff; border-radius:6px; cursor:pointer; }
+  .toolbar a.back { color:#1a3a8f; text-decoration:none; font-size:13px; align-self:center; }
+  @media print {
+    body { background:#fff; }
+    .paper { box-shadow:none; margin:0; width:auto; min-height:auto; padding:0; }
+    .toolbar { display:none; }
+  }
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <button onclick="window.print()">🖨 打印 / 另存 PDF</button>
+    <a class="back" href="javascript:history.back()">← 返回系统</a>
+  </div>
+
+  <div class="paper">
+    <div class="head">
+      <div class="org">{{ org }}</div>
+      <h1>一宠一档档案</h1>
+      <div class="qr-box">
+        <img src="{{ qr }}" alt="溯源二维码">
+        <div class="cap">扫码验真</div>
+      </div>
+    </div>
+    <div class="no-line">档案编号：<span class="no">{{ doc_no }}</span><span class="stage">{{ stage_display }}</span></div>
+
+    <div class="sec-title">基本信息</div>
+    <table class="info">
+      {% for l1, v1, l2, v2 in info_rows %}
+      <tr>
+        <td class="lbl">{{ l1 }}{% if l1 %}：{% endif %}</td><td>{{ v1 }}</td>
+        <td class="lbl">{{ l2 }}{% if l2 %}：{% endif %}</td><td>{{ v2 }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    {% if photos %}
+    <div class="sec-title">动物照片</div>
+    <div class="photo-grid">
+      {% for p in photos %}
+      <figure><img src="{{ p.url }}" alt="{{ p.label }}"><figcaption>{{ p.label }}</figcaption></figure>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="sec-title">流转全过程（{{ events|length }} 条）</div>
+    {% for ev in events %}
+    <div class="ev">
+      <div class="ev-head">
+        <span class="ev-date">{{ ev.date }}</span>
+        <span class="ev-title">{{ ev.title }}</span>
+      </div>
+      <table>
+        {% for label, value in ev.rows %}
+        <tr><td class="lbl">{{ label }}：</td><td>{{ value }}</td></tr>
+        {% endfor %}
+      </table>
+      {% if ev.photos %}
+      <div class="ev-photos">
+        {% for p in ev.photos %}<img src="{{ p.url }}" alt="{{ p.label }}" title="{{ p.label }}">{% endfor %}
+      </div>
+      {% endif %}
+      {% if ev.signature %}<img class="sig" src="{{ ev.signature }}" alt="电子签名">{% endif %}
+    </div>
+    {% empty %}
+    <div style="color:#777;">暂无流转记录</div>
+    {% endfor %}
+
+    <div class="foot">
+      <div class="meta">
+        <span>打印人：{{ printed_by }}</span>
+        <span>打印时间：{{ printed_at }}</span>
+        <span>本档案由 TNR 流浪动物管理系统生成，内容随业务办理实时更新</span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

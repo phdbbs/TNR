@@ -32,14 +32,18 @@ URL = '/api/business/treatments/'
 
 
 class FlowBase(BusinessTestBase):
-    """诊疗流程用例基类：甲区医院 + 一只在院猫 + 一批药品。"""
+    """诊疗流程用例基类：甲区医院 + 一只在院猫 + 一批库存用药。
+
+    第六十四轮起库存里只有疫苗 / 驱虫药 / 芯片，处方只能从疫苗 / 驱虫药开；
+    绝育麻药与「其他」项目的用药一律手写记录，不占库存。
+    """
 
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
-        cls.med_a = make_material(category='medicine', name='头孢曲松钠',
+        cls.med_a = make_material(category='dewormer', name='体内外驱虫药A',
                                   district=cls.district_a)
-        cls.med_b = make_material(category='medicine', name='美洛昔康注射液',
+        cls.med_b = make_material(category='dewormer', name='体内外驱虫药B',
                                   district=cls.district_a)
         cls.vaccine = make_material(category='vaccine', name='猫三联',
                                     district=cls.district_a)
@@ -58,7 +62,7 @@ class FlowBase(BusinessTestBase):
         return self.ok(resp)['data']
 
     def _check(self, tid, submit=True, **kw):
-        body = {'temperature': 38.5, 'temperature_flag': 'normal'}
+        body = {'temperature': 38.5}
         body.update(kw)
         if not submit:
             body['draft'] = True
@@ -71,7 +75,7 @@ class FlowBase(BusinessTestBase):
     def _diagnosed(self, tid, items=None):
         """把单子推到「已诊断」，返回 detail。"""
         self.ok(self._check(tid))
-        items = items or [{'key': 'other', 'planned_date': '2026-03-01',
+        items = items or [{'key': 'deworming', 'planned_date': '2026-03-01',
                            'rx': [self.med_a.id]}]
         self.ok(self._plan(tid, items))
         return self.ok(self.post_json(f'{URL}{tid}/diagnose/', {}))['data']
@@ -216,10 +220,23 @@ class CheckStepTest(FlowBase):
                               {'temperature_flag': 'normal'})
         self.expect_fail(resp, 400, '体温检测')
 
-    def test_submit_requires_temperature_flag(self):
+    def test_temperature_flag_is_derived_server_side(self):
+        """判定一律由读数派生，客户端传来的判定不采信（第六十四轮）。
+
+        界面已经没有「正常 / 发烧」选项；直调 API 传 `temperature_flag`
+        若被采信，就会出现「40.2℃ + 正常」这种自相矛盾却照常落库的数据。
+        """
         detail = self._open()
-        resp = self.post_json(f'{URL}{detail["id"]}/check/', {'temperature': 38.5})
-        self.expect_fail(resp, 400, '体温判定')
+        body = self.ok(self.post_json(f'{URL}{detail["id"]}/check/', {
+            'temperature': 38.5, 'temperature_flag': 'fever'}))['data']
+        self.assertEqual(body['temperature'], 38.5)
+        self.assertEqual(body['temperature_flag'], 'normal')
+
+        other = self._open(make_pet(status='in_treatment', district=self.district_a,
+                                    hospital=self.hospital_a, species='猫'))
+        body = self.ok(self.post_json(f'{URL}{other["id"]}/check/', {
+            'temperature': 40.2, 'temperature_flag': 'normal'}))['data']
+        self.assertEqual(body['temperature_flag'], 'fever')
 
     def test_other_required_checks_may_stay_empty(self):
         """常见病 / 传染病 / 皮肤黏膜**允许全空**也能提交（业务 2026-10-19 口径）。
@@ -256,38 +273,12 @@ class CheckStepTest(FlowBase):
                               {'temperature': 405, 'temperature_flag': 'fever'})
         self.expect_fail(resp, 400, '超出合理范围')
 
-    def test_invalid_temperature_flag_rejected(self):
+    def test_legacy_flag_value_is_ignored(self):
+        """旧客户端传 `hot` 这种非法判定也不报错 —— 字段已不参与写入。"""
         detail = self._open()
-        resp = self.post_json(f'{URL}{detail["id"]}/check/',
-                              {'temperature': 38.5, 'temperature_flag': 'hot'})
-        self.expect_fail(resp, 400, '不合法')
-
-    # ---- 体温数值与判定的交叉校验（B3）----
-    # 背景：点 chip 自动填数值、手改数值不联动判定 —— 「40.2℃ + 正常」
-    # 这种矛盾组合曾经可以照常提交，打印单与体温趋势互相矛盾且无人核对。
-    def test_fever_temperature_cannot_be_marked_normal(self):
-        """发烧线的数值配「正常」判定必须拦 —— 这是「测了高温却漏改判定」，
-        漏标的发烧会绕过疫病监测，是交叉校验里危害最大的方向。"""
-        detail = self._open()
-        resp = self.post_json(f'{URL}{detail["id"]}/check/',
-                              {'temperature': 40.2, 'temperature_flag': 'normal'})
-        self.expect_fail(resp, 400, '矛盾')
-
-    def test_normal_temperature_cannot_be_marked_fever(self):
-        """反向矛盾同样拦：判定与数值必须落在发烧线同侧，数据才可统计。"""
-        detail = self._open()
-        resp = self.post_json(f'{URL}{detail["id"]}/check/',
-                              {'temperature': 38.5, 'temperature_flag': 'fever'})
-        self.expect_fail(resp, 400, '矛盾')
-
-    def test_fever_pair_submits_ok(self):
-        """正常对照：数值与判定一致时必须放行（只测「拦」的话，
-        把校验写成「一律拒绝」也能通过）。"""
-        detail = self._open()
-        body = self.ok(self._check(detail['id'], temperature=40.2,
-                                   temperature_flag='fever'))['data']
-        self.assertEqual(body['temperature'], 40.2)
-        self.assertEqual(body['temperature_flag'], 'fever')
+        body = self.ok(self.post_json(f'{URL}{detail["id"]}/check/', {
+            'temperature': 38.5, 'temperature_flag': 'hot'}))['data']
+        self.assertEqual(body['temperature_flag'], 'normal')
 
     # ---- 提交后锁定（第四十八轮）----
     # 「点保存下一步，返回后是不能再修改记录」。前端把第 1 步整页置灰，
@@ -334,46 +325,40 @@ class CheckStepTest(FlowBase):
         self.assertIsNone(tx.checked_at, '暂存不应把检查单锁定')
 
     def test_threshold_boundary_is_fever(self):
-        """边界值 39.5 恰好等于发烧线：≥ 判发烧（与前端自动判定同一条线）。"""
+        """边界值 39.5 恰好等于发烧线：≥ 判发烧。"""
         self.assertEqual(st.fever_judge(39.5), 'fever')
         self.assertEqual(st.fever_judge(39.4), 'normal')
         detail = self._open()
-        resp = self.post_json(f'{URL}{detail["id"]}/check/',
-                              {'temperature': 39.5, 'temperature_flag': 'normal'})
-        self.expect_fail(resp, 400, '矛盾')
-        body = self.ok(self._check(detail['id'], temperature=39.5,
-                                   temperature_flag='fever'))['data']
+        body = self.ok(self.post_json(f'{URL}{detail["id"]}/check/', {
+            'temperature': 39.4, 'draft': True}))['data']
+        self.assertEqual(body['temperature_flag'], 'normal')
+        body = self.ok(self.post_json(f'{URL}{detail["id"]}/check/', {
+            'temperature': 39.5}))['data']
         self.assertEqual(body['temperature_flag'], 'fever')
 
     def test_draft_allows_temperature_without_flag(self):
-        """暂存允许填一半：只填数值没选判定时不触发交叉校验
-        （提交时两者都必填，那时才校验组合）。"""
+        """暂存只填读数即可 —— 判定由服务端算，界面不再要求选判定。"""
         detail = self._open()
         body = self.ok(self._check(detail['id'], submit=False,
-                                   temperature=40.2, temperature_flag=''))['data']
+                                   temperature=40.2))['data']
         self.assertEqual(body['temperature'], 40.2)
+        self.assertEqual(body['temperature_flag'], 'fever')
 
-    def test_draft_rejects_contradictory_pair(self):
-        """暂存也拦矛盾组合 —— 暂存不是「存错的豁免」，矛盾数据一旦落库，
-        看板/打印都会展示出来。"""
-        detail = self._open()
-        resp = self.post_json(f'{URL}{detail["id"]}/check/',
-                              {'temperature': 40.2, 'temperature_flag': 'normal',
-                               'draft': True})
-        self.expect_fail(resp, 400, '矛盾')
+    def test_stale_flag_is_repaired_on_next_save(self):
+        """存量矛盾单（修复前落库的旧数据）在下一次保存时按读数修正。
 
-    def test_stale_contradiction_blocks_later_save(self):
-        """存量矛盾单（修复前落库的旧数据）在任何一次保存时被拦下来
-        逼着修正 —— 交叉校验对**最终组合**生效，而不是只看本次传没传体温。
-        前端每次保存都显式带体温字段，浏览器路径行为一致。"""
+        判定改成派生后不再需要医生重选：前端每次保存都显式带体温，
+        服务端据此把「40.2℃ + 正常」改写为「40.2℃ + 发烧」。
+        """
         detail = self._open()
         stale = Treatment.objects.get(id=detail['id'])
         stale.temperature = 40.2
         stale.temperature_flag = 'normal'
         stale.save(update_fields=['temperature', 'temperature_flag'])
-        resp = self.post_json(f'{URL}{detail["id"]}/check/',
-                              {'check_note': '精神可'}, )
-        self.expect_fail(resp, 400, '矛盾')
+        self.ok(self.post_json(f'{URL}{detail["id"]}/check/',
+                               {'temperature': 40.2, 'check_note': '精神可'}))
+        stale.refresh_from_db()
+        self.assertEqual(stale.temperature_flag, 'fever')
 
     def test_common_findings_conflict_rejected(self):
         """「无异常」与其它项互斥 —— 前端 chips 拦不住时服务端必须拦。"""
@@ -441,7 +426,7 @@ class PlanStepTest(FlowBase):
         detail = self._open()
         tid = detail['id']
         self.ok(self._check(tid))
-        resp = self._plan(tid, [{'key': 'other', 'rx': [self.med_a.id]}])
+        resp = self._plan(tid, [{'key': 'deworming', 'rx': [self.med_a.id]}])
         self.expect_fail(resp, 400, '未填预计执行时间')
 
     def test_item_without_rx_is_skipped(self):
@@ -451,11 +436,11 @@ class PlanStepTest(FlowBase):
         tid = detail['id']
         self.ok(self._check(tid))
         body = self.ok(self._plan(tid, [
-            {'key': 'other', 'planned_date': '2026-03-01', 'rx': [self.med_a.id]},
-            {'key': 'deworming', 'planned_date': '2026-03-01'},
+            {'key': 'deworming', 'planned_date': '2026-03-01', 'rx': [self.med_a.id]},
+            {'key': 'vaccine', 'planned_date': '2026-03-01'},
         ]))['data']
         keys = {i['itemKey'] for i in body['items']}
-        self.assertEqual(keys, {'other'})
+        self.assertEqual(keys, {'deworming'})
 
     def test_plan_rejects_unknown_item_key(self):
         detail = self._open()
@@ -466,12 +451,12 @@ class PlanStepTest(FlowBase):
 
     def test_plan_rejects_rx_without_hospital_stock(self):
         """本院没库存的药不能开进处方（原型「无库存 = 不可选」）。"""
-        empty = make_material(category='medicine', name='阿托品注射液',
+        empty = make_material(category='dewormer', name='体内外驱虫药（无库存）',
                               district=self.district_a)
         detail = self._open()
         tid = detail['id']
         self.ok(self._check(tid))
-        resp = self._plan(tid, [{'key': 'other', 'planned_date': '2026-03-01',
+        resp = self._plan(tid, [{'key': 'deworming', 'planned_date': '2026-03-01',
                                  'rx': [empty.id]}])
         self.expect_fail(resp, 400, '库存为 0')
 
@@ -483,9 +468,37 @@ class PlanStepTest(FlowBase):
         detail = self._open()
         tid = detail['id']
         self.ok(self._check(tid))
-        resp = self._plan(tid, [{'key': 'other', 'planned_date': '2026-03-01',
+        resp = self._plan(tid, [{'key': 'deworming', 'planned_date': '2026-03-01',
                                  'rx': [chip_material.id]}])
         self.expect_fail(resp, 400, '不是可开处方的物资')
+
+    def test_stock_rx_rejected_for_non_prescription_items(self):
+        """只有驱虫 / 免疫能从库存开方（第六十四轮）。
+
+        绝育的麻药不进库存、芯片只认芯片号、「其他」写手写记录 ——
+        这三类项目带 `rx` 一律 400，否则库存会被莫名其妙扣掉。
+        """
+        detail = self._open()
+        tid = detail['id']
+        self.ok(self._check(tid))
+        for key in ('sterilization', 'chip', 'other'):
+            with self.subTest(key=key):
+                resp = self._plan(tid, [{'key': key, 'planned_date': '2026-03-01',
+                                         'rx': [self.med_a.id]}])
+                self.expect_fail(resp, 400, '不从库存出处方')
+
+    def test_handwritten_rx_allowed_for_sterilization(self):
+        """绝育用药手写记录（`rx_other`）照常保存，不占库存。"""
+        detail = self._open()
+        tid = detail['id']
+        self.ok(self._check(tid))
+        body = self.ok(self._plan(tid, [{
+            'key': 'sterilization', 'planned_date': '2026-03-01',
+            'rx_other': '舒泰50 0.1ml 肌注'}]))['data']
+        item = body['items'][0]
+        self.assertEqual(item['itemKey'], 'sterilization')
+        self.assertEqual(item['rxOther'], '舒泰50 0.1ml 肌注')
+        self.assertEqual(item['rx'], [])
 
     def test_plan_rejects_malformed_rx_id(self):
         """`rx` 元素畸形必须报 400 并指出字段，不能是 500。
@@ -502,7 +515,7 @@ class PlanStepTest(FlowBase):
         for value in ([[1, 2, 3]], ['abc'], [{'a': 1}], [True],
                       ['999999999999999999999999'], [-1]):
             with self.subTest(rx=value):
-                resp = self._plan(tid, [{'key': 'other',
+                resp = self._plan(tid, [{'key': 'deworming',
                                          'planned_date': '2026-03-01',
                                          'rx': value}])
                 self.assertEqual(resp.status_code, 400,
@@ -513,7 +526,7 @@ class PlanStepTest(FlowBase):
                               % resp.json().get('message'))
 
         # 反向对照：正常数字 id 仍然能开方（否则上面的拒绝就是「一律拒绝」）
-        resp = self._plan(tid, [{'key': 'other', 'planned_date': '2026-03-01',
+        resp = self._plan(tid, [{'key': 'deworming', 'planned_date': '2026-03-01',
                                  'rx': [self.med_a.id]}])
         self.assertEqual(resp.status_code, 200, resp.content[:200])
 
@@ -523,7 +536,7 @@ class PlanStepTest(FlowBase):
         detail = self._open()
         tid = detail['id']
         self._diagnosed(tid)
-        resp = self._plan(tid, [{'key': 'other', 'planned_date': '2026-03-01',
+        resp = self._plan(tid, [{'key': 'deworming', 'planned_date': '2026-03-01',
                                  'rx': [self.med_a.id]}])
         self.expect_fail(resp, 400, '撤回诊断')
 
@@ -534,14 +547,13 @@ class PlanStepTest(FlowBase):
         self.ok(self._check(tid))
         self.ok(self._plan(tid, [
             {'key': 'vaccine', 'planned_date': '2026-03-01', 'rx': [self.vaccine.id]},
-            {'key': 'other', 'planned_date': '2026-03-01', 'rx': [self.med_a.id]},
+            {'key': 'deworming', 'planned_date': '2026-03-01', 'rx': [self.med_a.id]},
         ]))
         treatment = Treatment.objects.get(id=tid)
         self.assertTrue(treatment.items_vaccine)
+        self.assertTrue(treatment.items_deworming)
         self.assertFalse(treatment.items_sterilization)
         self.assertFalse(treatment.items_chip)
-        # `other` 没有对应的旧列，不该被误映射到某一列上
-        self.assertFalse(treatment.items_deworming)
 
     def test_chip_item_requires_chip_no(self):
         detail = self._open()
@@ -628,7 +640,7 @@ class ExecuteStepTest(FlowBase):
         tid = detail['id']
         self.ok(self._check(tid))
         body = self.ok(self._plan(tid, [
-            {'key': 'other', 'planned_date': '2026-03-01', 'rx': [self.med_a.id]}]))['data']
+            {'key': 'deworming', 'planned_date': '2026-03-01', 'rx': [self.med_a.id]}]))['data']
         item_id = self._first_item_id(body)
         resp = self.post_json(f'{URL}{tid}/items/{item_id}/execute/', {})
         self.expect_fail(resp, 400, '诊断完成')
@@ -643,7 +655,7 @@ class ExecuteStepTest(FlowBase):
         tid = detail['id']
         self.ok(self._check(tid))
         self.ok(self._plan(tid, [{
-            'key': 'other', 'planned_date': '2026-03-01',
+            'key': 'deworming', 'planned_date': '2026-03-01',
             'rx': [self.med_a.id, self.med_b.id]}]))
         self.ok(self.post_json(f'{URL}{tid}/diagnose/', {}))
         item = TreatmentItem.objects.get(treatment_id=tid)

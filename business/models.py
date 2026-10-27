@@ -524,19 +524,17 @@ class TreatmentRx(models.Model):
 # 物资
 # ============================================
 class Material(models.Model):
+    # 库存只有三类（第六十四轮）：疫苗 / 驱虫药 / 芯片。
+    # 药品（含麻药）不再进库存 —— 绝育用药写在诊疗单的用药记录里，
+    # 处方也只能从疫苗 / 驱虫药里开（`services_treatment.RX_CATEGORIES`）。
     CATEGORY_CHOICES = [
         ('vaccine', '疫苗'),
         ('dewormer', '驱虫药'),
         ('chip', '芯片'),
-        # R46 口径 1（**机制性口径**）：处方药品**走现有物料体系** ——
-        # 从已下发的药品里选、扣医院侧库存（`adjust_stock(txn_type='consume')`），
-        # **不新建独立药品字典**。所以这里只加一个类别，其余全链路自动复用：
-        # 采购 / 下发 / 签收 / 台账 / 库存对账 / CON 消耗流水都不用改。
-        #
-        # ⚠ 加类别必须**同时**把前端物料类别下拉补上（捕捉点 / 医院 / 平台端），
-        #   否则就是本项目反复栽过的「服务端放行、前端藏选项 = 静默做不到」。
-        ('medicine', '药品'),
     ]
+    # 历史数据的类别标签：`medicine` 已从选项里移除，但库里的旧行还在，
+    # 台账 / 监管导出不能显示成裸的 `medicine`。
+    LEGACY_CATEGORY_LABELS = {'medicine': '药品'}
     name = models.CharField('物资名称', max_length=100)
     category = models.CharField('类别', max_length=20, choices=CATEGORY_CHOICES)
     unit = models.CharField('单位', max_length=20)
@@ -557,6 +555,10 @@ class Material(models.Model):
         ordering = ['-id']
         verbose_name = '物资'
         verbose_name_plural = verbose_name
+
+    def get_category_display(self):
+        return (dict(self.CATEGORY_CHOICES).get(self.category)
+                or self.LEGACY_CATEGORY_LABELS.get(self.category, self.category))
 
     def __str__(self):
         return f'{self.name} ({self.get_category_display()})'
