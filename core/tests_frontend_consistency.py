@@ -5508,6 +5508,122 @@ class CaptureCreateInteractionContractTest(SimpleTestCase):
         self.assertIn('await this._generatePetEntries();', reset,
                       '重置后必须重新生成默认的第 1 只')
 
+    def test_capture_photos_offer_camera_and_library(self):
+        """捕捉端的照片入口必须「拍照」和「相册」两条都有（合影 + 逐只 + 编辑弹层）。
+
+        `<input type=file>` **带** `capture` 在手机上只开相机、够不到相册；
+        **不带** 的又常常只弹文件管理器、现场拍不了。所以每处都给两个隐藏
+        input（一条带 capture、一条不带）配两个按钮 —— 与医院端出库照片同形态。
+        """
+        add = self._method('render_capture_add')
+        self.assertIn('id="ca_groupPhotoCam" accept="image/*" capture="environment"', add)
+        self.assertIn('id="ca_groupPhotoLib" accept="image/*"', add)
+        self.assertIn("getElementById('btnGroupPhotoCam').addEventListener"
+                      "('click', () => groupCam.click())", add,
+                      '「拍照」按钮没有触发相机那条 input')
+        self.assertIn("getElementById('btnGroupPhotoLib').addEventListener"
+                      "('click', () => groupLib.click())", add,
+                      '「相册」按钮没有触发文件那条 input')
+        self.assertNotIn('ca_groupPhotoInput', add,
+                         '合影仍是单个 file input，手机端只能拍照')
+
+        gen = self._method('_generatePetEntries')
+        # 逐只：`capture` 只能挂在「拍照」那条 input 上，且必须走 `setAttribute`
+        # —— 部分内核不把 `capture` 反射成 IDL 属性，`input.capture = ...` 只挂
+        # 了个 JS 属性、标签上根本不留，手机浏览器读的是属性（实测踩过）。
+        self.assertIn("if (kind === 'cam') input.setAttribute('capture', 'environment');", gen)
+        self.assertNotIn("input.capture = 'environment'", gen,
+                         '逐只照片的 capture 用属性赋值，移动端根本没生效')
+        self.assertIn('data-photo-cam="${esc(c)}"', gen)
+        self.assertIn('data-photo-lib="${esc(c)}"', gen)
+        self.assertIn('this._petPhotos[code] = { cam: cam, lib: lib, file: carried }', gen)
+        self.assertIn("openPicker(btn.dataset.photoCam, 'cam')", gen)
+        self.assertIn("openPicker(btn.dataset.photoLib, 'lib')", gen)
+        self.assertNotIn('{ input: input, file: carried }', gen,
+                         '逐只仍是单个 input 记录，两个入口共用一条队列')
+        # 手机原图 3~5MB，一只一张，数量可到 100 —— 不本地压缩必撞请求体上限
+        self.assertIn('await TNR_UI.compressImage(raw)', gen)
+
+        # ⚠ 标记必须带上**只有标签里才出现**的上下文（`accept="image/*"`、
+        #   `class="btn btn-secondary"`）。只写属性名的话，JS 里那句
+        #   `querySelector('[data-ed-group-input="lib"]')` 照样命中 ——
+        #   把 input 整行删掉测试仍然全绿（M252 实测就是这个空转）。
+        for marker in (
+                'accept="image/*" capture="environment" data-ed-group-input="cam"',
+                'accept="image/*" data-ed-group-input="lib"',
+                'class="btn btn-secondary" data-ed-group-cam',
+                'class="btn btn-secondary" data-ed-group-lib',
+                'accept="image/*" capture="environment" data-pet-photo="',
+                'accept="image/*" data-pet-photo="',
+                'class="btn btn-secondary" data-pet-cam="',
+                'class="btn btn-secondary" data-pet-lib="'):
+            self.assertIn(marker, self.source,
+                          f'编辑捕捉记录弹层的照片入口缺 {marker}')
+        self.assertNotIn('id="ed_groupPhoto"', self.source,
+                         '编辑弹层仍用裸 file input，手机上分不清拍照/相册')
+
+
+# ============================================================
+# 第六十七轮：诊疗第 1 步的「可回改窗口」——前端四处必须跟服务端同口径
+# ============================================================
+class CheckStepEditableUntilDiagnosisTest(SimpleTestCase):
+    """「诊疗前检查」在**医嘱提交之前**必须能反复回改重交。
+
+    锁的边界从「检查单已提交（`checked_at`）」挪到「医嘱已提交（`diagnosed_at`）」：
+      - 医生点错体温、事后要改体检结论，旧口径把第 1 步直接封死，只能先撤回诊断绕路；
+      - 但医嘱一旦提交，体检结论就是那条医嘱的依据，事后静默改写等于让
+        「医嘱基于什么结论」失去凭据 —— 那时才必须锁。
+
+    ⚠ 断言一律**收窄到方法体内**（`METHOD_START` + `brace_body`）：在整份 JS 里
+    搜关键词，随便一句注释就能让它空转。
+    ⚠ 这四处的形态各不一样（表单 disabled / 底部按钮 / 点击拦截 / 文案），
+    漏改任何一处都不报错，只会让医生点了才吃 400，或该锁的地方仍然能改。
+    """
+
+    def _body(self, name):
+        source = blank_comments(read_js('hospital'))
+        for m in METHOD_START.finditer(source):
+            head = m.group(0).lstrip()
+            if re.match(r'(?:async\s+)?' + re.escape(name) + r'\s*\(', head):
+                return brace_body(source, m.end() - 1)
+        self.fail(f'医院端找不到方法 {name}()（改名要同步这条判据）')
+
+    def test_step1_readonly_gate_is_diagnosis_not_check_submission(self):
+        body = self._body('step1HTML')
+        self.assertRegex(
+            body,
+            r'const\s+locked\s*=\s*!!detail\.is_disposed\s*\|\|\s*!!detail\.diagnosed_at\s*;',
+            '第 1 步的只读条件必须是「已办结 / 医嘱已提交」两条')
+        self.assertNotIn('!!detail.checked_at', body,
+                         '第 1 步仍按「交过检查单」封死 —— 医嘱前改不了')
+
+    def test_step1_bottom_bar_keeps_the_resubmit_button(self):
+        body = self._body('bottomBarHTML')
+        start, end = body.index('f.step === 1'), body.index('f.step === 2')
+        step1 = body[start:end]
+        self.assertLess(step1.index('detail.diagnosed_at'),
+                        step1.index('tx-check-submit'),
+                        '「提交并下一步」必须在「医嘱已提交」判据之后：'
+                        '已下医嘱时留着按钮，用户点一次就吃一个服务端 400')
+        self.assertIn('data-act="tx-check-save"', step1, '第 1 步没有暂存入口')
+
+    def test_step1_click_blocker_uses_the_same_predicate(self):
+        body = self._body('onTreatmentAct')
+        self.assertIn('const step1Locked = f.step === 1', body,
+                      '找不到第 1 步的点击拦截（chips/分段按钮靠它挡）')
+        self.assertIn('f.detail.diagnosed_at || f.detail.is_disposed', body,
+                      '点击拦截的判据与表单口径不一致')
+        self.assertNotIn('f.detail.checked_at', body,
+                         '交过检查单就拦掉点击 —— 回改窗口又被堵死了')
+
+    def test_resubmit_toast_knows_it_is_a_second_submit(self):
+        body = self._body('saveTreatmentCheck')
+        self.assertLess(body.index('const again = !!f.detail.checked_at;'),
+                        body.index('TNR_API.treatmentCheck('),
+                        '`again` 必须在提交**前**取：提交后 detail 已刷新，'
+                        '再取就永远是「已更新」，首次提交也说成改单')
+        self.assertIn("again ? '检查单已更新，进入医嘱与处方' : '检查单已提交，进入医嘱与处方'", body)
+
 
 # ============================================================
 # 第四十三轮：门户首页（`/portal/`）与登录页的「入口 + 账号提示」必须完整

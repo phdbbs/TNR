@@ -280,37 +280,63 @@ class CheckStepTest(FlowBase):
             'temperature': 38.5, 'temperature_flag': 'hot'}))['data']
         self.assertEqual(body['temperature_flag'], 'normal')
 
-    # ---- 提交后锁定（第四十八轮）----
-    # 「点保存下一步，返回后是不能再修改记录」。前端把第 1 步整页置灰，
-    # 服务端 `apply_check()` 也必须拒绝 —— 否则直调 API 一样能改，
-    # 而「医嘱基于什么体检结论下的」就没有凭据了。
+    # ---- 第 1 步的可改窗口（第六十七轮收口）----
+    # 锁挂在**医嘱提交（诊断完成）**上，不是「检查单已提交」：医生交完检查单
+    # 才发现体温读数录错、传染病那节整节没勾，只能回第 1 步改了重交；
+    # 挂在 `checked_at` 上的旧口径等于把这类单子逼成「作废重开」。
+    # 前端按同一条判据放开，服务端也必须自己判 —— 否则直调 API 就能在
+    # 已下医嘱之后偷改体检结论，「医嘱基于什么体检结论下的」失去凭据。
 
-    def test_check_cannot_be_modified_after_submit(self):
+    def test_check_can_be_revised_before_diagnosis(self):
+        """提交过检查单、还没下医嘱 → 能改，且改完真的落库。"""
         detail = self._open()
-        self.ok(self._check(detail['id']))
-        resp = self.post_json(f'{URL}{detail["id"]}/check/',
-                              {'temperature': 39.9, 'temperature_flag': 'fever'})
-        self.expect_fail(resp, 400, '已提交')
+        self.ok(self._check(detail['id'], temperature=38.5))
+        self.ok(self._check(detail['id'], temperature=39.9))
+        from business.models import Treatment
+        tx = Treatment.objects.get(id=detail['id'])
+        self.assertEqual(tx.temperature, 39.9)
+        self.assertEqual(tx.temperature_flag, 'fever', '判定没跟着新读数重派生')
 
-    def test_check_cannot_be_drafted_after_submit(self):
+    def test_resubmit_keeps_first_submit_time(self):
+        """重交只改内容，不把「提交时间」刷成当前时间（阶段也不回退）。"""
+        detail = self._open()
+        first = self.ok(self._check(detail['id']))['data']['checkedAt']
+        body = self.ok(self._check(detail['id'], temperature=39.9))['data']
+        self.assertEqual(body['checkedAt'], first)
+        self.assertEqual(body['stage'], 'treating')
+
+    def test_check_locked_after_diagnosis(self):
+        detail = self._open()
+        self._diagnosed(detail['id'])
+        resp = self.post_json(f'{URL}{detail["id"]}/check/', {'temperature': 39.9})
+        self.expect_fail(resp, 400, '医嘱已提交')
+
+    def test_check_cannot_be_drafted_after_diagnosis(self):
         """暂存同样被拒 —— 锁定不是「只拦提交」。"""
         detail = self._open()
-        self.ok(self._check(detail['id']))
+        self._diagnosed(detail['id'])
         resp = self.post_json(f'{URL}{detail["id"]}/check/',
                               {'check_note': '改一笔', 'draft': True})
-        self.expect_fail(resp, 400, '已提交')
+        self.expect_fail(resp, 400, '医嘱已提交')
 
-    def test_submitted_check_values_stay_untouched(self):
+    def test_diagnosed_check_values_stay_untouched(self):
         """被拒之后，库里的检查结论必须**一个字段都没变**。"""
         detail = self._open()
-        self.ok(self._check(detail['id'], temperature=38.5,
-                            temperature_flag='normal'))
-        self.post_json(f'{URL}{detail["id"]}/check/',
-                       {'temperature': 41.0, 'temperature_flag': 'fever'})
+        self._diagnosed(detail['id'])
+        self.post_json(f'{URL}{detail["id"]}/check/', {'temperature': 41.0})
         from business.models import Treatment
         tx = Treatment.objects.get(id=detail['id'])
         self.assertEqual(tx.temperature, 38.5)
         self.assertEqual(tx.temperature_flag, 'normal')
+
+    def test_check_editable_again_after_undiagnose(self):
+        """反向对照：撤回诊断后窗口重新打开（不能做成一次锁死）。"""
+        detail = self._open()
+        self._diagnosed(detail['id'])
+        self.ok(self.post_json(f'{URL}{detail["id"]}/undiagnose/', {}))
+        self.ok(self._check(detail['id'], temperature=39.9))
+        from business.models import Treatment
+        self.assertEqual(Treatment.objects.get(id=detail['id']).temperature, 39.9)
 
     def test_draft_before_submit_can_be_saved_repeatedly(self):
         """正向对照：提交**之前**暂存可以反复保存（不能做成「一次都不能改」）。"""

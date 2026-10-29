@@ -10559,7 +10559,7 @@ renderAccountsTable() {
 实测校准后的锚：§5.15 起于 `DEPLOY.md:941`，现跨到 985，`## 六、常见报错对照`
 在 `DEPLOY.md:986`（原来是 982）。
 
-### 一百二十八、生产发布（c4fd5ab → ts-phd）与发布后实测
+### 一百二十八、生产发布（c4fd5ab → tnr）与发布后实测
 
 发布包 `git archive --format=tar.gz --prefix=tnr/ HEAD`：**288 个条目 / 1,868,066 字节**，
 sha256 `3994c867707ce49cdb20742ff2811d35362b3b19b507b08fabfbc31bdeaef7db`
@@ -10680,5 +10680,128 @@ HTTP 闸门矩阵（全部应为拒绝，且**拒绝即无痕**）：
 （「测试会隔离 MEDIA_ROOT」）实际在 `tnr_system/settings.py:338` ——
 `settings.py` 本轮没动过，说明行号锚这种引用方式本身就在持续腐烂。
 建议将来允许改手册时统一换成章节锚（`DEPLOY.md §5.15` 而不是 `:941`）。
+
+### 一百二十九、捕捉端照片双入口 + 诊疗前检查的回改窗口（开发第六十七轮）
+
+现场反馈两条，都属「界面上只缺一个按钮，代码里却能让整条路径消失」：
+
+1. **捕捉端上传照片只能拍照，选不到相册**（新增登记与编辑弹层都一样）；
+2. **医院端「诊疗前检查」点了「提交并下一步」就再也回不去**，
+   漏填一项、体温读数录错，只能先「撤回诊断」绕路，或者直接整单作废重开。
+
+#### 一、照片：一个 `<input type=file>` 装不下两种意图
+
+带 `capture` 的 input 在手机上**只开相机**，不带的又常常**只弹文件管理器** ——
+同一条队列承载不了两个意图。沿用第四十八轮医院端出库照片的形态：
+**每处两个隐藏 input（一条带 `capture="environment"`、一条不带）配两个显式按钮**，
+合影 / 逐只 / 编辑弹层各一套。
+
+- 新增捕捉登记：`shelter.js:804`（`ca_groupPhotoCam`，带 capture）
+  与 `shelter.js:805`（`ca_groupPhotoLib`，不带），按钮 `shelter.js:863`，
+  绑定 `shelter.js:921`；逐只两个 input 由 `_generatePetEntries` 动态建进
+  `#ca_petPhotoInputs`，按钮 `shelter.js:1379`。
+- 编辑捕捉记录弹层：合影两条 input `shelter.js:582`、逐只两条
+  （`data-pet-photo` + `data-photo-kind`），原来那个裸 `#ed_groupPhoto` 删除。
+
+三处踩过的坑，都写成了判据：
+
+| 坑 | 表现 | 收口 |
+|---|---|---|
+| `input.capture = 'environment'` | 本项目的内核实测 **不把 `capture` 反射成 IDL 属性**（`'capture' in HTMLInputElement.prototype === false`），属性赋值只在 JS 对象上挂了个字段，**标签上根本不留** —— 手机浏览器读的是属性，等于「相机独占」从未生效过 | 一律 `setAttribute('capture', 'environment')`（`shelter.js:1443`），M253 专门把它打回属性赋值 |
+| 预览写进被点击的节点（`icon.outerHTML = …`） | 第二次重选时手上握着的是**已脱离文档的旧节点**：界面永远停在第一张照片，上传的却是第二张 —— 拍错动物重选，提交前看不出没换 | 预览只写回固定容器 `#ca_groupPreview` / `#ed_groupPreview` 的 `innerHTML` |
+| 两个 input 不清空 | 不清自己 → 重选同一张时浏览器认为「没变化」，静默不生效；不清对方 → 先拍后选会留下相机那条的旧文件，而提交读的是「谁有文件用谁」，**预览显示相册那张、上传相机那张** | 每次选完 `input.value = ''` 且清空**另一条**（弹层同理，两条互清） |
+
+逐只照片仍走 `TNR_UI.compressImage`：手机原图 3~5MB、一只一张、数量可到 100，
+不本地压缩必撞 nginx 20M 请求体上限（`shelter.js` 合影那条同口径）。
+
+#### 二、检查单的锁：边界从「交过检查单」挪到「医嘱已提交」
+
+体检结论真正**成为依据**是在医嘱落下去那一刻。在那之前它还是草稿，改了不影响
+任何已发出的单据；在那之后必须锁，否则「医嘱基于什么体检结论下的」失去凭据。
+
+| 位置 | 改动 |
+|---|---|
+| `business/services_treatment.py:284` | `if treatment.checked_at:` → `if treatment.diagnosed_at:`，报错文案换成「医嘱已提交，不能再修改检查单；如需修正请先「撤回诊断」」（`raise` 在 `:285`） |
+| `business/services_treatment.py:410` | `if submit and treatment.checked_at is None:` —— 重交**不刷** `checked_at`，留首次提交时间，回改痕迹交给审计日志 |
+| `business/views_treatment.py:383` | 提交前取 `resubmit`，二次提交回「检查单已更新」而不是「检查单已提交」 |
+| `hospital.js:1325` | 第 1 步只读条件 `!!detail.is_disposed || !!detail.diagnosed_at` |
+| `hospital.js:1919` 起 | 底部按钮：只有**医嘱已提交**才收掉「提交并下一步」；交过检查单仍给「暂存 + 提交并下一步」 |
+| `hospital.js:1982` | 点击拦截（体温/常见病/传染病/皮肤黏膜都是 `<span>`/`<button>`，`disabled` 拦不住）同口径改判据 |
+| `hospital.js:2192` | `again` 必须在**提交前**取：提交后 `detail` 已刷新，再取就永远报「已更新」 |
+| 文案 | 已交未诊：蓝条「检查单已于 … 提交，下医嘱前可回到本步修改后重新提交（提交时间不变，改动留痕）」；医嘱已提交：绿条「医嘱已提交，本步内容仅可查看、不可修改」 |
+
+⚠ 服务端与前端**各写一遍同一条判据**，四处前端形态（表单 disabled / 底部按钮 /
+点击拦截 / 文案）漏任何一处都不报错：要么医生点了吃 400，要么该锁的地方还能改。
+所以判据用例断言一律**收窄到方法体内**（`METHOD_START` + `brace_body`）——
+在整份 JS 里搜关键词，随便一句注释就能让它空转。
+
+#### 三、测试
+
+| 层 | 内容 |
+|---|---|
+| 后端 | `business/tests/test_treatment_flow.py` 的「提交后锁定」组改写为「可回改窗口」组：医嘱前可改并落库、重交保留首次提交时间且阶段不回退、医嘱后拒改（提交与暂存都拒）、被拒后**一个字段都没变**、撤回诊断后窗口重新打开 |
+| 前端契约 | `core/tests_frontend_consistency.py` 新增 `test_capture_photos_offer_camera_and_library`（合影 + 逐只 + 弹层双入口、`setAttribute` 口径、压缩调用）与新类 `CheckStepEditableUntilDiagnosisTest`（四处判据各一条） |
+| 全量 | `core business supervision accounts` **2054 条用例通过** |
+
+**变异锚 M246–M254**（本轮新增 9 条，`scripts/mutation_check.py`）：
+
+| 锚 | 打回去的东西 | 结果 |
+|---|---|---|
+| M246 | 检查单锁边界退回「交过检查单」就锁死 | 捕获 |
+| M247 | 医嘱提交后仍能改检查单（服务端判据删掉） | 捕获 |
+| M248 | 重交把首次提交时间刷成当次 | 捕获 |
+| M249 | 前端第 1 步锁仍按 `checked_at` 判 | 捕获 |
+| M250 | 逐只照片退回相机独占（删相册那条 input） | 捕获 |
+| M251 | 合影相册按钮不接文件选择器 | 捕获 |
+| M252 | 编辑捕捉弹层去掉相册入口 | **首轮空转 → 修好** |
+| M253 | `capture` 退回属性赋值（`input.capture = …`） | 捕获 |
+| M254 | 弹层里只删「相册」按钮、JS 绑定留着 | 捕获 |
+
+⚠ M252 第一轮跑出来是「变异体下测试**全部通过** —— 空转！」，根因不是断言写错，是
+**标记选得太瘦**：判据里写的是裸属性名 `data-ed-group-input="lib"`，而 JS 那句
+`querySelector('[data-ed-group-input="lib"]')` 里同样含这段字符串 —— 把 `<input>`
+整行删掉，绑定行还留着替它命中，测试照绿。改成**只有标签里才出现**的上下文
+（`accept="image/*" …`、`class="btn btn-secondary" …`）后复跑 M250–M254 **5 条全部捕获**，
+并补 M254 钉住「只删按钮不删绑定」这一形态。前端markup 类判据从此按这个口径写。
+
+#### 四、浏览器实测（真实登录，数据全部界面产出）
+
+捕捉端（`city_shelter`）：
+
+- 新增登记页合影与逐只**各给两条 input**：`cam` 带 `capture="environment"`、
+  `lib` 不带；点「📷 拍照」触发 cam、点「🖼 相册」触发 lib、点照片格子走 cam
+  （沿用旧版手感），三处触发目标逐一核对。
+- 走「相册」那条 input 实际选图并提交 → **CAP2600016**：
+  `group_photo=photos/album-photo.jpg`、`TNR261029001` 的
+  `photo_capture=photos/album-photo_y43NHHk.jpg`（照片真的落库，不只是界面预览）。
+- 编辑弹层：先「相册」选 A、再「拍照」选 B、再「相册」选 A ——
+  每一步都只剩**最后选的那条 input 有文件**（另一条被清），保存后库里
+  `photo_capture=photos/edit-lib-photo.jpg`，与预览一致。裸 `#ed_groupPhoto` 已不存在。
+
+医院端（`babitang_hosp`，诊疗单 TRE2600023 / id=75）：
+
+- 看板「待诊断 1」→ 点「诊断」进第 2 步 → 点步骤条「诊疗前检查」回第 1 步：
+  提示条、`暂存` + `提交并下一步` 都在，被禁用字段 **0** 个。
+- 体温 39.7 → 38.2，「提交并下一步」→ 进入第 2 步；库里
+  `temperature=38.2`、`temperature_flag` 由 `fever` **重派生为 `normal`**，
+  `checked_at` 仍是 `2026-10-26 16:27:59`（没被刷成当前时间），
+  `diagnosed_at` 仍空、看板仍在「待诊断」。审计日志留下本次操作人 + 时间。
+- 第 2 步点「诊断完成」→ 回第 1 步：绿条「医嘱已提交，本步内容仅可查看、不可修改
+  （如需修正请先在「医嘱与处方」撤回诊断）」，提交类按钮**消失**、
+  只剩「下一步：医嘱与处方 ›」，字段 disabled=7，chips 点击无效。
+- 绕过界面**直调** `POST /api/business/treatments/75/check/`：
+  `400 {"message":"医嘱已提交，不能再修改检查单；如需修正请先「撤回诊断」"}` ——
+  服务端自己判，前端放开不构成洞。
+- 「撤回诊断」确认后回第 1 步：提示条回到蓝条、按钮回来、disabled=0
+  （窗口**可反复开合**，不是一次锁死）；看板恢复「待诊断 1 / 诊疗中 0」，
+  处置项目 4 项全部 False，本轮实测没有把这张单子的状态留在别处。
+
+#### 五、遗留与取舍
+
+- 手机端真机行为仍以属性为准：本端只能验「两条 input 的属性与触发目标对不对」，
+  相机 / 相册谁被拉起由浏览器决定 —— 这也是为什么 `setAttribute` 那条要单独钉一条变异。
+- 「诊疗记录」列表的「详情」按钮开的是**只读快照弹层**，不是三步流程；
+  已诊断的单子想回看检查单，只能从看板对应桶进流程。本轮未动。
+- 建议去向、执行阶段的锁口径不变（仍按 `disposed_at` / `done_at`），本轮只挪检查单这一条边界。
 
 

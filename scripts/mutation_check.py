@@ -2707,6 +2707,87 @@ MUTATIONS += [
     ),
 ]
 
+# ---------- 第六十七轮：诊疗前检查的可改窗口 + 捕捉端照片双入口 ----------
+# 两条判据都是「前后端各写一遍」的形态，漏任何一侧都不报错：
+#   ① 检查单的锁边界从「交过检查单（`checked_at`）」挪到「医嘱已提交
+#     （`diagnosed_at`）」—— 服务端写死了医生回不去第 1 步，服务端放开了
+#     医嘱就能被事后改写；
+#   ② 照片入口的 `capture` 加与不加，决定手机上能不能选相册 —— 界面上只
+#     少一个按钮，代码里却能让整条路径消失。
+MUTATIONS += [
+    (
+        # 锁退回「交过检查单就封死」：医嘱提交前回不去第 1 步改体温。
+        'M246 检查单锁边界退回首次提交', 'business/services_treatment.py',
+        "    if treatment.diagnosed_at:\n"
+        "        raise ValueError('医嘱已提交，不能再修改检查单；如需修正请先「撤回诊断」')\n",
+        "    if treatment.checked_at:\n"
+        "        raise ValueError('检查单已提交，不能再修改检查单')\n",
+        'test_check_can_be_revised_before_diagnosis',
+    ),
+    (
+        # 判据整条删掉：医嘱已经按旧体检结论发出并打印，结论却还能静默改写。
+        'M247 医嘱提交后仍能改检查单', 'business/services_treatment.py',
+        "    if treatment.diagnosed_at:\n"
+        "        raise ValueError('医嘱已提交，不能再修改检查单；如需修正请先「撤回诊断」')\n",
+        "",
+        'test_check_locked_after_diagnosis',
+    ),
+    (
+        # 重交把 `checked_at` 刷成当前时间：详情里的「检查提交」不再指向首次提交。
+        'M248 检查单重交把首次提交时间刷成当次', 'business/services_treatment.py',
+        "    if submit and treatment.checked_at is None:\n",
+        "    if submit:\n",
+        'test_resubmit_keeps_first_submit_time',
+    ),
+    (
+        # 前端第 1 步仍按「交过检查单」封死 —— 服务端已放开，界面却进不去，
+        # 医生只能先撤回诊断绕路。
+        'M249 前端第 1 步锁仍按交过检查单判', 'static/js/portals/hospital.js',
+        "    const locked = !!detail.is_disposed || !!detail.diagnosed_at;\n",
+        "    const locked = !!detail.is_disposed || !!detail.checked_at;\n",
+        'test_step1_readonly_gate_is_diagnosis_not_check_submission',
+    ),
+    (
+        # 逐只照片无条件带 `capture`：手机上只能现场拍，相册里已有的照片选不到。
+        'M250 逐只照片退回相机独占', 'static/js/portals/shelter.js',
+        "        if (kind === 'cam') input.setAttribute('capture', 'environment');\n",
+        "        input.setAttribute('capture', 'environment');\n",
+        'test_capture_photos_offer_camera_and_library',
+    ),
+    (
+        # 「相册」按钮不再触发文件选择器：合影只剩拍照一条路（新增登记页）。
+        'M251 合影相册按钮不接文件选择器', 'static/js/portals/shelter.js',
+        "    document.getElementById('btnGroupPhotoLib').addEventListener"
+        "('click', () => groupLib.click());\n",
+        "",
+        'test_capture_photos_offer_camera_and_library',
+    ),
+    (
+        # 编辑弹层去掉「相册」那条 input：重新上传原图时又只能拍照。
+        'M252 编辑捕捉弹层去掉相册入口', 'static/js/portals/shelter.js',
+        '          <input type="file" accept="image/*" data-ed-group-input="lib" style="display:none;">\n',
+        "",
+        'test_capture_photos_offer_camera_and_library',
+    ),
+    (
+        # 弹层里只删「相册」按钮、JS 绑定留着 —— 判据若只写属性名，
+        # `querySelector('[data-ed-group-lib]')` 那行照样命中，删了也测不出。
+        'M254 编辑捕捉弹层删掉相册按钮', 'static/js/portals/shelter.js',
+        '            <button type="button" class="btn btn-secondary" data-ed-group-lib>🖼 相册 / 文件</button>\n',
+        "",
+        'test_capture_photos_offer_camera_and_library',
+    ),
+    (
+        # `capture` 退回属性赋值：本项目的内核实测**不反射**成 IDL 属性，
+        # `input.capture = ...` 只挂了个 JS 属性、标签上根本不留 ——
+        # 手机浏览器读的是属性，于是「相机入口」从未真的存在过。
+        'M253 逐只照片 capture 退回属性赋值', 'static/js/portals/shelter.js',
+        "        if (kind === 'cam') input.setAttribute('capture', 'environment');\n",
+        "        if (kind === 'cam') input.capture = 'environment';\n",
+        'test_capture_photos_offer_camera_and_library',
+    ),
+]
+
 # 允许 5 元组（单文件变异）与 6 元组（+ 附加改动，用于「复现原缺陷」这类跨文件变异）
 MUTATIONS = [m if len(m) == 6 else m + ([],) for m in MUTATIONS]
 

@@ -572,7 +572,14 @@ const Shelter = {
         </div>
         <div class="form-group"><label class="form-label">整体合影（重新上传将替换原图）</label>
           <div id="ed_groupPreview" style="margin-bottom:8px;">${(full.groupPhoto || full.group_photo) ? '<img src="' + (full.groupPhoto || full.group_photo) + '" data-zoom="' + (full.groupPhoto || full.group_photo) + '" style="max-width:180px;border-radius:6px;border:1px solid var(--border-light);cursor:zoom-in;">' : '<span class="text-light fs-sm">未上传</span>'}</div>
-          <input type="file" class="form-input" id="ed_groupPhoto" accept="image/*">
+          <!-- 拍照 / 相册各一个隐藏 input：单个带 capture 的在手机上只开相机，
+               不带的又常常只弹文件管理器 —— 与新增捕捉登记同形态 -->
+          <div class="photo-pick">
+            <button type="button" class="btn btn-secondary" data-ed-group-cam>📷 拍照</button>
+            <button type="button" class="btn btn-secondary" data-ed-group-lib>🖼 相册 / 文件</button>
+          </div>
+          <input type="file" accept="image/*" capture="environment" data-ed-group-input="cam" style="display:none;">
+          <input type="file" accept="image/*" data-ed-group-input="lib" style="display:none;">
         </div>
         ${pets.length ? '<div class="form-group"><label class="form-label">单只照片与档案信息（按编号对应，重新上传将替换原图）</label><div class="pet-entry-list">' + pets.map(p => {
           const ph = p.photoCapture || p.photo_capture || '';
@@ -581,12 +588,19 @@ const Shelter = {
           const breed = p.breed || '';
           const petName = p.name || '';
           return '<div class="pet-entry">'
+            + '<div class="pet-entry-photo-wrap">'
             + '<div class="pet-entry-photo' + (ph ? ' has-photo' : '') + '" data-edit-photo-slot="' + p.id + '">'
             + (ph
                 ? '<img src="' + ph + '" alt="' + esc(p.code) + '" style="width:100%;height:100%;object-fit:cover;">'
-                : '<div class="pet-entry-photo-icon">🐾</div><div class="pet-entry-photo-tip">点击上传照片</div>')
+                : '<div class="pet-entry-photo-icon">🐾</div><div class="pet-entry-photo-tip">未选照片</div>')
             + '</div>'
-            + '<input type="file" accept="image/*" data-pet-photo="' + p.id + '" style="display:none;">'
+            + '<div class="photo-pick">'
+            + '<button type="button" class="btn btn-secondary" data-pet-cam="' + p.id + '">📷 拍照</button>'
+            + '<button type="button" class="btn btn-secondary" data-pet-lib="' + p.id + '">🖼 相册</button>'
+            + '</div>'
+            + '</div>'
+            + '<input type="file" accept="image/*" capture="environment" data-pet-photo="' + p.id + '" data-photo-kind="cam" style="display:none;">'
+            + '<input type="file" accept="image/*" data-pet-photo="' + p.id + '" data-photo-kind="lib" style="display:none;">'
             + '<div class="pet-entry-body">'
             + '<div class="pet-entry-head"><span class="pet-code-chip">' + esc(p.code) + '</span>'
             + '<span class="pet-entry-index">照片/类别/性别/品种可改，编号不可改</span></div>'
@@ -619,27 +633,52 @@ const Shelter = {
       { title: '物业电子签名', initial: full.signature || null });
     // 绑定照片点击放大
     TNR_UI.bindPhotoZoom(document);
-    // 逐只照片槽：点击 → 打开该只动物对应的隐藏 file input，选图后就地预览。
-    // 这里刻意不用 <label> 包裹：label 会连带把「点击看大图」也变成「打开文件选择器」。
+    // 整体合影 / 逐只照片：拍照与相册各一个隐藏 input（同「新增捕捉登记」）。
+    // 选完只做就地预览，文件仍留在各自的 input 上，提交时按「哪条有文件取哪条」，
+    // 所以只清空**另一条**（保证预览与上传的是同一张），不清自己。
+    const groupPreview = document.getElementById('ed_groupPreview');
+    const groupCam = document.querySelector('[data-ed-group-input="cam"]');
+    const groupLib = document.querySelector('[data-ed-group-input="lib"]');
+    document.querySelector('[data-ed-group-cam]').addEventListener('click', () => groupCam.click());
+    document.querySelector('[data-ed-group-lib]').addEventListener('click', () => groupLib.click());
+    const pickGroup = (input, other) => {
+      const f = input.files && input.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        // 写回固定容器，不替换当前节点：替换后手上握着的是已脱离文档的旧节点，
+        // 第二次重选就没有任何预览变化了。
+        groupPreview.innerHTML = '<img src="' + ev.target.result + '" alt="待上传合影" '
+          + 'style="max-width:180px;border-radius:6px;border:1px solid var(--border-light);display:block;">';
+      };
+      reader.readAsDataURL(f);
+      other.value = '';
+    };
+    groupCam.addEventListener('change', () => pickGroup(groupCam, groupLib));
+    groupLib.addEventListener('change', () => pickGroup(groupLib, groupCam));
+
     document.querySelectorAll('[data-edit-photo-slot]').forEach(slot => {
-      slot.addEventListener('click', () => {
-        const input = document.querySelector('[data-pet-photo="' + slot.dataset.editPhotoSlot + '"]');
-        if (input) input.click();
-      });
-    });
-    document.querySelectorAll('[data-pet-photo]').forEach(input => {
-      input.addEventListener('change', () => {
+      const id = slot.dataset.editPhotoSlot;
+      const cam = document.querySelector('[data-pet-photo="' + id + '"][data-photo-kind="cam"]');
+      const lib = document.querySelector('[data-pet-photo="' + id + '"][data-photo-kind="lib"]');
+      // 刻意不用 <label> 包裹照片槽：label 会连带把「点击看大图」变成「打开文件选择器」，
+      // 所以点格子只开相机，要从相册选就用格子下面那两个按钮。
+      slot.addEventListener('click', () => cam && cam.click());
+      document.querySelector('[data-pet-cam="' + id + '"]').addEventListener('click', () => cam && cam.click());
+      document.querySelector('[data-pet-lib="' + id + '"]').addEventListener('click', () => lib && lib.click());
+      const pick = (input, other) => {
         const f = input.files && input.files[0];
         if (!f) return;
-        const slot = document.querySelector('[data-edit-photo-slot="' + input.dataset.petPhoto + '"]');
-        if (!slot) return;
         const reader = new FileReader();
         reader.onload = (ev) => {
-          slot.innerHTML = '<img src="' + ev.target.result + '" alt="待上传" style="width:100%;height:100%;object-fit:cover;">';
+          slot.innerHTML = '<img src="' + ev.target.result + '" alt="待上传">';
           slot.classList.add('has-photo');
         };
         reader.readAsDataURL(f);
-      });
+        other.value = '';
+      };
+      if (cam) cam.addEventListener('change', () => pick(cam, lib));
+      if (lib) lib.addEventListener('change', () => pick(lib, cam));
     });
 
     document.getElementById('btnSaveCaptureEdit').addEventListener('click', async (ev) => {
@@ -662,9 +701,12 @@ const Shelter = {
       fd.append('district_id', document.getElementById('ed_districtId').value || '');
       // 「留空则保留」：没重新签就不传，避免每次保存都把同一张签名重新上传一份
       if (sigPad.isDirty() && !sigPad.isEmpty()) fd.append('signature', sigPad.getDataURL());
-      const photoInput = document.getElementById('ed_groupPhoto');
-      if (photoInput.files && photoInput.files[0]) fd.append('group_photo', photoInput.files[0]);
-      // 单只照片：按 pet_id 匹配（后端 pet_photo_<pet_id> 落库到该宠物 photo_capture）
+      // 合影两条 input（拍照 / 相册）里取有文件的那条：每次选图会清掉另一条，
+      // 所以最多一条有值，提交的就是预览上那张
+      const groupFile = (groupCam.files && groupCam.files[0]) || (groupLib.files && groupLib.files[0]);
+      if (groupFile) fd.append('group_photo', groupFile);
+      // 单只照片：按 pet_id 匹配（后端 pet_photo_<pet_id> 落库到该宠物 photo_capture）。
+      // 每只两个 input，同样只有一条有值，直接按 data-pet-photo 归并即可。
       // 注意：必须用 document 查询——本方法是独立方法，作用域内没有 wrap；
       // 误用 wrap 会抛 ReferenceError，导致保存流程整体中断。
       document.querySelectorAll('[data-pet-photo]').forEach(inp => {
@@ -755,9 +797,12 @@ const Shelter = {
     this._pendingCodes = null;
 
     el.innerHTML = `
-      <!-- 隐藏的相机/文件选择元素：accept=image/* 让手机浏览器弹出相机/相册选项；
-           capture=environment 默认调后置摄像头；在桌面浏览器则回退为文件选择弹窗 -->
-      <input type="file" id="ca_groupPhotoInput" accept="image/*" capture="environment" style="display:none;">
+      <!-- 拍照 / 相册各一个隐藏 input：单个**带 capture** 的 input 在手机上只开相机、
+           选不到相册，**不带** 的又常常只弹文件管理器、现场拍不了 ——
+           两个入口各给一个才都够得着（与医院端出库照片同形态）。
+           逐只照片的 input 在生成编号时动态插入。 -->
+      <input type="file" id="ca_groupPhotoCam" accept="image/*" capture="environment" style="display:none;">
+      <input type="file" id="ca_groupPhotoLib" accept="image/*" style="display:none;">
       <div id="ca_petPhotoInputs"><!-- 由生成编号时动态插入 --></div>
 
       <div class="card">
@@ -809,10 +854,14 @@ const Shelter = {
             </div>
           </div>
           <div class="form-group"><label class="form-label">整体合影<span class="req">*</span></label>
-            <div class="upload-area" id="ca_groupUpload" style="padding:20px;cursor:pointer;">
-              <div class="upload-icon" id="ca_groupIcon">📷</div>
-              <div class="upload-text" id="ca_groupText">点击上传整体合影</div>
-              <div class="upload-hint" id="ca_groupHint">手机端会自动打开相机，电脑端会弹出文件选择器</div>
+            <div class="upload-area" style="padding:20px;cursor:default;">
+              <div id="ca_groupPreview"><div class="upload-icon">📷</div></div>
+              <div class="upload-text" id="ca_groupText">尚未选择合影</div>
+              <div class="upload-hint" id="ca_groupHint">现场拍一张，或从相册 / 本地文件里选一张</div>
+            </div>
+            <div class="photo-pick">
+              <button type="button" class="btn btn-secondary" id="btnGroupPhotoCam">📷 拍照</button>
+              <button type="button" class="btn btn-secondary" id="btnGroupPhotoLib">🖼 相册 / 文件</button>
             </div>
           </div>
           <div class="form-group"><label class="form-label">单只照片与档案信息（逐只填写）<span class="req">*</span></label>
@@ -839,14 +888,13 @@ const Shelter = {
     `;
 
     // ========== 整体合影上传 ==========
-    const groupInput = document.getElementById('ca_groupPhotoInput');
-    const groupSlot = document.getElementById('ca_groupUpload');
-    const groupIcon = document.getElementById('ca_groupIcon');
+    const groupCam = document.getElementById('ca_groupPhotoCam');
+    const groupLib = document.getElementById('ca_groupPhotoLib');
+    const groupPreview = document.getElementById('ca_groupPreview');
     const groupText = document.getElementById('ca_groupText');
     const groupHint = document.getElementById('ca_groupHint');
-    groupSlot.addEventListener('click', () => groupInput.click());
-    groupInput.addEventListener('change', async (e) => {
-      const raw = e.target.files && e.target.files[0];
+    const pickGroup = async (input) => {
+      const raw = input.files && input.files[0];
       if (!raw) return;
       groupText.textContent = '处理中…';
       // 手机原图常有 3~5MB：先在本地压到长边 1600 再上传，
@@ -854,13 +902,24 @@ const Shelter = {
       const f = await TNR_UI.compressImage(raw);
       const reader = new FileReader();
       reader.onload = (ev) => {
-        groupIcon.outerHTML = '<img id="ca_groupIcon" src="' + ev.target.result + '" style="width:100%;max-height:180px;object-fit:cover;border-radius:6px;display:block;">';
+        // 预览必须写进固定容器：直接替换被点击的那个节点的话，第二次选择时
+        // 手上握着的已是脱离文档的旧节点，界面上永远停在第一张照片，
+        // 而上传的却是第二张 —— 拍错动物重选，提交前根本看不出没换。
+        groupPreview.innerHTML = '<img src="' + ev.target.result + '" alt="整体合影" '
+          + 'style="width:100%;max-height:180px;object-fit:cover;border-radius:6px;display:block;">';
         groupText.textContent = '已选择：' + raw.name + '（' + Math.round(f.size / 1024) + 'KB）';
-        groupHint.textContent = '点击可重新选择 / 拍照';
+        groupHint.textContent = '重新选择会替换这张合影';
         this._groupPhoto = { file: f };
       };
       reader.readAsDataURL(f);
-    });
+      // 允许「选同一张照片」再次触发：不清空 value 时浏览器认为没变化，
+      // 重拍/重选同一文件会静默无反应（照片已经换了，`_groupPhoto` 却没换）
+      input.value = '';
+    };
+    groupCam.addEventListener('change', () => pickGroup(groupCam));
+    groupLib.addEventListener('change', () => pickGroup(groupLib));
+    document.getElementById('btnGroupPhotoCam').addEventListener('click', () => groupCam.click());
+    document.getElementById('btnGroupPhotoLib').addEventListener('click', () => groupLib.click());
 
     // ========== 定位功能 ==========
     // 流程：浏览器 Geolocation（WGS-84）→ 转换为高德 GCJ-02 坐标 → 请求后端逆地理编码接口
@@ -1257,13 +1316,10 @@ const Shelter = {
       this._generatedCount = 0;
       this._groupPhoto = null;
       this._petPhotos = {};
-      // 重置整体合影上传区的预览
-      const groupIcon = document.getElementById('ca_groupIcon');
-      const groupText = document.getElementById('ca_groupText');
-      const groupHint = document.getElementById('ca_groupHint');
-      if (groupIcon) groupIcon.outerHTML = '<div id="ca_groupIcon" style="font-size:20px;">📷</div>';
-      if (groupText) groupText.textContent = '点击上传整体合影';
-      if (groupHint) groupHint.textContent = '手机端会自动打开相机，电脑端会弹出文件选择器';
+      // 重置整体合影上传区的预览（预览写回固定容器，节点没被换掉，直接复用引用）
+      groupPreview.innerHTML = '<div class="upload-icon">📷</div>';
+      groupText.textContent = '尚未选择合影';
+      groupHint.textContent = '现场拍一张，或从相册 / 本地文件里选一张';
       await this._generatePetEntries();
     });
   },
@@ -1305,7 +1361,8 @@ const Shelter = {
     document.getElementById('ca_petCodes').innerHTML =
       codes.map(c => '<span class="pet-code-chip">' + c + '</span>').join('');
 
-    // 隐藏的文件选择器（每只一个，accept=image/* 让手机弹出相机/相册）
+    // 隐藏的文件选择器：每只两个（拍照一条 + 相册一条），由下面的循环建进
+    // `#ca_petPhotoInputs`，按钮与照片槽只负责触发它们
     const hiddenInputs = document.getElementById('ca_petPhotoInputs');
     hiddenInputs.innerHTML = '';
     this._petPhotos = {};
@@ -1313,9 +1370,15 @@ const Shelter = {
     const esc = TNR_UI.escape.bind(TNR_UI);
     entriesEl.innerHTML = codes.map((c, i) => `
       <div class="pet-entry" data-entry-code="${esc(c)}">
-        <div class="pet-entry-photo" data-photo-slot="${esc(c)}">
-          <div class="pet-entry-photo-icon">📷</div>
-          <div class="pet-entry-photo-tip">点击拍照/上传</div>
+        <div class="pet-entry-photo-wrap">
+          <div class="pet-entry-photo" data-photo-slot="${esc(c)}">
+            <div class="pet-entry-photo-icon">📷</div>
+            <div class="pet-entry-photo-tip">未选照片</div>
+          </div>
+          <div class="photo-pick">
+            <button type="button" class="btn btn-secondary" data-photo-cam="${esc(c)}">📷 拍照</button>
+            <button type="button" class="btn btn-secondary" data-photo-lib="${esc(c)}">🖼 相册</button>
+          </div>
         </div>
         <div class="pet-entry-body">
           <div class="pet-entry-head">
@@ -1370,34 +1433,57 @@ const Shelter = {
     };
 
     codes.forEach(code => {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'image/*';
-      input.capture = 'environment';
-      input.style.display = 'none';
-      input.dataset.code = code;
-      hiddenInputs.appendChild(input);
+      const mkInput = (kind) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        // 必须走 `setAttribute`：`capture` 不是所有浏览器都反射成 IDL 属性，
+        // `input.capture = ...` 在部分内核上只挂了个 JS 属性、标签上根本不留，
+        // 手机浏览器读的是**属性** —— 那样等于相机独占这条从未生效过。
+        if (kind === 'cam') input.setAttribute('capture', 'environment');
+        input.style.display = 'none';
+        input.dataset.code = code;
+        input.dataset.photoKind = kind;
+        hiddenInputs.appendChild(input);
+        return input;
+      };
+      const cam = mkInput('cam');
+      const lib = mkInput('lib');
       // 编号没变的，把之前选好的照片一并带过来，避免改数量后要重拍一遍
       const carried = prevPhotos[code] && prevPhotos[code].file ? prevPhotos[code].file : null;
-      this._petPhotos[code] = { input: input, file: carried };
+      this._petPhotos[code] = { cam: cam, lib: lib, file: carried };
       if (carried) paintSlot(code, carried);
-      input.addEventListener('change', async (e) => {
-        const raw = e.target.files && e.target.files[0];
+      const pick = async (input, sibling) => {
+        const raw = input.files && input.files[0];
         if (!raw) return;
         // 与合影同一条路径：先本地压缩再入队，避免请求体超限 / 上传过慢。
         // 一只动物一张，`pet_count` 最多 100 —— 不压的话很容易撞 nginx 20M。
         const f = await TNR_UI.compressImage(raw);
         this._petPhotos[code].file = f;
         paintSlot(code, f);
-      });
+        // 两个 input 都要清空：不清自己，重选同一张照片时浏览器认为「没变化」，
+        // 静默不生效；不清对方，先拍后选会留下相机那条的旧文件，而提交读的是
+        // 「谁有文件用谁」——结果是预览显示相册那张，上传的是相机那张。
+        input.value = '';
+        sibling.value = '';
+      };
+      cam.addEventListener('change', () => pick(cam, lib));
+      lib.addEventListener('change', () => pick(lib, cam));
     });
 
-    // 点击照片槽 → 打开该只动物对应的隐藏 input
+    const openPicker = (code, kind) => {
+      const rec = this._petPhotos[code];
+      if (rec && rec[kind]) rec[kind].click();
+    };
+    // 点照片槽仍是「直接拍」（沿用旧版手感），要改从相册选就点下面的按钮
     entriesEl.querySelectorAll('[data-photo-slot]').forEach(slot => {
-      slot.addEventListener('click', () => {
-        const rec = this._petPhotos[slot.dataset.photoSlot];
-        if (rec && rec.input) rec.input.click();
-      });
+      slot.addEventListener('click', () => openPicker(slot.dataset.photoSlot, 'cam'));
+    });
+    entriesEl.querySelectorAll('[data-photo-cam]').forEach(btn => {
+      btn.addEventListener('click', () => openPicker(btn.dataset.photoCam, 'cam'));
+    });
+    entriesEl.querySelectorAll('[data-photo-lib]').forEach(btn => {
+      btn.addEventListener('click', () => openPicker(btn.dataset.photoLib, 'lib'));
     });
   },
 

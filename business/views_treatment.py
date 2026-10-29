@@ -380,13 +380,17 @@ def treatment_check(request, pk):
         return json_fail('诊疗单不存在或无权访问', status=404)
 
     submit = not _truthy(data.get('draft'))
+    resubmit = treatment.checked_at is not None
     try:
         with transaction.atomic():
             st.apply_check(treatment, data, submit=submit)
     except ValueError as e:
         return json_fail(str(e))
-    return json_ok(_treatment_detail_data(treatment),
-                   message='检查单已提交' if submit else '检查单已暂存')
+    if submit:
+        msg = '检查单已更新' if resubmit else '检查单已提交'
+    else:
+        msg = '检查单已暂存'
+    return json_ok(_treatment_detail_data(treatment), message=msg)
 
 
 # ============================================

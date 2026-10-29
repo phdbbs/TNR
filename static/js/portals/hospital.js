@@ -1316,12 +1316,13 @@ const Hospital = {
     const tests = opts.infectious_tests || [];
     const results = opts.test_results || [];
     const intake = detail.intake || {};
-    // 只读的两种情况（第四十八轮）：
+    // 只读的两种情况（第六十七轮收口）：
     //   ① 已办结 —— 办结时间与去向是历史事实，改不得；
-    //   ② 检查单**已提交** —— 返回第 1 步只能看，不能改。
-    //      检查结果是医嘱与诊断的依据，事后静默改写会让「医嘱基于什么
-    //      体检结论下的」失去凭据。服务端 `apply_check()` 同样拒绝二次修改。
-    const locked = !!detail.is_disposed || !!detail.checked_at;
+    //   ② 医嘱已提交（诊断完成）—— 体检结论已经是医嘱的依据，事后静默改写
+    //      会让「医嘱基于什么体检结论下的」失去凭据。
+    // 只提交过检查单、还没下医嘱的，**允许回第 1 步改了再交**（服务端
+    // `apply_check()` 同一条判据）。
+    const locked = !!detail.is_disposed || !!detail.diagnosed_at;
     const dis = locked ? ' disabled' : '';
 
     let h = '<div class="card mb-5"><div class="card-header">'
@@ -1355,13 +1356,16 @@ const Hospital = {
       + '<div><div class="k">接收日期</div><div class="v">' + this.formatDate(intake.receive_date) + '</div></div>'
       + '</div>';
 
-    if (!locked) {
+    if (locked) {
+      h += '<div class="tx-tip suc"><span>✓</span><div><b>医嘱已提交</b>，'
+        + '本步内容仅可查看、不可修改（如需修正请先在「医嘱与处方」撤回诊断）。</div></div>';
+    } else if (detail.checked_at) {
+      h += '<div class="tx-tip inf"><span>ℹ</span><div>检查单已于 '
+        + this.formatDateTime(detail.checked_at)
+        + ' 提交，下医嘱前可回到本步修改后重新提交（提交时间不变，改动留痕）。</div></div>';
+    } else {
       h += '<div class="tx-tip wrn"><span>✎</span><div>以上为动物基础属性，'
         + '修改后写回档案并留痕（记录操作人与时间）。</div></div>';
-    } else if (detail.checked_at && !detail.is_disposed) {
-      h += '<div class="tx-tip suc"><span>✓</span><div><b>检查单已提交</b>，'
-        + '本步内容仅可查看、不可修改（提交时间 '
-        + this.formatDateTime(detail.checked_at) + '）。</div></div>';
     }
     h += '</div></div>';
 
@@ -1915,10 +1919,10 @@ const Hospital = {
       return '<button class="btn btn-primary" data-act="tx-back">返回看板（本单已办结）</button>';
     }
     if (f.step === 1) {
-      // 已提交 → 只剩「下一步」。不给「保存修改」，因为服务端也拒绝改
-      // （`apply_check` 见 `checked_at` 即 400）—— 界面留着按钮只会让
-      // 用户点一次、吃一个 400，还以为是系统坏了。
-      if (detail.checked_at) {
+      // 医嘱已提交（诊断完成）→ 只剩「下一步」，不给提交按钮：服务端
+      // `apply_check()` 那时会 400，界面留着按钮只会让用户点一次吃一个报错。
+      // 只提交过检查单、还没下医嘱的照旧给「提交并下一步」——同一入口可反复重交。
+      if (detail.diagnosed_at) {
         return '<button class="btn btn-primary" data-act="tx-step" data-v="2">'
           + '下一步：医嘱与处方 ›</button>';
       }
@@ -1971,12 +1975,12 @@ const Hospital = {
     }
     if (!f) return;
 
-    // 检查单已提交 / 已办结 → 第 1 步只读。
+    // 医嘱已提交 / 已办结 → 第 1 步只读（只交过检查单不算，还能改）。
     // ⚠ 光把 `<input>` 设 `disabled` 不够：体温 chips、常见病 chips、
     //   传染病分段按钮、皮肤黏膜 chips 都是 `<span>` / `<button>`，
     //   `disabled` 拦不住点击 —— 点了照样改 `draft`，只是保存时被服务端 400。
     const step1Locked = f.step === 1
-      && (f.detail.checked_at || f.detail.is_disposed);
+      && (f.detail.diagnosed_at || f.detail.is_disposed);
     if (step1Locked && ['tx-temp-step', 'tx-common', 'tx-common-other',
                         'tx-test', 'tx-skin'].indexOf(act) >= 0) {
       return;
@@ -2185,11 +2189,13 @@ const Hospital = {
     try {
       const payload = this.txCheckPayload();
       payload.draft = !!isDraft;
+      const again = !!f.detail.checked_at;
       const res = await TNR_API.treatmentCheck(f.detail.id, payload);
       TNR_UI.assertOk(res, '检查单保存失败');
       // 暂存停在原步骤（提交才前进），否则「点了暂存却被弹到第二步」。
       this.startTreatmentFlow(res.data, isDraft ? f.step : 2);
-      TNR_UI.toast(isDraft ? '检查单已暂存' : '检查单已提交，进入医嘱与处方', 'success');
+      TNR_UI.toast(isDraft ? '检查单已暂存'
+        : (again ? '检查单已更新，进入医嘱与处方' : '检查单已提交，进入医嘱与处方'), 'success');
     } catch (e) {
       TNR_UI.toast(e.message || '保存失败', 'danger');
     }
