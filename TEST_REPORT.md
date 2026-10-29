@@ -10804,4 +10804,80 @@ HTTP 闸门矩阵（全部应为拒绝，且**拒绝即无痕**）：
   已诊断的单子想回看检查单，只能从看板对应桶进流程。本轮未动。
 - 建议去向、执行阶段的锁口径不变（仍按 `disposed_at` / `done_at`），本轮只挪检查单这一条边界。
 
+### 一百三十、生产发布（3bf0e00 → tnr）与现网实测
+
+发布包 `git archive --format=tar.gz --prefix=tnr/ HEAD`：**293 个条目 / 1,930,461 字节**，
+sha256 `bd9de536c70ba594373d149213b7fd8b28bf7eedce144dc706d00ac2368c24f3`。
+本批**无迁移**（现网 `business` 已应用到 `0040_checkin_review_note`，`showmigrations` 全 `[X]`），
+所以回滚只需要重打包覆盖 + `collectstatic` + 重启，不动库。
+
+#### 一、备份闸门（`/var/backups/tnr/3bf0e00-20261029-215823/`）
+
+| 产物 | 实测 | 闸门 |
+|---|---|---|
+| `db-tnr_system.sql` 760,770 B | `grep -c '^CREATE TABLE'` = **40**，结尾 `-- Dump completed on 2026-10-29 13:58:24` | 与现网 `information_schema` 的 BASE TABLE 数**相等**（不是手册里的 33） |
+| `opt-tnr-code.tar.gz` 20,371,832 B | 1382 条目，`^tnr/venv/` 命中 **0** | 条目数 + 清单，**不看退出码** |
+| `media.tar.gz` 11,944,246 B | 1785 条目 | 非空即过 |
+| `conf.tar.gz` **163 B** | `tar tzf` 列出 `sites-enabled/tnr` | ⚠ **小包 ≠ 空包**：一个 nginx 站点文件本来就只有几十行，判据是清单里有没有期望的那两条路径，字节数只能用来抓「45 字节空包」这一种失败 |
+| `env.txt` 766 B | `-rw-r----- root` | 发布脚本第 3 步拿它比对 `.env` 没被覆盖 |
+
+#### 二、发布动作与静态缓存闸门（内容哈希取代人工 `?v=`）
+
+`migrate --noinput` → 无待应用；`collectstatic --noinput`（root）+ `chown -R www-data`；
+`supervisorctl restart tnr-gunicorn tnr-qworker` → pid **1910228 / 1910235**，RUNNING；`/` → **302**。
+
+缓存闸门按**四层同一串**收口（这是把 `?v=` 换成内容哈希之后的第一次发布）：
+
+| 资源 | ① `/opt/tnr/static` ② `/opt/tnr/staticfiles` ③ nginx 实际吐出的内容 ④ 页面里的 `?v=` |
+|---|---|
+| `js/portals/shelter.js` | `7dc0b655daa5` ×4 |
+| `js/portals/hospital.js` | `3e4d41526c40` ×4 |
+| `js/tnr-api.js` | `d256655a5271` ×4 |
+
+`grep -rn 'v=2026' templates/ static/` 命中 **0** —— 12 个引入点全部改走 `{% asset_url %}`，
+**发布时不再需要同步任何人工清单**。`OPERA_GUIDE` §8.3 那张「7 处 / 6 个文件」的表
+从本轮起**整体作废**（该文件只读，此处只纠偏不落手册）；它那条「不带新 `?v=` 的静态改动
+等于没发布」的结论仍然成立，只是执行方式变成「改内容 → 哈希自己变」。
+
+`check_data_integrity`：仍然只有 **1** 条一致性问题 —— `TNR261026006：档案=樊城区 捕捉点=襄城区`
+（存量，见任务 #115），本批**未新增**；另有 2 条「医院操作员未登记执业兽医师证号」是
+`i` 级待补录，不阻断。
+
+#### 三、捕捉端双入口的现网实测（真实登录，数据全部界面产出）
+
+`city_shelter` → 新增捕捉登记，合影与逐只都走「🖼 相册」那条 input 实际选图并提交：
+
+- 落库 **CAP2600017**（id 84，`pending`）：`group_photo=photos/prod-group-photo.jpg`，
+  挂的 `TNR261029003` `photo_capture=photos/prod-album-photo.jpg`；
+  两个文件都在 `/opt/tnr/media/photos/`（5,080 / 821 字节），**不是只有界面预览**。
+- 编辑捕捉记录弹层：`grep -c data-ed-group-input /opt/tnr/static/js/portals/shelter.js` = **4**
+  （合影 cam/lib + 逐只 cam/lib），裸 `#ed_groupPhoto` 已不存在。
+- 真机谁被拉起（相机还是相册）仍以属性为准，本端只能验两条 input 的 `capture` 与触发目标 —— 同第一百二十九轮第五节。
+
+#### 四、医院端回改窗口的现网实测（`aixin_hosp`，TRE2600025 / id=77）
+
+| 动作 | 界面 | 库里 |
+|---|---|---|
+| 看板「待诊断 2」→ 进流程 → 点步骤条回第 1 步 | 蓝条「检查单已于 2026-10-29 14:33 提交，下医嘱前可回到本步修改后重新提交（提交时间不变，改动留痕）」，`暂存` + `提交并下一步` 都在，可见字段 disabled **0** 个 | — |
+| 体温 38 → 39.4，「提交并下一步」 | toast「检查单已更新，进入医嘱与处方」 | `temperature=39.4`、`temperature_flag` 重派生为 `normal`、**`checked_at` 仍是 `2026-10-29 06:33:19.083392+00:00`**（没刷成当次）、`diagnosed_at` 空、看板仍在「待诊断」 |
+| 填医嘱 → 「诊断完成」 | 自动进第 3 步；回第 2 步时医嘱框 `disabled` | 看板 `待诊断 2→1`、`诊疗中 0→1` |
+| 再回第 1 步 | 绿条「医嘱已提交，本步内容仅可查看、不可修改（如需修正请先在「医嘱与处方」撤回诊断）」，7 个可见字段**全部** disabled/readonly，`暂存`/`提交并下一步` **消失** | — |
+| 绕过界面直调 `POST /api/business/treatments/77/check/`（`temperature 40.1 + submit`） | — | **400**「医嘱已提交，不能再修改检查单；如需修正请先「撤回诊断」」，40.1 没进去 |
+| 「撤回诊断」→ 确认 | 蓝条回来、按钮回来、disabled **0** | `diagnosed_at=None`，看板恢复 `待诊断 2 / 诊疗中 0` |
+
+> 「撤回诊断」的二次确认是**站内弹层**（`取消` / `确认` 两个 button），不是原生 `confirm()` ——
+> 用自动化去 `handle_dialog` 会得到「No open dialog found」，得回头点 DOM 里那个「确认」。
+
+**39.4℃ 判 `normal` 是对的**，不是漏判：发烧线 `FEVER_THRESHOLD = 39.5`
+（`business/services_treatment.py:182`，本系统以猫为主取猫的正常上限；狗上限略低，
+混养时保守按猫线，最多多判一次、不会漏判真发烧），且阈值随 `check_options()` 下发，
+前端 `syncTempFlag()` 不另抄一份。判定一律服务端由数值派生，客户端传的 `temperature_flag` 被忽略。
+
+#### 五、本轮实测留在现网的东西
+
+撤回诊断**只回退 `diagnosed_at`**，不清空已写的医嘱文本（这是判据本身：窗口可反复开合，
+医生写的字不该被抹掉）。代价是这次实测把 id=77 的 `advice` 从空变成一句、`temperature`
+从 38 改成 39.4，都留在现网 —— 看板状态已回到测试前，内容是测试数据，不回滚，在此留痕。
+
+
 
