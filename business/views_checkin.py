@@ -112,8 +112,13 @@ def checkin_create(request):
     if exists:
         return json_fail(f'{month} 已打卡，请勿重复提交')
 
+    # 照片是打卡的留证依据（第一百三十一轮 UI 实测确认必填口径）：
+    # 缺照片的打卡让「回访管控」退化成纯文字汇报，先在服务端硬拦。
+    photo = request.FILES.get('photo')
+    if photo is None:
+        return json_fail('请上传宠物近期照片后再提交')
     # 图片内容校验放在创建之前：非法时不要留下一条「没有照片」的打卡记录
-    photo_err = validate_image_upload(request.FILES.get('photo'), '打卡照片')
+    photo_err = validate_image_upload(photo, '打卡照片')
     if photo_err:
         return json_fail(photo_err)
 
@@ -127,10 +132,9 @@ def checkin_create(request):
         status='pending',
     )
 
-    # 处理照片上传
-    if request.FILES.get('photo'):
-        checkin.photo = request.FILES['photo']
-        checkin.save(update_fields=['photo'])
+    # 处理照片上传（上面已确保 photo 必存在）
+    checkin.photo = photo
+    checkin.save(update_fields=['photo'])
 
     # 审计用上下文：`CheckIn` 本身没有 district 字段（区县沿 pet 派生），
     # 响应体里也就读不出归属区县，必须显式指定。

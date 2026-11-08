@@ -2,7 +2,7 @@
 from django.utils import timezone
 
 from business.models import Adoption, CheckIn, Message
-from business.tests.base import BusinessTestBase, make_pet, make_user
+from business.tests.base import BusinessTestBase, make_image_file, make_pet, make_user
 
 URL = '/api/business/checkins/'
 
@@ -21,24 +21,38 @@ class CheckInCreateTest(BusinessTestBase):
         pet, adopter = self._adopted()
         self.login_as(adopter)
         body = self.ok(self.post_json(f'{URL}create/', {
-            'pet_id': pet.id, 'month': '2026-05', 'note': '适应良好'}))
+            'pet_id': pet.id, 'month': '2026-05', 'note': '适应良好',
+            'photo': make_image_file('checkin.png')}))
         checkin = CheckIn.objects.get(id=body['data']['id'])
         self.assertEqual(checkin.status, 'pending')
         self.assertEqual(checkin.month, '2026-05')
         self.assertEqual(checkin.adopter, adopter)
         self.assertEqual(checkin.pet_code, pet.code)
+        # 照片是打卡的留证依据：随创建一起落库
+        self.assertTrue(checkin.photo)
+
+    def test_photo_required(self):
+        """缺照片的打卡在服务端硬拦 —— 回访管控不能退化成纯文字汇报。"""
+        pet, adopter = self._adopted()
+        self.login_as(adopter)
+        self.expect_fail(self.post_json(f'{URL}create/', {
+            'pet_id': pet.id, 'month': '2026-05', 'note': '适应良好'}),
+            message='请上传宠物近期照片后再提交')
+        self.assertEqual(CheckIn.objects.count(), 0)
 
     def test_month_defaults_to_current(self):
         pet, adopter = self._adopted()
         self.login_as(adopter)
-        body = self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id}))
+        body = self.ok(self.post_json(f'{URL}create/', {
+            'pet_id': pet.id, 'photo': make_image_file('checkin.png')}))
         self.assertEqual(CheckIn.objects.get(id=body['data']['id']).month,
                          timezone.localdate().strftime('%Y-%m'))
 
     def test_duplicate_month_rejected(self):
         pet, adopter = self._adopted()
         self.login_as(adopter)
-        self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'month': '2026-05'}))
+        self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'month': '2026-05',
+                                                 'photo': make_image_file('checkin.png')}))
         self.expect_fail(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'month': '2026-05'}),
                   message='已打卡，请勿重复提交')
 
@@ -194,13 +208,15 @@ class CheckInResubmitAfterRejectTest(BusinessTestBase):
         pet, adopter = self._adopted()
         self.login_as(adopter)
         first = self.ok(self.post_json(f'{URL}create/',
-                                       {'pet_id': pet.id, 'month': '2026-05'}))
+                                       {'pet_id': pet.id, 'month': '2026-05',
+                                        'photo': make_image_file('checkin.png')}))
         self.login_as(self.shelter_user_a)
         self.ok(self.post_json(f'{URL}{first["data"]["id"]}/review/', {
             'status': 'rejected', 'review_note': '近况写得太少'}))
         self.login_as(adopter)
         body = self.ok(self.post_json(f'{URL}create/',
-                                      {'pet_id': pet.id, 'month': '2026-05'}))
+                                      {'pet_id': pet.id, 'month': '2026-05',
+                                       'photo': make_image_file('checkin2.png')}))
         self.assertEqual(body['data']['status'], 'pending')
         # 旧的驳回记录保留 —— 「驳回过 + 补交过」是回访管控要看两条痕迹
         rows = list(CheckIn.objects.filter(pet=pet, month='2026-05')
@@ -210,7 +226,8 @@ class CheckInResubmitAfterRejectTest(BusinessTestBase):
     def test_pending_month_still_blocks_duplicate(self):
         pet, adopter = self._adopted()
         self.login_as(adopter)
-        self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'month': '2026-05'}))
+        self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'month': '2026-05',
+                                                 'photo': make_image_file('checkin.png')}))
         self.expect_fail(self.post_json(f'{URL}create/',
                                         {'pet_id': pet.id, 'month': '2026-05'}),
                   message='已打卡，请勿重复提交')
@@ -220,7 +237,8 @@ class CheckInResubmitAfterRejectTest(BusinessTestBase):
         pet, adopter = self._adopted()
         self.login_as(adopter)
         created = self.ok(self.post_json(f'{URL}create/',
-                                         {'pet_id': pet.id, 'month': '2026-05'}))
+                                         {'pet_id': pet.id, 'month': '2026-05',
+                                          'photo': make_image_file('checkin.png')}))
         self.login_as(self.shelter_user_a)
         self.ok(self.post_json(f'{URL}{created["data"]["id"]}/review/',
                                {'status': 'approved'}))
@@ -234,12 +252,14 @@ class CheckInResubmitAfterRejectTest(BusinessTestBase):
         pet, adopter = self._adopted()
         self.login_as(adopter)
         first = self.ok(self.post_json(f'{URL}create/',
-                                       {'pet_id': pet.id, 'month': '2026-05'}))
+                                       {'pet_id': pet.id, 'month': '2026-05',
+                                        'photo': make_image_file('checkin.png')}))
         self.login_as(self.shelter_user_a)
         self.ok(self.post_json(f'{URL}{first["data"]["id"]}/review/', {
             'status': 'rejected', 'review_note': '近况写得太少'}))
         self.login_as(adopter)
-        self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'month': '2026-06'}))
+        self.ok(self.post_json(f'{URL}create/', {'pet_id': pet.id, 'month': '2026-06',
+                                                 'photo': make_image_file('checkin2.png')}))
         self.expect_fail(self.post_json(f'{URL}create/',
                                         {'pet_id': pet.id, 'month': '2026-06'}),
                   message='已打卡，请勿重复提交')

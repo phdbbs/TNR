@@ -245,6 +245,9 @@ const GovPortal = {
       <div class="dashboard-grid">
         <div class="card">
           <div class="card-body card-body-flush">
+            <div class="fs-sm text-muted" style="padding:10px 16px 0;">
+              注：市级机构登记的业务按其归属区县计入对应行；「全市（市级）」行仅统计归属区县为市级的业务，通常为 0。
+            </div>
             <div class="table-wrapper" style="border:none;">
               <table class="data-table district-compare-table">
                 <thead><tr>

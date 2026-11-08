@@ -812,6 +812,38 @@ class UndoStepTest(FlowBase):
         self.assertEqual(treatment.chip_no, '')
         self.assertIsNone(treatment.chip_date)
 
+    def test_execute_return_counts_chip_material(self):
+        """execute_item 的返回值 = 实际落库的消耗流水条数：芯片植入不走
+        rx_rows，只数处方行会把「扣了芯片物料库存」误报成「未扣减」——
+        第一百三十一轮 views 层 toast 文案依赖这个数。"""
+        chip = make_chip(number='CHIPRETCNT01', institution=self.hospital_a)
+        detail = self._open()
+        tid = detail['id']
+        detail = self._diagnosed(tid, [{
+            'key': 'chip', 'chip_no': chip.number, 'planned_date': '2026-03-01'}])
+        item = TreatmentItem.objects.get(pk=self._first_item_id(detail))
+        consumed = st.execute_item(Treatment.objects.get(pk=tid), item,
+                                   self.hospital_user_a)
+        self.assertEqual(consumed, 1)
+
+    def test_execute_return_zero_for_record_only_sterilization(self):
+        """无处方的绝育（病历类项目）执行返回 0 —— views 层据此改报
+        「未扣减库存」，不再对没扣任何东西的执行谎报已扣。"""
+        detail = self._open()
+        tid = detail['id']
+        self._diagnosed(tid, [{'key': 'sterilization',
+                               'planned_date': '2026-03-01'}])
+        # needs_record 闸门：执行前病历必须六栏齐全（走同一个提交接口）
+        self.ok(self.post_json(f'{URL}{tid}/sterilization/', {
+            'surgery_date': '2026-03-01', 'surgeon': '赵医生',
+            'diagnosis': '健康', 'anesthesia': '吸入麻醉',
+            'procedure': '常规卵巢子宫摘除', 'recovery': '良好'}))
+        item = TreatmentItem.objects.filter(treatment_id=tid,
+                                            item_key='sterilization').first()
+        consumed = st.execute_item(Treatment.objects.get(pk=tid), item,
+                                   self.hospital_user_a)
+        self.assertEqual(consumed, 0)
+
     def test_undo_chip_rebound_to_other_pet_rejected(self):
         """芯片已被别的档案绑走时不能退回 —— 否则一颗芯片两条档案。"""
         chip = make_chip(number='CHIPUNDO0002', institution=self.hospital_a)

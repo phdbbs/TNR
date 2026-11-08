@@ -642,7 +642,7 @@ async function renderMyAdoption() {
                 <div class="pet-card-name">${TNR_UI.escape(petName)} ${pet.name ? `<span class="pet-card-code" style="font-family:var(--font-mono);">${TNR_UI.escape(petCode)}</span>` : ''}</div>
                 <div class="pet-card-meta">
                   <span class="pet-card-meta-item">申请时间：${TNR_UI.escape(appliedAt)}</span>
-                  <span class="pet-card-meta-item">受理：${TNR_UI.escape(app.hospital_name || '—')}</span>
+                  <span class="pet-card-meta-item">审核由归属捕捉点进行 · 出库医院：${TNR_UI.escape(app.hospital_name || '—')}</span>
                 </div>
                 ${app.review_note ? `<div class="pet-card-desc" style="margin-top:6px;color:var(--ink-muted);">审核意见：${TNR_UI.escape(app.review_note)}</div>` : ''}
               </div>
@@ -892,11 +892,11 @@ async function renderCheckin() {
     html += `<div class="form-label">打卡月份</div>`;
     html += `<div style="margin-bottom:12px;"><span class="badge badge-cinnabar" style="font-size:13px;">${currentMonth}</span></div>`;
 
-    html += '<div class="form-label">宠物近期照片</div>';
+    html += '<div class="form-label">宠物近期照片 <span style="color:var(--cinnabar);">*</span></div>';
     html += `<div class="photo-upload-area" id="photoUploadArea" onclick="document.getElementById('checkinPhotoInput').click()">
       <div class="photo-upload-placeholder">📷</div>
-      <div style="font-size:13px;color:var(--ink-muted);">点击上传照片</div>
-      <div style="font-size:11px;color:var(--ink-light);margin-top:4px;">支持 JPG/PNG 格式</div>
+      <div style="font-size:13px;color:var(--ink-muted);">点击上传照片（必填）</div>
+      <div style="font-size:11px;color:var(--ink-light);margin-top:4px;">支持 JPG/PNG 格式，作为本月回访留证</div>
     </div>`;
     html += `<input type="file" id="checkinPhotoInput" accept="image/*" style="display:none;" onchange="onPhotoSelected(event)">`;
 
@@ -1020,6 +1020,12 @@ async function submitCheckin(month) {
   const note = noteEl ? noteEl.value.trim() : '';
   if (!note) {
     TNR_UI.toast('请填写近况说明', 'warning');
+    return;
+  }
+  // 照片是打卡留证依据（与服务端 checkin_create 同一硬拦）：
+  // 缺照片的打卡让回访管控退化成纯文字汇报。
+  if (!uploadedPhotoFile) {
+    TNR_UI.toast('请上传宠物近期照片后再提交', 'warning');
     return;
   }
 

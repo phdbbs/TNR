@@ -17,7 +17,8 @@ from business.models import (
     Adoption, AdoptionApplication, AdoptionHallListing, CheckIn, Message,
 )
 from business.tests.base import (
-    BusinessTestBase, make_capture, make_district, make_pet, make_user,
+    BusinessTestBase, make_capture, make_district, make_image_file, make_pet,
+    make_user,
 )
 from core import audit
 from core.models import AuditLog, District
@@ -404,8 +405,10 @@ class AuditWriteCoverageTest(BusinessTestBase):
         Adoption.objects.create(pet=pet, pet_code=pet.code, adopter=self.adopter,
                                 district=self.district_a, status='completed')
         self.login_as(self.adopter)
+        # 第七轮 UI 实测后照片改为必填：审计用例随接口口径一起补上照片
         self.ok(self.post_json('/api/business/checkins/create/', {
-            'pet_id': pet.id, 'month': '2026-01', 'note': '适应良好'}))
+            'pet_id': pet.id, 'month': '2026-01', 'note': '适应良好',
+            'photo': make_image_file('checkin.png')}))
         self._assert_attributed(self.district_a, '回访打卡')
 
     def test_checkin_review(self):

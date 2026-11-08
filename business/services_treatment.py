@@ -903,7 +903,11 @@ def execute_item(treatment, item, user):
 
     # `is_done` / `done_at` 已在第二段开头由那条 CAS 写库，这里**不再 save**：
     # 再写一次等于用一个新的 `done_at` 覆盖刚抢到的那一版。
-    return len(rx_rows)
+    # 返回值 = 本次实际落库的消耗流水条数（处方行 + 芯片物料那笔）。
+    # 调用方（views_treatment）拿它决定 toast 文案：芯片植入**不走 rx_rows**，
+    # 只数处方行会把「扣了芯片库存」误报成「未扣减库存」。
+    consumed = len(rx_rows) + (1 if chip_row is not None and chip_row.material_id else 0)
+    return consumed
 
 
 def undo_item(treatment, item, user):

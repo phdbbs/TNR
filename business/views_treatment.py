@@ -490,12 +490,17 @@ def treatment_item_execute(request, pk, item_id):
 
     try:
         with transaction.atomic():
-            st.execute_item(treatment, item, user)
+            # execute_item 返回本次实际落库的消耗流水条数（0 = 该项目没有
+            # 库存处方，如无处方绝育 / 纯手写记录），toast 文案据此区分，
+            # 不再对「没扣任何东西」的执行谎报「已扣减库存」。
+            consumed = st.execute_item(treatment, item, user)
     except ValueError as e:
         return json_fail(str(e))
     treatment.refresh_from_db()
-    return json_ok(_treatment_detail_data(treatment),
-                   message=f'{item.item_name or item.get_item_key_display()}：治疗完成，已扣减库存')
+    name = item.item_name or item.get_item_key_display()
+    message = (f'{name}：治疗完成，已扣减库存' if consumed
+               else f'{name}：治疗完成（本项无库存处方，未扣减库存）')
+    return json_ok(_treatment_detail_data(treatment), message=message)
 
 
 @csrf_exempt

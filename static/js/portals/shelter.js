@@ -816,7 +816,7 @@ const Shelter = {
           </div>
           <div class="form-row">
             <div class="form-group"><label class="form-label">详细地址</label>
-              <div class="flex gap-2 items-center">
+              <div class="flex gap-2 items-center addr-locate-row">
                 <input class="form-input" id="ca_address" placeholder="点击「定位」自动填入，或手动填写门牌号">
                 <button type="button" class="btn btn-secondary btn-sm" id="btnLocate" style="white-space:nowrap;">📍 定位</button>
               </div>
