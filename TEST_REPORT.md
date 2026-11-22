@@ -10879,5 +10879,76 @@ sha256 `bd9de536c70ba594373d149213b7fd8b28bf7eedce144dc706d00ac2368c24f3`。
 医生写的字不该被抹掉）。代价是这次实测把 id=77 的 `advice` 从空变成一句、`temperature`
 从 38 改成 39.4，都留在现网 —— 看板状态已回到测试前，内容是测试数据，不回滚，在此留痕。
 
+---
 
+## 第一百三十一轮（2026-11-08）：UI 全流程实测七项修正 —— 打卡照片必填、执行文案据实、移动端首列钉扎
 
+本轮起因：对现网 `http://100.99.98.71` 做了一次「五端 + PC/移动双视口」的纯界面黑盒测试
+（`city_shelter` / `aixin_hosp` / `adopter1` / `admin` / `platform` 五账号全真实登录，
+数据全部由界面产出），产出 7 项待确认问题；业务方确认后逐项处理。实测金路径
+`CAP2600018 → TRF2600019 → TRE2600026 → ADP2600008`（动物 TNR261031001，终态已领养）在
+**数据库级**逐字段复核一致（Pet.status=adopted、医院库存 54=55-1、CON2600025 消耗流水、
+绝育/驱虫 is_done、领养单手写签名 dataURL 落库、CheckIn approved、平台回退三半同步、
+AuditLog 留痕），UI↔库无漂移。
+
+### 一、七项问题的处理结果
+
+| # | 问题（实测发现） | 处理 |
+|---|---|---|
+| ① | 回访打卡**无照片可提交**（服务端 `validate_image_upload(None)` 放行） | **已修**：`checkin_create` 缺照片直接 400「请上传宠物近期照片后再提交」；领养人端表单标注必填 + 提交前本地拦截；新增 `test_photo_required` |
+| ② | 已完成捕捉单行内「编辑/删除」疑似可点 | **误报关闭**：生产 DOM 实测 CAP2600018 行按钮 `disabled: true`——`captureLocked`（transferred>0）与后端 `capture_transfer_state().can_edit` 双层守卫本来就在；上轮 aria 快照把相邻行按钮扁平化进了同一行的 accessible name 导致误判 |
+| ③ | 领养人「我的领养」显示「受理：爱心宠物医院」，但审核方是捕捉点 | **已修**：文案改为「审核由归属捕捉点进行 · 出库医院：××」 |
+| ④ | 政府大屏「全市（市级）」行恒为 0，易被当成统计缺失 | **已修**：区县分布表上方加口径说明（市级机构业务按归属区县计入对应行） |
+| ⑤ | 绝育（无处方）执行后 toast「已扣减库存」与事实不符 | **已修**：`execute_item` 的返回值（消耗流水条数）区分文案——0 条时改报「本项无库存处方，未扣减库存」 |
+| ⑥ | 移动端宽表横滚后行身份（首列）滚出视口，只剩钉右的操作列 | **已修**：≤768px 下 `.data-table` 首列 `sticky left`（与已有的操作列钉右对称），左上角表头格 z-index 高于普通表头 |
+| ⑦ | 390px 下捕捉表单「详细地址+定位」同行拥挤、placeholder 截断 | **已修**：新增 `.addr-locate-row`，小屏上下堆叠、定位按钮右对齐 |
+
+### 二、后端测试
+
+在服务器 `/home/ubuntu/tnr-verify`（同提交 `83bbeb3` 的副本 + 本批 8 个文件）上跑
+`DB_ENGINE=sqlite3 manage.py test`（生产 venv，python3.12；生产库账号无 CREATE 权限，
+`--parallel` 在该环境抛 `cannot pickle 'traceback'`，换单进程）：
+
+在服务器 `/home/ubuntu/tnr-verify`（提交 `83bbeb3` 副本 + 本批文件）上跑
+`DB_ENGINE=sqlite3 manage.py test`（生产 venv，python3.12；生产库无 CREATE 权限，
+`--parallel` 抛 `cannot pickle 'traceback'`，换单进程——**教训：3.7G 内存机器不能与
+生产服务并行跑全量套件，实测把机器压到失联，被迫云控制台重启；此后改跑受影响子集**）：
+
+- 全量首轮（被打断前已推进 2000+ 例无失败输出）；重启后子集
+  （checkin_views / treatment_flow / treatment_views / upload_validation / tests_audit）
+  **235 例 OK**。
+- 过程修复：带文件的用例改走 multipart（`post_json` 只序列化 JSON，
+  `SimpleUploadedFile` 会抛 TypeError）；`execute_item` 芯片项目消耗计数补
+  `chip_row` 物料那笔（只数 rx_rows 会把芯片植入误报为 0 消耗）。
+
+### 三、发布动作
+
+备份四件（`/var/backups/tnr/*-20261122-142347.*`：SQL 811KB / code 20MB / media 12MB / env）→
+`git archive HEAD`（1.9MB，`83bbeb3..a0e494d` 无删除文件）→ 解包 `/opt/tnr` →
+167 文件 `py_compile` 全过 → `migrate` 无待应用 → `seed_data` 幂等完成 →
+`collectstatic` 8 文件重哈希 → `supervisorctl restart` → 冒烟 `/`=302 `/login/`=200
+`/portal/`=200 `/shelter/`=302。静态核对：`staticfiles` 与 `static` 内容一致，
+页面引用 `{% asset_url %}` 新哈希。
+
+⚠ **运维发现**：服务器硬重启后 1Panel 的 MariaDB / Redis 容器**不会自动拉起**
+（`Exited (0)`，登录页 500 `Can't connect to MySQL on 127.0.0.1:3306`），需手工
+`docker start`。建议在 1Panel 里把这两个容器设为开机自启（restart=always）。
+
+### 四、本轮实测留在现网的东西
+
+- 打卡照片必填上线后，**存量无照片打卡记录不受影响**（只在创建时拦截）；
+- 领养回访打卡的历史记录、政府大屏、监管页口径均未改动（④只是加说明文字）；
+- 破坏性分支补测在本轮发布后于现网真实走业务链路（浏览器界面 + 页面内同链路 API），
+  数据为测试数据不回滚，落库结果逐项 DB 复核：
+
+  | 分支 | 动作链 | 结果（库内复核） |
+  |---|---|---|
+  | 放归两段闭环 | TNR261026001：待出院 → 建议=放归 → 医院开运回单 **RTN2600009** → 捕捉点签收 → 放归单 **REL2600007** → 转运回小区 → 小区签字 | `Pet.status=released` 终态；放归单 `pending→transferred→released` |
+  | 主人领回 | city_shelter 对在途 TNR261029003 领回登记 **RET2600004**（姓名/电话/证件/签名齐全） | `Pet.status=owner_returned` |
+  | 物料异动+出库 | 市级捕捉点盘亏 1（ADJ）+ 报废出库 2（OUT） | 流水落库，台账口径与库存同步 |
+  | 死亡出库+遗体交接 | 医院对 **EUT2600002** 出库（交接人/接收单位/接收人/签字/日期）→ 捕捉点领取遗体 | `outbound_at=2026-11-22`、`body_received=True`；重复领取被幂等守卫拦（「遗体已被领取」） |
+  | 黑名单违规收回 | 咪咪 **ADP2600004** 违规收回（动物回待领养+大厅重新上架+记入黑名单）→ 删除黑名单条目恢复 | `Pet.status=pending_adopt`，黑名单条目删除成功 |
+
+  过程纠错留痕：运回单误选动物开出 **RTN2600008**（黑犬三号），随即撤回
+  （「运回单已撤回，1 只动物已回到『待领养』」），动物状态复原后按正确对象重开 ——
+  撤回链路本身也是一次实测。
