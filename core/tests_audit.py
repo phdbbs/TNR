@@ -405,8 +405,9 @@ class AuditWriteCoverageTest(BusinessTestBase):
         Adoption.objects.create(pet=pet, pet_code=pet.code, adopter=self.adopter,
                                 district=self.district_a, status='completed')
         self.login_as(self.adopter)
-        # 第七轮 UI 实测后照片改为必填：审计用例随接口口径一起补上照片
-        self.ok(self.post_json('/api/business/checkins/create/', {
+        # 第一百三十一轮 UI 实测后照片改为必填：审计用例随接口口径一起补上照片
+        # （带文件的提交走 multipart，不能经 post_json 的 JSON 序列化）
+        self.ok(self.client.post('/api/business/checkins/create/', data={
             'pet_id': pet.id, 'month': '2026-01', 'note': '适应良好',
             'photo': make_image_file('checkin.png')}))
         self._assert_attributed(self.district_a, '回访打卡')
