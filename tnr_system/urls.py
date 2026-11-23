@@ -19,6 +19,7 @@ from business.views_portal import (
     gov_portal, platform_portal,
 )
 from business.views_print import print_doc, print_pet_archive
+from business.views_export import batch_pet_archive_pdf
 from core.http import is_api_request
 
 urlpatterns = [
@@ -43,6 +44,10 @@ urlpatterns = [
     #   实际是路由没抢到。
     path('print/pet-archive/<int:pk>/', print_pet_archive, name='print_pet_archive'),
     path('print/<str:doc>/<int:pk>/', print_doc, name='print_doc'),
+    # 批量导出一宠一档：返回 application/zip 文件流，**不放 `/api/`**
+    # （同上：`/api/` 契约是 JSON 信封，会被全路由闸门正确拦下）。
+    path('export/pet-archive/batch/', batch_pet_archive_pdf,
+         name='batch_pet_archive_pdf'),
     path('api/business/', include('business.urls')),
     path('api/supervision/', include('supervision.urls')),
 ]

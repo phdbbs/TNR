@@ -11,6 +11,10 @@
    字段含 物种/品种/性别/芯片/来源/去向/照片，并遵守区县隔离。
 5. `pets/<id>/lifecycle/` 各阶段事件带上照片，响应带 pet_brief + photos。
 """
+import io
+import json
+import zipfile
+
 from django.utils import timezone
 
 from business.models import (
@@ -623,6 +627,118 @@ class PetArchivePrintTest(BusinessTestBase):
         resp = self.client.get(PRINT_URL.format(self.pet.id))
         self.assertEqual(resp.status_code, 302)
         self.assertIn('/login', resp['Location'])
+
+
+# ============================================================
+# 批量导出一宠一档：ZIP 里一只一份真正的 PDF
+# ============================================================
+BATCH_PDF_URL = '/export/pet-archive/batch/'
+
+
+class BatchPetArchiveZipTest(BusinessTestBase):
+    """「按搜索条件批量导出 PDF 压缩包」的行为判据。
+
+    不停在 200：必须验证 ZIP 结构、每份都是合法 PDF、越权的不产出，
+    以及 PDF 渲染确实复用了 lifecycle 数据源（否则批量导出的内容和
+    单张打印页会各写一套，出现「ZIP 里的档案少一段」且不报错）。
+    """
+
+    def setUp(self):
+        self.capture = make_capture(
+            district=self.district_a, shelter=self.shelter_a,
+            pet_codes=['TNRBATCH01', 'TNRBATCH02'])
+        self.pet_a = make_pet(
+            code='TNRBATCH01', status='in_treatment', district=self.district_a,
+            capture=self.capture, shelter=self.shelter_a)
+        self.pet_b = make_pet(
+            code='TNRBATCH02', status='in_treatment', district=self.district_a,
+            capture=self.capture, shelter=self.shelter_a)
+        self.pet_other = make_pet(
+            code='TNRBATCH99', status='in_treatment', district=self.district_b,
+            shelter=self.shelter_b)
+        Treatment.objects.create(
+            pet=self.pet_a, pet_code=self.pet_a.code, hospital_name='甲区医院',
+            items_sterilization=True, district=self.district_a,
+            ledger_no='TRE-BATCH-01')
+
+    def _post(self, user, ids, method='post'):
+        self.login_as(user)
+        if method == 'get':
+            return self.client.get(BATCH_PDF_URL)
+        return self.client.post(
+            BATCH_PDF_URL, data=json.dumps({'pet_ids': ids}),
+            content_type='application/json')
+
+    def test_zip_has_one_valid_pdf_per_visible_pet(self):
+        """当前筛选结果的每只宠物都有一份以 %PDF 开头的文件。"""
+        resp = self._post(self.shelter_user_a, [self.pet_a.id, self.pet_b.id])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp['Content-Type'], 'application/zip')
+        self.assertEqual(resp['X-Pet-Archive-Count'], '2')
+        archive = zipfile.ZipFile(io.BytesIO(resp.content))
+        names = archive.namelist()
+        self.assertEqual(len(names), 2)
+        self.assertTrue(all(n.endswith('_一宠一档.pdf') for n in names),
+                        f'ZIP 里混进了非档案文件：{names}')
+        self.assertTrue(any(self.pet_a.code in n for n in names), names)
+        self.assertTrue(any(self.pet_b.code in n for n in names), names)
+        for name in names:
+            self.assertEqual(archive.read(name)[:4], b'%PDF',
+                             f'{name} 不是合法 PDF')
+        # 中文文件名走 filename*，不能只剩一个 ASCII 占位名
+        self.assertIn("filename*=UTF-8''", resp['Content-Disposition'])
+
+    def test_out_of_scope_and_missing_are_skipped(self):
+        """越权与不存在都不产出，且两者在结果上不可区分。"""
+        resp = self._post(self.shelter_user_a,
+                          [self.pet_a.id, self.pet_other.id, 99999999])
+        self.assertEqual(resp.status_code, 200)
+        names = zipfile.ZipFile(io.BytesIO(resp.content)).namelist()
+        self.assertEqual(len(names), 1)
+        self.assertIn(self.pet_a.code, names[0])
+        self.assertNotIn(self.pet_other.code, ' '.join(names))
+
+    def test_no_visible_pet_returns_readable_failure(self):
+        """一只都没导出时不能下发空 ZIP（用户会以为导出成功）。"""
+        resp = self._post(self.shelter_user_a, [self.pet_other.id, 99999999])
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(resp['Content-Type'].startswith('application/zip'))
+
+    def test_param_contract_never_500s(self):
+        """空、超限、非法编号、GET 都要 4xx，不能 500。"""
+        self.login_as(self.shelter_user_a)
+        cases = (
+            {'pet_ids': []},
+            {'pet_ids': list(range(1, 102))},
+            {'pet_ids': ['abc']},
+            {'pet_ids': [True]},
+            {'pet_ids': [-1]},
+        )
+        for payload in cases:
+            with self.subTest(payload=str(payload)[:60]):
+                resp = self.client.post(
+                    BATCH_PDF_URL, data=json.dumps(payload),
+                    content_type='application/json')
+                self.assertEqual(resp.status_code, 400, resp.content[:200])
+                self.assertTrue(resp.json()['success'] is False)
+        self.assertEqual(self._post(self.shelter_user_a, [], method='get').status_code, 405)
+
+    def test_adopter_has_no_batch_entry(self):
+        """批量导出不开放给领养人（只读自己的单只档案）。"""
+        resp = self._post(self.adopter, [self.pet_a.id])
+        # 项目的 role_required 对无权限角色重定向到首页（不泄露权限信息）
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(resp['Location'])
+
+    def test_pdf_renderer_reuses_lifecycle_source(self):
+        """批量 PDF 必须与打印页同源，不允许自己另查一遍库。"""
+        import inspect
+        from business.services_pdf import render_pet_archive_pdf
+        src = inspect.getsource(render_pet_archive_pdf)
+        self.assertIn('build_pet_lifecycle(', src)
+        self.assertIn('event_print_rows(', src,
+                      '批量 PDF 没用统一的事件四要素拼装，'
+                      '会出现「ZIP 里少了操作人/操作时间」且不报错')
 
 
 # ============================================================

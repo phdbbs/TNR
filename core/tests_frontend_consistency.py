@@ -2579,7 +2579,10 @@ class WriteFailureVisibilityTest(SimpleTestCase):
                         block = lines[i - 1:j]
                         break
                 body = '\n'.join(block)
-                calls = sorted(set(RAW_BACKED_CALL.findall(body)))
+                # ⚠ 必须用 `raw` 过滤：只有走 `_post`/`_get` 的方法才「失败不抛」。
+                # 严格读/二进制下载（如 getPetLifecycleStrict、batchPetArchivePdf）
+                # 自己会抛异常，它们的 catch 不是死代码。
+                calls = sorted(set(RAW_BACKED_CALL.findall(body)) & raw)
                 if not calls or not SUCCESS_TOAST.search(body):
                     continue
                 if SUCCESS_CHECK.search(body):
@@ -3205,6 +3208,51 @@ class PetArchivePdfEntryTest(SimpleTestCase):
             '一宠一档档案抽屉里没有「导出 PDF」入口：'
             '`print_pet_archive` 写好了，但用户在界面上点不到 = 功能不存在')
 
+    def test_ledger_export_offers_single_pet_pdf_in_both_ends(self):
+        """两端「一宠一档」页签的导出都必须给出**单宠 PDF** 入口。
+
+        事故形态：打印页写好了、档案抽屉里也挂了按钮，旧用例（只查抽屉）
+        全绿，但用户实际点的「台账 → 导出」只产出 CSV 列表 —— 功能对用户
+        等于不存在。这里改为查两端导出按钮的**接线**：按钮存在还不够，
+        必须真的接到公共选择器上。
+        """
+        for role in ('shelter', 'gov'):
+            src = strip_js_comments(read_js(role))
+            self.assertIn(
+                'id="btnExportPetArchive"', src,
+                f'{role} 端台账没有「导出单宠档案 PDF」按钮定义：'
+                '用户在台账点导出只会拿到 CSV 列表'
+                '（只查标识符会被「接线还在、按钮已删」骗过）')
+            self.assertIn(
+                'TNR_UI.pickPetForArchive(', src,
+                f'{role} 端的单宠 PDF 按钮没有接到公共选择器'
+                '（按钮挂了但点了没反应）')
+
+    def test_gov_ledger_detail_has_pdf_for_pet(self):
+        """政府端台账详情里，一宠一档也必须能导出单宠 PDF。"""
+        src = strip_js_comments(read_js('gov'))
+        self.assertIn(
+            "TNR_UI.printDocBtn('pet-archive', r.id", src,
+            '政府端台账详情的 pet 分支没有 PDF 入口：'
+            '点开档案编号后仍然拿不到这只动物的完整档案')
+
+    def test_pet_pdf_picker_is_shared_and_uses_archive_route(self):
+        """单宠 PDF 选择器只允许公共层一份，且必须指向一宠一档打印路由。"""
+        common = strip_js_comments(_read_raw('static/js/tnr-common.js'))
+        self.assertIn('pickPetForArchive(records)', common,
+                      '公共层缺少单宠 PDF 选择器')
+        self.assertIn("this.printDocBtn('pet-archive', r.id", common,
+                      '选择器没有挂到 `/print/pet-archive/<id>/`，'
+                      '导出的不是该动物的完整档案')
+        for rel in FRONTEND_FILES:
+            if rel == 'static/js/tnr-common.js':
+                continue
+            self.assertNotIn(
+                'pickPetForArchive(records)',
+                strip_js_comments(_read_raw(rel)),
+                f'{rel} 自己实现了一份选择器：两端各写一遍迟早漂移成'
+                '「一端导 CSV、一端导 PDF」')
+
     def test_pet_archive_route_precedes_generic_print_route(self):
         """`print/pet-archive/<pk>/` 必须排在 `print/<str:doc>/<int:pk>/` 之前。
 
@@ -3222,6 +3270,59 @@ class PetArchivePdfEntryTest(SimpleTestCase):
 
 
 
+
+
+# ============================================================
+# 批量导出一宠一档 ZIP（第六十四轮）
+# ============================================================
+#
+# 事故形态与上一组一样：后端能产出 ZIP，但台账上如果只给「导出列表 CSV」，
+# 用户依然拿不到批量 PDF。这里同时盯住**按钮接线**、**前后端数量上限一致**
+# 与**文件出口不放 /api/**（那里是 JSON 信封契约）。
+class BatchPetArchiveEntryTest(SimpleTestCase):
+
+    def test_both_ends_have_batch_button_and_wiring(self):
+        for role in ('shelter', 'gov'):
+            src = strip_js_comments(read_js(role))
+            self.assertIn(
+                'id="btnBatchPetArchive"', src,
+                f'{role} 端没有「批量导出单宠档案 PDF」按钮定义'
+                '（只查标识符会被「接线还在、按钮已删」骗过）')
+            self.assertIn(
+                'TNR_API.batchPetArchivePdf(', src,
+                f'{role} 端的批量按钮没接到导出接口（点了没反应）')
+            self.assertIn(
+                'TNR_UI.downloadBlob(', src,
+                f'{role} 端拿到 ZIP 后没有触发浏览器下载')
+
+    def test_api_method_posts_zip_route_and_surfaces_failure(self):
+        src = strip_js_comments(_read_raw('static/js/tnr-api.js'))
+        self.assertIn("fetch('/export/pet-archive/batch/'", src,
+                      '批量导出接口路径不对')
+        self.assertIn('return await res.blob();', src,
+                      '接口返回的是二进制 ZIP，不能当 JSON 解析')
+        self.assertIn('res.json()', src,
+                      '失败响应（含数量超限的 message）没读出来，'
+                      '用户只会看到「导出失败」却不知道原因')
+
+    def test_batch_limit_matches_backend_constant(self):
+        backend = _read_raw('business/services_pdf.py')
+        match = re.search(r'MAX_BATCH_PET_ARCHIVE\s*=\s*(\d+)', backend)
+        self.assertTrue(match, '后端批量上限常量解析失败，判据本身失效')
+        limit = match.group(1)
+        for role in ('shelter', 'gov'):
+            src = strip_js_comments(read_js(role))
+            self.assertIn(
+                f'ids.length > {limit}', src,
+                f'{role} 端的前端上限与后端 MAX_BATCH_PET_ARCHIVE={limit} '
+                '不一致：界面让选更多、服务端却静默截断')
+
+    def test_export_route_is_not_under_api(self):
+        src = _read_raw('tnr_system/urls.py')
+        self.assertIn("path('export/pet-archive/batch/'", src)
+        self.assertNotIn("path('api/business/export", src,
+                         '批量导出返回 ZIP 文件流，挂到 /api/ 会被'
+                         '「JSON 信封」全路由闸门正确拦下')
 
 
 # ============================================================

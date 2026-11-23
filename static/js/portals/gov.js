@@ -1164,9 +1164,50 @@ const GovPortal = {
       { key: 'start_date', label: '开始日期', type: 'date' },
       { key: 'end_date', label: '结束日期', type: 'date' }
     ], `
-      <button class="btn btn-secondary btn-sm" id="btnExportLedger">📥 导出</button>
+      ${this.ledgerState.tab === 'pet' ? `
+        <button class="btn btn-primary btn-sm" id="btnExportPetArchive">📄 导出单宠档案 PDF</button>
+        <button class="btn btn-primary btn-sm" id="btnBatchPetArchive">📦 批量导出单宠档案 PDF</button>
+      ` : ''}
+      <button class="btn btn-secondary btn-sm" id="btnExportLedger">📥 导出列表 CSV</button>
       <button class="btn btn-secondary btn-sm" id="btnPrintLedger">🖨️ 打印</button>
     `) + '<div class="table-wrapper" id="ledgerTableWrapper"></div>';
+    if (document.getElementById('btnExportPetArchive')) {
+      document.getElementById('btnExportPetArchive').addEventListener('click', () => {
+        // 「导出」在一宠一档页签必须给出**单只动物的完整档案**，不能只有 CSV 列表。
+        // 选择器取当前筛选结果；打印页再按角色收敛一次权限与 PII 口径。
+        TNR_UI.pickPetForArchive(this._ledgerRecords);
+      });
+    }
+    if (document.getElementById('btnBatchPetArchive')) {
+      document.getElementById('btnBatchPetArchive').addEventListener('click', async () => {
+        const rows = this._ledgerRecords || [];
+        const ids = rows.map(r => r.id).filter(x => x !== null && x !== undefined);
+        if (!ids.length) {
+          TNR_UI.toast('当前筛选结果为空，没有可导出的宠物', 'warning');
+          return;
+        }
+        // 与后端 MAX_BATCH_PET_ARCHIVE 同口径（判据核对），不让界面选
+        // 500 只、服务端只给 100 只却不说原因。
+        if (ids.length > 100) {
+          TNR_UI.toast('一次最多导出 100 只，请缩小筛选范围后再批量导出', 'warning');
+          return;
+        }
+        const btn = document.getElementById('btnBatchPetArchive');
+        const original = btn.innerHTML;
+        btn.disabled = true;
+        btn.textContent = '正在生成 PDF…';
+        try {
+          const blob = await TNR_API.batchPetArchivePdf(ids);
+          TNR_UI.downloadBlob(blob, TNR_UI.batchArchiveZipName());
+          TNR_UI.toast(`已导出 ${ids.length} 只宠物的档案 ZIP`, 'success');
+        } catch (e) {
+          TNR_UI.toast('批量导出失败：' + (e.message || '未知错误'), 'danger');
+        } finally {
+          btn.disabled = false;
+          btn.innerHTML = original;
+        }
+      });
+    }
     document.getElementById('btnExportLedger').addEventListener('click', () => {
       // 以前这里只弹一句「导出成功（模拟）」，**没有任何文件产出** ——
       // 监管方以为导出好了，去文件夹里找不到东西。现在走公共实现，
@@ -1547,9 +1588,15 @@ const GovPortal = {
         /* 「全局台账中心」是政府端**归档打印**的落点：`r.business_type` 与后端
            `views_print.DOC_SPECS` 的键**同名**（capture / transfer / treatment /
            release / adoption / material / euthanasia），所以直接透传即可。
-           `pet` 是一宠一档（档案，不是单据），后端没有这个 doc key —— 故意不挂按钮。 */
+           `pet` 是档案、没有 doc key，走下面单独的 `/print/pet-archive/<id>/`。 */
         if (tab !== 'pet') {
           bodyEl.insertAdjacentHTML('beforeend', TNR_UI.printDocBtn(tab, r.id));
+        } else {
+          // 一宠一档是档案、不是单据，后端 DOC_SPECS 里没有 `pet` 键。
+          // 但它恰恰是最该能打印的一类：点开编号就得能导出这只动物的全部
+          // 记录，否则「导出」在界面上只剩 CSV 列表一种口径。
+          bodyEl.insertAdjacentHTML('beforeend',
+            TNR_UI.printDocBtn('pet-archive', r.id, '导出 PDF（本动物全部档案）'));
         }
       }
     });

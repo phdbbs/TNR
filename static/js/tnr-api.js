@@ -393,6 +393,27 @@ const TNR_API = {
   async getHallListings() { return this._get('/api/business/hall-listings/'); },
   // 一宠一档：动物档案台账（每只动物一行，含全生命周期聚合数据）
   async getPetArchive() { return this._get('/api/business/pets/archive/'); },
+
+  // 批量导出一宠一档：POST 取回 **application/zip 二进制流**，不是 JSON 信封。
+  // 失败时服务端回的是 json_ok 信封，要把 message 读出来呈现，不能静默成空 ZIP。
+  async batchPetArchivePdf(petIds) {
+    const res = await fetch('/export/pet-archive/batch/', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': this._getCSRF()},
+      body: JSON.stringify({pet_ids: petIds})
+    });
+    if (!res.ok) {
+      let json = null;
+      try { json = await res.json(); } catch (e) { /* 非 JSON 错误体 */ }
+      if (res.status === 401) {
+        this._handleUnauthorized(json && json.message);
+        throw new Error((json && json.message) || '请先登录');
+      }
+      throw new Error((json && json.message) || `批量导出失败（HTTP ${res.status}）`);
+    }
+    return await res.blob();
+  },
   async getPetLifecycle(petId) { return this._get(`/api/business/pets/${petId}/lifecycle/`); },
   async editAdoptionInfo(petId, data) { return this._post(`/api/business/adoptions/${petId}/edit-info/`, data); },
   async saveAdoptionInfo(petId, formData) {

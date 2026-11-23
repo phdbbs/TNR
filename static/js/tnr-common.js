@@ -2698,6 +2698,63 @@ const TNR_UI = {
       + this.escape(label || '打印单据') + '</button></div>';
   },
 
+  /* 台账「导出一宠一档」：从当前筛选结果里挑一只，打开它的 A4 完整档案页。
+     放在公共层是因为捕捉点端与政府端各有一份台账：两端各写一遍，迟早一边
+     导出 CSV 列表、一边导出单宠 PDF —— 用户点「导出」拿不到该动物的全部
+     记录，而且不报错。这里只负责「选哪一只」，实际取数与权限仍由
+     `/print/pet-archive/<id>/` 服务端复用 lifecycle 服务决定。 */
+  pickPetForArchive(records) {
+    const rows = records || [];
+    if (!rows.length) {
+      this.toast('当前筛选结果为空，没有可导出的宠物', 'warning');
+      return;
+    }
+    const esc = v => this.escape(v === null || v === undefined || v === '' ? '—' : v);
+    const list = rows.map(r => {
+      const code = r.ledgerNo || r.ledger_no || r.code || '—';
+      const name = r.name || '—';
+      const district = r.districtName || r.district_name || '—';
+      const status = r.statusDisplay || r.status_display || '—';
+      return '<div class="desc-item" style="align-items:center;">'
+        + '<div class="desc-label" style="margin:0;">' + esc(code) + '</div>'
+        + '<div class="desc-value" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'
+        + '<span>' + esc(name) + '</span>'
+        + '<span class="text-muted fs-sm">' + esc(district) + '</span>'
+        + '<span class="text-muted fs-sm">' + esc(status) + '</span>'
+        + this.printDocBtn('pet-archive', r.id, '导出这只的 PDF')
+        + '</div></div>';
+    }).join('');
+    this.drawer({
+      title: '选择宠物 · 导出一宠一档 PDF（共 ' + rows.length + ' 只）',
+      body: '<div style="padding:0 var(--sp-4) var(--sp-4);">'
+        + '<div class="text-muted fs-sm" style="margin-bottom:12px;">'
+        + '点「导出这只的 PDF」打开 A4 档案页，含从捕捉到领养后打卡的全过程、'
+        + '时间、操作人、操作内容与照片；在打印页选「另存为 PDF」。'
+        + '</div>' + list + '</div>'
+    });
+  },
+
+  /* 把接口返回的 blob 触发为浏览器下载。两端批量导出共用，
+     否则「创建了 a 标签但没 append / 没 revoke」这类问题会逐端复发。 */
+  downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'download';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
+
+  /* 批量导出的 ZIP 文件名：与服务端同名规则，便于用户对上 downloaded 文件。 */
+  batchArchiveZipName() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    return '一宠一档档案批量导出_' + d.getFullYear() + p(d.getMonth() + 1)
+      + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes()) + '.zip';
+  },
+
   /* 抽屉是 append 到 `document.body` 的，容器级委托接不到它，
      所以打印委托必须绑在 **document** 上，且只绑一次（防重复弹窗）。 */
   _bindPrintDoc() {

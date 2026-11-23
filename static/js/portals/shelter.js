@@ -4918,7 +4918,11 @@ const Shelter = {
       <div class="card">
         <div class="card-header" style="justify-content:flex-end;">
           <div class="flex gap-2">
-            <button class="btn btn-secondary btn-sm" id="btnExportLedger">导出</button>
+            ${tab === 'pets' ? `
+              <button class="btn btn-primary btn-sm" id="btnExportPetArchive">📄 导出单宠档案 PDF</button>
+              <button class="btn btn-primary btn-sm" id="btnBatchPetArchive">📦 批量导出单宠档案 PDF</button>
+            ` : ''}
+            <button class="btn btn-secondary btn-sm" id="btnExportLedger">导出列表 CSV</button>
             <button class="btn btn-secondary btn-sm" id="btnPrintLedger">打印</button>
           </div>
         </div>
@@ -4931,6 +4935,42 @@ const Shelter = {
     // 当前页签的行数据/列定义，供「行内点击」与「导出」取用（见 render_ledger）
     this._ledgerRows = data;
     this._ledgerColumns = columns;
+    if (document.getElementById('btnExportPetArchive')) {
+      document.getElementById('btnExportPetArchive').addEventListener('click', () => {
+        // 与政府端共用同一个选择器：两端各写一遍迟早一边导 CSV 列表、
+        // 一边导单宠 PDF。这里只负责挑哪一只，取数与权限由打印页把关。
+        TNR_UI.pickPetForArchive(this._ledgerRows);
+      });
+    }
+    if (document.getElementById('btnBatchPetArchive')) {
+      document.getElementById('btnBatchPetArchive').addEventListener('click', async () => {
+        const rows = this._ledgerRows || [];
+        const ids = rows.map(r => r.id).filter(x => x !== null && x !== undefined);
+        if (!ids.length) {
+          TNR_UI.toast('当前筛选结果为空，没有可导出的宠物', 'warning');
+          return;
+        }
+        // 与后端 MAX_BATCH_PET_ARCHIVE 同口径（判据核对）
+        if (ids.length > 100) {
+          TNR_UI.toast('一次最多导出 100 只，请缩小筛选范围后再批量导出', 'warning');
+          return;
+        }
+        const btn = document.getElementById('btnBatchPetArchive');
+        const original = btn.innerHTML;
+        btn.disabled = true;
+        btn.textContent = '正在生成 PDF…';
+        try {
+          const blob = await TNR_API.batchPetArchivePdf(ids);
+          TNR_UI.downloadBlob(blob, TNR_UI.batchArchiveZipName());
+          TNR_UI.toast(`已导出 ${ids.length} 只宠物的档案 ZIP`, 'success');
+        } catch (e) {
+          TNR_UI.toast('批量导出失败：' + (e.message || '未知错误'), 'danger');
+        } finally {
+          btn.disabled = false;
+          btn.innerHTML = original;
+        }
+      });
+    }
     document.getElementById('btnExportLedger').addEventListener('click', () => {
       // 走公共实现：旧代码在这里逐列取 `c.key`，而 render 列一律写空串，
       // 一宠一档 11 列全是 render，导出就只剩表头（见 TNR_UI.exportCsv 注释）。
