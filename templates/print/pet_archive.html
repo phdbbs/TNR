@@ -38,8 +38,10 @@
              padding-left:8px; margin-bottom:5px; }
   .ev-date { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:#555; }
   .ev-title { font-weight:700; letter-spacing:1px; }
-  .ev-photos { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .ev-photos { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
+  .ev-photos figure { width:24mm; }
   .ev-photos img { width:24mm; height:24mm; object-fit:cover; border:1px solid #888; }
+  .ev-photos figcaption { font-size:9.5px; color:#555; text-align:center; margin-top:2px; }
   .sig { max-width:62mm; max-height:28mm; border:1px solid #888; background:#fff; padding:2px; margin-top:6px; }
   .foot { margin-top:22px; }
   .meta { margin-top:14px; font-size:11.5px; color:#777; display:flex; justify-content:space-between; }
@@ -103,7 +105,12 @@
       </table>
       {% if ev.photos %}
       <div class="ev-photos">
-        {% for p in ev.photos %}<img src="{{ p.url }}" alt="{{ p.label }}" title="{{ p.label }}">{% endfor %}
+        {% for p in ev.photos %}
+        <figure>
+          <img src="{{ p.url }}" alt="{{ p.label }}" title="{{ p.label }}">
+          <figcaption>{{ p.label }}</figcaption>
+        </figure>
+        {% endfor %}
       </div>
       {% endif %}
       {% if ev.signature %}<img class="sig" src="{{ ev.signature }}" alt="电子签名">{% endif %}

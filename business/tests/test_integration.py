@@ -189,7 +189,12 @@ class FullLifecycleTest(BusinessTestBase):
         # 8. 溯源：宠物B 应有 捕捉→转运→诊疗→放归 完整事件链
         body = self.ok(self.client.get(f'{API}/pets/{pet_b.id}/lifecycle/'))
         types = [e['type'] for e in body['data']['events']]
-        self.assertEqual(types, ['capture', 'transfer', 'treatment', 'release'])
+        # 断言**相对顺序**而不是写死全集：档案后续会补 surgery / prescription /
+        # discharge / checkin 等中间事件，写死列表会让「功能变强」表现为测试变红，
+        # 然后有人为了绿灯把新事件从聚合层删掉 —— 判据反而成了倒退的推手。
+        cursor = -1
+        for stage in ('capture', 'transfer', 'treatment', 'release'):
+            cursor = types.index(stage, cursor + 1)
 
     def test_offline_adoption_to_completed(self):
         """线下领养登记 → 医院确认领出 → 领养完成 + 消息通知。"""

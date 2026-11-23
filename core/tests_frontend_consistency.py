@@ -7037,3 +7037,45 @@ class NoNativeBlockingDialogTest(SimpleTestCase):
         self.assertGreater(bind, -1, '「确认拒绝」按钮没有接线')
         self.assertGreater(body.find("submit(id, 'reject'", bind), -1,
                            '按钮没有把原因提交出去（只关了弹窗）')
+
+
+class LifecycleTimelineCoverageTest(SimpleTestCase):
+    """一宠一档新增事件类型时，两个前端时间线都要同步认识。
+
+    后端聚合（`services_lifecycle.build_pet_lifecycle`）是事件类型的**真源**，
+    前端两处时间线（公共抽屉 + 领养人端）按 `ev.type` 逐类拼详情，
+    没有 `else` 兜底 —— 新增类型而前端没跟上的表现是：JSON 里有这段，
+    屏幕上只剩一个标题、详情空白，而且不报任何错。
+    """
+
+    def test_both_timelines_cover_every_event_type(self):
+        import inspect
+        from business.services_lifecycle import build_pet_lifecycle
+
+        src = inspect.getsource(build_pet_lifecycle)
+        types = sorted(set(re.findall(r"'type':\s*'([a-z_]+)'", src)))
+        self.assertGreaterEqual(len(types), 10,
+                                '没能从聚合服务里提取出事件类型，判据会变成恒真')
+
+        for rel in ('static/js/tnr-common.js', 'static/js/portals/adopter.js'):
+            js = strip_js_comments(_read_raw(rel))
+            missing = [t for t in types if f"ev.type === '{t}'" not in js]
+            self.assertEqual(
+                missing, [],
+                f'{rel} 的时间线不认识这些事件（屏幕上详情会是空白）：{missing}')
+
+    def test_adopter_timeline_renders_event_photos(self):
+        """领养人端必须**真的渲染**事件照片 —— 回访打卡的图原先完全不显示。
+
+        ⚠ 不能只断言 `ev.photos` 这个标识符存在：把 `if (evPhotos.length)`
+        改成 `if (false)`、或算出 `photoHTML` 却不拼进详情，标识符都还在，
+        界面上一张图也不会有（变异测试实测过这种假绿）。三处都钉住：
+        有照片 → 分支成立 → HTML 拼进时间线。
+        """
+        js = strip_js_comments(_read_raw('static/js/portals/adopter.js'))
+        self.assertIn('const evPhotos = ev.photos || []', js,
+                      '领养人端时间线没有取事件照片')
+        self.assertIn('if (evPhotos.length) {', js,
+                      '照片渲染分支被删或短路 —— 打卡有图也看不见')
+        self.assertIn('${desc}${photoHTML}', js,
+                      '照片 HTML 算出来了却没拼进详情（界面仍然不显示）')

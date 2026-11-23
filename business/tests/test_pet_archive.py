@@ -14,12 +14,13 @@
 from django.utils import timezone
 
 from business.models import (
-    Adoption, Capture, Euthanasia, OwnerReturn, Pet, Release, Transfer,
-    Treatment,
+    Adoption, Capture, CheckIn, Euthanasia, OwnerReturn, Pet, Release, Transfer,
+    Treatment, TreatmentItem, TreatmentRx,
 )
 from business.services import pet_archive_records, pet_photo_list
+from business.services_lifecycle import build_pet_lifecycle, event_print_rows
 from business.tests.base import (
-    BusinessTestBase, make_capture, make_district, make_pet,
+    BusinessTestBase, make_capture, make_district, make_material, make_pet,
 )
 
 CAPTURES_URL = '/api/business/captures/'
@@ -622,3 +623,155 @@ class PetArchivePrintTest(BusinessTestBase):
         resp = self.client.get(PRINT_URL.format(self.pet.id))
         self.assertEqual(resp.status_code, 302)
         self.assertIn('/login', resp['Location'])
+
+
+# ============================================================
+# 全过程四要素：捕捉 → 转运 → 诊疗 → 手术 → 处方 → 出院 → 领养后打卡
+# ============================================================
+class PetArchiveFullProcessTest(BusinessTestBase):
+    """「一宠一档导出要把全过程记全」的判据（不停在状态码/事件数量）。
+
+    用户原话要求每一段都有**时间、操作人、操作内容、照片**。这里的做法是
+    逐段造真数据、调**与打印页共用**的 `build_pet_lifecycle`，然后断言：
+      ① 四类此前缺失的事件（手术/处方/出院/打卡）真的出现；
+      ② 每条事件都有 content / time / 操作人三要素（照片是可选的，
+         因为多数业务单据本身就没有照片字段，硬造等于伪造档案）；
+      ③ 打印页把这些中文标签和内容**真的印出来** —— 只出现在 JSON 里
+         而打印页没有，等于用户要的 PDF 仍然缺。
+    """
+
+    CODE = 'TNRWHOLE01'
+
+    def setUp(self):
+        self.capture = make_capture(
+            district=self.district_a, shelter=self.shelter_a,
+            pet_codes=[self.CODE])
+        self.pet = make_pet(
+            code=self.CODE, status='adopted', district=self.district_a,
+            capture=self.capture, shelter=self.shelter_a)
+        self.treatment = Treatment.objects.create(
+            pet=self.pet, pet_code=self.CODE, hospital_name='甲区宠物医院',
+            district=self.district_a, ledger_no='TRE-WHOLE-01',
+            operator_name='张医生', advice='术后静养七天',
+            done_at=timezone.now(),
+            disposed_at=timezone.now(), disposal='pending_adopt',
+            disposal_advised='pending_adopt',
+            sterilization_surgery_date=timezone.localdate(),
+            sterilization_surgeon='李主刀', sterilization_anesthesia='吸入麻醉',
+            sterilization_procedure='常规卵巢子宫切除，过程顺利')
+
+    def _seed_rx_and_checkin(self):
+        """新流程的子表数据（处方必须挂在 TreatmentItem 下）。"""
+        material = make_material(
+            district=self.district_a, name='狂犬疫苗', category='vaccine')
+        item = TreatmentItem.objects.create(
+            treatment=self.treatment, item_key='vaccine',
+            item_name='免疫', vet_name='张医生', is_done=True,
+            done_at=timezone.now(), notes='注射于右后腿')
+        TreatmentRx.objects.create(
+            item=item, material=material, material_name='狂犬疫苗',
+            quantity=1, unit='支')
+        CheckIn.objects.create(
+            pet=self.pet, pet_code=self.CODE, adopter_name='李四',
+            month='2026-11', note='状态很好，已适应新家',
+            status='approved', review_note='照片清晰',
+            operator=self.gov_a, photo='checkins/whole.png')
+
+    def _events(self):
+        data = build_pet_lifecycle(self.pet, self.shelter_user_a)
+        return data['events']
+
+    # ---------- 事件齐全 ----------
+
+    def test_all_seven_stages_present(self):
+        self._seed_rx_and_checkin()
+        types = {e['type'] for e in self._events()}
+        needed = {'capture', 'treatment', 'surgery', 'prescription',
+                  'discharge', 'checkin'}
+        self.assertEqual(needed - types, set(),
+                         f'档案缺这些阶段：{needed - types}')
+
+    def test_surgery_detail_is_not_reduced_to_one_word(self):
+        """旧字段（新流程不写）也必须能出手术详情 —— 历史单不能只剩「绝育」。"""
+        ev = next(e for e in self._events() if e['type'] == 'surgery')
+        rows = dict(event_print_rows(ev))
+        self.assertEqual(rows['主刀医生'], '李主刀')
+        self.assertEqual(rows['麻醉方式'], '吸入麻醉')
+        self.assertEqual(rows['手术过程'], '常规卵巢子宫切除，过程顺利')
+        self.assertEqual(rows['手术日期'], timezone.localdate().isoformat())
+
+    def test_prescription_carries_drug_and_operator(self):
+        self._seed_rx_and_checkin()
+        ev = next(e for e in self._events() if e['type'] == 'prescription')
+        rows = dict(event_print_rows(ev))
+        self.assertEqual(rows['药品'], '狂犬疫苗')
+        self.assertEqual(rows['数量'], '1支')
+        self.assertEqual(rows['开方兽医'], '张医生')
+        self.assertIn('狂犬疫苗', ev['content'])
+
+    def test_discharge_is_a_separate_event(self):
+        """出院是诊疗的收口节点，不能只靠领养/放归单据代替。"""
+        ev = next(e for e in self._events() if e['type'] == 'discharge')
+        rows = dict(event_print_rows(ev))
+        self.assertEqual(rows['出院去向'], '领养')
+        self.assertEqual(rows['原建议去向'], '领养')
+
+    def test_checkin_carries_photo_note_and_review(self):
+        self._seed_rx_and_checkin()
+        ev = next(e for e in self._events() if e['type'] == 'checkin')
+        rows = dict(event_print_rows(ev))
+        self.assertEqual(rows['回访月份'], '2026-11')
+        self.assertEqual(rows['近况备注'], '状态很好，已适应新家')
+        self.assertEqual(rows['审核状态'], '已通过')
+        self.assertEqual(rows['审核意见'], '照片清晰')
+        self.assertEqual(len(ev['photos']), 1)
+        self.assertIn('回访打卡', ev['photos'][0]['label'])
+        self.assertIn('/media/checkins/whole.png', ev['photos'][0]['url'])
+
+    # ---------- 四要素 ----------
+
+    def test_every_event_has_content_time_and_operator(self):
+        """每条事件都要有「时间 / 操作人 / 操作内容」—— 不是只有新增的四类。"""
+        self._seed_rx_and_checkin()
+        events = self._events()
+        self.assertTrue(events)
+        for ev in events:
+            with self.subTest(type=ev['type']):
+                rows = dict(event_print_rows(ev))
+                self.assertTrue(ev.get('date'), '缺日期，时间线无法排序')
+                self.assertTrue(ev.get('content'), '缺操作内容')
+                self.assertTrue(rows.get('操作内容'), '打印页缺「操作内容」行')
+                self.assertTrue(rows.get('操作人'), '缺操作人')
+                self.assertTrue(rows.get('操作时间'), '打印页缺「操作时间」行')
+
+    def test_legacy_treatment_without_child_tables_still_prints(self):
+        """没有子表的历史单：手术事件靠旧列生成，其余事件照常，不 500。"""
+        events = self._events()
+        types = {e['type'] for e in events}
+        self.assertIn('surgery', types)
+        self.assertIn('discharge', types)
+        self.assertNotIn('prescription', types)
+
+    # ---------- 打印页（用户拿到的 PDF 就是这一页） ----------
+
+    def test_print_page_contains_every_stage_and_four_elements(self):
+        self._seed_rx_and_checkin()
+        self.login_as(self.shelter_user_a)
+        resp = self.client.get(PRINT_URL.format(self.pet.id))
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode()
+        for needle in ('手术记录', '处方用药', '出院办理', '领养后打卡',
+                       '操作内容', '操作时间', '操作人',
+                       '李主刀', '狂犬疫苗', '状态很好，已适应新家',
+                       '/media/checkins/whole.png'):
+            self.assertIn(needle, html, f'PDF 打印页少了：{needle}')
+
+    def test_print_page_uses_same_service_as_json(self):
+        """打印页与 JSON 共用聚合服务：改一处两边同时变，不会纸上缺一段。"""
+        import inspect
+        from business import views_print
+        # 视图被 login_required 包过，__code__.co_names 拿到的是 wrapper 的，
+        # 必须看源码（与项目其它「手抄副本漂移」判据同一写法）。
+        src = inspect.getsource(views_print.print_pet_archive)
+        self.assertIn('build_pet_lifecycle(', src,
+                      '打印页没有调用共用聚合服务')

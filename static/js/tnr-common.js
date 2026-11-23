@@ -412,6 +412,30 @@ const TNR_UI = {
               + '<img src="' + ev.signature + '" alt="签名" data-zoom="' + ev.signature + '" '
               + 'style="max-width:260px;max-height:120px;background:#fff;border:1px solid var(--border-light);border-radius:6px;cursor:zoom-in;padding:4px;"></div>';
           }
+        } else if (ev.type === 'surgery') {
+          desc = '医院：' + this.escape(ev.hospital_name || '—')
+            + '<br>手术日期：' + this.escape(ev.surgery_date || '—')
+            + '<br>主刀：' + this.escape(ev.surgeon || '—')
+            + (ev.anesthesia ? '<br>麻醉：' + this.escape(ev.anesthesia) : '')
+            + (ev.procedure ? '<br>过程：' + this.escape(ev.procedure) : '')
+            + (ev.notes ? '<br>注意事项：' + this.escape(ev.notes) : '');
+        } else if (ev.type === 'prescription') {
+          desc = '药品：' + this.escape(ev.drug_name || '—')
+            + '<br>数量：' + this.escape(ev.quantity || '—')
+            + '<br>项目：' + this.escape(ev.item_name || '—')
+            + '<br>开方兽医：' + this.escape(ev.vet_name || '—')
+            + (ev.manual_rx ? '<br>手写处方：' + this.escape(ev.manual_rx) : '');
+        } else if (ev.type === 'discharge') {
+          desc = '医院：' + this.escape(ev.hospital_name || '—')
+            + '<br>出院去向：' + this.escape(ev.disposal_label || ev.disposal || '—')
+            + (ev.advised_label ? '<br>原建议去向：' + this.escape(ev.advised_label) : '')
+            + '<br>操作人：' + this.escape(ev.operator_name || '—');
+        } else if (ev.type === 'checkin') {
+          desc = '回访月份：' + this.escape(ev.month || '—')
+            + '<br>领养人：' + this.escape(ev.adopter_name || '—')
+            + '<br>近况：' + this.escape(ev.note || '—')
+            + '<br>审核状态：' + this.escape(ev.status_label || ev.status || '—')
+            + (ev.review_note ? '<br>审核意见：' + this.escape(ev.review_note) : '');
         }
         const evPhotos = ev.photos || [];
         if (evPhotos.length) {

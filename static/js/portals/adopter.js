@@ -796,11 +796,39 @@ async function showLifecycle(adoptionId) {
           desc += `<div style="margin-top:8px;"><div style="font-size:12px;color:var(--ink-muted);margin-bottom:4px;">领回人电子签名</div>`
             + `<img src="${ev.signature}" style="max-width:240px;max-height:100px;background:#fff;border:1px solid var(--border-light);border-radius:6px;padding:4px;"></div>`;
         }
+      } else if (ev.type === 'surgery') {
+        desc = `医院：${TNR_UI.escape(ev.hospital_name || '—')}<br>手术日期：${TNR_UI.escape(ev.surgery_date || '—')}`
+          + `<br>主刀：${TNR_UI.escape(ev.surgeon || '—')}`
+          + (ev.anesthesia ? `<br>麻醉：${TNR_UI.escape(ev.anesthesia)}` : '')
+          + (ev.procedure ? `<br>过程：${TNR_UI.escape(ev.procedure)}` : '');
+      } else if (ev.type === 'prescription') {
+        desc = `药品：${TNR_UI.escape(ev.drug_name || '—')}<br>数量：${TNR_UI.escape(ev.quantity || '—')}`
+          + `<br>项目：${TNR_UI.escape(ev.item_name || '—')}`
+          + `<br>开方兽医：${TNR_UI.escape(ev.vet_name || '—')}`;
+      } else if (ev.type === 'discharge') {
+        desc = `医院：${TNR_UI.escape(ev.hospital_name || '—')}`
+          + `<br>出院去向：${TNR_UI.escape(ev.disposal_label || ev.disposal || '—')}`
+          + (ev.advised_label ? `<br>原建议去向：${TNR_UI.escape(ev.advised_label)}` : '');
+      } else if (ev.type === 'checkin') {
+        desc = `回访月份：${TNR_UI.escape(ev.month || '—')}<br>领养人：${TNR_UI.escape(ev.adopter_name || '—')}`
+          + `<br>近况：${TNR_UI.escape(ev.note || '—')}`
+          + `<br>审核状态：${TNR_UI.escape(ev.status_label || ev.status || '—')}`
+          + (ev.review_note ? `<br>审核意见：${TNR_UI.escape(ev.review_note)}` : '');
+      }
+      // 领养人端原先**完全不渲染**事件照片 —— 回访打卡有图也看不见。
+      // 与 tnr-common.js 的照片墙同款（点击放大由全局委托处理）。
+      const evPhotos = ev.photos || [];
+      let photoHTML = '';
+      if (evPhotos.length) {
+        photoHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">'
+          + evPhotos.map(p => `<img src="${p.url}" alt="${TNR_UI.escape(p.label)}" data-zoom="${p.url}" `
+            + `style="width:72px;height:72px;object-fit:cover;border-radius:6px;border:1px solid var(--border-light);cursor:zoom-in;">`).join('')
+          + '</div>';
       }
       html += `<div class="timeline-item done">
         <div class="timeline-time">${TNR_UI.escape(dateStr)}</div>
         <div class="timeline-title">${TNR_UI.escape(ev.type_display || ev.type)}</div>
-        <div class="timeline-desc">${desc}</div>
+        <div class="timeline-desc">${desc}${photoHTML}</div>
       </div>`;
     });
   }
