@@ -42,6 +42,7 @@ MODULE_BY_PREFIX = [
     ('/api/supervision/users/', '用户管理', '账号'),
     ('/api/supervision/config/', '系统配置', '系统参数'),
     ('/api/supervision/discharge-docs/', '出院单据维护', '出院单据'),
+    ('/api/supervision/admission-docs/', '入院单据维护', '入院单据'),
     ('/api/accounts/', '账户安全', '账户'),
 ]
 

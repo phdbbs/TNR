@@ -3,7 +3,7 @@ Task 13: 政府监管后端 - URL 路由
 """
 from django.urls import path
 
-from . import doc_maintenance, views
+from . import admission_doc_maintenance, doc_maintenance, views
 
 app_name = 'supervision'
 
@@ -53,4 +53,12 @@ urlpatterns = [
          name='discharge_doc_list'),
     path('discharge-docs/status/', doc_maintenance.discharge_doc_status,
          name='discharge_doc_status'),
+
+    # ============================================
+    # 入院单据状态维护（捕捉/转运/领回/诊疗，仅平台管理员）
+    # ============================================
+    path('admission-docs/', admission_doc_maintenance.admission_doc_list,
+         name='admission_doc_list'),
+    path('admission-docs/status/', admission_doc_maintenance.admission_doc_status,
+         name='admission_doc_status'),
 ]
