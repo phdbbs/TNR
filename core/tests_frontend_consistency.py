@@ -7180,3 +7180,109 @@ class LifecycleTimelineCoverageTest(SimpleTestCase):
                       '照片渲染分支被删或短路 —— 打卡有图也看不见')
         self.assertIn('${desc}${photoHTML}', js,
                       '照片 HTML 算出来了却没拼进详情（界面仍然不显示）')
+
+
+# ============================================================
+# 入院单据维护入口 + 单据列表序号（本轮新增）
+# ============================================================
+class AdmissionDocMaintenanceTest(SimpleTestCase):
+    """入院单据维护：导航/页面/接口/类型映射四处必须同时到位。
+
+    这类功能最容易「后端写好了、前端没有入口」或「页面有了、导航点不到」，
+    与一宠一档 PDF 入口同一类缺陷。用源码级断言把四处钉在一起。
+    """
+
+    def test_nav_and_page_container_exist(self):
+        base = _read_raw('templates/portal/platform_base.html')
+        portal = _read_raw('templates/portal/platform/portal.html')
+        self.assertIn('入院单据维护', base, '平台端侧边栏没有入院单据维护入口')
+        self.assertIn('id="page-admissions"', portal, '平台端没有入院维护页容器')
+
+    def test_platform_js_wires_nav_and_renderer(self):
+        js = strip_js_comments(_read_raw('static/js/portals/platform.js'))
+        self.assertIn("'入院单据维护': 'admissions'", js, '导航映射缺失，点了不跳转')
+        self.assertIn("'admissions': '入院单据维护'", js, '标题映射缺失')
+        self.assertIn('async render_admissions()', js, '没有入院维护页渲染方法')
+        self.assertIn('TNR_API.getAdmissionDocs(', js, '没有取数调用，页面会空白')
+        self.assertIn('TNR_API.setAdmissionDocStatus(', js, '没有提交操作，改了也存不了')
+
+    def test_api_methods_exist(self):
+        js = strip_js_comments(_read_raw('static/js/tnr-api.js'))
+        self.assertIn("async getAdmissionDocs(filters)", js)
+        self.assertIn("async setAdmissionDocStatus(data)", js)
+        self.assertIn('/api/supervision/admission-docs/', js)
+
+    def test_doc_type_labels_match_backend(self):
+        """前端页签类型必须与后端白名单逐字一致，否则切页签永远空表。"""
+        from supervision.admission_doc_maintenance import DOC_LABELS as be
+        js = strip_js_comments(_read_raw('static/js/portals/platform.js'))
+        m = re.search(r'ADM_DOC_LABELS:\s*\{(.*?)\n  \}', js, re.S)
+        self.assertIsNotNone(m, '找不到前端 ADM_DOC_LABELS')
+        for key in be:
+            self.assertRegex(m.group(1), r"\b" + re.escape(key) + r"\s*:",
+                             f'前端缺少单据类型页签：{key}')
+
+    def test_treatment_is_readonly_in_frontend(self):
+        """诊疗单只读：前端不能给它挂任何回退动作。"""
+        js = strip_js_comments(_read_raw('static/js/portals/platform.js'))
+        self.assertIn("r.doc_type === 'treatment'", js)
+        self.assertIn('诊疗单只读', js)
+
+    def test_action_labels_cover_all_transitions(self):
+        """每个白名单迁移都要有中文动作词，否则按钮显示成英文状态码。"""
+        from supervision.admission_doc_maintenance import (
+            TRANSITIONS, RESUBMIT_TARGET,
+        )
+        js = strip_js_comments(_read_raw('static/js/portals/platform.js'))
+        m = re.search(r'ADM_ACTION_LABEL:\s*\{(.*?)\n  \}', js, re.S)
+        self.assertIsNotNone(m, '找不到前端动作词映射')
+        body = m.group(1)
+        for doc_type, mapping in TRANSITIONS.items():
+            # mapping 的 key 是「当前状态」，value 才是可迁移到的「目标状态」；
+            # 动作词映射按 doc_type:目标状态 组织，所以要检查 values。
+            for targets in mapping.values():
+                for target in targets:
+                    key = f"'{doc_type}:{target}'"
+                    self.assertIn(key, body, f'缺少动作词：{key}')
+        self.assertIn(RESUBMIT_TARGET, body)
+
+    def test_audit_route_mapped(self):
+        audit = _read_raw('core/audit.py')
+        self.assertIn('/api/supervision/admission-docs/', audit,
+                      '入院维护操作不写审计台账')
+
+
+class DocumentListSequenceTest(SimpleTestCase):
+    """单据列表序号：在 mountTable 组件层一处注入，覆盖所有端。
+
+    变异风险：把注入语句删掉、把序号列渲染短路、或把 columns 原地 unshift
+    （重渲染累积多列），判据都要能抓到。
+    """
+
+    def test_mount_table_injects_sequence_column(self):
+        js = strip_js_comments(_read_raw('static/js/tnr-common.js'))
+        self.assertIn('const numbered = opts.numbered !== false', js,
+                      '序号注入开关缺失（默认应在所有单据列表生效）')
+        self.assertIn("key: '__seq__'", js, '没有注入序号虚拟列')
+        self.assertIn('title: \'序号\'', js, '序号列表头缺失')
+        self.assertIn('const columns = numbered ? [seqCol].concat(baseColumns) : baseColumns', js,
+                      '没有用新数组注入（原地改会累积多列序号）')
+
+    def test_sequence_is_page_continuous(self):
+        """序号必须跨页连续，不能每页都从 1 开始。"""
+        js = strip_js_comments(_read_raw('static/js/tnr-common.js'))
+        self.assertIn("'<span class=\"dt-seq\">'", js, '序号单元格没有 dt-seq 标记')
+        self.assertIn('(st.page - 1) * pageSize + idx + 1', js,
+                      '序号没有按分页连续编号')
+
+    def test_render_loops_use_injected_columns(self):
+        """表头/单元格渲染必须遍历注入后的 columns，不能绕回 baseColumns。"""
+        js = strip_js_comments(_read_raw('static/js/tnr-common.js'))
+        # 注入后至少 3 处遍历（colgroup / 表头 / 单元格）用 columns
+        self.assertGreaterEqual(js.count('columns.forEach('), 3,
+                                '有渲染循环仍在用未注入序号的列数组')
+
+    def test_seq_column_not_sortable_resizable(self):
+        """序号列不可排序、不可拖宽（序号是行号，排序/改宽无意义且会错乱）。"""
+        js = strip_js_comments(_read_raw('static/js/tnr-common.js'))
+        self.assertIn('sortable: false, resizable: false', js)

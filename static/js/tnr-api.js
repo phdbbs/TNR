@@ -527,6 +527,19 @@ const TNR_API = {
   async setDischargeDocStatus(data) {
     return this._post('/api/supervision/discharge-docs/status/', data);
   },
+  /* 入院单据维护（捕捉/转运/领回/诊疗，仅平台端）。同样走严格读 getData()。 */
+  async getAdmissionDocs(filters) {
+    const params = new URLSearchParams();
+    Object.keys(filters || {}).forEach(k => {
+      const v = filters[k];
+      if (v !== undefined && v !== null && v !== '') params.append(k, v);
+    });
+    const qs = params.toString();
+    return this.getData('/api/supervision/admission-docs/' + (qs ? '?' + qs : ''));
+  },
+  async setAdmissionDocStatus(data) {
+    return this._post('/api/supervision/admission-docs/status/', data);
+  },
   async generatePetCodes(count) {
     try {
       const res = await fetch('/api/business/captures/codes-preview/?count=' + count, { credentials: 'same-origin' });

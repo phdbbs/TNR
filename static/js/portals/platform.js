@@ -3,7 +3,7 @@
 
    职责边界（第四十二轮）：全局设置在这里，业务查看在政府端（/gov/）。
    ------------------------------------------------
-   机构基础管理 / 账号权限管理 / 出院单据维护 / 系统配置  ← 本端
+   机构基础管理 / 账号权限管理 / 出院单据维护 / 入院单据维护 / 系统配置  ← 本端
    数据总览大屏 / 全业务监管 / 物料全局监管 / 全局台账中心 ← 政府端
    ============================================ */
 
@@ -12,6 +12,7 @@ const PlatformPortal = {
   instState: { tab: 'district' },
   settingsState: { tab: 'prefix' },
   docState: { type: '' },
+  admissionState: { type: '' },
 
   /* ⚠ 键必须与 `platform_base.html` 侧边栏的标签文本一一对应。
      点击是按 label 文本找 render 方法的，两边漂移就是「点了没反应」。 */
@@ -19,6 +20,7 @@ const PlatformPortal = {
     'institutions': '机构基础管理',
     'accounts': '账号权限管理',
     'docs': '出院单据维护',
+    'admissions': '入院单据维护',
     'settings': '系统配置'
   },
 
@@ -35,6 +37,7 @@ const PlatformPortal = {
       '机构基础管理': 'institutions',
       '账号权限管理': 'accounts',
       '出院单据维护': 'docs',
+      '入院单据维护': 'admissions',
       '系统配置': 'settings'
     };
     document.querySelectorAll('.portal-sidebar-nav .nav-item').forEach(a => {
@@ -1211,6 +1214,196 @@ const PlatformPortal = {
         await this.loadDocs();
       } catch (e) {
         TNR_UI.toast(e.message || '退回失败', 'danger');
+      }
+    });
+  },
+
+  /* ========== 入院单据维护 ==========
+   * 与出院维护对称，但语义不同：捕捉/领回走「退回草稿 → 改错 → 重新提交」，
+   * 转运只做「未签收退回重转」，诊疗单只读。能做什么由服务端 `targets` 决定，
+   * 前端只照译，不另写一份状态机。
+   */
+  ADM_DOC_LABELS: {
+    '': '全部单据',
+    capture: '捕捉单',
+    transfer: '转运单',
+    owner_return: '现场领回单',
+    treatment: '诊疗单'
+  },
+  /* 操作按钮文案：doc_type:target → 动词。草稿/生效本身是状态名，直接写
+     「退回为草稿」对「重新提交」不适用，故按类型分别给动作词。 */
+  ADM_ACTION_LABEL: {
+    'capture:draft': '退回草稿',
+    'capture:effective': '重新提交',
+    'transfer:void': '退回重转',
+    'owner_return:draft': '退回草稿',
+    'owner_return:effective': '重新提交'
+  },
+
+  async render_admissions() {
+    const el = document.getElementById('page-admissions');
+    el.innerHTML = '<div class="tabs">'
+      + Object.keys(this.ADM_DOC_LABELS).map(t =>
+        '<div class="tab-item' + (this.admissionState.type === t ? ' active' : '')
+        + '" data-adm-tab="' + t + '">' + this.ADM_DOC_LABELS[t] + '</div>').join('')
+      + '</div>'
+      + '<p class="form-hint mb-4">捕捉单、现场领回单可退回草稿（单据与照片保留），修正后重新提交；'
+        + '仅未签收的转运单可退回重转；诊疗单仅供查看。每次操作都写入日志，原因必填。</p>'
+      + TNR_UI.renderFilterBar([
+        { key: 'q', label: '搜索', type: 'search', placeholder: '动物编号 / 单据编号' },
+        { key: 'actionable', label: '可操作', type: 'select',
+          options: [{ value: '1', label: '只看当前可操作' }] }
+      ], '<button type="button" class="btn btn-secondary btn-sm" id="btnAdmRefresh">刷新</button>')
+      + '<div class="table-wrapper" id="admTableWrapper">'
+      + '<div class="table-empty"><div class="table-empty-icon">⏳</div>'
+      + '<div class="table-empty-text">加载中...</div></div></div>';
+
+    el.querySelectorAll('[data-adm-tab]').forEach(tab => {
+      tab.addEventListener('click', () => {
+        this.admissionState.type = tab.dataset.admTab;
+        this.render_admissions();
+      });
+    });
+    document.getElementById('btnAdmRefresh').addEventListener('click', () => this.loadAdmissions());
+    await this.loadAdmissions();
+    TNR_UI.bindFilter(() => this.loadAdmissions(), el);
+  },
+
+  async loadAdmissions() {
+    const f = TNR_UI.getFilterValues(document.getElementById('page-admissions'));
+    const query = { doc_type: this.admissionState.type, limit: 200 };
+    if (f.q) query.q = f.q;
+    if (f.actionable) query.actionable = f.actionable;
+    try {
+      this._admissions = (await TNR_API.getAdmissionDocs(query)) || [];
+    } catch (e) {
+      this._admissions = null;
+      this.showLoadError(document.getElementById('admTableWrapper'),
+        '入院单据加载失败', e, () => this.loadAdmissions());
+      return;
+    }
+    this.renderAdmissionsTable();
+  },
+
+  _admissionsEmptyText(f) {
+    const scope = this.admissionState.type
+      ? this.ADM_DOC_LABELS[this.admissionState.type] : '全部单据';
+    const conds = [];
+    if (f.q) conds.push('编号「' + f.q + '」');
+    if (f.actionable) conds.push('只看可操作');
+    return conds.length
+      ? scope + '里没有匹配 ' + conds.join('、') + ' 的单据，可清空搜索或切页签'
+      : scope + '暂无入院单据';
+  },
+
+  renderAdmissionsTable() {
+    if (!this._admissions) return;
+    const f = TNR_UI.getFilterValues(document.getElementById('page-admissions'));
+    const data = this._admissions.filter(r =>
+      TNR_UI.inDateRange(r.created_at, f.start_date, f.end_date));
+    const cell = {
+      doc: r => '<div>' + TNR_UI.escape(r.doc_label) + '</div>'
+        + '<div class="fs-sm text-muted">'
+        + TNR_UI.escape(r.ledger_no || ('#' + r.id)) + '</div>',
+      pet: r => '<div>' + TNR_UI.escape(r.pet_code || '—') + '</div>'
+        + (r.pet_status_display
+          ? '<div class="fs-sm text-muted">' + TNR_UI.petStatusBadge(r.pet_status) + '</div>' : ''),
+      inst: r => '<div>' + TNR_UI.escape(r.institution_name || '—') + '</div>'
+        + '<div class="fs-sm text-muted">' + TNR_UI.escape(r.district_name || '全市') + '</div>',
+      status: r => TNR_UI.statusBadge(TNR_UI.escape(r.status_display || '—'),
+        r.targets.length ? 'warning' : 'default'),
+      created: r => TNR_UI.escape(r.created_at || '—')
+    };
+    const columns = [
+      { key: 'doc_label', title: '单据', render: cell.doc },
+      { key: 'pet_code', title: '动物 / 档案状态', render: cell.pet },
+      { key: 'institution_name', title: '机构 / 区县', render: cell.inst, mobile: 'hide' },
+      { key: 'status_display', title: '单据状态', render: cell.status },
+      { key: 'created_at', title: '创建时间', render: cell.created, mobile: 'hide' }
+    ];
+    const rowActions = r => {
+      if (!r.targets || !r.targets.length) {
+        return r.doc_type === 'treatment'
+          ? '<span class="fs-sm text-muted">诊疗单只读</span>'
+          : '<span class="fs-sm text-muted">无可操作状态</span>';
+      }
+      return r.targets.map(t => {
+        const label = this.ADM_ACTION_LABEL[r.doc_type + ':' + t] || ('改为「' + t + '」');
+        return '<button class="btn-link" data-adm-op="'
+          + TNR_UI.escape(r.doc_type) + ':' + r.id + ':' + TNR_UI.escape(t) + '">'
+          + TNR_UI.escape(label) + '</button>';
+      }).join('');
+    };
+    TNR_UI.mountTable('admTableWrapper', {
+      id: 'platform.admissionDocs', columns, data, rowActions,
+      emptyText: this._admissionsEmptyText(f)
+    });
+    TNR_UI.delegateClick('admTableWrapper', {
+      'data-adm-op': (v) => this.changeAdmissionDoc(v)
+    });
+  },
+
+  changeAdmissionDoc(spec) {
+    const parts = String(spec || '').split(':');
+    const target = parts[2];
+    const row = (this._admissions || []).find(r =>
+      r.doc_type === parts[0] && String(r.id) === parts[1]);
+    if (!row) {
+      TNR_UI.toast('单据不存在或已被删除，请刷新列表', 'warning');
+      return;
+    }
+    if ((row.targets || []).indexOf(target) === -1) {
+      TNR_UI.toast('该单据状态已变化，请刷新列表', 'warning');
+      return;
+    }
+    const action = this.ADM_ACTION_LABEL[row.doc_type + ':' + target] || '状态变更';
+    const isResubmit = target === 'effective';
+    const hint = row.doc_type === 'transfer'
+      ? '退回后动物回「在途」，捕捉点需重新选择动物与目标医院再转运；医院已签收的单不会出现在可操作列表。'
+      : (isResubmit
+        ? '重新提交后恢复业务效力，动物状态与关联单据一并生效。'
+        : '退回草稿后单据、照片与编号全部保留，仅业务效力暂停，修正后可重新提交。');
+    const body = `
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">单据</label>
+          <input type="text" class="form-input" readonly
+            value="${TNR_UI.escape(row.doc_label + ' ' + (row.ledger_no || ('#' + row.id)))}"></div>
+        <div class="form-group"><label class="form-label">动物编号</label>
+          <input type="text" class="form-input" readonly
+            value="${TNR_UI.escape(row.pet_code || '—')}"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">当前状态</label>
+          <input type="text" class="form-input" readonly value="${TNR_UI.escape(row.status_display || '—')}"></div>
+        <div class="form-group"><label class="form-label">操作</label>
+          <input type="text" class="form-input" readonly value="${TNR_UI.escape(action)}"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">维护原因<span class="req">*</span></label>
+        <textarea class="form-textarea" id="admOp-reason" maxlength="200"
+          placeholder="必填，不超过 200 字。写清为什么退回或重提，例如「主人电话填错，需重新登记」"></textarea>
+      </div>
+      <p class="form-hint">${TNR_UI.escape(hint)}本操作记入操作日志（旧状态 → 新状态｜原因）。</p>`;
+    const m = TNR_UI.modal({
+      title: '入院单据维护 · ' + TNR_UI.escape(row.doc_label) + ' · ' + TNR_UI.escape(action),
+      body, size: 'md',
+      actions: '<button class="btn btn-secondary" data-action="cancel">取消</button>'
+        + '<button class="btn btn-primary" id="admOpSave">确认' + TNR_UI.escape(action) + '</button>'
+    });
+    m.overlay.querySelector('[data-action="cancel"]').addEventListener('click', m.close);
+    m.overlay.querySelector('#admOpSave').addEventListener('click', async () => {
+      const reason = m.overlay.querySelector('#admOp-reason').value.trim();
+      if (!reason) { TNR_UI.toast('请填写维护原因', 'warning'); return; }
+      try {
+        const res = await TNR_API.setAdmissionDocStatus({
+          doc_type: row.doc_type, doc_id: row.id, target: target, reason: reason
+        });
+        TNR_UI.assertOk(res, '操作失败');
+        TNR_UI.toast(res.message || '已处理', 'success');
+        m.close();
+        await this.loadAdmissions();
+      } catch (e) {
+        TNR_UI.toast(e.message || '操作失败', 'danger');
       }
     });
   },

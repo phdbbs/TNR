@@ -1722,6 +1722,11 @@ body .page-view .std-page-head .filter-bar { position: static; }
 .dt-actions-td .btn-link { padding: 4px 8px; }
 .dt-pagesize { appearance: auto; }
 
+/* 序号列（虚拟列，由 mountTable 注入到 columns 首位）：弱化为次要信息，
+   居中且等宽，避免长列表里抢视觉焦点。跨页连续编号由 render 负责。 */
+.dt-seq { display: inline-block; min-width: 20px; text-align: center;
+          color: var(--ink-light, #888); font-variant-numeric: tabular-nums; }
+
 /* 移动端列压缩（第五十九轮续）：`mobile:'hide'` 的列只在 ≤768px 隐藏，
    被隐藏的信息由主列 `mobileRender` 带回 —— 两段规则必须成对存在：
    只隐藏不补回 = 手机上信息消失；只补回不隐藏 = 文字在桌面上重复一遍。 */

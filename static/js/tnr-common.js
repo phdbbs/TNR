@@ -727,6 +727,23 @@ const TNR_UI = {
     const pageSize = st.pageSize || prefs.pageSize || opts.pageSize || 10;
     const data = Array.isArray(opts.data) ? opts.data.slice() : [];
 
+    // ---- 序号列（虚拟列，全端单据列表一处生效）----
+    // 需求：所有单据列表都加序号。56 个 mountTable 调用点逐个加列风险太大，
+    // 改为在组件层注入一个「虚拟列」到 columns 开头 —— colgroup / 表头 /
+    // 单元格 / 列宽拖拽 / 排序全部按 columns 遍历，插入后自然对齐。
+    // ⚠ 必须生成新数组，不能 opts.columns.unshift()：排序/翻页重渲染会复用
+    // 同一个 opts，原地改会每渲染一次多一列序号。
+    const baseColumns = Array.isArray(opts.columns) ? opts.columns : [];
+    const numbered = opts.numbered !== false;
+    const seqCol = {
+      key: '__seq__', title: '序号', width: 60,
+      sortable: false, resizable: false, align: 'center',
+      render: (row, idx) => '<span class="dt-seq">'
+        + ((st.page - 1) * pageSize + idx + 1) + '</span>'
+    };
+    // 序号跨页连续：(当前页-1)*每页条数 + 页内行号 + 1。
+    const columns = numbered ? [seqCol].concat(baseColumns) : baseColumns;
+
     // ---- 排序（外部重渲染保留排序条件；filter 变化时由调用方决定是否重置） ----
     let rows = data;
     if (st.sortKey) {
@@ -751,7 +768,12 @@ const TNR_UI = {
     const pageRows = rows.slice((st.page - 1) * pageSize, st.page * pageSize);
 
     // ---- 列宽记忆 ----
-    const widths = prefs.widths || null;
+    // 旧记忆是按「无序号列」的列数存的；插入序号列后数组整体错一位。
+    // 检测到长度差 1 时在开头补一个占位，保住用户对原有列的宽度设置。
+    let widths = prefs.widths || null;
+    if (numbered && widths && widths.length === baseColumns.length) {
+      widths = [60].concat(widths);
+    }
 
     const esc = this.escape.bind(this);
     const emptyText = opts.emptyText || '暂无数据';
@@ -772,16 +794,16 @@ const TNR_UI = {
       const fixed = widths ? ' table-layout:fixed;' : '';
       html += `<table class="data-table dt-table" style="${fixed}">`;
       html += '<colgroup>';
-      opts.columns.forEach((col, i) => {
+      columns.forEach((col, i) => {
         const w = widths ? widths[i] : (col.width || null);
         // 移动端列压缩：`mobile:'hide'` 的列在 ≤768px 隐藏（见 CSS），
         // 其内容应通过主列的 `mobileRender` 带回，否则手机上信息直接消失。
         const hide = col.mobile === 'hide' ? ' class="dt-col-mobile-hide"' : '';
         html += `<col${hide} style="${w ? 'width:' + (typeof w === 'number' ? w + 'px' : w) + ';' : ''}">`;
       });
-      if (actionsCol) html += `<col style="${widths && widths[opts.columns.length] ? 'width:' + widths[opts.columns.length] + 'px' : 'width:1px;'}">`;
+      if (actionsCol) html += `<col style="${widths && widths[columns.length] ? 'width:' + widths[columns.length] + 'px' : 'width:1px;'}">`;
       html += '</colgroup><thead><tr>';
-      opts.columns.forEach((col, i) => {
+      columns.forEach((col, i) => {
         const sortable = col.sortable !== false && col.key;
         const sorted = st.sortKey === col.key;
         const arrow = sortable ? `<span class="dt-sort ${sorted ? 'on ' + (st.sortDir === 'desc' ? 'desc' : 'asc') : ''}">${sorted ? (st.sortDir === 'desc' ? '▼' : '▲') : '⇅'}</span>` : '';
@@ -791,11 +813,11 @@ const TNR_UI = {
         if (col.resizable !== false) html += `<span class="dt-colresizer" data-dt-col="${i}"></span>`;
         html += '</th>';
       });
-      if (actionsCol) html += `<th class="dt-actions-th">操作<span class="dt-colresizer" data-dt-col="${opts.columns.length}"></span></th>`;
+      if (actionsCol) html += `<th class="dt-actions-th">操作<span class="dt-colresizer" data-dt-col="${columns.length}"></span></th>`;
       html += '</tr></thead><tbody>';
       pageRows.forEach((row, idx) => {
         html += '<tr>';
-        opts.columns.forEach(col => {
+        columns.forEach(col => {
           let val = typeof col.render === 'function' ? col.render(row, idx) : (row[col.key] ?? '');
           // 仅手机可见的补充内容，挂在主列单元格里；桌面端由 CSS 隐藏，
           // 不改变原有列宽与信息密度。
@@ -1766,6 +1788,9 @@ const TNR_UI = {
      `Shelter.captureStatusBadge` 各写一份 —— 四份文案恰好一致才没出事，
      后端加一档必然漏一处。 */
   CAPTURE_STATUS: {
+    // 草稿（平台端入院单据维护退回）：单据与照片保留、业务效力暂停，
+    // 宠物已逻辑失效不在待转运列表。必须与 Capture.STATUS_CHOICES 同步。
+    draft:     { text: '草稿',     badge: 'default' },
     pending:   { text: '待转运',   badge: 'warning' },
     partial:   { text: '部分转运', badge: 'info' },
     completed: { text: '已完成',   badge: 'success' },
