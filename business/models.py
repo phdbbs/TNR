@@ -89,6 +89,11 @@ class Capture(models.Model):
     - void      已作废：记录被逻辑删除
     """
     STATUS_CHOICES = [
+        # 草稿（入院单据维护）：平台端把填错的生效单退回草稿；草稿单的宠物
+        # 逻辑失效、不在待转运列表，但图片/编号保留，改错后可再次提交。
+        # 不能复用 void（已作废）：作废是终态、语义是「这张单不要了」，
+        # 而草稿要能重新提交，两者在维护页的可操作项完全不同。
+        ('draft', '草稿'),
         ('pending', '待转运'),
         ('partial', '部分转运'),
         ('completed', '已完成'),
@@ -143,6 +148,20 @@ class Capture(models.Model):
 # 主人领回
 # ============================================
 class OwnerReturn(models.Model):
+    #: 生效/草稿。领回单原先没有 status，「已存在」就等于已生效。加 status 后
+    #: 缺省必须是 effective —— 否则迁移后所有存量单据会瞬间变成草稿，
+    #: 平台维护页会把全部历史领回单当成「可改错重提」。
+    STATUS_CHOICES = [
+        ('draft', '草稿'),
+        ('effective', '已生效'),
+    ]
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES,
+                              default='effective')
+    #: 退回草稿时宠物的原状态（in_treatment / pending_adopt / in_transit）。
+    #: 必须落库，不能靠「医院办的就是 in_treatment」猜：医院端也能办 pending_adopt
+    #: 的领回，反推会把它错置成在治；重新提交时再按它精确恢复。
+    pet_status_before = models.CharField('领回前宠物状态', max_length=30,
+                                          blank=True, default='')
     pet = models.ForeignKey('business.Pet', on_delete=models.CASCADE, related_name='owner_returns', verbose_name='宠物')
     pet_code = models.CharField('宠物编号', max_length=30, blank=True, default='')
     owner_name = models.CharField('主人姓名', max_length=50)

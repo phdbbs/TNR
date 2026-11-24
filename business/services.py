@@ -1503,6 +1503,19 @@ def capture_states_bulk(captures):
 
     result = {}
     for cap in captures:
+        # 草稿单（入院单据维护退回）：其宠物已被逻辑失效，不在下面的统计里。
+        # 若不在这里短路，`total=0` 会被 `capture_status_code` 判成「待转运」，
+        # 列表显示与维护页的「草稿」自相矛盾。草稿是人工状态，与 void 同理，
+        # 不参与按转运情况的派生。
+        if cap.status == 'draft' and not cap.is_deleted:
+            result[cap.id] = {
+                'total': 0, 'transferred': 0, 'received': 0, 'settled': 0,
+                'rejected': 0, 'untouched': 0,
+                'can_edit': True, 'can_delete': True,
+                'status': 'draft',
+                'status_display': capture_status_display('draft'),
+            }
+            continue
         codes = codes_by_capture.get(cap.id, set())
         transferred = len(codes & active_codes)
         received = len(codes & received_codes)
@@ -1541,6 +1554,11 @@ def recalc_capture_status(capture, save=True):
     if capture.is_deleted:
         # 作废单不统计转运情况，省掉一次查询
         new_status = 'void'
+    elif capture.status == 'draft':
+        # 草稿单的宠物已逻辑失效，重算会得到 pending 覆盖草稿标记 —— 与
+        # `capture_states_bulk` 的草稿短路保持同一口径。只有「重新提交」
+        # 会显式清掉草稿并调本函数，那时才按宠物转运情况重新派生。
+        new_status = 'draft'
     else:
         state = capture_transfer_state(capture)
         new_status = capture_status_code(False, state['total'], state['transferred'])
